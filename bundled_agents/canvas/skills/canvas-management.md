@@ -48,13 +48,13 @@ Execute Python via subprocess. Stateless — each call is independent. `agent_id
 
 ## Content Aliases
 
-### `content_alias_file(file_path)` → `/content/{id}`
+### `content_alias_file(file_path, persistent=True)` → `/content/{id}`
 Serve a local file via HTTP. Auto-detects MIME type.
 
-### `content_alias_url(url)` → `/content/{id}`
+### `content_alias_url(url, persistent=True)` → `/content/{id}`
 Create a redirect alias for an external URL.
 
-Aliases are persisted to `.fantastic/aliases.json`. Use the returned path in HTML `<img>`, `<script>`, `<link>` tags.
+Aliases are persisted to `.fantastic/aliases.json`. Use the returned path in HTML `<img>`, `<script>`, `<link>` tags. By default `persistent=True` — aliases survive server restarts. Pass `persistent=False` for temporary aliases that are cleaned up on reload.
 
 ## Scene VFX
 
