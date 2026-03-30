@@ -88,6 +88,11 @@ aider --message-file .fantastic/fantastic.md
 opencode --prompt "$(cat .fantastic/fantastic.md)"
 ```
 
+## Best practices
+
+- **Never inline base64 images in `post_output`** — payloads over 512KB crash the canvas. Instead: save the file to the project dir, call `content_alias_file(file_path)` to get a `/content/{id}` URL, then reference it in HTML as `window.parent.location.origin + "/content/{id}"`.
+- **Large assets** (images, CSVs, plots): always use `content_alias_file` → URL reference pattern. Lightweight HTML, heavy assets served via HTTP.
+
 ## Key facts
 
 - **Agent types**: `terminal` (full PTY shell) and `html` (iframe renderer)

@@ -1,8 +1,12 @@
 """Agent tools — agent CRUD, execute_python, post_output, refresh, state."""
 
+import logging
+
 from ..dispatch import ToolResult, register_dispatch, register_tool
 from . import _fire_broadcasts, _format_outputs
 from . import _state
+
+logger = logging.getLogger(__name__)
 
 
 @register_dispatch("execute_python")
@@ -264,6 +268,11 @@ async def _update_agent(agent_id: str = "", options: dict | None = None) -> Tool
 
 @register_dispatch("post_output")
 async def _post_output(agent_id: str = "", html: str = "") -> ToolResult:
+    if len(html) > 512 * 1024:
+        logger.warning(
+            f"post_output: payload is {len(html) // 1024}KB for {agent_id}. "
+            f"Use content_alias_file() for large assets instead of inlining."
+        )
     try:
         await _state._engine.post_output(agent_id, html)
         return ToolResult(data={"posted": True, "agent_id": agent_id})

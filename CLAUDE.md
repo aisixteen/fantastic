@@ -98,6 +98,11 @@ WS `/ws` is the primary transport — `{"type": "<tool_name>", ...args}` maps di
 **Outgoing (frontend → backend):** `create_agent`, `delete_agent`, `move_agent`, `resize_agent`, `process_create`, `process_input`, `process_resize`, `process_close` — all use `agent_id` field.
 **Incoming (backend → frontend):** `agent_created`, `agent_moved`, `agent_resized`, `agent_updated`, `agent_deleted`, `agent_output`, `agent_refresh`, `process_output`, `process_created`, `process_closed`, `process_started` — all use `agent_id` field.
 
+## Best Practices
+
+- **Never inline base64 in `post_output`** — payloads over 512KB crash the canvas. Use `content_alias_file(file_path)` to get a `/content/{id}` URL, reference it in HTML via `window.parent.location.origin + alias_path`.
+- **Large assets** (images, plots, data): save to project dir → `content_alias_file` → URL in HTML. Lightweight HTML, assets served via HTTP.
+
 ## Architecture
 
 - **Agent types**: `terminal`, `html`
