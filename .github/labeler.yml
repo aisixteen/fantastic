@@ -1,0 +1,28 @@
+backend:
+  - changed-files:
+      - any-glob-to-any-file: 'core/**'
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file: 'bundled_agents/canvas/web/**'
+
+terminal:
+  - changed-files:
+      - any-glob-to-any-file: 'bundled_agents/terminal/**'
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '*.md'
+          - 'docs/**'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Dockerfile'
+          - 'docker-compose*.yml'

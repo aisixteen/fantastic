@@ -1,5 +1,9 @@
 # Fantastic
 
+[![Tests](https://github.com/Alexadar/fantastic_canvas/actions/workflows/test-on-label.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/test-on-label.yml)
+[![Lint & Type Check](https://github.com/Alexadar/fantastic_canvas/actions/workflows/lint-typecheck.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/lint-typecheck.yml)
+[![CodeQL](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml)
+
 A post-IDE editor — an infinite canvas where AI agents build anything.
 
 ## How it looks
