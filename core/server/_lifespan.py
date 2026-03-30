@@ -54,10 +54,14 @@ async def lifespan(app: FastAPI):
     requirements_file = os.getenv("REQUIREMENTS_FILE")
     if requirements_file and Path(requirements_file).exists():
         logger.info(f"Installing requirements from {requirements_file}")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", requirements_file],
-            check=True,
-        )
+        import shutil
+        if shutil.which("uv"):
+            subprocess.run(["uv", "pip", "install", "-r", requirements_file], check=True)
+        else:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", requirements_file],
+                check=True,
+            )
 
     _state.engine = Engine(
         project_dir=project_dir,

@@ -2,8 +2,6 @@
 set -e
 cd "$(dirname "$0")/.."
 
-PYTHON="${PYTHON:-python3}"
-
 # Build frontend — install deps if needed
 if [ -d bundled_agents/canvas/web ]; then
     cd bundled_agents/canvas/web
@@ -32,15 +30,15 @@ cp bundled_agents/terminal/bridge.js core/_bundled/agents/terminal/dist/
 [ -f fantastic.md ] && cp fantastic.md core/_bundled/
 
 echo "==> Building Python package..."
-cd core && $PYTHON -m build
+cd core && uv build
 
 echo "==> Done! Package is in core/dist/"
 ls -la dist/*.whl dist/*.tar.gz 2>/dev/null || true
 
-# --install-local: pip install the wheel into current environment
+# --install-local: install the wheel into current environment
 if [[ "$1" == "--install-local" ]]; then
     echo ""
     echo "==> Installing locally..."
-    $PYTHON -m pip install dist/fantastic-*.whl --force-reinstall --no-deps
+    uv pip install dist/fantastic-*.whl --force-reinstall --no-deps
     echo "==> Installed!"
 fi

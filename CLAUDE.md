@@ -17,13 +17,13 @@ The conversation buffer (`{who}:{message}`) is the universal backbone. Color-cod
 ## Quick Start
 
 ```bash
-# Development
-conda activate fantastic
-fantastic add canvas                                         # add canvas bundle (once)
-fantastic add terminal                                       # add terminal bundle (once)
-fantastic                                                    # adaptive: Core+Server if bundles added
+# Development (uv)
+uv sync                                                      # install deps + create venv
+uv run fantastic add canvas                                  # add canvas bundle (once)
+uv run fantastic add terminal                                # add terminal bundle (once)
+uv run fantastic                                             # adaptive: Core+Server if bundles added
 cd bundled_agents/canvas/web && npm run dev                  # port 3000
-cd core && python -m pytest tests/ -v -x                     # core tests
+cd core && uv run pytest tests/ -v -x                        # core tests
 cd bundled_agents/canvas/web && npx vitest run               # frontend tests
 
 # CLI subcommands (offline use)
@@ -38,8 +38,9 @@ fantastic                                                    # starts input loop
 > add canvas                                                 # add canvas bundle
 > log                                                        # show conversation history
 
-# Pip install
-pip install fantastic
+# Install globally via uv
+uv tool install ./core                                       # from source
+uv tool install ./core[torch]                                # with PyTorch (auto: CPU on macOS, CUDA on Linux)
 fantastic add canvas && fantastic --project-dir ~/my-project
 
 # Docker
@@ -110,13 +111,13 @@ WS `/ws` is the primary transport — `{"type": "<tool_name>", ...args}` maps di
 - **Tool dispatch as component router**: all agent-to-agent communication goes through tools (`agent_call`, `post_output`, etc.)
 - **Code execution**: Python subprocess (stateless, one-shot)
 - **Broadcast mode**: readonly WS streaming to remote viewers (`/ws/broadcast?token=...`)
-- **Remote instances**: `launch_instance` with `ssh_host` + `remote_cmd` (e.g. `"conda run -n fantastic fantastic"`). The `remote_cmd` prefix derives the remote Python for port-finding. If a server is already running on the remote (detected via `.fantastic/config.json` PID check over SSH), `launch_instance` reuses it by setting up a tunnel only (`-N` flag) instead of launching a new process.
+- **Remote instances**: `launch_instance` with `ssh_host` + `remote_cmd` (e.g. `"uv run fantastic"` or `"fantastic"` if installed globally). The `remote_cmd` prefix derives the remote Python for port-finding. If a server is already running on the remote (detected via `.fantastic/config.json` PID check over SSH), `launch_instance` reuses it by setting up a tunnel only (`-N` flag) instead of launching a new process.
 
 ## Project Structure
 
 ```
 fantastic_canvas/
-├── CLAUDE.md, fantastic.md, .env, environment.yml
+├── CLAUDE.md, fantastic.md, .env, .python-version
 ├── scripts/                                # Build & test scripts
 │   ├── build-core.sh                       # Build pip package with bundled frontend
 │   └── test-core.sh                        # Run core tests
@@ -212,7 +213,8 @@ fantastic_canvas/
 
 ## Environment
 
-- **Conda env**: `fantastic` (Python 3.11)
+- **uv**: project manager + virtualenv (`uv sync` to set up)
+- **Python**: 3.11+ (pinned in `.python-version`)
 - **Backend**: FastAPI, uvicorn, httpx
 - **Frontend**: React 18, Vite 6, TypeScript
 - **Ports**: Backend (auto), Frontend dev 3000

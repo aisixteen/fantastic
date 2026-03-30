@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["watchfiles>=1.0.0", "pytest", "pytest-asyncio", "pytest-xdist"]
+torch = ["torch>=2.2.0"]
 
 [project.scripts]
 fantastic = "core.cli:main"

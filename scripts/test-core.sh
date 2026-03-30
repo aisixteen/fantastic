@@ -1,10 +1,9 @@
 #!/bin/bash
 set -e
 cd "$(dirname "$0")/.."
-PYTHON="${PYTHON:-python3}"
 
 echo "==> Running backend tests..."
-cd core && $PYTHON -m pytest tests/ -v -x "$@"
+cd core && uv run pytest tests/ -v -x "$@"
 cd ..
 
 echo ""
