@@ -5,11 +5,13 @@ Each agent gets its own subdirectory with agent.json, source.py, output.html.
 Registry and config live at the `.fantastic/` root level.
 """
 
+import asyncio
 import json
 import logging
 import secrets
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +31,7 @@ class AgentStore:
         self._agents_dir = self._root / "agents"
         self._on_delete_hooks: list[Callable[[str], None]] = []
         self._enrich_hooks: list[Callable[[str, dict], None]] = []
+        self._memory_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def agents_dir(self) -> Path:
@@ -69,6 +72,8 @@ class AgentStore:
         agent_id: str | None = None,
         bundle: str | None = None,
         parent: str | None = None,
+        author_type: int = 0,
+        created_by: str | None = None,
     ) -> dict[str, Any]:
         """Create a new agent directory and return its full state dict."""
         aid = agent_id or new_agent_id()
@@ -84,7 +89,10 @@ class AgentStore:
             "display_name": "",
             "delete_lock": False,
             "created_at": time.time(),
+            "author_type": author_type,
         }
+        if created_by:
+            agent_json["created_by"] = created_by
         if bundle:
             agent_json["bundle"] = bundle
         if parent:
@@ -231,6 +239,66 @@ class AgentStore:
             if data.get("bundle") == name:
                 return self._build_agent_dict(entry.name, data)
         return None
+
+    # ─── Agent memory (memory_long.jsonl) ───────────────────
+
+    def _memory_lock(self, agent_id: str) -> asyncio.Lock:
+        """Get or create a per-agent asyncio.Lock for memory writes."""
+        if agent_id not in self._memory_locks:
+            self._memory_locks[agent_id] = asyncio.Lock()
+        return self._memory_locks[agent_id]
+
+    def _memory_path(self, agent_id: str) -> Path:
+        return self._agents_dir / agent_id / "memory_long.jsonl"
+
+    async def append_memory(
+        self, agent_id: str, author_type: int, message: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Append an entry to the agent's long-term memory. Thread-safe per agent."""
+        path = self._memory_path(agent_id)
+        if not path.parent.exists():
+            raise ValueError(f"Agent {agent_id} not found")
+
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": author_type,
+            "message": message,
+        }
+
+        async with self._memory_lock(agent_id):
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+
+        return entry
+
+    def read_memory(
+        self,
+        agent_id: str,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read agent memory, optionally filtered by time range."""
+        path = self._memory_path(agent_id)
+        if not path.exists():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = entry.get("ts", "")
+                if from_ts and ts < from_ts:
+                    continue
+                if to_ts and ts > to_ts:
+                    continue
+                entries.append(entry)
+        return entries
 
     # ─── Internal helpers ────────────────────────────────────
 

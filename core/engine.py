@@ -5,6 +5,7 @@ Each agent gets its own directory under `.fantastic/agents/`. Python code is exe
 via subprocess (stateless, one-shot). Server registry is persisted to disk.
 """
 
+import hashlib
 import html as html_mod
 import json
 import logging
@@ -92,12 +93,16 @@ class Engine:
         parent: str | None = None,
         url: str | None = None,
         html_content: str | None = None,
+        author_type: int = 0,
+        created_by: str | None = None,
     ) -> dict[str, Any]:
         """Create a new agent and return its full state dict."""
         agent = self._store.create_agent(
             agent_id=agent_id,
             bundle=bundle,
             parent=parent,
+            author_type=author_type,
+            created_by=created_by,
         )
 
         # HTML: store URL and/or content in agent metadata
@@ -144,7 +149,9 @@ class Engine:
                 )
         return "\n".join(parts)
 
-    async def execute_code(self, agent_id: str, code: str) -> dict[str, Any]:
+    async def execute_code(
+        self, agent_id: str, code: str, author_type: int = 0, triggered_by: str | None = None,
+    ) -> dict[str, Any]:
         """Execute code via subprocess."""
         agent = self._store.get_agent(agent_id)
         if agent is None:
@@ -153,12 +160,28 @@ class Engine:
         self._store.set_source(agent_id, code)
 
         wd = self.resolve_working_dir(agent_id)
+        t0 = time.monotonic()
         result = await self._runner.execute(agent_id, code, cwd=str(wd))
+        duration_ms = int((time.monotonic() - t0) * 1000)
 
         # Auto-render code outputs as HTML and push to agent
         output_html = self._render_outputs_html(result["outputs"])
         if output_html:
             await self.post_output(agent_id, output_html)
+
+        # Append to agent long-term memory
+        try:
+            await self._store.append_memory(agent_id, author_type, {
+                "kind": "execution",
+                "source_hash": hashlib.sha256(code.encode()).hexdigest(),
+                "source_snippet": code[:500],
+                "exit_code": 0 if result.get("success") else 1,
+                "duration_ms": duration_ms,
+                "output_size": len(output_html) if output_html else 0,
+                "triggered_by": triggered_by,
+            })
+        except Exception:
+            logger.warning(f"Failed to append memory for agent {agent_id}", exc_info=True)
 
         return result
 

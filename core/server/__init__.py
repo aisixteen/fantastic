@@ -83,6 +83,8 @@ from ._rest import (  # noqa: E402
     api_schema,
     favicon_redirect,
     serve_content_alias,
+    get_agent_memory,
+    post_agent_memory,
 )
 from ._broadcast_mode import (  # noqa: E402
     broadcast_viewer_ws,
@@ -209,6 +211,8 @@ app.post("/api/broadcast/stop")(stop_broadcast)
 app.get("/api/broadcast/status")(broadcast_status)
 app.post("/api/call")(api_call_proxy)
 app.get("/api/schema")(api_schema)
+app.get("/api/agents/{agent_id}/memory")(get_agent_memory)
+app.post("/api/agents/{agent_id}/memory")(post_agent_memory)
 app.get("/favicon.ico")(favicon_redirect)
 app.get("/content/{alias_id}")(serve_content_alias)
 

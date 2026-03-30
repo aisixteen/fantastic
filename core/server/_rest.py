@@ -6,7 +6,7 @@ import mimetypes
 import types as _types
 from typing import Any, Union, get_args, get_origin
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -23,6 +23,11 @@ class ResolveRequest(BaseModel):
 
 class ExecuteRequest(BaseModel):
     code: str
+
+
+class MemoryAppendRequest(BaseModel):
+    type: int
+    message: dict
 
 
 async def resolve_agent(agent_id: str, req: ResolveRequest):
@@ -105,6 +110,31 @@ async def api_call_proxy(body: dict):
         except Exception as e:
             return {"error": str(e)}
     return {"error": f"Unknown tool '{tool_name}'"}
+
+
+# ─── Agent memory ────────────────────────────────────────────────────────
+
+
+async def get_agent_memory(
+    agent_id: str,
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
+):
+    """Read agent long-term memory, optionally filtered by time range."""
+    agent = _state.engine.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+    entries = _state.engine.store.read_memory(agent_id, from_ts=from_ts, to_ts=to_ts)
+    return entries
+
+
+async def post_agent_memory(agent_id: str, req: MemoryAppendRequest):
+    """Append an entry to agent long-term memory."""
+    agent = _state.engine.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+    entry = await _state.engine.store.append_memory(agent_id, req.type, req.message)
+    return entry
 
 
 # ─── Schema builder ─────────────────────────────────────────────────────

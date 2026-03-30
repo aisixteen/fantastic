@@ -48,6 +48,8 @@ async def _create_agent(
     html_content: str = "",
     options: dict | None = None,
     parent: str = "",
+    author_type: int = 0,
+    created_by: str | None = None,
 ) -> ToolResult:
     bundle = template if template else None
 
@@ -56,6 +58,8 @@ async def _create_agent(
         bundle=bundle,
         parent=parent or None,
         url=url or None, html_content=html_content or None,
+        author_type=author_type,
+        created_by=created_by,
     )
 
     try:
