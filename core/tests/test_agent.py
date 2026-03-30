@@ -61,7 +61,9 @@ def test_discover_bare_autorun(tmp_path: Path):
 
 def test_discover_autorun_with_pty(tmp_path: Path):
     src = tmp_path / "source.py"
-    src.write_text("from core.agent import autorun\n\n@autorun(pty=True)\ndef main(): pass\n")
+    src.write_text(
+        "from core.agent import autorun\n\n@autorun(pty=True)\ndef main(): pass\n"
+    )
     result = discover_autorun(src)
     assert result == {"pty": True, "env": {}}
 
@@ -82,7 +84,9 @@ def test_discover_agent_dot_autorun(tmp_path: Path):
 
 def test_discover_agent_dot_autorun_with_args(tmp_path: Path):
     src = tmp_path / "source.py"
-    src.write_text("import core.agent as agent\n\n@agent.autorun(pty=True)\ndef main(): pass\n")
+    src.write_text(
+        "import core.agent as agent\n\n@agent.autorun(pty=True)\ndef main(): pass\n"
+    )
     result = discover_autorun(src)
     assert result == {"pty": True, "env": {}}
 

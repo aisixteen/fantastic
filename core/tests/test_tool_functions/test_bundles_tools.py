@@ -1,7 +1,5 @@
 """Tests for bundle management tools."""
 
-import pytest
-
 from core import conversation
 from core.tools._bundles import _add_bundle, _remove_bundle, _list_bundles
 

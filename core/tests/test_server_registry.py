@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from core.engine import Engine
 from core.tools import (
@@ -16,6 +15,7 @@ from core.tools import (
 class TestServerRegistry:
     def setup_method(self):
         import tempfile
+
         self._tmp = tempfile.mkdtemp()
         self.engine = Engine(project_dir=self._tmp)
 
@@ -96,37 +96,55 @@ class TestFormatOutputs:
         assert out == "hello\n"
 
     def test_error(self):
-        out = _format_outputs([{
-            "output_type": "error",
-            "ename": "ValueError",
-            "evalue": "bad",
-            "traceback": ["Traceback...", "ValueError: bad"],
-        }])
+        out = _format_outputs(
+            [
+                {
+                    "output_type": "error",
+                    "ename": "ValueError",
+                    "evalue": "bad",
+                    "traceback": ["Traceback...", "ValueError: bad"],
+                }
+            ]
+        )
         assert "ValueError: bad" in out
 
     def test_execute_result(self):
-        out = _format_outputs([{
-            "output_type": "execute_result",
-            "data": {"text/plain": "42"},
-            "metadata": {},
-        }])
+        out = _format_outputs(
+            [
+                {
+                    "output_type": "execute_result",
+                    "data": {"text/plain": "42"},
+                    "metadata": {},
+                }
+            ]
+        )
         assert out == "42"
 
     def test_image_placeholder(self):
-        out = _format_outputs([{
-            "output_type": "display_data",
-            "data": {"image/png": "base64data"},
-            "metadata": {},
-        }])
+        out = _format_outputs(
+            [
+                {
+                    "output_type": "display_data",
+                    "data": {"image/png": "base64data"},
+                    "metadata": {},
+                }
+            ]
+        )
         assert out == "[image/png output]"
 
     def test_empty_outputs(self):
         assert _format_outputs([]) == ""
 
     def test_multiple_outputs(self):
-        out = _format_outputs([
-            {"output_type": "stream", "text": "line1\n"},
-            {"output_type": "execute_result", "data": {"text/plain": "42"}, "metadata": {}},
-        ])
+        out = _format_outputs(
+            [
+                {"output_type": "stream", "text": "line1\n"},
+                {
+                    "output_type": "execute_result",
+                    "data": {"text/plain": "42"},
+                    "metadata": {},
+                },
+            ]
+        )
         assert "line1" in out
         assert "42" in out

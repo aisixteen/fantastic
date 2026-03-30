@@ -52,7 +52,9 @@ async def test_execute_with_custom_cwd(tmp_path):
     custom_dir.mkdir()
     (custom_dir / "marker.txt").write_text("found")
     runner = CodeRunner(project_dir=str(tmp_path))
-    result = await runner.execute("a1", "print(open('marker.txt').read())", cwd=str(custom_dir))
+    result = await runner.execute(
+        "a1", "print(open('marker.txt').read())", cwd=str(custom_dir)
+    )
     assert result["success"] is True
     assert any("found" in o.get("text", "") for o in result["outputs"])
 

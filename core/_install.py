@@ -57,7 +57,9 @@ def _clone_git(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         ["git", "clone", "--depth", "1", url, str(dest)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
@@ -130,6 +132,5 @@ def list_plugin_dirs(project_dir: Path) -> list[Path]:
     if not pdir.exists():
         return []
     return sorted(
-        d for d in pdir.iterdir()
-        if d.is_dir() and (d / "template.json").exists()
+        d for d in pdir.iterdir() if d.is_dir() and (d / "template.json").exists()
     )

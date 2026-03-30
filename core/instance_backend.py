@@ -46,10 +46,11 @@ async def _drain_pipe(stream: asyncio.StreamReader | None) -> None:
 @dataclass
 class LaunchResult:
     """Result of a backend launch operation."""
+
     process: asyncio.subprocess.Process
     pid: int
-    port: int       # port accessible from the launcher
-    url: str        # URL accessible from the launcher
+    port: int  # port accessible from the launcher
+    url: str  # URL accessible from the launcher
     extra: dict = field(default_factory=dict)  # backend-specific metadata
 
 
@@ -58,8 +59,7 @@ class InstanceBackend(ABC):
 
     @property
     @abstractmethod
-    def backend_type(self) -> str:
-        ...
+    def backend_type(self) -> str: ...
 
     @abstractmethod
     async def launch(
@@ -67,8 +67,7 @@ class InstanceBackend(ABC):
         project_dir: str,
         port: int = 0,
         cli: str = "",
-    ) -> LaunchResult:
-        ...
+    ) -> LaunchResult: ...
 
     @abstractmethod
     async def stop(self, pid: int) -> None:
@@ -86,11 +85,14 @@ class InstanceBackend(ABC):
                     return port
                 except OSError:
                     continue
-        raise RuntimeError(f"No free port found in range {start}-{start + max_tries - 1}")
+        raise RuntimeError(
+            f"No free port found in range {start}-{start + max_tries - 1}"
+        )
 
     async def health_check(self, url: str, timeout: float = 15.0) -> bool:
         """Poll url until 200 response or timeout."""
         import httpx
+
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -125,10 +127,15 @@ class LocalBackend(InstanceBackend):
             port = self.find_free_local_port()
 
         cmd = [
-            sys.executable, "-m", "core.cli",
-            "--port", str(port),
-            "--host", "127.0.0.1",
-            "--project-dir", abs_dir,
+            sys.executable,
+            "-m",
+            "core.cli",
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--project-dir",
+            abs_dir,
             "serve",
         ]
         if cli:
@@ -205,6 +212,7 @@ class SSHBackend(InstanceBackend):
         Bare 'fantastic' → 'python3'
         """
         from pathlib import PurePosixPath
+
         p = PurePosixPath(self._remote_cmd.split()[0])
         if p.parent != PurePosixPath("."):
             return str(p.parent / "python3")
@@ -314,8 +322,10 @@ class SSHBackend(InstanceBackend):
         # Build remote command: cd into project dir, then run fantastic
         remote_cmd_parts = [
             self._remote_cmd,
-            "--port", str(remote_port),
-            "--host", "127.0.0.1",
+            "--port",
+            str(remote_port),
+            "--host",
+            "127.0.0.1",
         ]
         if cli:
             remote_cmd_parts += ["--cli"] + cli.split()

@@ -1,13 +1,11 @@
 """Tests for list_templates and register_template."""
 
 import json
-import pytest
 
 from core.tools._registry import (
     _register_template,
     _list_templates,
 )
-from core.tools import _state
 
 
 # ─── list_templates ──────────────────────────────────────────────────
@@ -43,10 +41,14 @@ async def test_register_template_valid(setup):
     engine, _, _ = setup
     plugin_dir = engine.project_dir / "plugins" / "my_widget"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "template.json").write_text(json.dumps({
-        "name": "my_widget",
-        "bundle": "my_widget",
-    }))
+    (plugin_dir / "template.json").write_text(
+        json.dumps(
+            {
+                "name": "my_widget",
+                "bundle": "my_widget",
+            }
+        )
+    )
     (plugin_dir / "tools.py").write_text(
         "def register_tools(engine, fire_broadcasts, process_runner=None):\n"
         "    async def widget_hello() -> str:\n"
@@ -67,10 +69,14 @@ async def test_register_template_without_tools(setup):
     engine, _, _ = setup
     plugin_dir = engine.project_dir / "plugins" / "static_tmpl"
     plugin_dir.mkdir(parents=True)
-    (plugin_dir / "template.json").write_text(json.dumps({
-        "name": "static_tmpl",
-        "bundle": "static_tmpl",
-    }))
+    (plugin_dir / "template.json").write_text(
+        json.dumps(
+            {
+                "name": "static_tmpl",
+                "bundle": "static_tmpl",
+            }
+        )
+    )
     tr = await _register_template(path="plugins/static_tmpl")
     assert "error" not in tr.data
     assert tr.data["tools"] == []

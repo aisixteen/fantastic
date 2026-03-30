@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -48,7 +47,9 @@ def test_install_local(tmp_path):
     project.mkdir()
     source = tmp_path / "myplugin"
     source.mkdir()
-    (source / "template.json").write_text(json.dumps({"name": "test", "bundle": "test"}))
+    (source / "template.json").write_text(
+        json.dumps({"name": "test", "bundle": "test"})
+    )
     (source / "tools.py").write_text("def on_add(project_dir): pass")
 
     result = install_plugin(project, str(source), "test")
@@ -166,7 +167,9 @@ def test_read_plugins_json_corrupt(tmp_path):
 
 
 def test_get_plugin_dir(tmp_path):
-    assert get_plugin_dir(tmp_path, "foo") == tmp_path / ".fantastic" / "plugins" / "foo"
+    assert (
+        get_plugin_dir(tmp_path, "foo") == tmp_path / ".fantastic" / "plugins" / "foo"
+    )
 
 
 def test_list_plugin_dirs_empty(tmp_path):

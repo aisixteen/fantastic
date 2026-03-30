@@ -1,10 +1,19 @@
 """Tests for core.conversation — ring buffer + color formatting."""
 
 from core.conversation import (
-    say, read, clear, format_entry, actor_color,
-    CONVERSATION_BUFFER_SIZE, NAME_PAD,
-    CORE_COLOR, USER_COLOR, AGENT_COLOR, RESET,
-    CORE_ACTORS, _buffer,
+    say,
+    read,
+    clear,
+    format_entry,
+    actor_color,
+    CONVERSATION_BUFFER_SIZE,
+    NAME_PAD,
+    CORE_COLOR,
+    USER_COLOR,
+    AGENT_COLOR,
+    RESET,
+    CORE_ACTORS,
+    _buffer,
 )
 
 

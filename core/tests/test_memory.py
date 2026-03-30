@@ -1,7 +1,6 @@
 """Tests for per-agent long-term memory (memory_long.jsonl)."""
 
 import json
-import os
 
 import pytest
 from starlette.testclient import TestClient
@@ -172,6 +171,7 @@ def app_client(tmp_path, monkeypatch):
     monkeypatch.setenv("PROJECT_DIR", str(tmp_path))
     import importlib
     import core.server as server_mod
+
     importlib.reload(server_mod)
     client = TestClient(server_mod.app)
     with client:
@@ -180,10 +180,13 @@ def app_client(tmp_path, monkeypatch):
 
 def _create_agent_rest(app_client):
     """Helper: create an agent via REST and return its ID."""
-    r = app_client.post("/api/call", json={
-        "tool": "create_agent",
-        "args": {},
-    })
+    r = app_client.post(
+        "/api/call",
+        json={
+            "tool": "create_agent",
+            "args": {},
+        },
+    )
     assert r.status_code == 200
     return r.json()["result"]["agent_id"]
 
@@ -197,10 +200,13 @@ def test_get_memory_empty(app_client):
 
 def test_post_and_get_memory(app_client):
     aid = _create_agent_rest(app_client)
-    r = app_client.post(f"/api/agents/{aid}/memory", json={
-        "type": 0,
-        "message": {"note": "test entry"},
-    })
+    r = app_client.post(
+        f"/api/agents/{aid}/memory",
+        json={
+            "type": 0,
+            "message": {"note": "test entry"},
+        },
+    )
     assert r.status_code == 200
     entry = r.json()
     assert entry["type"] == 0
@@ -217,21 +223,32 @@ def test_get_memory_404_for_missing_agent(app_client):
 
 
 def test_post_memory_404_for_missing_agent(app_client):
-    r = app_client.post("/api/agents/nonexistent/memory", json={
-        "type": 0,
-        "message": {"x": 1},
-    })
+    r = app_client.post(
+        "/api/agents/nonexistent/memory",
+        json={
+            "type": 0,
+            "message": {"x": 1},
+        },
+    )
     assert r.status_code == 404
 
 
 def test_get_memory_with_time_filter(app_client):
     aid = _create_agent_rest(app_client)
-    app_client.post(f"/api/agents/{aid}/memory", json={
-        "type": 0, "message": {"n": 1},
-    })
-    app_client.post(f"/api/agents/{aid}/memory", json={
-        "type": 0, "message": {"n": 2},
-    })
+    app_client.post(
+        f"/api/agents/{aid}/memory",
+        json={
+            "type": 0,
+            "message": {"n": 1},
+        },
+    )
+    app_client.post(
+        f"/api/agents/{aid}/memory",
+        json={
+            "type": 0,
+            "message": {"n": 2},
+        },
+    )
     all_entries = app_client.get(f"/api/agents/{aid}/memory").json()
     assert len(all_entries) == 2
 

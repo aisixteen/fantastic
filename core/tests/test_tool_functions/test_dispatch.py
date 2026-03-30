@@ -13,13 +13,22 @@ from core.dispatch import ToolResult, dispatch, _DISPATCH
 def test_tool_dispatch_has_core_tools():
     """_TOOL_DISPATCH covers core tools (statically registered)."""
     expected_core = {
-        "execute_python", "create_agent", "list_agents", "read_agent",
-        "delete_agent", "content_alias_file", "content_alias_url", "get_aliases",
+        "execute_python",
+        "create_agent",
+        "list_agents",
+        "read_agent",
+        "delete_agent",
+        "content_alias_file",
+        "content_alias_url",
+        "get_aliases",
         "get_state",
         "agent_call",
         "get_handbook",
-        "register_template", "list_templates",
-        "launch_instance", "stop_instance", "list_instances",
+        "register_template",
+        "list_templates",
+        "launch_instance",
+        "stop_instance",
+        "list_instances",
         "restart_instance",
         "server_logs",
         "core_chat_message",
@@ -33,9 +42,14 @@ async def test_tool_dispatch_has_plugin_tools(setup):
     Both bundles are loaded in test setup (derived from agents created in conftest).
     """
     expected_plugin = {
-        "move_agent", "resize_agent", "rename_agent", "update_agent",
-        "post_output", "refresh_agent",
-        "scene_vfx", "scene_vfx_data",
+        "move_agent",
+        "resize_agent",
+        "rename_agent",
+        "update_agent",
+        "post_output",
+        "refresh_agent",
+        "scene_vfx",
+        "scene_vfx_data",
         "spatial_discovery",
     }
     assert expected_plugin.issubset(set(_TOOL_DISPATCH.keys()))
@@ -43,8 +57,12 @@ async def test_tool_dispatch_has_plugin_tools(setup):
 
 def test_tool_dispatch_excludes_removed_tools():
     """Removed tools must not be in dispatch."""
-    for name in ("register_server_legacy", "unregister_server_legacy",
-                  "get_server_tools", "get_endpoints_legacy"):
+    for name in (
+        "register_server_legacy",
+        "unregister_server_legacy",
+        "get_server_tools",
+        "get_endpoints_legacy",
+    ):
         assert name not in _TOOL_DISPATCH
 
 
@@ -91,10 +109,17 @@ async def test_dispatch_table_minimum_count(setup):
 async def test_inner_dispatch_has_agent_names(setup):
     """Inner dispatch has agent-based names (including plugin bundle tools)."""
     agent_names = {
-        "create_agent", "list_agents", "read_agent",
-        "delete_agent", "move_agent", "resize_agent",
-        "rename_agent", "update_agent", "refresh_agent",
-        "agent_call", "agent_run",
+        "create_agent",
+        "list_agents",
+        "read_agent",
+        "delete_agent",
+        "move_agent",
+        "resize_agent",
+        "rename_agent",
+        "update_agent",
+        "refresh_agent",
+        "agent_call",
+        "agent_run",
     }
     assert agent_names.issubset(set(_DISPATCH.keys()))
 

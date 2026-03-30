@@ -22,9 +22,25 @@ logger = logging.getLogger(__name__)
 
 # Directories/files to exclude from project file listing
 _EXCLUDED_DIRS = {
-    "__pycache__", ".git", ".hg", ".svn", "node_modules", ".mypy_cache",
-    ".pytest_cache", ".tox", ".eggs", "*.egg-info", ".venv", "venv",
-    "env", ".env", "dist", "build", ".next", ".nuxt", ".fantastic",
+    "__pycache__",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".eggs",
+    "*.egg-info",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".fantastic",
 }
 
 
@@ -71,7 +87,9 @@ class Engine:
         await self._runner.stop_all()
         logger.info("Engine stopped")
 
-    def set_broadcast(self, broadcast: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+    def set_broadcast(
+        self, broadcast: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
         self._broadcast = broadcast
 
     def resolve_working_dir(self, agent_id: str) -> Path:
@@ -112,7 +130,9 @@ class Engine:
                 f'sandbox="allow-scripts allow-same-origin allow-forms allow-popups" '
                 f'allowTransparency="true"></iframe>'
             )
-            self._store.update_agent_meta(agent["id"], url=url, html_content=iframe_html)
+            self._store.update_agent_meta(
+                agent["id"], url=url, html_content=iframe_html
+            )
             agent["url"] = url
             agent["html_content"] = iframe_html
         if html_content:
@@ -137,20 +157,24 @@ class Engine:
                 text = out.get("text", "")
                 parts.append(
                     f'<pre style="margin:0;white-space:pre-wrap">'
-                    f'{html_mod.escape(text)}</pre>'
+                    f"{html_mod.escape(text)}</pre>"
                 )
             elif otype == "error":
                 # Strip ANSI escape codes from traceback
                 tb = "\n".join(out.get("traceback", []))
-                tb = re.sub(r'\x1b\[[0-9;]*m', '', tb)
+                tb = re.sub(r"\x1b\[[0-9;]*m", "", tb)
                 parts.append(
                     f'<pre style="margin:0;color:#f87171;white-space:pre-wrap">'
-                    f'{html_mod.escape(tb)}</pre>'
+                    f"{html_mod.escape(tb)}</pre>"
                 )
         return "\n".join(parts)
 
     async def execute_code(
-        self, agent_id: str, code: str, author_type: int = 0, triggered_by: str | None = None,
+        self,
+        agent_id: str,
+        code: str,
+        author_type: int = 0,
+        triggered_by: str | None = None,
     ) -> dict[str, Any]:
         """Execute code via subprocess."""
         agent = self._store.get_agent(agent_id)
@@ -171,17 +195,23 @@ class Engine:
 
         # Append to agent long-term memory
         try:
-            await self._store.append_memory(agent_id, author_type, {
-                "kind": "execution",
-                "source_hash": hashlib.sha256(code.encode()).hexdigest(),
-                "source_snippet": code[:500],
-                "exit_code": 0 if result.get("success") else 1,
-                "duration_ms": duration_ms,
-                "output_size": len(output_html) if output_html else 0,
-                "triggered_by": triggered_by,
-            })
+            await self._store.append_memory(
+                agent_id,
+                author_type,
+                {
+                    "kind": "execution",
+                    "source_hash": hashlib.sha256(code.encode()).hexdigest(),
+                    "source_snippet": code[:500],
+                    "exit_code": 0 if result.get("success") else 1,
+                    "duration_ms": duration_ms,
+                    "output_size": len(output_html) if output_html else 0,
+                    "triggered_by": triggered_by,
+                },
+            )
         except Exception:
-            logger.warning(f"Failed to append memory for agent {agent_id}", exc_info=True)
+            logger.warning(
+                f"Failed to append memory for agent {agent_id}", exc_info=True
+            )
 
         return result
 
@@ -231,17 +261,21 @@ class Engine:
         if has_iframe:
             self._store.update_agent_meta(agent_id, html_content=html)
         if self._broadcast:
-            await self._broadcast({
-                "type": "agent_output",
-                "agent_id": agent_id,
-                "output_html": html,
-            })
+            await self._broadcast(
+                {
+                    "type": "agent_output",
+                    "agent_id": agent_id,
+                    "output_html": html,
+                }
+            )
             # Force iframe remount for iframe agents
             if has_iframe:
-                await self._broadcast({
-                    "type": "agent_refresh",
-                    "agent_id": agent_id,
-                })
+                await self._broadcast(
+                    {
+                        "type": "agent_refresh",
+                        "agent_id": agent_id,
+                    }
+                )
 
     # ─── Content aliases ─────────────────────────────────────
 
@@ -286,28 +320,40 @@ class Engine:
     def _walk_dir(self, dirpath: Path) -> list[dict[str, Any]]:
         entries = []
         try:
-            items = sorted(dirpath.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            items = sorted(
+                dirpath.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+            )
         except PermissionError:
             return entries
         for item in items:
-            if item.name.startswith(".") and item.name in {".git", ".hg", ".svn", ".env", ".fantastic"}:
+            if item.name.startswith(".") and item.name in {
+                ".git",
+                ".hg",
+                ".svn",
+                ".env",
+                ".fantastic",
+            }:
                 continue
             if item.name in _EXCLUDED_DIRS:
                 continue
             if item.is_dir():
                 children = self._walk_dir(item)
-                entries.append({
-                    "name": item.name,
-                    "path": str(item.relative_to(self._project_dir)),
-                    "isDir": True,
-                    "children": children,
-                })
+                entries.append(
+                    {
+                        "name": item.name,
+                        "path": str(item.relative_to(self._project_dir)),
+                        "isDir": True,
+                        "children": children,
+                    }
+                )
             else:
-                entries.append({
-                    "name": item.name,
-                    "path": str(item.relative_to(self._project_dir)),
-                    "isDir": False,
-                })
+                entries.append(
+                    {
+                        "name": item.name,
+                        "path": str(item.relative_to(self._project_dir)),
+                        "isDir": False,
+                    }
+                )
         return entries
 
     def rename_file(self, old_path: str, new_path: str) -> None:
@@ -332,22 +378,28 @@ class Engine:
     def read_file(self, path: str) -> dict[str, Any]:
         """Read a file and return its content. For images, returns base64 data."""
         import base64
+
         target = self._project_dir / path
         if not target.exists():
             raise ValueError(f"File not found: {path}")
         target.resolve().relative_to(self._project_dir.resolve())
 
         ext = target.suffix.lower()
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.ico'}
+        image_exts = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"}
 
         if ext in image_exts:
             with open(target, "rb") as f:
                 data = base64.b64encode(f.read()).decode("ascii")
             mime = {
-                '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp',
-                '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-            }.get(ext, 'application/octet-stream')
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+                ".webp": "image/webp",
+                ".svg": "image/svg+xml",
+                ".ico": "image/x-icon",
+            }.get(ext, "application/octet-stream")
             return {"kind": "image", "data": data, "mime": mime}
         else:
             try:

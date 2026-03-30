@@ -18,7 +18,6 @@ async def _agent_call(
     from_agent_id: str = "",
 ) -> ToolResult:
     target = target_agent_id
-    source = from_agent_id
 
     agent = _state._engine.get_agent(target)
     if agent is None:
@@ -63,7 +62,9 @@ async def agent_call(
         message: The message content.
         from_agent_id: Optional — the sending agent's id.
     """
-    tr = await _agent_call(target_agent_id=target_agent_id, message=message, from_agent_id=from_agent_id)
+    tr = await _agent_call(
+        target_agent_id=target_agent_id, message=message, from_agent_id=from_agent_id
+    )
     await _fire_broadcasts(tr)
     return tr.data
 
@@ -74,7 +75,9 @@ async def _process_output(agent_id: str = "", max_lines: int = 200) -> ToolResul
     if not raw:
         raw = _state._process_runner.load_scrollback_from_disk(agent_id)
     if not raw:
-        return ToolResult(data={"error": f"Process {agent_id} not found or has no output"})
+        return ToolResult(
+            data={"error": f"Process {agent_id} not found or has no output"}
+        )
     lines = raw.split("\n")
     if len(lines) > max_lines:
         lines = lines[-max_lines:]

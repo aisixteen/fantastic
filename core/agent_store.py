@@ -313,8 +313,8 @@ class AgentStore:
         source = self.get_source(agent_id)
         output_html = self.get_output(agent_id)
         result = dict(agent_json)
-        result["id"] = agent_id          # canonical source
-        result["source"] = source        # from file
+        result["id"] = agent_id  # canonical source
+        result["source"] = source  # from file
         result["output_html"] = output_html  # from file
         # Backfill has_iframe from content presence
         if "has_iframe" not in result:

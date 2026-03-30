@@ -19,7 +19,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import Response
 from starlette.routing import Mount, Route
 
 from .._paths import env_path, bundled_agents_dir
@@ -106,6 +106,7 @@ app.add_middleware(
 
 # ─── Bundle serving ──────────────────────────────────────────────────────
 
+
 @app.get("/bundles/{name}/{path:path}")
 async def serve_bundle(name: str, path: str):
     """Serve bundle assets — user overrides, built-in, or installed plugins."""
@@ -114,7 +115,9 @@ async def serve_bundle(name: str, path: str):
         user_path = _state.engine.project_dir / ".fantastic" / "bundles" / name / path
         if user_path.exists() and user_path.is_file():
             mt, _ = mimetypes.guess_type(str(user_path))
-            return FileResponse(str(user_path), media_type=mt or "application/octet-stream")
+            return FileResponse(
+                str(user_path), media_type=mt or "application/octet-stream"
+            )
 
     # 2. Built-in: bundled_agents/{name}/dist/{path}
     builtin = bundled_agents_dir() / name / "dist" / path
@@ -124,10 +127,14 @@ async def serve_bundle(name: str, path: str):
 
     # 3. Installed plugin: .fantastic/plugins/{name}/dist/{path}
     if _state.engine:
-        plugin_asset = _state.engine.project_dir / ".fantastic" / "plugins" / name / "dist" / path
+        plugin_asset = (
+            _state.engine.project_dir / ".fantastic" / "plugins" / name / "dist" / path
+        )
         if plugin_asset.exists() and plugin_asset.is_file():
             mt, _ = mimetypes.guess_type(str(plugin_asset))
-            return FileResponse(str(plugin_asset), media_type=mt or "application/octet-stream")
+            return FileResponse(
+                str(plugin_asset), media_type=mt or "application/octet-stream"
+            )
 
     return Response(status_code=404, content=f"Bundle asset not found: {name}/{path}")
 
@@ -137,7 +144,10 @@ async def serve_bundle(name: str, path: str):
 _proxy_client = httpx.AsyncClient(timeout=30.0)
 
 
-@app.api_route("/proxy/{port}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+@app.api_route(
+    "/proxy/{port}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
 async def proxy_http(port: int, path: str, request: Request):
     """Reverse proxy HTTP requests to localhost:{port}."""
     target = f"http://127.0.0.1:{port}/{path}"
@@ -151,7 +161,10 @@ async def proxy_http(port: int, path: str, request: Request):
     headers["X-Forwarded-Port"] = str(request.url.port or 80)
     headers["X-Forwarded-Host"] = request.headers.get("host", "localhost")
     resp = await _proxy_client.request(
-        request.method, target, content=body, headers=headers,
+        request.method,
+        target,
+        content=body,
+        headers=headers,
     )
     return Response(
         content=resp.content,
@@ -170,6 +183,7 @@ async def proxy_ws(port: int, path: str, ws: WebSocket):
     target = f"ws://127.0.0.1:{port}/{path}"
     try:
         async with websockets.connect(target) as remote:
+
             async def client_to_remote():
                 try:
                     while True:
@@ -227,10 +241,18 @@ def remount_web_ui():
     """Hot-swap plugin routes (called when bundles are added/removed)."""
     # Remove existing plugin mounts and root page
     app.routes[:] = [
-        r for r in app.routes
+        r
+        for r in app.routes
         if not (
-            (isinstance(r, Mount) and getattr(r, "name", None) == "static" and r.path == "")
-            or (isinstance(r, Route) and getattr(r, "name", None) in ("default_shell", "root_page"))
+            (
+                isinstance(r, Mount)
+                and getattr(r, "name", None) == "static"
+                and r.path == ""
+            )
+            or (
+                isinstance(r, Route)
+                and getattr(r, "name", None) in ("default_shell", "root_page")
+            )
         )
     ]
     mount_all_apps()

@@ -1,7 +1,5 @@
 """Tests for conversation tools."""
 
-import pytest
-
 from core import conversation
 from core.tools._conversation import (
     _conversation_say,
@@ -50,7 +48,9 @@ async def test_log_empty():
 
 
 async def test_core_chat_message_success():
-    tr = await _core_chat_message(who="actor_a", message="http://localhost:8888/view/main")
+    tr = await _core_chat_message(
+        who="actor_a", message="http://localhost:8888/view/main"
+    )
     assert tr.data["who"] == "actor_a"
     assert tr.data["message"] == "http://localhost:8888/view/main"
     assert len(tr.broadcast) == 1

@@ -20,12 +20,14 @@ class _BufferingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            _log_buffer.append({
-                "ts": record.created,
-                "level": record.levelname,
-                "name": record.name,
-                "message": self.format(record),
-            })
+            _log_buffer.append(
+                {
+                    "ts": record.created,
+                    "level": record.levelname,
+                    "name": record.name,
+                    "message": self.format(record),
+                }
+            )
         except Exception:
             pass  # never break the logging chain
 
@@ -40,7 +42,9 @@ def install_log_buffer() -> None:
         return
     handler = _BufferingHandler()
     handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     root = logging.getLogger()
     root.addHandler(handler)
     # Ensure root logger passes INFO+ to our handler (uvicorn may reset it)
@@ -57,10 +61,12 @@ async def _server_logs(max_lines: int = SERVER_LOG_BUFFER_SIZE) -> ToolResult:
     entries = list(_log_buffer)
     if len(entries) > max_lines:
         entries = entries[-max_lines:]
-    return ToolResult(data={
-        "lines": len(entries),
-        "entries": entries,
-    })
+    return ToolResult(
+        data={
+            "lines": len(entries),
+            "entries": entries,
+        }
+    )
 
 
 @register_tool("server_logs")

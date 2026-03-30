@@ -8,7 +8,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from ..dispatch import ToolResult, _DISPATCH
 from ..tools import _TOOL_DISPATCH
-from . import _state
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,9 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw)
-            logger.debug(f"WS <- {msg.get('type', '?')} {json.dumps(msg, default=str)[:200]}")
+            logger.debug(
+                f"WS <- {msg.get('type', '?')} {json.dumps(msg, default=str)[:200]}"
+            )
             await handle_ws_message(ws, msg)
     except WebSocketDisconnect:
         pass
@@ -65,15 +66,29 @@ async def handle_ws_message(ws: WebSocket, msg: dict[str, Any]) -> None:
             if tool_fn is not None:
                 try:
                     result = await tool_fn(**args)
-                    await ws.send_text(_reply({
-                        "type": "call_result", "tool": tool, "data": result,
-                    }))
+                    await ws.send_text(
+                        _reply(
+                            {
+                                "type": "call_result",
+                                "tool": tool,
+                                "data": result,
+                            }
+                        )
+                    )
                 except Exception as e:
-                    await ws.send_text(_reply({"type": "error", "tool": tool, "error": str(e)}))
+                    await ws.send_text(
+                        _reply({"type": "error", "tool": tool, "error": str(e)})
+                    )
                 return
-        await ws.send_text(_reply({
-            "type": "error", "tool": tool, "error": f"Unknown message type: {tool}",
-        }))
+        await ws.send_text(
+            _reply(
+                {
+                    "type": "error",
+                    "tool": tool,
+                    "error": f"Unknown message type: {tool}",
+                }
+            )
+        )
         return
 
     try:
@@ -82,8 +97,16 @@ async def handle_ws_message(ws: WebSocket, msg: dict[str, Any]) -> None:
         await ws.send_text(_reply({"type": "error", "tool": tool, "error": str(e)}))
         return
 
-    if isinstance(result, ToolResult) and isinstance(result.data, dict) and "error" in result.data and not result.broadcast and not result.reply:
-        await ws.send_text(_reply({"type": "error", "tool": tool, "error": result.data["error"]}))
+    if (
+        isinstance(result, ToolResult)
+        and isinstance(result.data, dict)
+        and "error" in result.data
+        and not result.broadcast
+        and not result.reply
+    ):
+        await ws.send_text(
+            _reply({"type": "error", "tool": tool, "error": result.data["error"]})
+        )
         return
 
     if isinstance(result, ToolResult):
@@ -92,6 +115,12 @@ async def handle_ws_message(ws: WebSocket, msg: dict[str, Any]) -> None:
         for m in result.broadcast:
             await broadcast(m)
         if msg_type == "call":
-            await ws.send_text(_reply({
-                "type": "call_result", "tool": tool, "data": result.data,
-            }))
+            await ws.send_text(
+                _reply(
+                    {
+                        "type": "call_result",
+                        "tool": tool,
+                        "data": result.data,
+                    }
+                )
+            )

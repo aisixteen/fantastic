@@ -2,14 +2,21 @@
 
 import json
 
-import pytest
 
 from core.tools._instance_tracking import (
-    _launched_processes, _load_tracked, _save_tracked, _instance_id, _get_own_port,
+    _launched_processes,
+    _load_tracked,
+    _save_tracked,
+    _instance_id,
 )
 from core.tools._instances import (
-    _launch_instance, _stop_instance, _register_instance,
-    launch_instance, stop_instance, list_instances, restart_instance,
+    _launch_instance,
+    _stop_instance,
+    _register_instance,
+    launch_instance,
+    stop_instance,
+    list_instances,
+    restart_instance,
 )
 from core.tools._process_handlers import _get_state
 
@@ -66,9 +73,16 @@ async def test_launch_instance(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec, \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.LocalBackend.find_free_local_port", return_value=49999):
+    with (
+        patch(
+            "asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)
+        ) as mock_exec,
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.LocalBackend.find_free_local_port",
+            return_value=49999,
+        ),
+    ):
         result = await launch_instance(project_dir=str(project))
 
     assert "error" not in result
@@ -123,10 +137,19 @@ async def test_launch_instance_with_cli(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)) as mock_exec, \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.LocalBackend.find_free_local_port", return_value=50000):
-        result = await launch_instance(project_dir=str(project), cli="claude --model sonnet")
+    with (
+        patch(
+            "asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)
+        ) as mock_exec,
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.LocalBackend.find_free_local_port",
+            return_value=50000,
+        ),
+    ):
+        result = await launch_instance(
+            project_dir=str(project), cli="claude --model sonnet"
+        )
 
     assert "error" not in result
     cmd_args = mock_exec.call_args.args
@@ -161,7 +184,9 @@ async def test_stop_instance(setup, tmp_path):
 
     inst_id = _instance_id(str(project))
     # Add to tracked list + cache process
-    _save_tracked([{"project_dir": str(project), "name": "stop_proj", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "stop_proj", "backend": "local"}]
+    )
     _launched_processes[inst_id] = mock_proc
 
     result = await stop_instance(inst_id)
@@ -192,12 +217,18 @@ async def test_list_instances_with_running(setup, tmp_path):
     # Write config.json with our own PID (alive but no HTTP server on this port)
     config_dir = project / ".fantastic"
     config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(json.dumps({
-        "pid": os.getpid(),
-        "port": 49300,
-    }))
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "port": 49300,
+            }
+        )
+    )
 
-    _save_tracked([{"project_dir": str(project), "name": "list_proj", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "list_proj", "backend": "local"}]
+    )
 
     result = await list_instances()
     assert len(result) == 1
@@ -220,12 +251,18 @@ async def test_list_instances_with_running_http(setup, tmp_path):
 
     config_dir = project / ".fantastic"
     config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(json.dumps({
-        "pid": os.getpid(),
-        "port": 49300,
-    }))
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "port": 49300,
+            }
+        )
+    )
 
-    _save_tracked([{"project_dir": str(project), "name": "list_proj_http", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "list_proj_http", "backend": "local"}]
+    )
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -251,12 +288,18 @@ async def test_list_instances_stopped(setup, tmp_path):
 
     config_dir = project / ".fantastic"
     config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(json.dumps({
-        "pid": 999999,  # Very unlikely to be alive
-        "port": 49301,
-    }))
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "pid": 999999,  # Very unlikely to be alive
+                "port": 49301,
+            }
+        )
+    )
 
-    _save_tracked([{"project_dir": str(project), "name": "dead_proj", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "dead_proj", "backend": "local"}]
+    )
 
     result = await list_instances()
     assert len(result) == 1
@@ -284,7 +327,9 @@ async def test_restart_instance_success(setup, tmp_path):
     inst_id = _instance_id(str(project))
 
     # Track the instance and cache a mock old process
-    _save_tracked([{"project_dir": str(project), "name": "to-restart", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "to-restart", "backend": "local"}]
+    )
     mock_old_proc = AsyncMock()
     mock_old_proc.returncode = None
     mock_old_proc.pid = 11111
@@ -308,9 +353,14 @@ async def test_restart_instance_success(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_new_proc)), \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.LocalBackend.find_free_local_port", return_value=49300):
+    with (
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_new_proc)),
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.LocalBackend.find_free_local_port",
+            return_value=49300,
+        ),
+    ):
         result = await restart_instance(inst_id)
 
     assert "error" not in result
@@ -351,11 +401,21 @@ async def test_launch_instance_ssh(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("core.instance_backend.SSHBackend._find_free_remote_port", AsyncMock(return_value=9123)), \
-         patch("core.instance_backend.SSHBackend._check_remote_server", AsyncMock(return_value=None)), \
-         patch("asyncio.create_subprocess_shell", AsyncMock(return_value=mock_proc)), \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.SSHBackend.find_free_local_port", return_value=49500):
+    with (
+        patch(
+            "core.instance_backend.SSHBackend._find_free_remote_port",
+            AsyncMock(return_value=9123),
+        ),
+        patch(
+            "core.instance_backend.SSHBackend._check_remote_server",
+            AsyncMock(return_value=None),
+        ),
+        patch("asyncio.create_subprocess_shell", AsyncMock(return_value=mock_proc)),
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.SSHBackend.find_free_local_port", return_value=49500
+        ),
+    ):
         result = await launch_instance(
             project_dir="/home/user/proj",
             ssh_host="gpu-box",
@@ -401,9 +461,14 @@ async def test_launch_instance_broadcasts(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)), \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.LocalBackend.find_free_local_port", return_value=49401):
+    with (
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.LocalBackend.find_free_local_port",
+            return_value=49401,
+        ),
+    ):
         tr = await _launch_instance(str(project))
 
     assert any(b["type"] == "instances_changed" for b in tr.broadcast)
@@ -429,7 +494,9 @@ async def test_stop_instance_broadcasts(setup, tmp_path):
     mock_proc.kill = MagicMock()
     mock_proc.wait = AsyncMock(return_value=0)
 
-    _save_tracked([{"project_dir": str(project), "name": "bc_stop", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "bc_stop", "backend": "local"}]
+    )
     _launched_processes[inst_id] = mock_proc
 
     tr = await _stop_instance(inst_id)
@@ -451,12 +518,18 @@ async def test_get_state_includes_instances(setup, tmp_path):
 
     config_dir = project / ".fantastic"
     config_dir.mkdir(parents=True)
-    (config_dir / "config.json").write_text(json.dumps({
-        "pid": os.getpid(),
-        "port": 49206,
-    }))
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "port": 49206,
+            }
+        )
+    )
 
-    _save_tracked([{"project_dir": str(project), "name": "gs_proj", "backend": "local"}])
+    _save_tracked(
+        [{"project_dir": str(project), "name": "gs_proj", "backend": "local"}]
+    )
 
     tr = await _get_state()
     assert "instances" in tr.data
@@ -480,7 +553,9 @@ async def test_register_instance_rejects_self(setup):
     from unittest.mock import patch
 
     with patch("core.tools._instance_tracking._get_own_port", return_value=8888):
-        tr = await _register_instance(url="http://127.0.0.1:8888", project_dir="/tmp/self")
+        tr = await _register_instance(
+            url="http://127.0.0.1:8888", project_dir="/tmp/self"
+        )
 
     assert "error" in tr.data
     assert "Cannot register self" in tr.data["error"]
@@ -539,9 +614,14 @@ async def test_launch_rejects_self_pid(setup, tmp_path):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)), \
-         patch("httpx.AsyncClient", return_value=mock_client), \
-         patch("core.instance_backend.LocalBackend.find_free_local_port", return_value=49777):
+    with (
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
+        patch("httpx.AsyncClient", return_value=mock_client),
+        patch(
+            "core.instance_backend.LocalBackend.find_free_local_port",
+            return_value=49777,
+        ),
+    ):
         tr = await _launch_instance(project_dir=str(project))
 
     assert "error" in tr.data

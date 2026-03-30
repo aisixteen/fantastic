@@ -20,6 +20,7 @@ def autorun(fn=None, *, pty=False, env=None):
     def wrapper(f):
         f._autorun_config = config
         return f
+
     return wrapper
 
 

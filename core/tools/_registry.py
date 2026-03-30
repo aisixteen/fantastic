@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 async def _list_templates() -> ToolResult:
     from ..bundles import BundleStore
     from .._paths import bundled_agents_dir
+
     store = BundleStore(bundled_agents_dir())
     builtin = store.list_bundles()
     # Also include project plugins that have template.json
@@ -50,12 +51,16 @@ async def _register_template(path: str = "") -> ToolResult:
         return ToolResult(data={"error": f"No template.json in {path}"})
 
     import json
+
     tmpl = json.loads(template_file.read_text())
     name = tmpl.get("name", bundle_dir.name)
 
     from ._plugin_loader import load_single_bundle
     from . import _TOOL_DISPATCH, _fire_broadcasts
-    result = load_single_bundle(bundle_dir, _state._engine, _fire_broadcasts, _state._process_runner)
+
+    result = load_single_bundle(
+        bundle_dir, _state._engine, _fire_broadcasts, _state._process_runner
+    )
     _TOOL_DISPATCH.update(result.tools)
 
     return ToolResult(
@@ -92,14 +97,18 @@ async def _get_handbook(skill: str = "") -> ToolResult:
         for sd in search_dirs:
             skill_file = sd / f"{skill}.md"
             if skill_file.exists():
-                return ToolResult(data={"text": f"# SKILL: {skill}\n\n{skill_file.read_text()}"})
+                return ToolResult(
+                    data={"text": f"# SKILL: {skill}\n\n{skill_file.read_text()}"}
+                )
         # Dynamic available list from search dirs
         available = set()
         for sd in search_dirs:
             if sd.exists():
                 available.update(p.stem for p in sd.glob("*.md"))
         avail_str = ", ".join(sorted(available)) if available else "(none)"
-        return ToolResult(data={"error": f"Skill '{skill}' not found. Available: {avail_str}"})
+        return ToolResult(
+            data={"error": f"Skill '{skill}' not found. Available: {avail_str}"}
+        )
 
     for candidate in [_state._engine.project_dir / "CLAUDE.md", claude_md_path()]:
         if candidate.exists():

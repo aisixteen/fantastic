@@ -1,6 +1,6 @@
 """Shared mutable state for server submodules."""
 
-from typing import Any, Callable
+from typing import Callable
 
 # Global instances — wired during lifespan
 engine = None
@@ -11,10 +11,12 @@ file_watcher_task = None
 # Bundles register these during register_tools() to extend server behavior
 # without core/server knowing about specific plugins.
 
-_route_hooks: list[Callable] = []          # (app, state_module) → register REST routes
+_route_hooks: list[Callable] = []  # (app, state_module) → register REST routes
 _broadcast_resolvers: list[Callable] = []  # (message) → scope or ""
-_lifespan_hooks: list[Callable] = []       # async (state_module, broadcast_fn) → startup tasks
-_lifespan_hooks_ran: int = 0               # tracks how many hooks have been executed
+_lifespan_hooks: list[
+    Callable
+] = []  # async (state_module, broadcast_fn) → startup tasks
+_lifespan_hooks_ran: int = 0  # tracks how many hooks have been executed
 
 
 def register_route_hook(fn: Callable) -> None:

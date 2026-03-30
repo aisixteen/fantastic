@@ -86,6 +86,7 @@ class ProcessRunner:
             return shell
         # 2. Current user's login shell from passwd
         import pwd
+
         try:
             pw_shell = pwd.getpwuid(os.getuid()).pw_shell
             if pw_shell and os.path.isfile(pw_shell):
@@ -123,7 +124,9 @@ class ProcessRunner:
         # Evict oldest chunks if over limit
         while self._scrollback_bytes[agent_id] > MAX_SCROLLBACK and buf:
             old = buf.popleft()
-            self._scrollback_bytes[agent_id] -= len(old.encode("utf-8", errors="replace"))
+            self._scrollback_bytes[agent_id] -= len(
+                old.encode("utf-8", errors="replace")
+            )
 
         self._scrollback_dirty.add(agent_id)
 
@@ -309,6 +312,7 @@ class ProcessRunner:
     def _blocking_read(self, master_fd: int) -> str | None:
         """Blocking read from master fd. Returns None on EOF."""
         import select
+
         try:
             r, _, _ = select.select([master_fd], [], [], 0.1)
             if r:
@@ -324,6 +328,7 @@ class ProcessRunner:
     def _write_all(fd: int, data: bytes) -> None:
         """Write all bytes to fd, handling partial writes and non-blocking EAGAIN."""
         import time
+
         mv = memoryview(data)
         while mv:
             try:

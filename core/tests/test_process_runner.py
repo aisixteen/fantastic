@@ -1,7 +1,5 @@
 """Tests for ProcessRunner — PTY management and scrollback."""
 
-import asyncio
-
 import pytest
 
 from core.process_runner import ProcessRunner
@@ -25,7 +23,9 @@ async def runner(tmp_path):
 async def test_create_and_exists(runner, tmp_path):
     agents_dir = tmp_path / ".fantastic" / "agents"
     (agents_dir / "a1").mkdir()
-    await runner.create("a1", cwd=str(tmp_path), command="/bin/echo", args=["/bin/echo", "hi"])
+    await runner.create(
+        "a1", cwd=str(tmp_path), command="/bin/echo", args=["/bin/echo", "hi"]
+    )
     assert runner.exists("a1")
 
 

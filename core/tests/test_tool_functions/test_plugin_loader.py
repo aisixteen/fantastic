@@ -1,9 +1,10 @@
 """Tests for the plugin loader — load_bundle_tools & load_project_plugins."""
 
-import pytest
-
 from core.tools._plugin_loader import (
-    load_bundle_tools, load_project_plugins, load_single_bundle, BundleLoadResult,
+    load_bundle_tools,
+    load_project_plugins,
+    load_single_bundle,
+    BundleLoadResult,
 )
 
 

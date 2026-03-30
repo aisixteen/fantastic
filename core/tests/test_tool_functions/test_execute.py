@@ -1,7 +1,5 @@
 """Tests for execute_python, get_state, and get_handbook."""
 
-import json
-
 from core.tools._agents import _create_agent
 from core.tools import (
     execute_python,

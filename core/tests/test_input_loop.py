@@ -6,13 +6,24 @@ from core.recipients import CoreRecipient
 def test_parse_add():
     r = CoreRecipient()
     result = r.parse("add bundle_a")
-    assert result == ("add_bundle", {"bundle_name": "bundle_a", "name": "", "working_dir": "", "from_source": ""})
+    assert result == (
+        "add_bundle",
+        {"bundle_name": "bundle_a", "name": "", "working_dir": "", "from_source": ""},
+    )
 
 
 def test_parse_add_with_name():
     r = CoreRecipient()
     result = r.parse("add bundle_a --name debug")
-    assert result == ("add_bundle", {"bundle_name": "bundle_a", "name": "debug", "working_dir": "", "from_source": ""})
+    assert result == (
+        "add_bundle",
+        {
+            "bundle_name": "bundle_a",
+            "name": "debug",
+            "working_dir": "",
+            "from_source": "",
+        },
+    )
 
 
 def test_parse_remove():
@@ -48,25 +59,57 @@ def test_parse_log_with_count():
 def test_parse_add_with_working_dir():
     r = CoreRecipient()
     result = r.parse("add bundle_a --working-dir ./notebooks")
-    assert result == ("add_bundle", {"bundle_name": "bundle_a", "name": "", "working_dir": "./notebooks", "from_source": ""})
+    assert result == (
+        "add_bundle",
+        {
+            "bundle_name": "bundle_a",
+            "name": "",
+            "working_dir": "./notebooks",
+            "from_source": "",
+        },
+    )
 
 
 def test_parse_add_with_name_and_working_dir():
     r = CoreRecipient()
     result = r.parse("add bundle_a --name main --working-dir ./notebooks")
-    assert result == ("add_bundle", {"bundle_name": "bundle_a", "name": "main", "working_dir": "./notebooks", "from_source": ""})
+    assert result == (
+        "add_bundle",
+        {
+            "bundle_name": "bundle_a",
+            "name": "main",
+            "working_dir": "./notebooks",
+            "from_source": "",
+        },
+    )
 
 
 def test_parse_add_with_from():
     r = CoreRecipient()
     result = r.parse("add vscode --from https://github.com/user/fantastic-vscode.git")
-    assert result == ("add_bundle", {"bundle_name": "vscode", "name": "", "working_dir": "", "from_source": "https://github.com/user/fantastic-vscode.git"})
+    assert result == (
+        "add_bundle",
+        {
+            "bundle_name": "vscode",
+            "name": "",
+            "working_dir": "",
+            "from_source": "https://github.com/user/fantastic-vscode.git",
+        },
+    )
 
 
 def test_parse_add_with_from_local():
     r = CoreRecipient()
     result = r.parse("add myplugin --from /path/to/plugin")
-    assert result == ("add_bundle", {"bundle_name": "myplugin", "name": "", "working_dir": "", "from_source": "/path/to/plugin"})
+    assert result == (
+        "add_bundle",
+        {
+            "bundle_name": "myplugin",
+            "name": "",
+            "working_dir": "",
+            "from_source": "/path/to/plugin",
+        },
+    )
 
 
 def test_parse_run():

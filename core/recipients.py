@@ -51,7 +51,15 @@ class CoreRecipient(Recipient):
                 idx = parts.index("--from")
                 if idx + 1 < len(parts):
                     from_source = parts[idx + 1]
-            return ("add_bundle", {"bundle_name": parts[1], "name": name, "working_dir": working_dir, "from_source": from_source})
+            return (
+                "add_bundle",
+                {
+                    "bundle_name": parts[1],
+                    "name": name,
+                    "working_dir": working_dir,
+                    "from_source": from_source,
+                },
+            )
         if cmd == "remove" and len(parts) >= 2:
             name = ""
             if "--name" in parts:

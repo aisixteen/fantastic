@@ -1,7 +1,5 @@
 """Tests for dashboard bundle on_add hook."""
 
-from pathlib import Path
-
 from core.agent_store import AgentStore
 
 

@@ -6,7 +6,6 @@ Unrecognized input becomes conversation.
 
 import asyncio
 import logging
-from typing import Any
 
 from . import conversation
 from .recipients import CoreRecipient, Recipient
@@ -38,7 +37,10 @@ class InputLoop:
         loop = asyncio.get_event_loop()
         while True:
             try:
-                line = await loop.run_in_executor(None, lambda: input(f"{conversation.USER_COLOR}>{conversation.RESET} "))
+                line = await loop.run_in_executor(
+                    None,
+                    lambda: input(f"{conversation.USER_COLOR}>{conversation.RESET} "),
+                )
                 line = line.strip()
                 if not line:
                     continue
@@ -59,7 +61,11 @@ class InputLoop:
                     await self._dispatch_to(recipient, rest)
                 else:
                     conversation.say("fantastic", f"unknown: @{tag}")
-                    print(conversation.format_entry({"who": "fantastic", "message": f"unknown: @{tag}"}))
+                    print(
+                        conversation.format_entry(
+                            {"who": "fantastic", "message": f"unknown: @{tag}"}
+                        )
+                    )
             else:
                 # Default → @core
                 await self._dispatch_to(self._core, line)
@@ -80,7 +86,8 @@ class InputLoop:
             return
 
         spec = importlib.util.spec_from_file_location(
-            f"bundle_{bundle_name}_run", str(tools_file),
+            f"bundle_{bundle_name}_run",
+            str(tools_file),
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -127,7 +134,9 @@ class InputLoop:
             # Plain conversation
             conversation.say("user", text)
             if self._remote_url:
-                await self._remote_call("conversation_say", {"who": "user", "message": text})
+                await self._remote_call(
+                    "conversation_say", {"who": "user", "message": text}
+                )
 
     async def _execute(self, recipient: Recipient, tool_name: str, args: dict) -> str:
         """Execute a tool — locally via recipient or via REST."""
@@ -141,6 +150,7 @@ class InputLoop:
     async def _remote_call(self, tool_name: str, args: dict) -> str:
         """Call tool via REST /api/call."""
         import httpx
+
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -165,7 +175,9 @@ class InputLoop:
                     for inst in b["instances"]:
                         display = inst.get("display_name") or inst["id"]
                         children = inst.get("children", 0)
-                        lines.append(f"  {b['name']}  {display}  ({inst['id']})  [{children} agents]")
+                        lines.append(
+                            f"  {b['name']}  {display}  ({inst['id']})  [{children} agents]"
+                        )
                 else:
                     status = "[available]"
                     lines.append(f"  {b['name']}  {status}")

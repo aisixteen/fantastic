@@ -4,7 +4,6 @@ import logging
 
 from ..dispatch import ToolResult, register_dispatch, register_tool
 
-logger = logging.getLogger(__name__)
 from . import _fire_broadcasts, _format_outputs
 from . import _state
 
@@ -57,7 +56,8 @@ async def _create_agent(
         agent_id=agent_id,
         bundle=bundle,
         parent=parent or None,
-        url=url or None, html_content=html_content or None,
+        url=url or None,
+        html_content=html_content or None,
         author_type=author_type,
         created_by=created_by,
     )
@@ -111,7 +111,13 @@ async def create_agent(
 
     Returns the created agent's id, type, and position.
     """
-    tr = await _create_agent(template=template, url=url, html_content=html_content, options=options, parent=parent)
+    tr = await _create_agent(
+        template=template,
+        url=url,
+        html_content=html_content,
+        options=options,
+        parent=parent,
+    )
     await _fire_broadcasts(tr)
     agent = tr.data
     result = {
@@ -211,7 +217,9 @@ async def _delete_agent(agent_id: str = "") -> ToolResult:
     if not agent:
         return ToolResult(data={"error": f"Cannot delete agent {agent_id} (not found)"})
     if agent.get("delete_lock"):
-        return ToolResult(data={"error": f"Agent {agent_id} is delete-locked. Cannot delete."})
+        return ToolResult(
+            data={"error": f"Agent {agent_id} is delete-locked. Cannot delete."}
+        )
 
     # Cascade: collect all descendants depth-first, then delete root
     all_ids = _collect_descendants(agent_id) + [agent_id]
@@ -253,7 +261,11 @@ async def _rename_agent(agent_id: str = "", display_name: str = "") -> ToolResul
     return ToolResult(
         data={"agent_id": agent_id, "display_name": display_name},
         broadcast=[
-            {"type": "agent_updated", "agent_id": agent_id, "display_name": display_name},
+            {
+                "type": "agent_updated",
+                "agent_id": agent_id,
+                "display_name": display_name,
+            },
         ],
     )
 
@@ -296,7 +308,11 @@ async def _refresh_agent(agent_id: str = "") -> ToolResult:
     if _state._process_runner and _state._process_runner.exists(agent_id):
         await _state._process_runner.restart(agent_id)
         return ToolResult(
-            data={"agent_id": agent_id, "refreshed": True, "action": "process_restarted"},
+            data={
+                "agent_id": agent_id,
+                "refreshed": True,
+                "action": "process_restarted",
+            },
             broadcast=[
                 {"type": "process_closed", "agent_id": agent_id},
                 {"type": "process_started", "agent_id": agent_id},
@@ -324,8 +340,7 @@ async def _get_full_state(scope: str = "") -> ToolResult:
         if container:
             cid = container["id"]
             state["agents"] = [
-                a for a in state["agents"]
-                if a["id"] == cid or a.get("parent") == cid
+                a for a in state["agents"] if a["id"] == cid or a.get("parent") == cid
             ]
     return ToolResult(data=state)
 

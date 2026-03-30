@@ -25,7 +25,9 @@ class CodeRunner:
     ) -> dict[str, Any]:
         """Run code as `python -c code`, capture stdout/stderr."""
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code,
+            sys.executable,
+            "-c",
+            code,
             cwd=cwd or self._project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -37,12 +39,14 @@ class CodeRunner:
             proc.kill()
             await proc.communicate()
             return {
-                "outputs": [{
-                    "output_type": "error",
-                    "ename": "TimeoutError",
-                    "evalue": "Execution timed out",
-                    "traceback": ["TimeoutError: Execution timed out"],
-                }],
+                "outputs": [
+                    {
+                        "output_type": "error",
+                        "ename": "TimeoutError",
+                        "evalue": "Execution timed out",
+                        "traceback": ["TimeoutError: Execution timed out"],
+                    }
+                ],
                 "success": False,
                 "error": None,
             }
@@ -51,24 +55,30 @@ class CodeRunner:
 
         outputs: list[dict[str, Any]] = []
         if stdout:
-            outputs.append({
-                "output_type": "stream",
-                "name": "stdout",
-                "text": stdout.decode(),
-            })
+            outputs.append(
+                {
+                    "output_type": "stream",
+                    "name": "stdout",
+                    "text": stdout.decode(),
+                }
+            )
         if stderr and proc.returncode != 0:
-            outputs.append({
-                "output_type": "error",
-                "ename": "RuntimeError",
-                "evalue": stderr.decode(),
-                "traceback": [stderr.decode()],
-            })
+            outputs.append(
+                {
+                    "output_type": "error",
+                    "ename": "RuntimeError",
+                    "evalue": stderr.decode(),
+                    "traceback": [stderr.decode()],
+                }
+            )
         elif stderr:
-            outputs.append({
-                "output_type": "stream",
-                "name": "stderr",
-                "text": stderr.decode(),
-            })
+            outputs.append(
+                {
+                    "output_type": "stream",
+                    "name": "stderr",
+                    "text": stderr.decode(),
+                }
+            )
 
         return {
             "outputs": outputs,

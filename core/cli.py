@@ -30,15 +30,15 @@ import uvicorn
 # ─── Banner ────────────────────────────────────────────────────
 
 _NM = "\033[38;5;165m"  # neon magenta
-_BM = "\033[95m"         # bright magenta
-_B = "\033[1m"           # bold
-_D = "\033[2m"           # dim
-_C = "\033[36m"          # cyan
-_R = "\033[0m"           # reset
+_BM = "\033[95m"  # bright magenta
+_B = "\033[1m"  # bold
+_D = "\033[2m"  # dim
+_C = "\033[36m"  # cyan
+_R = "\033[0m"  # reset
 
 
-_G = "\033[32m"          # green
-_Y = "\033[33m"          # yellow
+_G = "\033[32m"  # green
+_Y = "\033[33m"  # yellow
 
 
 def _banner(project_dir: str = "", status: dict | None = None):
@@ -95,7 +95,6 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-
 def _read_saved_config(project_dir: str) -> dict:
     """Read config from .fantastic/config.json."""
     config_path = Path(project_dir) / ".fantastic" / "config.json"
@@ -112,18 +111,22 @@ def _write_saved_config(project_dir: str, config: dict) -> None:
     config_dir = Path(project_dir) / ".fantastic"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(
-        json.dumps(config, indent=2), encoding="utf-8",
+        json.dumps(config, indent=2),
+        encoding="utf-8",
     )
 
 
-def _call_bundle_hook(bundle_dir: Path, hook_name: str, project_dir: str, **kwargs) -> None:
+def _call_bundle_hook(
+    bundle_dir: Path, hook_name: str, project_dir: str, **kwargs
+) -> None:
     """Call a hook function on a bundle's tools.py if it exists."""
     tools_file = bundle_dir / "tools.py"
     if not tools_file.exists():
         return
     try:
         spec = importlib.util.spec_from_file_location(
-            f"bundle_{bundle_dir.name}_hook", tools_file,
+            f"bundle_{bundle_dir.name}_hook",
+            tools_file,
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -141,10 +144,7 @@ def _has_agents(project_dir: str) -> bool:
     agents_dir = Path(project_dir) / ".fantastic" / "agents"
     if not agents_dir.exists():
         return False
-    return any(
-        d.is_dir() and (d / "agent.json").exists()
-        for d in agents_dir.iterdir()
-    )
+    return any(d.is_dir() and (d / "agent.json").exists() for d in agents_dir.iterdir())
 
 
 # ─── Subcommands ───────────────────────────────────────────────
@@ -164,6 +164,7 @@ def _cmd_add(args):
     if from_source:
         # External plugin: install (copy files only, no agent creation)
         from ._install import install_plugin
+
         try:
             install_plugin(Path(project_dir), from_source, bundle_name)
         except RuntimeError as e:
@@ -178,14 +179,18 @@ def _cmd_add(args):
     saved_port = config.get("port", 0)
     if saved_pid and _pid_alive(saved_pid) and saved_port:
         import httpx
+
         try:
             resp = httpx.post(
                 f"http://localhost:{saved_port}/api/call",
-                json={"tool": "add_bundle", "args": {
-                    "bundle_name": bundle_name,
-                    "name": name,
-                    "working_dir": working_dir,
-                }},
+                json={
+                    "tool": "add_bundle",
+                    "args": {
+                        "bundle_name": bundle_name,
+                        "name": name,
+                        "working_dir": working_dir,
+                    },
+                },
                 timeout=30,
             )
             data = resp.json()
@@ -205,17 +210,22 @@ def _cmd_add(args):
         bundle_dir = bundled_agents_dir() / bundle_name
     else:
         from ._install import get_plugin_dir
+
         plugin_dir = get_plugin_dir(Path(project_dir), bundle_name)
         if plugin_dir.exists() and (plugin_dir / "template.json").exists():
             bundle_dir = plugin_dir
         else:
-            available = [b.get("bundle", b.get("name", "?")) for b in store.list_bundles()]
+            available = [
+                b.get("bundle", b.get("name", "?")) for b in store.list_bundles()
+            ]
             print(f"  Unknown bundle: {bundle_name}")
             if available:
                 print(f"  Available: {', '.join(available)}")
             return
 
-    _call_bundle_hook(bundle_dir, "on_add", project_dir, name=name, working_dir=working_dir)
+    _call_bundle_hook(
+        bundle_dir, "on_add", project_dir, name=name, working_dir=working_dir
+    )
 
     print(f"  Added: {bundle_name}" + (f" ({name})" if name else ""))
 
@@ -296,7 +306,9 @@ def _cmd_list(args):
             for inst in instances:
                 display = inst.get("display_name") or inst["id"]
                 children = agent_store.list_children(inst["id"])
-                print(f"  {_G}●{_R} {bname}  {display}  ({inst['id']})  [{len(children)} agents]")
+                print(
+                    f"  {_G}●{_R} {bname}  {display}  ({inst['id']})  [{len(children)} agents]"
+                )
         else:
             print(f"  {_D}○ {bname}{_R}  [available]")
 
@@ -315,7 +327,9 @@ def _cmd_list(args):
             for inst in instances:
                 display = inst.get("display_name") or inst["id"]
                 children = agent_store.list_children(inst["id"])
-                print(f"  {_G}●{_R} {pname}  {display}  ({inst['id']})  [{len(children)} agents]  {_D}[plugin]{_R}")
+                print(
+                    f"  {_G}●{_R} {pname}  {display}  ({inst['id']})  [{len(children)} agents]  {_D}[plugin]{_R}"
+                )
         else:
             print(f"  {_D}○ {pname}{_R}  [plugin]")
 
@@ -340,6 +354,7 @@ class _ConversationLogHandler(logging.Handler):
 
     def emit(self, record):
         from . import conversation
+
         msg = record.getMessage()
         raw = record.name.split(".")[-1]
         who = self._SHORT.get(raw, raw)
@@ -350,7 +365,7 @@ class _ConversationLogHandler(logging.Handler):
                 who = "fantastic"
             elif first_word.isalpha() and len(first_word) < 20:
                 who = first_word
-                msg = msg[len(first_word) + 1:]
+                msg = msg[len(first_word) + 1 :]
         entry = conversation.say(who, msg)
         print(conversation.format_entry(entry))
 
@@ -424,14 +439,21 @@ def _cmd_start(args):
     if saved_pid and _pid_alive(saved_pid):
         saved_port = saved.get("port", 8888)
         url = f"http://{args.host}:{saved_port}"
-        _banner(project_dir=project_dir, status={
-            "core": True, "server": True, "ai": False,
-        })
+        _banner(
+            project_dir=project_dir,
+            status={
+                "core": True,
+                "server": True,
+                "ai": False,
+            },
+        )
         from . import conversation
+
         entry = conversation.say("fantastic", f"server already running at {url}")
         print(conversation.format_entry(entry))
         print()
         from .input_loop import InputLoop
+
         loop = InputLoop()
         asyncio.run(loop.run())
         return
@@ -447,6 +469,7 @@ def _cmd_start(args):
 
     # Retry binding 3 times (handles TIME_WAIT on restart), then find new port
     import time
+
     for attempt in range(3):
         if _port_available(args.host, port):
             break
@@ -455,14 +478,20 @@ def _cmd_start(args):
         port = _find_free_port(args.host)
 
     url = f"http://{args.host}:{port}"
-    _banner(project_dir=project_dir, status={
-        "core": True, "server": True, "ai": False,
-    })
+    _banner(
+        project_dir=project_dir,
+        status={
+            "core": True,
+            "server": True,
+            "ai": False,
+        },
+    )
 
     # Fresh project? Auto-add + run quickstart wizard
     bundle_name = None
     if not _has_agents(project_dir):
         from ._paths import bundled_agents_dir
+
         _call_bundle_hook(bundled_agents_dir() / "quickstart", "on_add", project_dir)
         bundle_name = "quickstart"
 
@@ -479,9 +508,14 @@ def _cmd_serve(args):
     if saved_pid and _pid_alive(saved_pid):
         saved_port = saved.get("port", 8888)
         url = f"http://{args.host}:{saved_port}"
-        _banner(project_dir=project_dir, status={
-            "core": True, "server": True, "ai": False,
-        })
+        _banner(
+            project_dir=project_dir,
+            status={
+                "core": True,
+                "server": True,
+                "ai": False,
+            },
+        )
         print(f"  {_D}Already running at {url}{_R}")
         return
 
@@ -495,6 +529,7 @@ def _cmd_serve(args):
 
     # Retry binding 3 times (handles TIME_WAIT on restart), then find new port
     import time
+
     for attempt in range(3):
         if _port_available(args.host, port):
             break
@@ -514,9 +549,14 @@ def _cmd_serve(args):
         os.environ["FANTASTIC_CLI"] = cli_cmd
 
     url = f"http://{args.host}:{port}"
-    _banner(project_dir=project_dir, status={
-        "core": True, "server": True, "ai": False,
-    })
+    _banner(
+        project_dir=project_dir,
+        status={
+            "core": True,
+            "server": True,
+            "ai": False,
+        },
+    )
 
     uvicorn.run(
         "core.server:app",
@@ -536,6 +576,7 @@ async def _run_with_server_and_bundle(args, project_dir):
 
     port = args.port or _read_saved_config(project_dir).get("port", 8888)
     import time
+
     for _ in range(3):
         if _port_available(args.host, port):
             break
@@ -544,7 +585,9 @@ async def _run_with_server_and_bundle(args, project_dir):
         port = _find_free_port(args.host)
 
     os.environ["SERVER_PORT"] = str(port)
-    config = uvicorn.Config("core.server:app", host=args.host, port=port, log_level="warning")
+    config = uvicorn.Config(
+        "core.server:app", host=args.host, port=port, log_level="warning"
+    )
     server = uvicorn.Server(config)
     loop = InputLoop()
 
@@ -565,15 +608,27 @@ def _cmd_run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Fantastic")
-    parser.add_argument("--project-dir", type=str, default=os.getcwd(), help="Project directory (default: CWD)")
+    parser.add_argument(
+        "--project-dir",
+        type=str,
+        default=os.getcwd(),
+        help="Project directory (default: CWD)",
+    )
     subs = parser.add_subparsers(dest="command")
 
     # ─── add <bundle> ──────────────────────────────────────────
     p_add = subs.add_parser("add", help="Add a bundle")
     p_add.add_argument("bundle", help="Bundle name")
     p_add.add_argument("--name", default="", help="Instance name (e.g. --name main)")
-    p_add.add_argument("--working-dir", default="", help="Working directory for this instance")
-    p_add.add_argument("--from", dest="from_source", default="", help="Git URL or local path to external plugin")
+    p_add.add_argument(
+        "--working-dir", default="", help="Working directory for this instance"
+    )
+    p_add.add_argument(
+        "--from",
+        dest="from_source",
+        default="",
+        help="Git URL or local path to external plugin",
+    )
 
     # ─── remove <bundle> ───────────────────────────────────────
     p_remove = subs.add_parser("remove", help="Remove a bundle")
@@ -591,12 +646,26 @@ def main():
     p_run.add_argument("bundle", help="Bundle name (e.g. quickstart)")
 
     # ─── Shared flags ──────────────────────────────────────────
-    parser.add_argument("--port", type=int, default=None, help="Server port (default: auto from 8888)")
-    parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
-    parser.add_argument("--requirements", type=str, help="Path to requirements.txt to install on startup")
-    parser.add_argument("--cli", nargs=argparse.REMAINDER, default=None,
-                        help="Auto-launch an agent with this command (e.g. --cli claude --model sonnet)")
-    parser.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
+    parser.add_argument(
+        "--port", type=int, default=None, help="Server port (default: auto from 8888)"
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--requirements",
+        type=str,
+        help="Path to requirements.txt to install on startup",
+    )
+    parser.add_argument(
+        "--cli",
+        nargs=argparse.REMAINDER,
+        default=None,
+        help="Auto-launch an agent with this command (e.g. --cli claude --model sonnet)",
+    )
+    parser.add_argument(
+        "--log-level", default="info", choices=["debug", "info", "warning", "error"]
+    )
 
     args = parser.parse_args()
 

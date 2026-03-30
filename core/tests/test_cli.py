@@ -4,14 +4,18 @@ import json
 import os
 import socket
 from argparse import Namespace
-from pathlib import Path
-from unittest.mock import patch
 
 from core.cli import (
-    _find_free_port, _pid_alive, _port_available,
-    _read_saved_config, _write_saved_config,
-    _cmd_add, _cmd_remove, _cmd_list, _cmd_start,
-    _call_bundle_hook, _has_agents,
+    _find_free_port,
+    _pid_alive,
+    _port_available,
+    _read_saved_config,
+    _write_saved_config,
+    _cmd_add,
+    _cmd_remove,
+    _cmd_list,
+    _call_bundle_hook,
+    _has_agents,
 )
 from core.agent_store import AgentStore
 

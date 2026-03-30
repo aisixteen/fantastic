@@ -93,7 +93,10 @@ def test_rest_api_call_execute_python(app_client):
     agent = _create_agent(app_client)
     r = app_client.post(
         "/api/call",
-        json={"tool": "execute_python", "args": {"code": "print(7*8)", "agent_id": agent["id"]}},
+        json={
+            "tool": "execute_python",
+            "args": {"code": "print(7*8)", "agent_id": agent["id"]},
+        },
     )
     assert r.status_code == 200
     assert "56" in r.json()["result"]
@@ -106,7 +109,6 @@ def test_rest_api_call_unknown_tool(app_client):
     )
     assert r.status_code == 200
     assert "Unknown tool" in r.json()["error"]
-
 
 
 # ─── REST: Process endpoints ──────────────────────────────────────────────

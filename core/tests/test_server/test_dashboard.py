@@ -27,12 +27,14 @@ def project_dir(tmp_path):
 def dashboard_client(project_dir, monkeypatch):
     """TestClient with a dashboard agent pre-created (bundle registers its own route)."""
     from core.tools import _state
+
     _state._on_agent_created.clear()
 
     _pre_add_dashboard(project_dir)
     monkeypatch.setenv("PROJECT_DIR", project_dir)
 
     import core.server as server_mod
+
     importlib.reload(server_mod)
     client = TestClient(server_mod.app)
     with client:

@@ -33,20 +33,25 @@ class MemoryAppendRequest(BaseModel):
 async def resolve_agent(agent_id: str, req: ResolveRequest):
     """External caller submits generated code -> executes and pushes to frontend."""
     from . import broadcast
+
     try:
         result = await _state.engine.resolve_agent(agent_id, req.code)
-        await broadcast({
-            "type": "agent_output",
-            "agent_id": agent_id,
-            "outputs": result["outputs"],
-            "success": result["success"],
-        })
-        await broadcast({
-            "type": "agent_complete",
-            "agent_id": agent_id,
-            "final_code": req.code,
-            "outputs": result["outputs"],
-        })
+        await broadcast(
+            {
+                "type": "agent_output",
+                "agent_id": agent_id,
+                "outputs": result["outputs"],
+                "success": result["success"],
+            }
+        )
+        await broadcast(
+            {
+                "type": "agent_complete",
+                "agent_id": agent_id,
+                "final_code": req.code,
+                "outputs": result["outputs"],
+            }
+        )
         return result
     except ValueError as e:
         return {"error": str(e)}
@@ -55,14 +60,17 @@ async def resolve_agent(agent_id: str, req: ResolveRequest):
 async def execute_agent(agent_id: str, req: ExecuteRequest):
     """Execute raw code for an agent."""
     from . import broadcast
+
     try:
         result = await _state.engine.execute_code(agent_id, req.code)
-        await broadcast({
-            "type": "agent_output",
-            "agent_id": agent_id,
-            "outputs": result["outputs"],
-            "success": result["success"],
-        })
+        await broadcast(
+            {
+                "type": "agent_output",
+                "agent_id": agent_id,
+                "outputs": result["outputs"],
+                "success": result["success"],
+            }
+        )
         return result
     except ValueError as e:
         return {"error": str(e)}
@@ -71,6 +79,7 @@ async def execute_agent(agent_id: str, req: ExecuteRequest):
 async def get_state(scope: str = ""):
     """Get state. Filter by scope (container name)."""
     from ..tools._agents import _get_full_state
+
     tr = await _get_full_state(scope=scope)
     return tr.data
 
@@ -91,6 +100,7 @@ async def get_handbook_rest(skill: str = ""):
 async def api_call_proxy(body: dict):
     """Call any tool via REST."""
     from . import broadcast
+
     tool_name = body.get("tool", "")
     args = body.get("args", {})
     fn = _TOOL_DISPATCH.get(tool_name)

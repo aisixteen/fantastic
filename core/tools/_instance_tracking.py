@@ -79,7 +79,11 @@ def _add_tracked(entry: dict) -> None:
 def _remove_tracked(instance_id: str) -> bool:
     """Remove a tracked entry by instance_id. Returns True if found."""
     entries = _load_tracked()
-    new = [e for e in entries if _instance_id(e["project_dir"], e.get("ssh_host", "")) != instance_id]
+    new = [
+        e
+        for e in entries
+        if _instance_id(e["project_dir"], e.get("ssh_host", "")) != instance_id
+    ]
     if len(new) == len(entries):
         return False
     _save_tracked(new)
@@ -133,6 +137,7 @@ async def _fetch_instance_state(entry: dict, *, check_http: bool = False) -> dic
         if check_http and url:
             try:
                 import httpx
+
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"{url}/api/state", timeout=2)
                     if resp.status_code != 200:
@@ -154,21 +159,23 @@ async def _instance_list(*, check_http: bool = False) -> list[dict]:
     if not entries:
         return []
 
-    states = await asyncio.gather(*[
-        _fetch_instance_state(e, check_http=check_http) for e in entries
-    ])
+    states = await asyncio.gather(
+        *[_fetch_instance_state(e, check_http=check_http) for e in entries]
+    )
 
     result = []
     for entry, state in zip(entries, states):
         iid = _instance_id(entry["project_dir"], entry.get("ssh_host", ""))
-        result.append({
-            "id": iid,
-            "project_dir": entry["project_dir"],
-            "name": entry.get("name", ""),
-            "backend": entry.get("backend", "local"),
-            **({"ssh_host": entry["ssh_host"]} if entry.get("ssh_host") else {}),
-            **state,
-        })
+        result.append(
+            {
+                "id": iid,
+                "project_dir": entry["project_dir"],
+                "name": entry.get("name", ""),
+                "backend": entry.get("backend", "local"),
+                **({"ssh_host": entry["ssh_host"]} if entry.get("ssh_host") else {}),
+                **state,
+            }
+        )
     return result
 
 
@@ -201,15 +208,17 @@ def _instance_list_sync() -> list[dict]:
         local_port = entry.get("local_port", port)
         url = f"http://127.0.0.1:{local_port}" if local_port else ""
 
-        result.append({
-            "id": iid,
-            "project_dir": project_dir,
-            "name": entry.get("name", ""),
-            "backend": entry.get("backend", "local"),
-            **({"ssh_host": ssh_host} if ssh_host else {}),
-            "pid": pid,
-            "port": port,
-            "status": "running" if alive else "stopped",
-            "url": url,
-        })
+        result.append(
+            {
+                "id": iid,
+                "project_dir": project_dir,
+                "name": entry.get("name", ""),
+                "backend": entry.get("backend", "local"),
+                **({"ssh_host": ssh_host} if ssh_host else {}),
+                "pid": pid,
+                "port": port,
+                "status": "running" if alive else "stopped",
+                "url": url,
+            }
+        )
     return result

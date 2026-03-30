@@ -54,6 +54,7 @@ async def _agent_run(agent_id: str = "", code: str = "") -> ToolResult:
 
 _SENTINEL = object()
 
+
 @register_dispatch("process_attach")
 async def _process_attach(
     agent_id: str = "",
@@ -72,11 +73,13 @@ async def _process_attach(
         await _state._process_runner.resize(aid, cols, rows)
         scrollback = _state._process_runner.get_scrollback(aid)
         if scrollback:
-            reply.append({
-                "type": "process_output",
-                "agent_id": aid,
-                "data": scrollback,
-            })
+            reply.append(
+                {
+                    "type": "process_output",
+                    "agent_id": aid,
+                    "data": scrollback,
+                }
+            )
     else:
         # Load saved params from agent.json (if agent exists on disk from previous session)
         agent = _state._engine.store.get_agent(aid)
@@ -98,11 +101,13 @@ async def _process_attach(
         # Check for disk scrollback to replay
         disk_scrollback = _state._process_runner.load_scrollback_from_disk(aid)
         if disk_scrollback:
-            reply.append({
-                "type": "process_output",
-                "agent_id": aid,
-                "data": disk_scrollback,
-            })
+            reply.append(
+                {
+                    "type": "process_output",
+                    "agent_id": aid,
+                    "data": disk_scrollback,
+                }
+            )
             # Seed in-memory buffer so subsequent browser refreshes get it
             _state._process_runner.seed_scrollback(aid, disk_scrollback)
             # Don't re-run welcome_command — user already saw it in previous session
@@ -111,19 +116,25 @@ async def _process_attach(
             effective_welcome = welcome_command
 
         await _state._process_runner.create(
-            aid, cols=cols, rows=rows,
+            aid,
+            cols=cols,
+            rows=rows,
             cwd=str(_state._engine.resolve_working_dir(aid)),
-            command=effective_command, args=effective_args,
+            command=effective_command,
+            args=effective_args,
             welcome_command=effective_welcome,
         )
 
         # Persist process params to agent.json for future restarts
         resolved_wc = welcome_command  # save the full welcome_command regardless
-        _state._engine.update_agent_meta(aid, process_params={
-            "command": effective_command,
-            "args": effective_args,
-            "welcome_command": resolved_wc,
-        })
+        _state._engine.update_agent_meta(
+            aid,
+            process_params={
+                "command": effective_command,
+                "args": effective_args,
+                "welcome_command": resolved_wc,
+            },
+        )
 
     reply.append({"type": "process_created", "agent_id": aid})
     return ToolResult(data={"agent_id": aid}, reply=reply)
@@ -138,14 +149,18 @@ async def _process_create(**kwargs) -> ToolResult:
 
 
 @register_dispatch("process_input")
-async def _process_input(process_id: str = "", agent_id: str = "", data: str = "") -> ToolResult:
+async def _process_input(
+    process_id: str = "", agent_id: str = "", data: str = ""
+) -> ToolResult:
     aid = agent_id or process_id
     await _state._process_runner.write(aid, data)
     return ToolResult()
 
 
 @register_dispatch("process_resize")
-async def _process_resize(process_id: str = "", agent_id: str = "", cols: int = 80, rows: int = 24) -> ToolResult:
+async def _process_resize(
+    process_id: str = "", agent_id: str = "", cols: int = 80, rows: int = 24
+) -> ToolResult:
     aid = agent_id or process_id
     await _state._process_runner.resize(aid, cols, rows)
     return ToolResult()

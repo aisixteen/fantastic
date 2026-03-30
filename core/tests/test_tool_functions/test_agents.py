@@ -1,7 +1,5 @@
 """Tests for agent CRUD tool inner functions."""
 
-import pytest
-
 from core.tools._agents import (
     _create_agent,
     _list_agents,

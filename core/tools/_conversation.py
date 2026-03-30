@@ -2,7 +2,7 @@
 
 from .. import conversation
 from ..dispatch import ToolResult, register_dispatch, register_tool
-from . import _state, _fire_broadcasts
+from . import _fire_broadcasts
 
 
 @register_dispatch("conversation_log")

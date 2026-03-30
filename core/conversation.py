@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 CONVERSATION_BUFFER_SIZE = 1000
 
 # ANSI color codes
-CORE_COLOR = "\033[35m"   # magenta
-USER_COLOR = "\033[32m"   # green
+CORE_COLOR = "\033[35m"  # magenta
+USER_COLOR = "\033[32m"  # green
 AGENT_COLOR = "\033[36m"  # cyan
 RESET = "\033[0m"
 

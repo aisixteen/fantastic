@@ -12,7 +12,14 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from ..engine import Engine
-from ..tools import init_tools, install_log_buffer, _instance_list_sync, _load_tracked, _pid_alive, _launched_processes
+from ..tools import (
+    init_tools,
+    install_log_buffer,
+    _instance_list_sync,
+    _load_tracked,
+    _pid_alive,
+    _launched_processes,
+)
 from ..process_runner import ProcessRunner
 from ..agent import discover_autorun
 from .._paths import fantastic_md_path
@@ -33,8 +40,12 @@ async def watch_project_dir():
                     return False
             return True
 
-        async for _changes in watchfiles.awatch(str(_state.engine.project_dir), watch_filter=_watch_filter):
-            await broadcast({"type": "files_changed", "files": _state.engine.list_files()})
+        async for _changes in watchfiles.awatch(
+            str(_state.engine.project_dir), watch_filter=_watch_filter
+        ):
+            await broadcast(
+                {"type": "files_changed", "files": _state.engine.list_files()}
+            )
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -55,8 +66,11 @@ async def lifespan(app: FastAPI):
     if requirements_file and Path(requirements_file).exists():
         logger.info(f"Installing requirements from {requirements_file}")
         import shutil
+
         if shutil.which("uv"):
-            subprocess.run(["uv", "pip", "install", "-r", requirements_file], check=True)
+            subprocess.run(
+                ["uv", "pip", "install", "-r", requirements_file], check=True
+            )
         else:
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r", requirements_file],
@@ -121,15 +135,19 @@ async def lifespan(app: FastAPI):
 
         await _state.process_runner.create(
             agent_id,
-            cols=120, rows=40,
+            cols=120,
+            rows=40,
             cwd=str(_state.engine.resolve_working_dir(agent_id)),
             welcome_command=cli_cmd,
         )
-        _state.engine.update_agent_meta(agent_id, process_params={
-            "command": None,
-            "args": None,
-            "welcome_command": cli_cmd,
-        })
+        _state.engine.update_agent_meta(
+            agent_id,
+            process_params={
+                "command": None,
+                "args": None,
+                "welcome_command": cli_cmd,
+            },
+        )
         await broadcast({"type": "agent_created", "agent": agent})
         logger.info(f"Auto-launched agent {agent_id} with: {cli_cmd}")
 
@@ -148,7 +166,8 @@ async def lifespan(app: FastAPI):
             params = agent.get("process_params") or {}
             await _state.process_runner.create(
                 aid,
-                cols=80, rows=24,
+                cols=80,
+                rows=24,
                 cwd=str(_state.engine.resolve_working_dir(aid)),
                 command=params.get("command"),
                 args=params.get("args"),
@@ -172,7 +191,9 @@ async def lifespan(app: FastAPI):
                 cur = {i["id"]: i["status"] for i in instances}
                 if cur != _prev_statuses:
                     _prev_statuses = cur
-                    await broadcast({"type": "instances_changed", "instances": instances})
+                    await broadcast(
+                        {"type": "instances_changed", "instances": instances}
+                    )
             except Exception:
                 pass
 
@@ -194,6 +215,7 @@ async def lifespan(app: FastAPI):
     await _state.process_runner.close_all()
     # Stop launched instances on shutdown
     import signal as _signal
+
     for proc in list(_launched_processes.values()):
         if proc.returncode is None:
             try:
@@ -234,4 +256,5 @@ async def _generic_process_output(agent_id: str, data: str):
     """Generic PTY output handler — broadcasts process_output."""
     if data:
         from . import broadcast
+
         await broadcast({"type": "process_output", "agent_id": agent_id, "data": data})

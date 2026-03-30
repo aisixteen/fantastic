@@ -8,7 +8,6 @@ from typing import Any
 from ..dispatch import ToolResult, register_dispatch, register_tool
 from ..instance_backend import get_backend
 from . import _fire_broadcasts
-from . import _state
 from . import _instance_tracking as _it
 
 logger = logging.getLogger(__name__)
@@ -40,7 +39,9 @@ async def _launch_instance(
             pass
         return ToolResult(data={"error": "Cannot track self (same port)"})
 
-    abs_dir = os.path.abspath(project_dir) if backend.backend_type == "local" else project_dir
+    abs_dir = (
+        os.path.abspath(project_dir) if backend.backend_type == "local" else project_dir
+    )
     inst_id = _it._instance_id(abs_dir, ssh_host)
 
     # Cache process object for graceful stop later
@@ -71,7 +72,9 @@ async def _launch_instance(
     }
     return ToolResult(
         data=instance_data,
-        broadcast=[{"type": "instances_changed", "instances": _it._instance_list_sync()}],
+        broadcast=[
+            {"type": "instances_changed", "instances": _it._instance_list_sync()}
+        ],
     )
 
 
@@ -154,7 +157,9 @@ async def _stop_instance(instance_id: str) -> ToolResult:
 
     return ToolResult(
         data={"id": instance_id, "stopped": True},
-        broadcast=[{"type": "instances_changed", "instances": _it._instance_list_sync()}],
+        broadcast=[
+            {"type": "instances_changed", "instances": _it._instance_list_sync()}
+        ],
     )
 
 
@@ -191,10 +196,13 @@ async def _register_instance(
     name: str = "",
 ) -> ToolResult:
     if not project_dir:
-        return ToolResult(data={"error": "project_dir is required for register_instance"})
+        return ToolResult(
+            data={"error": "project_dir is required for register_instance"}
+        )
 
     own_port = _it._get_own_port()
     from urllib.parse import urlparse
+
     if own_port:
         p = urlparse(url)
         h = p.hostname or ""
@@ -211,7 +219,9 @@ async def _register_instance(
 
     return ToolResult(
         data={"id": iid, "project_dir": project_dir, "name": tracked_entry["name"]},
-        broadcast=[{"type": "instances_changed", "instances": _it._instance_list_sync()}],
+        broadcast=[
+            {"type": "instances_changed", "instances": _it._instance_list_sync()}
+        ],
     )
 
 
@@ -242,7 +252,9 @@ async def _unregister_instance(instance_id: str) -> ToolResult:
     _it._launched_processes.pop(instance_id, None)
     return ToolResult(
         data={"id": instance_id, "unregistered": True},
-        broadcast=[{"type": "instances_changed", "instances": _it._instance_list_sync()}],
+        broadcast=[
+            {"type": "instances_changed", "instances": _it._instance_list_sync()}
+        ],
     )
 
 

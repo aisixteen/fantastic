@@ -78,7 +78,9 @@ async def test_update_agent_meta(engine):
 
 @pytest.mark.asyncio
 async def test_content_aliases(engine):
-    engine.add_content_alias("test1", {"type": "url", "url": "http://example.com", "persistent": True})
+    engine.add_content_alias(
+        "test1", {"type": "url", "url": "http://example.com", "persistent": True}
+    )
     assert "test1" in engine.content_aliases
     assert engine.content_aliases["test1"]["url"] == "http://example.com"
     engine.remove_content_alias("test1")
@@ -108,14 +110,14 @@ async def test_html_agent_with_url(engine):
 
 @pytest.mark.asyncio
 async def test_resolve_working_dir_default(engine):
-    agent = engine.create_agent(agent_id="a1")
+    engine.create_agent(agent_id="a1")
     wd = engine.resolve_working_dir("a1")
     assert wd == engine.project_dir
 
 
 @pytest.mark.asyncio
 async def test_resolve_working_dir_absolute(engine, tmp_path):
-    container = engine.create_agent(agent_id="c1", bundle="bundle_a")
+    engine.create_agent(agent_id="c1", bundle="bundle_a")
     target = tmp_path / "other"
     target.mkdir()
     engine.update_agent_meta("c1", working_dir=str(target))
@@ -125,7 +127,7 @@ async def test_resolve_working_dir_absolute(engine, tmp_path):
 
 @pytest.mark.asyncio
 async def test_resolve_working_dir_relative(engine, tmp_path):
-    container = engine.create_agent(agent_id="c1", bundle="bundle_a")
+    engine.create_agent(agent_id="c1", bundle="bundle_a")
     (tmp_path / "notebooks").mkdir()
     engine.update_agent_meta("c1", working_dir="notebooks")
     wd = engine.resolve_working_dir("c1")
@@ -134,10 +136,10 @@ async def test_resolve_working_dir_relative(engine, tmp_path):
 
 @pytest.mark.asyncio
 async def test_resolve_working_dir_child_inherits(engine, tmp_path):
-    container = engine.create_agent(agent_id="c1", bundle="bundle_a")
+    engine.create_agent(agent_id="c1", bundle="bundle_a")
     (tmp_path / "notebooks").mkdir()
     engine.update_agent_meta("c1", working_dir="notebooks")
-    child = engine.create_agent(agent_id="t1", parent="c1")
+    engine.create_agent(agent_id="t1", parent="c1")
     wd = engine.resolve_working_dir("t1")
     assert wd == tmp_path / "notebooks"
 

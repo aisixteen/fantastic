@@ -17,7 +17,8 @@ _bundle_tool_names: dict[str, list[str]] = {}
 @dataclass
 class BundleLoadResult:
     """Result of loading one or more bundles."""
-    tools: dict[str, Any] = field(default_factory=dict)       # tool_name → callable
+
+    tools: dict[str, Any] = field(default_factory=dict)  # tool_name → callable
 
 
 def load_single_bundle(
@@ -33,13 +34,16 @@ def load_single_bundle(
         return result
     try:
         spec = importlib.util.spec_from_file_location(
-            f"bundle_{entry.name}_tools", tools_file,
+            f"bundle_{entry.name}_tools",
+            tools_file,
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         if hasattr(mod, "register_tools"):
             tools = mod.register_tools(
-                engine, fire_broadcasts, process_runner,
+                engine,
+                fire_broadcasts,
+                process_runner,
             )
             result.tools.update(tools)
             _bundle_tool_names[entry.name] = list(tools.keys())

@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 @register_dispatch("add_bundle")
 @register_tool("add_bundle")
-async def _add_bundle(bundle_name: str, name: str = "", working_dir: str = "", from_source: str = "") -> ToolResult:
+async def _add_bundle(
+    bundle_name: str, name: str = "", working_dir: str = "", from_source: str = ""
+) -> ToolResult:
     """Add a bundle: validate, call on_add hook, hot-load tools if server running."""
     from . import _state, _fire_broadcasts
     from .._paths import bundled_agents_dir
@@ -26,6 +28,7 @@ async def _add_bundle(bundle_name: str, name: str = "", working_dir: str = "", f
     # External plugin install (files only, no agent)
     if from_source:
         from .._install import install_plugin
+
         try:
             install_plugin(_state._engine.project_dir, from_source, bundle_name)
         except RuntimeError as e:
@@ -40,22 +43,34 @@ async def _add_bundle(bundle_name: str, name: str = "", working_dir: str = "", f
         bundle_dir = bundled_agents_dir() / bundle_name
     else:
         from .._install import get_plugin_dir
+
         plugin_dir = get_plugin_dir(_state._engine.project_dir, bundle_name)
         if plugin_dir.exists() and (plugin_dir / "template.json").exists():
             bundle_dir = plugin_dir
         else:
-            available = [b.get("bundle", b.get("name", "?")) for b in store.list_bundles()]
-            return ToolResult(data={"error": f"Unknown bundle: {bundle_name}", "available": available})
+            available = [
+                b.get("bundle", b.get("name", "?")) for b in store.list_bundles()
+            ]
+            return ToolResult(
+                data={"error": f"Unknown bundle: {bundle_name}", "available": available}
+            )
 
     # Snapshot agent IDs before on_add so we can detect new agents
     before_ids = {a["id"] for a in _state._engine.store.list_agents()}
 
     # Call bundle's on_add hook (creates agent, registers hooks, etc.)
-    _call_bundle_hook_sync(bundle_dir, "on_add", str(_state._engine.project_dir), name=name, working_dir=working_dir)
+    _call_bundle_hook_sync(
+        bundle_dir,
+        "on_add",
+        str(_state._engine.project_dir),
+        name=name,
+        working_dir=working_dir,
+    )
 
     # Broadcast agent_created for any agents created by on_add
     try:
         from ..server import broadcast
+
         for agent in _state._engine.store.list_agents():
             if agent["id"] not in before_ids:
                 await broadcast({"type": "agent_created", "agent": agent})
@@ -68,7 +83,10 @@ async def _add_bundle(bundle_name: str, name: str = "", working_dir: str = "", f
         from . import _TOOL_DISPATCH
 
         result = load_single_bundle(
-            bundle_dir, _state._engine, _fire_broadcasts, _state._process_runner,
+            bundle_dir,
+            _state._engine,
+            _fire_broadcasts,
+            _state._process_runner,
         )
         _TOOL_DISPATCH.update(result.tools)
         if result.tools:
@@ -78,23 +96,24 @@ async def _add_bundle(bundle_name: str, name: str = "", working_dir: str = "", f
     try:
         from ..server import remount_web_ui, broadcast
         from ..server._state import _lifespan_hooks, _lifespan_hooks_ran
+
         remount_web_ui()
         # Run any newly registered lifespan hooks that haven't run yet
         import core.server._state as _srv_state
+
         for hook in _lifespan_hooks[_lifespan_hooks_ran:]:
             await hook(_srv_state, broadcast)
         _srv_state._lifespan_hooks_ran = len(_lifespan_hooks)
     except Exception:
         logger.debug("Could not hot-swap web UI (server may not be running)")
 
-    conversation.say(bundle_name, f"bundle loaded")
+    conversation.say(bundle_name, "bundle loaded")
     return ToolResult(data={"added": bundle_name, "name": name or "main"})
 
 
 async def _remove_bundle(bundle_name: str, name: str = "") -> ToolResult:
     """Remove a bundle instance. For multi-instance bundles, name is required."""
     from . import _state
-    from .._paths import bundled_agents_dir
 
     if not _state._engine:
         return ToolResult(data={"error": "No engine available"})
@@ -116,7 +135,11 @@ async def _remove_bundle(bundle_name: str, name: str = "") -> ToolResult:
         targets = [a for a in bundle_agents if a.get("display_name") == name]
         if not targets:
             names = [a.get("display_name", a["id"]) for a in bundle_agents]
-            return ToolResult(data={"error": f"No {bundle_name} '{name}' found. Active: {', '.join(names)}"})
+            return ToolResult(
+                data={
+                    "error": f"No {bundle_name} '{name}' found. Active: {', '.join(names)}"
+                }
+            )
     else:
         targets = bundle_agents
 
@@ -130,10 +153,13 @@ async def _remove_bundle(bundle_name: str, name: str = "") -> ToolResult:
         await _fire_broadcasts(tr)
 
     # If no more agents with this bundle → unload tools
-    remaining = [a for a in _state._engine.store.list_agents() if a.get("bundle") == bundle_name]
+    remaining = [
+        a for a in _state._engine.store.list_agents() if a.get("bundle") == bundle_name
+    ]
     if not remaining:
         from . import _TOOL_DISPATCH
         from ._plugin_loader import _bundle_tool_names
+
         for tool_name in _bundle_tool_names.get(bundle_name, []):
             _TOOL_DISPATCH.pop(tool_name, None)
         _bundle_tool_names.pop(bundle_name, None)
@@ -142,16 +168,20 @@ async def _remove_bundle(bundle_name: str, name: str = "") -> ToolResult:
     # Hot-swap web UI
     try:
         from ..server import remount_web_ui
+
         remount_web_ui()
     except Exception:
         logger.debug("Could not hot-swap web UI (server may not be running)")
     try:
         from ..server import broadcast
+
         await broadcast({"type": "reload"})
     except Exception:
         logger.debug("Could not broadcast reload")
 
-    conversation.say("fantastic", f"Removed {bundle_name}" + (f" '{name}'" if name else ""))
+    conversation.say(
+        "fantastic", f"Removed {bundle_name}" + (f" '{name}'" if name else "")
+    )
     return ToolResult(data={"removed": bundle_name, "name": name})
 
 
@@ -184,8 +214,13 @@ async def _list_bundles() -> ToolResult:
             "name": bname,
             "added": len(instances) > 0,
             "instances": [
-                {"id": a["id"], "display_name": a.get("display_name", ""),
-                 "children": len(_state._engine.store.list_children(a["id"])) if _state._engine else 0}
+                {
+                    "id": a["id"],
+                    "display_name": a.get("display_name", ""),
+                    "children": len(_state._engine.store.list_children(a["id"]))
+                    if _state._engine
+                    else 0,
+                }
                 for a in instances
             ],
         }
@@ -203,16 +238,23 @@ async def _list_bundles() -> ToolResult:
                 continue
             seen_names.add(pname)
             instances = bundle_instances.get(pname, [])
-            result.append({
-                "name": pname,
-                "added": len(instances) > 0,
-                "plugin": True,
-                "instances": [
-                    {"id": a["id"], "display_name": a.get("display_name", ""),
-                     "children": len(_state._engine.store.list_children(a["id"]))}
-                    for a in instances
-                ],
-            })
+            result.append(
+                {
+                    "name": pname,
+                    "added": len(instances) > 0,
+                    "plugin": True,
+                    "instances": [
+                        {
+                            "id": a["id"],
+                            "display_name": a.get("display_name", ""),
+                            "children": len(
+                                _state._engine.store.list_children(a["id"])
+                            ),
+                        }
+                        for a in instances
+                    ],
+                }
+            )
 
     return ToolResult(data=result)
 
@@ -220,23 +262,24 @@ async def _list_bundles() -> ToolResult:
 def _call_bundle_hook_sync(bundle_dir, hook_name, project_dir, **kwargs):
     """Call a hook function on a bundle's tools.py if it exists."""
     import importlib.util
+
     tools_file = bundle_dir / "tools.py"
     if not tools_file.exists():
         return
     try:
         spec = importlib.util.spec_from_file_location(
-            f"bundle_{bundle_dir.name}_hook", tools_file,
+            f"bundle_{bundle_dir.name}_hook",
+            tools_file,
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         fn = getattr(mod, hook_name, None)
         if fn:
             import inspect
+
             sig = inspect.signature(fn)
             # Pass kwargs that the hook accepts
             valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
             fn(project_dir, **valid_kwargs)
     except Exception as e:
         logger.warning(f"Hook {hook_name} failed for {bundle_dir.name}: {e}")
-
-

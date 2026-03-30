@@ -30,8 +30,10 @@ def app_client(project_dir, monkeypatch):
     """TestClient with lifespan — sets up engine, process_runner, tools."""
     # Clear module-level hook lists to avoid cross-test contamination
     from core.tools import _state
+
     _state._on_agent_created.clear()
     from core.server import _state as server_state
+
     server_state.clear_hooks()
 
     _pre_add_bundles(project_dir)
@@ -39,6 +41,7 @@ def app_client(project_dir, monkeypatch):
     # Reload server module so lifespan picks up the new PROJECT_DIR
     import importlib
     import core.server as server_mod
+
     importlib.reload(server_mod)
     client = TestClient(server_mod.app)
     with client:

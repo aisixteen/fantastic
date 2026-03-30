@@ -25,6 +25,7 @@ class ToolResult:
         broadcast: Messages to send to ALL connected WS clients.
         reply:     Messages to send only to the requesting WS client.
     """
+
     data: Any = None
     broadcast: list[dict] = field(default_factory=list)
     reply: list[dict] = field(default_factory=list)
@@ -32,17 +33,21 @@ class ToolResult:
 
 def register_dispatch(name: str = ""):
     """Decorator: register inner function to _DISPATCH."""
+
     def decorator(fn):
         _DISPATCH[name or fn.__name__] = fn
         return fn
+
     return decorator
 
 
 def register_tool(name: str = ""):
     """Decorator: register wrapper function to _TOOL_DISPATCH."""
+
     def decorator(fn):
         _TOOL_DISPATCH[name or fn.__name__] = fn
         return fn
+
     return decorator
 
 

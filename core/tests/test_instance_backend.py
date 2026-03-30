@@ -1,6 +1,5 @@
 """Tests for instance_backend — LocalBackend, SSHBackend, factory."""
 
-import asyncio
 import signal as _signal
 
 import pytest
@@ -55,9 +54,11 @@ async def test_local_launch_success(tmp_path):
 
     backend = LocalBackend()
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)), \
-         patch.object(backend, "health_check", AsyncMock(return_value=True)), \
-         patch.object(backend, "find_free_local_port", return_value=49999):
+    with (
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
+        patch.object(backend, "health_check", AsyncMock(return_value=True)),
+        patch.object(backend, "find_free_local_port", return_value=49999),
+    ):
         result = await backend.launch(str(project))
 
     assert isinstance(result, LaunchResult)
@@ -86,8 +87,10 @@ async def test_local_launch_process_dies(tmp_path):
 
     backend = LocalBackend()
 
-    with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)), \
-         patch.object(backend, "find_free_local_port", return_value=50000):
+    with (
+        patch("asyncio.create_subprocess_exec", AsyncMock(return_value=mock_proc)),
+        patch.object(backend, "find_free_local_port", return_value=50000),
+    ):
         with pytest.raises(RuntimeError, match="startup error"):
             await backend.launch(str(project))
 
@@ -103,9 +106,11 @@ async def test_local_stop_clean():
         if sig == 0:
             raise ProcessLookupError()
 
-    with patch("os.getpgid", return_value=1234), \
-         patch("os.killpg") as mock_killpg, \
-         patch("os.kill", side_effect=fake_kill):
+    with (
+        patch("os.getpgid", return_value=1234),
+        patch("os.killpg") as mock_killpg,
+        patch("os.kill", side_effect=fake_kill),
+    ):
         await backend.stop(1234)
     mock_killpg.assert_called_once_with(1234, _signal.SIGTERM)
 
@@ -148,11 +153,15 @@ async def test_ssh_launch_success():
 
     backend = SSHBackend(ssh_host="gpu-box")
 
-    with patch.object(backend, "_find_free_remote_port", AsyncMock(return_value=9123)), \
-         patch.object(backend, "_check_remote_server", AsyncMock(return_value=None)), \
-         patch("asyncio.create_subprocess_shell", AsyncMock(return_value=mock_proc)) as mock_exec, \
-         patch.object(backend, "health_check", AsyncMock(return_value=True)), \
-         patch.object(backend, "find_free_local_port", return_value=49200):
+    with (
+        patch.object(backend, "_find_free_remote_port", AsyncMock(return_value=9123)),
+        patch.object(backend, "_check_remote_server", AsyncMock(return_value=None)),
+        patch(
+            "asyncio.create_subprocess_shell", AsyncMock(return_value=mock_proc)
+        ) as mock_exec,
+        patch.object(backend, "health_check", AsyncMock(return_value=True)),
+        patch.object(backend, "find_free_local_port", return_value=49200),
+    ):
         result = await backend.launch("/home/user/proj")
 
     assert isinstance(result, LaunchResult)
@@ -175,8 +184,13 @@ async def test_ssh_launch_connection_failure():
     backend = SSHBackend(ssh_host="bad-host")
 
     with patch.object(
-        backend, "_find_free_remote_port",
-        AsyncMock(side_effect=RuntimeError("SSH port-finding failed on bad-host: Connection refused")),
+        backend,
+        "_find_free_remote_port",
+        AsyncMock(
+            side_effect=RuntimeError(
+                "SSH port-finding failed on bad-host: Connection refused"
+            )
+        ),
     ):
         with pytest.raises(RuntimeError, match="SSH port-finding failed"):
             await backend.launch("/home/user/proj")
@@ -190,6 +204,7 @@ async def test_ssh_stop_terminates():
     backend = SSHBackend(ssh_host="gpu-box")
 
     call_count = 0
+
     def fake_kill(pid, sig):
         nonlocal call_count
         if sig == _signal.SIGTERM:
@@ -219,7 +234,9 @@ async def test_health_check_success():
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        result = await backend.health_check("http://127.0.0.1:49200/api/state", timeout=2)
+        result = await backend.health_check(
+            "http://127.0.0.1:49200/api/state", timeout=2
+        )
     assert result is True
 
 
@@ -232,7 +249,9 @@ async def test_health_check_timeout():
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
-        result = await backend.health_check("http://127.0.0.1:49200/api/state", timeout=1)
+        result = await backend.health_check(
+            "http://127.0.0.1:49200/api/state", timeout=1
+        )
     assert result is False
 
 

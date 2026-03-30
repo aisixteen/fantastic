@@ -16,6 +16,7 @@ def app_client(project_dir, monkeypatch):
     monkeypatch.setenv("PROJECT_DIR", project_dir)
     import importlib
     import core.server as server_mod
+
     importlib.reload(server_mod)
     client = TestClient(server_mod.app)
     with client:
@@ -93,10 +94,13 @@ def test_relative_content_alias(app_client, project_dir):
     with open(test_file, "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
 
-    r = app_client.post("/api/call", json={
-        "tool": "content_alias_file",
-        "args": {"file_path": test_file},
-    })
+    r = app_client.post(
+        "/api/call",
+        json={
+            "tool": "content_alias_file",
+            "args": {"file_path": test_file},
+        },
+    )
     assert r.status_code == 200
     alias_path = r.json()["result"]
     assert alias_path.startswith("/content/")
@@ -118,13 +122,22 @@ def test_cli_requirements_env_var(monkeypatch, tmp_path):
     req_file.write_text("numpy\npandas\n")
 
     monkeypatch.setattr(
-        sys, "argv",
-        ["fantastic", "--requirements", str(req_file), "--project-dir", str(tmp_path), "serve"],
+        sys,
+        "argv",
+        [
+            "fantastic",
+            "--requirements",
+            str(req_file),
+            "--project-dir",
+            str(tmp_path),
+            "serve",
+        ],
     )
 
     # Patch uvicorn.run to prevent actually starting the server
     with patch("uvicorn.run"):
         from core.cli import main
+
         main()
 
     assert os.environ.get("REQUIREMENTS_FILE") == str(req_file)

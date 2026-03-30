@@ -1,6 +1,7 @@
 """Tests for core.bundles — BundleStore."""
 
 import json
+from pathlib import Path
 
 import pytest
 from core.bundles import BundleStore
@@ -11,13 +12,23 @@ def bundles_dir(tmp_path):
     """Create a tmp directory with two mock bundles."""
     (tmp_path / "alpha").mkdir()
     (tmp_path / "alpha" / "template.json").write_text(
-        json.dumps({"bundle": "alpha", "parameters": {"default_width": 400, "default_height": 300}})
+        json.dumps(
+            {
+                "bundle": "alpha",
+                "parameters": {"default_width": 400, "default_height": 300},
+            }
+        )
     )
     (tmp_path / "alpha" / "source.py").write_text("print('alpha')\n")
 
     (tmp_path / "beta").mkdir()
     (tmp_path / "beta" / "template.json").write_text(
-        json.dumps({"bundle": "beta", "parameters": {"default_width": 600, "default_height": 400}})
+        json.dumps(
+            {
+                "bundle": "beta",
+                "parameters": {"default_width": 600, "default_height": 400},
+            }
+        )
     )
     return tmp_path
 
@@ -109,6 +120,3 @@ def test_apply_bundle_uses_template_defaults(bundles_dir, tmp_path):
 def test_nonexistent_dir():
     store = BundleStore(Path("/nonexistent/dir"))
     assert store.list_bundles() == []
-
-
-from pathlib import Path
