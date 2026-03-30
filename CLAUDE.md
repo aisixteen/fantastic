@@ -244,6 +244,17 @@ Terminals start with `cwd` set to the project directory. **Always use relative p
 - **DO NOT**: `os.path.expanduser("~/Projects/my-project/notebooks/config.yaml")`
 - **Why**: Absolute paths break in Docker (`-v $(pwd):/workspace`) where `~` = `/workspace`, not your home dir. Relative paths work everywhere — local, pip-installed, and containerized.
 
+## Pre-push Checks
+
+Run these before pushing to ensure CI passes:
+
+```bash
+uvx ruff check core/                                         # Python lint
+uvx ruff format --check core/                                # Python format
+cd bundled_agents/canvas/web && npm ci && npx tsc --noEmit   # TypeScript type check
+uv sync --dev && uv run pytest core/tests/ -v -x             # Backend tests
+```
+
 ## Conventions
 
 - Agent IDs: `{type}_{hex6}` format (e.g. `terminal_a3f2b1`)
