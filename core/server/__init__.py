@@ -144,6 +144,10 @@ async def proxy_http(port: int, path: str, request: Request):
     body = await request.body()
     headers = dict(request.headers)
     headers.pop("host", None)
+    # X-Forwarded headers for reverse proxy support (VSCode PR #237411)
+    headers["X-Forwarded-Prefix"] = f"/proxy/{port}"
+    headers["X-Forwarded-Port"] = str(request.url.port or 80)
+    headers["X-Forwarded-Host"] = request.headers.get("host", "localhost")
     resp = await _proxy_client.request(
         request.method, target, content=body, headers=headers,
     )

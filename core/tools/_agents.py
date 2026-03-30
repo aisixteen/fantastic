@@ -3,6 +3,8 @@
 import logging
 
 from ..dispatch import ToolResult, register_dispatch, register_tool
+
+logger = logging.getLogger(__name__)
 from . import _fire_broadcasts, _format_outputs
 from . import _state
 
