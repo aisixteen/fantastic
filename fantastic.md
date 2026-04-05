@@ -74,6 +74,8 @@ POST {{SERVER_URL}}/api/terminal/{id}/write        # Write to pty: {"data": "...
 GET  {{SERVER_URL}}/api/files                      # Project file tree
 POST {{SERVER_URL}}/api/agents/{id}/execute        # Execute raw code
 POST {{SERVER_URL}}/api/agents/{id}/resolve        # Submit + execute code
+GET  {{SERVER_URL}}/api/agents/{id}/memory          # Read agent memory (?from=&to= epoch)
+POST {{SERVER_URL}}/api/agents/{id}/memory          # Append: {"type": "note", "message": {...}}
 ```
 
 ## How to use this file
@@ -96,7 +98,8 @@ opencode --prompt "$(cat .fantastic/fantastic.md)"
 ## Key facts
 
 - **Agent types**: `terminal` (full PTY shell) and `html` (iframe renderer)
-- **Python execution** is stateless (subprocess per call)
+- **Python execution** is stateless (subprocess per call), but results are auto-recorded in agent memory (`memory_long.jsonl`)
+- **Agent memory**: each agent has append-only JSONL memory at `.fantastic/agents/{id}/memory_long.jsonl` — read via `GET /api/agents/{id}/memory`
 - **Project files** live in the project root, agent state in `.fantastic/`
 - **Frontend code** must always use `window.parent.location.origin` for API calls — port may be forwarded
 - **Skill deep-dives**: `get_handbook_canvas(skill="canvas-management")`, `get_handbook_terminal(skill="terminal-control")`

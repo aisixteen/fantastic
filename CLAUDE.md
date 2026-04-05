@@ -78,6 +78,8 @@ GET  /api/handbook                      # Handbook (CLAUDE.md)
 POST /api/call                          # Universal tool call: {"tool": "...", "args": {...}}
 POST /api/agents/{id}/resolve           # Submit + execute code
 POST /api/agents/{id}/execute           # Execute raw code
+GET  /api/agents/{id}/memory            # Read agent memory (?from=&to= epoch filters)
+POST /api/agents/{id}/memory            # Append to agent memory {"type": "...", "message": {...}}
 GET  /api/terminal/{id}/output          # Terminal scrollback
 POST /api/terminal/{id}/restart         # Restart terminal process
 POST /api/terminal/{id}/signal          # Send signal: {"signal": 2}
@@ -109,6 +111,7 @@ WS `/ws` is the primary transport — `{"type": "<tool_name>", ...args}` maps di
 - **Agent types**: `terminal`, `html`
 - **`delete_lock`**: boolean property on any agent's agent.json; `delete_agent` refuses deletion when true
 - **Tool dispatch as component router**: all agent-to-agent communication goes through tools (`agent_call`, `post_output`, etc.)
+- **Agent memory**: append-only JSONL at `.fantastic/agents/{id}/memory_long.jsonl`. Auto-records execution events (hash, snippet, exit code, duration). Read/write via REST `GET/POST /api/agents/{id}/memory`. Time-range filtering with `?from=&to=` epoch params.
 - **Code execution**: Python subprocess (stateless, one-shot)
 - **Broadcast mode**: readonly WS streaming to remote viewers (`/ws/broadcast?token=...`)
 - **Remote instances**: `launch_instance` with `ssh_host` + `remote_cmd` (e.g. `"uv run fantastic"` or `"fantastic"` if installed globally). The `remote_cmd` prefix derives the remote Python for port-finding. If a server is already running on the remote (detected via `.fantastic/config.json` PID check over SSH), `launch_instance` reuses it by setting up a tunnel only (`-N` flag) instead of launching a new process.

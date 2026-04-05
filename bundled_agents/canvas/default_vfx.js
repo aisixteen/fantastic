@@ -124,8 +124,8 @@ fetch(FONT_URL)
     objects.push({ mesh: backLight });
 
     // ── Grid lines under text (XZ plane) — extends well beyond view for sense of scale ──
-    var gridSize = 12000 * S;
-    var gridDiv = 60;
+    var gridSize = 120000 * S;
+    var gridDiv = 200;
     var gridStep = gridSize / gridDiv;
     var half = gridSize / 2;
     var gridMat = new THREE.LineBasicMaterial({
