@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-canvas-backend"
+version = "0.1.0"
+description = "Fantastic canvas backend — spatial discovery for agents."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+canvas_backend = "canvas_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/canvas_backend"]

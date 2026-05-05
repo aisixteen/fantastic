@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-terminal-backend"
+version = "0.1.0"
+description = "Fantastic terminal backend — PTY shell session as an agent."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+terminal_backend = "terminal_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminal_backend"]

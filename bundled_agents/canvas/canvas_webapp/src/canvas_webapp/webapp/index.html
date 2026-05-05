@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>canvas</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #06060c; color: #aaa; font-family: system-ui, sans-serif; overflow: hidden; }
+  #bg { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; display: block; }
+  #canvas { position: relative; width: 100%; height: 100vh; overflow: hidden; z-index: 1; }
+  /* Wheel-zoom + drag-pan applied to .canvas-world; agent frames are children of it. */
+  .canvas-world { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
+  #canvas.panning { cursor: grabbing; }
+  /* During pan / frame-drag / frame-resize, iframes don't capture
+     pointer events — drag/pan continues across cells even when the
+     cursor passes over another iframe's content (otherwise the iframe
+     swallows window mousemove and the gesture stalls). Class drops on
+     mouseup. */
+  #canvas.panning .agent-frame iframe,
+  body.dragging-frame .agent-frame iframe { pointer-events: none; }
+
+  /* ─── Liquid Glass frame chrome ──────────────────────────────────
+     The canvas (host) styles its own iframe wrappers. Per-agent
+     iframe content is sandboxed and untouched. Three layered
+     effects: translucent dark fill + backdrop-filter blur+saturate
+     for the frosted base, an inset top highlight + hairline rim for
+     the bevel, and a ::before pseudo for the radial specular sheen.
+     Hover/drag escalate the rim toward neon cyan. */
+  .agent-frame {
+    position: absolute;
+    border-radius: 14px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    z-index: 2;
+    background: rgba(20, 22, 36, 0.62);
+    backdrop-filter: blur(28px) saturate(180%) brightness(112%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%) brightness(112%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      0 0 0 1px rgba(255,255,255,0.14),
+      0 24px 48px -12px rgba(0,0,0,0.70),
+      0 8px 16px -4px rgba(0,0,0,0.50);
+    transition: box-shadow .25s ease, transform .25s ease;
+  }
+  .agent-frame::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background:
+      radial-gradient(1200px 240px at 50% -160px, rgba(255,255,255,0.18), transparent 60%),
+      linear-gradient(180deg, rgba(255,255,255,0.07), transparent 28%);
+    z-index: 1;
+  }
+  .agent-frame:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.16),
+      0 0 0 1px rgba(180,220,255,0.32),
+      0 28px 56px -12px rgba(0,0,0,0.72),
+      0 0 32px rgba(120,200,255,0.16);
+  }
+  .agent-frame.dragging, .agent-frame.resizing {
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.22),
+      0 0 0 1px rgba(120,220,255,0.55),
+      0 32px 64px -12px rgba(0,0,0,0.85),
+      0 0 60px rgba(80,200,255,0.36);
+  }
+
+  .frame-head {
+    position: relative;
+    z-index: 2;
+    height: 28px;
+    flex: 0 0 28px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    color: rgba(220,230,245,0.92);
+    font: 600 11px ui-monospace, SFMono-Regular, monospace;
+    cursor: move;
+    user-select: none;
+  }
+  .frame-head .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .frame-head .actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
+  .frame-head .reload,
+  .frame-head .lock,
+  .frame-head .close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px; height: 18px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    color: rgba(220,230,245,0.85);
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+    transition: background .15s, color .15s, transform .15s;
+  }
+  .frame-head .reload:hover { background: rgba(120,200,255,0.30); color: #fff; transform: scale(1.08); }
+  .frame-head .lock:hover   { background: rgba(255,209,102,0.30); color: #fff; transform: scale(1.08); }
+  .frame-head .lock.locked  { background: rgba(255,209,102,0.32); color: #ffd166; }
+  .frame-head .close:hover  { background: rgba(255,120,120,0.42); color: #fff; transform: scale(1.08); }
+
+  .frame-body {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    /* Transparent so the .agent-frame glass surface (translucent fill
+       + backdrop-filter) shows through into the body region. Per-agent
+       iframes opt into this by setting body { background: transparent }
+       (terminal_webapp, ai_chat_webapp do this); agents that paint an
+       opaque body keep their own look. */
+    background: transparent;
+  }
+  .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
+  .resize-handle {
+    position: absolute;
+    bottom: 4px; right: 4px;
+    width: 14px; height: 14px;
+    cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.22) 50%);
+    border-radius: 0 0 10px 0;
+    z-index: 3;
+  }
+
+  #toolbar {
+    position: fixed; top: 12px; left: 12px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: rgba(20, 22, 36, 0.55);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      0 0 0 1px rgba(255,255,255,0.10),
+      0 12px 32px -8px rgba(0,0,0,0.55);
+    color: rgba(220,230,245,0.85);
+    font: 500 12px ui-monospace, SFMono-Regular, monospace;
+    z-index: 100;
+  }
+  #toolbar code { color: #cde; background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<!-- Optional liquid refraction filter for the .agent-frame::before
+     specular layer. Subtle (scale=6) so it reads as wet glass, not a
+     glitch. Browsers without SVG filter support fall back to plain
+     glass — no JS detection needed. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="liquid-distort">
+    <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="2" seed="3"/>
+    <feDisplacementMap in="SourceGraphic" scale="6"/>
+  </filter>
+</svg>
+<canvas id="bg"></canvas>
+<div id="canvas"></div>
+<div id="toolbar"><span id="status">…</span></div>
+<script type="module">
+import * as THREE from 'https://esm.sh/three@0.160.0';
+
+(async () => {
+  const t = fantastic_transport();
+  await t.ready;
+  const me = t.agentId;
+  const meReflect = await t.call(me, { type: 'reflect' });
+  const upstream = meReflect.upstream_id;
+  if (!upstream) {
+    document.body.innerHTML =
+      `<pre style="padding:24px;font-family:monospace">canvas_webapp ${me}: upstream_id not set.\n` +
+      `Configure with:\n  add canvas_webapp upstream_id=&lt;canvas_backend_id&gt;\n` +
+      `or:\n  @core update_agent id=${me} upstream_id=&lt;canvas_backend_id&gt;</pre>`;
+    return;
+  }
+
+  // ─── WebGL host scaffolding ───────────────────────────────────
+  // The canvas is a generic compositor with two layer surfaces:
+  //   - DOM (#canvas-world) — iframes for agents answering get_webapp
+  //   - GL  (THREE.Scene)   — geometry/sprites for agents answering
+  //                           get_gl_view (e.g. telemetry_pane,
+  //                           future particle/bg/animation agents)
+  // An agent answering BOTH gets both presentations simultaneously
+  // (dual-layer presence is a first-class case).
+  const bgCanvas = document.getElementById('bg');
+  const renderer = new THREE.WebGLRenderer({ canvas: bgCanvas, antialias: false, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x06060c, 1);
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+  // Camera framing chosen so a hash/grid of agent sprites around
+  // the origin reads centered with comfortable margins. Pose driven
+  // by `view` (zoom/pan) via applyCamera() — see below.
+  const BASE_Z = 140, BASE_Y = 14, LOOK_Y = -2;
+  camera.position.set(0, BASE_Y, BASE_Z);
+  camera.lookAt(0, LOOK_Y, 0);
+
+  // GL view registry: agent_id -> { cleanup: fn[] }. Each GL agent's
+  // `get_gl_view` source body runs inside its own function scope with
+  // `(THREE, scene, t, onFrame, cleanup)` injected. The host calls
+  // every cleanup closure on remove_agent.
+  const glViews = new Map();
+  const glFrameCbs = new Map();   // agent_id -> Set<fn> (per-frame ticks)
+
+  function installGlView(agent_id, view) {
+    if (glViews.has(agent_id)) return;
+    if (!view || typeof view.source !== 'string' || !view.source) {
+      console.warn('[gl] empty view from', agent_id);
+      return;
+    }
+    const cleanup = [];
+    const cbs = new Set();
+    const onFrame = (cb) => { cbs.add(cb); };
+    glFrameCbs.set(agent_id, cbs);
+    try {
+      const fn = new Function(
+        'THREE', 'scene', 't', 'onFrame', 'cleanup',
+        view.source,
+      );
+      fn(THREE, scene, t, onFrame, cleanup);
+      glViews.set(agent_id, { cleanup });
+      console.log('[gl] installed', agent_id, '—', view.source.length, 'chars');
+    } catch (e) {
+      console.error('[gl] install failed for', agent_id, ':', e);
+      glFrameCbs.delete(agent_id);
+    }
+  }
+
+  function removeGlView(agent_id) {
+    const entry = glViews.get(agent_id);
+    if (!entry) return;
+    for (const fn of entry.cleanup) {
+      try { fn(); } catch (e) { console.error('[gl] cleanup raised:', e); }
+    }
+    glViews.delete(agent_id);
+    glFrameCbs.delete(agent_id);
+  }
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    applyCamera();    // recomputes pan offset against new innerHeight
+  });
+
+  const startMs = performance.now();
+  function frame() {
+    const time = (performance.now() - startMs) / 1000;
+    // Per-frame ticks for any GL agents that registered an onFrame
+    // callback (e.g. animations, time-driven motion).
+    for (const cbs of glFrameCbs.values()) {
+      for (const cb of cbs) {
+        try { cb(time); } catch (e) { console.error('[gl] onFrame raised:', e); }
+      }
+    }
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ─── iframe layer (frames for sibling webapps) ────────────────
+  const canvas = document.getElementById('canvas');
+  const status = document.getElementById('status');
+  const frames = new Map();
+
+  // .canvas-world wraps all frames; zoom/pan is applied as a CSS
+  // transform on this wrapper so frames scale + translate together.
+  // (Particle bg stays in WebGL world space, unaffected.)
+  const world = document.createElement('div');
+  world.className = 'canvas-world';
+  canvas.appendChild(world);
+
+  const view = { z: 1, ox: 0, oy: 0 };
+  const ZOOM_MIN = 0.1, ZOOM_MAX = 5;
+  function applyView() {
+    world.style.transform = `translate(${view.ox}px, ${view.oy}px) scale(${view.z})`;
+    applyCamera();
+  }
+  // Three.js camera follows `view` so the GL bg stays in lock-step
+  // with the iframe layer. The DOM uses `transform: translate(ox, oy)
+  // scale(z)` with origin (0,0), so screen center (W/2, H/2) shows
+  // canvas-world point ((W/2-ox)/z, (H/2-oy)/z). The camera must look
+  // at the SAME canvas-world point — at zoom != 1 the cursor-anchored
+  // wheel zoom shifts where the screen center lands in canvas-world,
+  // and the camera has to track that shift, not just the pan.
+  function applyCamera() {
+    const fovRad = camera.fov * Math.PI / 180;
+    const worldH = 2 * BASE_Z * Math.tan(fovRad / 2);     // visible world height at z=BASE_Z
+    const wpp = worldH / window.innerHeight;              // world units per CSS pixel at zoom=1
+    const W = window.innerWidth, H = window.innerHeight;
+    // Canvas-world point under screen center, post-pan, post-scale.
+    const cwX = (W / 2 - view.ox) / view.z;
+    const cwY = (H / 2 - view.oy) / view.z;
+    // Map canvas-world (W/2, H/2) at zoom=1, no-pan to 3js (0, LOOK_Y).
+    // CSS Y goes down; 3js Y goes up — flip on Y.
+    const lookX = (cwX - W / 2) * wpp;
+    const lookY = -(cwY - H / 2) * wpp + LOOK_Y;
+    // Camera sits BASE_Z back on Z and (BASE_Y - LOOK_Y) above the
+    // lookAt on Y so the slight downward tilt stays constant.
+    camera.position.set(lookX, lookY + (BASE_Y - LOOK_Y), BASE_Z);
+    camera.zoom = view.z;
+    camera.updateProjectionMatrix();
+    camera.lookAt(lookX, lookY, 0);
+  }
+  applyView();
+
+  // Cursor-anchored zoom: keep the canvas point under the cursor fixed.
+  // Wheel over a cell stays inside that cell (e.g. xterm scroll, chat
+  // scroll); only wheel on empty canvas triggers zoom.
+  canvas.addEventListener('wheel', (e) => {
+    if (e.target.closest('.agent-frame')) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const factor = e.deltaY > 0 ? 0.95 : 1.05;
+    const newZ = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.z * factor));
+    const ratio = newZ / view.z;
+    view.ox = mx - (mx - view.ox) * ratio;
+    view.oy = my - (my - view.oy) * ratio;
+    view.z = newZ;
+    applyView();
+  }, { passive: false });
+
+  // Pan with click-and-hold on empty canvas. Pan only engages after the
+  // cursor moves > 4px so a plain click still propagates to dblclick
+  // (which spawns a terminal pair). Middle-click engages immediately.
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.agent-frame')) return;
+    if (e.button !== 0 && e.button !== 1) return;
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY;
+    const ox0 = view.ox, oy0 = view.oy;
+    let engaged = e.button === 1;          // middle-click: engage now
+    function move(ev) {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (!engaged && (dx * dx + dy * dy) > 16) {
+        engaged = true;
+        canvas.classList.add('panning');
+      }
+      if (engaged) {
+        view.ox = ox0 + dx;
+        view.oy = oy0 + dy;
+        applyView();
+      }
+    }
+    function up() {
+      canvas.classList.remove('panning');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    }
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+
+  // Map screen coords (relative to #canvas) → world coords (inside .canvas-world).
+  function screenToWorld(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    return { x: (sx - view.ox) / view.z, y: (sy - view.oy) / view.z };
+  }
+
+  function rectFromRec(rec, wa, idx) {
+    return {
+      x: typeof rec.x === 'number' ? rec.x : 40 + (idx % 4) * 360,
+      y: typeof rec.y === 'number' ? rec.y : 40 + Math.floor(idx / 4) * 280,
+      w: rec.width || wa.default_width || 340,
+      h: rec.height || wa.default_height || 240,
+    };
+  }
+
+  function makeFrame(rec, wa, idx) {
+    const r = rectFromRec(rec, wa, idx);
+    const el = document.createElement('div');
+    el.className = 'agent-frame';
+    el.style.left = r.x + 'px'; el.style.top = r.y + 'px';
+    el.style.width = r.w + 'px'; el.style.height = r.h + 'px';
+    const locked = !!rec.delete_lock;
+    el.innerHTML = `
+      <div class="frame-head">
+        <span class="id">${wa.title || rec.id} · <code style="opacity:0.6;font-size:10px">${rec.id}</code></span>
+        <span class="actions">
+          <span class="lock ${locked ? 'locked' : ''}" title="${locked ? 'unlock (allow delete)' : 'lock (refuse delete)'}">${locked ? '🔒' : '🔓'}</span>
+          <span class="reload" title="reload">⟳</span>
+          <span class="close" title="delete">×</span>
+        </span>
+      </div>
+      <div class="frame-body">
+        <iframe src="${wa.url}" loading="lazy"></iframe>
+      </div>
+      <div class="resize-handle"></div>
+    `;
+    world.appendChild(el);
+
+    const head = el.querySelector('.frame-head');
+    head.addEventListener('mousedown', (e) => {
+      // Don't start a frame drag when the click is on an actions button.
+      if (e.target.closest('.actions')) return;
+      startDrag(e, rec.id, el);
+    });
+    el.querySelector('.resize-handle').addEventListener('mousedown', (e) => startResize(e, rec.id, el));
+    el.querySelector('.reload').addEventListener('click', (e) => {
+      // Same plumbing as set_html → reload_html: emit on the agent's
+      // inbox; transport.js's universal listener calls location.reload()
+      // inside the iframe.
+      e.stopPropagation();
+      t.emit(rec.id, { type: 'reload_html' });
+    });
+    el.querySelector('.lock').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const live = frames.get(rec.id);
+      const cur = !!(live && live.rec && live.rec.delete_lock);
+      // Toggle the record's delete_lock flag. Optimistic UI: flip the
+      // icon now; agent_updated event triggers a refresh that confirms.
+      const lockEl = el.querySelector('.lock');
+      lockEl.classList.toggle('locked', !cur);
+      lockEl.textContent = !cur ? '🔒' : '🔓';
+      lockEl.title = !cur ? 'unlock (allow delete)' : 'lock (refuse delete)';
+      await t.call('core', {
+        type: 'update_agent',
+        id: rec.id,
+        delete_lock: !cur,
+      });
+    });
+    el.querySelector('.close').addEventListener('click', async () => {
+      // Lookup latest rec at click time — upstream_id may have been
+      // reassigned via update_agent since this frame was created.
+      const live = frames.get(rec.id);
+      // The framed agent's backend (e.g. terminal_backend behind a
+      // terminal_webapp). NOT the canvas's own upstream — that's the
+      // outer-scope `upstream` (canvas_backend) used just below.
+      const agentBackend = (live && live.rec && live.rec.upstream_id) || rec.upstream_id;
+      // Drop from canvas membership FIRST so canvas_backend.members
+      // doesn't accumulate ghost ids of deleted agents. The refresh()
+      // self-heal also covers paths that bypass this (CLI delete,
+      // programmatic delete), but doing it explicitly here keeps the
+      // common case clean without waiting for the next refresh tick.
+      await t.call(upstream, { type: 'remove_agent', agent_id: rec.id });
+      // Webapp next: removes the iframe via agent_deleted → refresh → removeFrame
+      // (so the iframe doesn't try to talk to a dead backend).
+      const r = await t.call('core', { type: 'delete_agent', id: rec.id });
+      // If delete_lock blocked the webapp, abort the cascade — don't
+      // orphan-delete the backend. Caller (LLM or human) can unlock
+      // and retry.
+      if (r && r.locked) {
+        console.warn('[canvas] delete refused — delete_lock on', rec.id);
+        return;
+      }
+      if (agentBackend) {
+        const r2 = await t.call('core', { type: 'delete_agent', id: agentBackend });
+        if (r2 && r2.locked) {
+          console.warn('[canvas] backend delete refused — delete_lock on', agentBackend);
+        }
+      }
+    });
+    return el;
+  }
+
+  function removeFrame(aid) {
+    const f = frames.get(aid);
+    if (f) { f.el.remove(); frames.delete(aid); }
+  }
+
+  async function persistRect(aid, x, y, w, h) {
+    const meta = {};
+    if (x !== undefined) { meta.x = Math.round(x); meta.y = Math.round(y); }
+    if (w !== undefined) { meta.width = Math.round(w); meta.height = Math.round(h); }
+    await t.call('core', { type: 'update_agent', id: aid, ...meta });
+  }
+
+  function startDrag(e, aid, el) {
+    e.preventDefault();
+    el.classList.add('dragging');
+    document.body.classList.add('dragging-frame');
+    const sx = e.clientX, sy = e.clientY;
+    const ox = parseFloat(el.style.left), oy = parseFloat(el.style.top);
+    function move(ev) {
+      // Divide screen-pixel deltas by zoom so drag tracks the cursor 1:1
+      // even when the world is scaled.
+      el.style.left = (ox + (ev.clientX - sx) / view.z) + 'px';
+      el.style.top  = (oy + (ev.clientY - sy) / view.z) + 'px';
+    }
+    function up() {
+      el.classList.remove('dragging');
+      document.body.classList.remove('dragging-frame');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      persistRect(aid, parseFloat(el.style.left), parseFloat(el.style.top));
+    }
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  }
+
+  function startResize(e, aid, el) {
+    e.preventDefault(); e.stopPropagation();
+    el.classList.add('resizing');
+    document.body.classList.add('dragging-frame');
+    const sx = e.clientX, sy = e.clientY;
+    const ow = parseFloat(el.style.width), oh = parseFloat(el.style.height);
+    function move(ev) {
+      el.style.width = Math.max(180, ow + (ev.clientX - sx) / view.z) + 'px';
+      el.style.height = Math.max(120, oh + (ev.clientY - sy) / view.z) + 'px';
+    }
+    function up() {
+      el.classList.remove('resizing');
+      document.body.classList.remove('dragging-frame');
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      persistRect(aid, undefined, undefined, parseFloat(el.style.width), parseFloat(el.style.height));
+    }
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  }
+
+  async function refresh() {
+    // Explicit membership: ask upstream canvas_backend for the list of
+    // agent ids it hosts. Two presentation layers — DOM iframe (for
+    // agents answering get_webapp) and GL view (get_gl_view). Both
+    // probes run independently per agent; an agent answering BOTH gets
+    // BOTH presentations (dual-layer is a first-class case).
+    const lr = await t.call(upstream, { type: 'list_members' });
+    const memberIds = new Set((lr && lr.members) || []);
+    if (memberIds.size === 0) {
+      for (const aid of [...frames.keys()]) removeFrame(aid);
+      for (const aid of [...glViews.keys()]) removeGlView(aid);
+      status.innerHTML = `canvas <code>${me}</code> → <code>${upstream}</code> · 0 members`;
+      return;
+    }
+    // Hoisted single list_agents → records-by-id lookup for the loop.
+    const all = (await t.call('core', { type: 'list_agents' })).agents;
+    const recordsById = new Map(all.map(a => [a.id, a]));
+    const probes = await Promise.all([...memberIds].map(async (mid) => {
+      // Defensive: skip self/upstream if a misconfigured caller adds them.
+      if (mid === me || mid === upstream) return null;
+      const rec = recordsById.get(mid);
+      if (!rec) {
+        // Stale member id — agent was deleted (CLI delete, scheduler,
+        // anything that bypasses the close button). Self-heal: prune
+        // from canvas_backend.members so the next caller sees a clean
+        // list. members_updated will fire and trigger another refresh,
+        // but the second refresh finds the id gone → no-op.
+        t.call(upstream, { type: 'remove_agent', agent_id: mid });
+        return null;
+      }
+      const [wa, gl] = await Promise.all([
+        t.call(mid, { type: 'get_webapp' }).catch(() => null),
+        t.call(mid, { type: 'get_gl_view' }).catch(() => null),
+      ]);
+      const hasWa = wa && wa.url && !wa.error;
+      const hasGl = gl && gl.source && !gl.error;
+      if (!hasWa && !hasGl) return null;
+      return { rec, wa: hasWa ? wa : null, gl: hasGl ? gl : null };
+    }));
+    const members = probes.filter(Boolean);
+
+    const seenDom = new Set();
+    const seenGl = new Set();
+    let idx = 0;
+    for (const { rec, wa, gl } of members) {
+      // DOM iframe presentation
+      if (wa) {
+        seenDom.add(rec.id);
+        if (!frames.has(rec.id)) {
+          const el = makeFrame(rec, wa, idx);
+          frames.set(rec.id, { el, rec, wa });
+        } else {
+          const f = frames.get(rec.id);
+          if (typeof rec.x === 'number') { f.el.style.left = rec.x + 'px'; f.el.style.top = rec.y + 'px'; }
+          if (rec.width)  { f.el.style.width  = rec.width  + 'px'; }
+          if (rec.height) { f.el.style.height = rec.height + 'px'; }
+          const lockEl = f.el.querySelector('.lock');
+          if (lockEl) {
+            const locked = !!rec.delete_lock;
+            lockEl.classList.toggle('locked', locked);
+            lockEl.textContent = locked ? '🔒' : '🔓';
+            lockEl.title = locked ? 'unlock (allow delete)' : 'lock (refuse delete)';
+          }
+          f.rec = rec;
+          f.wa = wa;
+        }
+        idx++;
+      }
+      // GL view presentation (independent of DOM — both can apply)
+      if (gl) {
+        seenGl.add(rec.id);
+        if (!glViews.has(rec.id)) installGlView(rec.id, gl);
+      }
+    }
+    for (const aid of [...frames.keys()]) {
+      if (!seenDom.has(aid)) removeFrame(aid);
+    }
+    for (const aid of [...glViews.keys()]) {
+      if (!seenGl.has(aid)) removeGlView(aid);
+    }
+    status.innerHTML = `canvas <code>${me}</code> → <code>${upstream}</code> · ${frames.size} dom · ${glViews.size} gl`;
+  }
+
+  // core: agent record changes (geometry, delete) keep frames in sync.
+  await t.watch('core');
+  t.on('agent_updated', () => refresh());
+  t.on('agent_deleted', () => refresh());
+  // agent_created NO LONGER triggers refresh — explicit add_agent is the
+  // way new agents become visible. (The dblclick handler below adds
+  // automatically on creation; programmatic creators can decide.)
+
+  // upstream canvas_backend: membership changes refresh us live.
+  await t.watch(upstream);
+  t.on('members_updated', () => refresh());
+
+  // Note: the kernel state stream subscription that USED to live
+  // here moved into the `telemetry_pane` bundle's glview.js. To get
+  // the live agent-vis on this canvas, create a telemetry_pane agent
+  // and `add_agent` it to the canvas — its `get_gl_view` source will
+  // be installed by the GL host above.
+
+  // Double-click on empty canvas → create a terminal pair at click coords
+  // AND add the new webapp to THIS canvas's membership so it appears here.
+  canvas.addEventListener('dblclick', async (e) => {
+    if (e.target.closest('.agent-frame')) return;   // ignore dblclick inside frames
+    // Map screen click to world coords so the new frame lands under the
+    // cursor regardless of current zoom/pan.
+    const w = screenToWorld(e.clientX, e.clientY);
+    const x = Math.round(w.x);
+    const y = Math.round(w.y);
+    const tb = await t.call('core', {
+      type: 'create_agent',
+      handler_module: 'terminal_backend.tools',
+    });
+    if (!tb || !tb.id) {
+      console.error('[canvas] failed to create terminal_backend:', tb);
+      return;
+    }
+    const tw = await t.call('core', {
+      type: 'create_agent',
+      handler_module: 'terminal_webapp.tools',
+      upstream_id: tb.id,
+      x, y,
+    });
+    if (!tw || !tw.id) {
+      console.error('[canvas] failed to create terminal_webapp; orphan backend:', tb.id);
+      return;
+    }
+    // Add the fresh webapp to THIS canvas's membership; members_updated
+    // fires → refresh() renders the new frame here only.
+    const ar = await t.call(upstream, { type: 'add_agent', agent_id: tw.id });
+    if (ar && ar.error) console.error('[canvas] add_agent failed:', ar.error);
+  });
+
+  // One refresh on mount to render the current membership; from then
+  // on, the canvas is purely event-driven via the `t.watch` + `t.on`
+  // wiring above (core: agent_updated/agent_deleted; upstream:
+  // members_updated). No polling — if a fanout is dropped the user
+  // can refresh the tab.
+  await refresh();
+})();
+</script>
+</body>
+</html>

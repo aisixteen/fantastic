@@ -1,8 +1,0 @@
-{
-  "name": "terminal",
-  "bundle": "terminal",
-  "parameters": {
-    "default_width": 900,
-    "default_height": 525
-  }
-}

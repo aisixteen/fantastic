@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-html-agent"
+version = "0.1.0"
+description = "Fantastic html_agent — UI-as-a-record. Per-instance HTML stored on agent.json, served by webapp at /<id>/."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+html_agent = "html_agent.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/html_agent"]

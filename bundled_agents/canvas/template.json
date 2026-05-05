@@ -1,8 +1,0 @@
-{
-  "name": "canvas",
-  "bundle": "canvas",
-  "parameters": {
-    "default_width": 0,
-    "default_height": 0
-  }
-}

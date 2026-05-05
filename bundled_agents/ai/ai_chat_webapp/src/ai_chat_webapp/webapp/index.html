@@ -1,0 +1,526 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>chat</title>
+<style>
+  /* Transparent body so the canvas host's Liquid Glass frame chrome
+     shows through behind the chat. Individual message bubbles keep
+     their own backgrounds for legibility. */
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; background: transparent; color: #e0e0ff; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  #header { padding: 8px 14px; font-size: 12px; color: rgba(220,230,245,0.65); border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; justify-content: space-between; }
+  #header b { color: rgba(220,230,245,0.95); }
+
+  /* Dialog: scrollback of completed turns + the in-flight assistant turn. */
+  #dialog { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  /* Glass message bubbles — translucent fill + backdrop blur so the
+     canvas chrome behind shows through. */
+  .msg {
+    padding: 8px 12px; border-radius: 12px; line-height: 1.45; max-width: 85%;
+    word-wrap: break-word; white-space: pre-wrap; font-size: 14px;
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.10),
+      0 0 0 1px rgba(255,255,255,0.08),
+      0 6px 14px -6px rgba(0,0,0,0.45);
+  }
+  .msg.user { align-self: flex-end; background: rgba(110, 90, 220, 0.32); color: #fff; position: relative; }
+  .msg.user.queued { opacity: 0.55; font-style: italic; }
+  .msg.user.queued::after {
+    content: '⌛ queued';
+    display: inline-block;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #ffd16622;
+    color: #ffd166;
+    font-size: 11px;
+    font-style: normal;
+    vertical-align: middle;
+  }
+  .msg.assistant { align-self: flex-start; background: rgba(36, 38, 56, 0.50); color: #cde; }
+
+  /* Tool block: a compact, expandable record of one tool_call inside
+     the in-flight assistant bubble. Header pulses while in-progress
+     (no reply_preview yet); settles on the reply. */
+  .tool-block {
+    margin: 6px 0; padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(24, 26, 40, 0.50);
+    backdrop-filter: blur(12px) saturate(160%);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: #abb;
+  }
+  .tool-block .tool-head { display: flex; align-items: baseline; gap: 6px; }
+  .tool-block .tool-verb { color: #ffd166; }
+  .tool-block .tool-target { color: #8ad; }
+  .tool-block .tool-state { margin-left: auto; color: #666; font-size: 11px; }
+  .tool-block.pending .tool-state::after { content: '…'; animation: pulse 1.4s ease-in-out infinite; display: inline-block; }
+  .tool-block .tool-detail { margin-top: 4px; }
+  .tool-block .tool-detail summary { cursor: pointer; color: #667; font-size: 11px; }
+  .tool-block pre { margin: 4px 0; padding: 6px; background: rgba(8, 10, 18, 0.55); border-radius: 4px; color: #abb; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; }
+  .tool-block .tool-args { color: #889; }
+  .tool-block .tool-reply { color: #9b9; }
+
+  /* Queued band: stacked pending submissions for THIS client_id, FIFO. */
+  #queued { display: flex; flex-direction: column; gap: 4px; padding: 0 12px; }
+  #queued:empty { display: none; }
+  #queued .msg.user { max-width: 100%; opacity: 0.55; font-style: italic; }
+
+  /* Dynamic status footer: phase pill + elapsed + interrupt hint. */
+  #status-footer { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 11px; color: rgba(220,230,245,0.55); min-height: 28px; }
+  #status-footer .phase-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); color: rgba(220,230,245,0.75); font-weight: 500; letter-spacing: 0.02em; }
+  #status-footer .phase-pill[data-phase="thinking"],
+  #status-footer .phase-pill[data-phase="tool_calling"] { background: rgba(110, 90, 220, 0.45); color: #fff; animation: pulse 1.4s ease-in-out infinite; }
+  #status-footer .phase-pill[data-phase="streaming"] { background: rgba(80, 180, 120, 0.40); color: #fff; }
+  #status-footer .phase-pill[data-phase="queued"] { background: rgba(255, 209, 102, 0.20); color: #ffd166; }
+  #status-footer .phase-pill[data-phase="done"] { background: rgba(255,255,255,0.06); color: rgba(220,230,245,0.55); }
+  #status-footer .others-hint { color: #666; font-size: 10px; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+
+  #row { display: flex; padding: 10px; gap: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+  #input {
+    flex: 1;
+    background: rgba(255,255,255,0.06);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    border: 0;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10);
+    border-radius: 10px;
+    padding: 8px 12px;
+    color: #e0e0ff;
+    font-size: 14px;
+    outline: none;
+    transition: box-shadow 0.15s;
+  }
+  #input:focus { box-shadow: inset 0 0 0 1px rgba(180,220,255,0.45), 0 0 0 3px rgba(120,200,255,0.10); }
+  #send {
+    background: rgba(110, 90, 220, 0.45);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    border: 0;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), inset 0 0 0 1px rgba(255,255,255,0.10);
+    border-radius: 10px;
+    color: white;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.15s;
+  }
+  #send:hover { background: rgba(130, 110, 240, 0.55); transform: scale(1.02); }
+  #send.stop { background: rgba(200, 80, 80, 0.55); }
+  #send.stop:hover { background: rgba(220, 100, 100, 0.65); }
+  #err { padding: 24px; font-family: monospace; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <span><b id="agentLabel"></b></span>
+    <span id="modelLabel"></span>
+  </div>
+  <div id="dialog"></div>
+  <div id="queued"></div>
+  <div id="status-footer">
+    <span class="phase-pill" data-phase="idle">idle</span>
+    <span class="elapsed"></span>
+    <span class="hint"></span>
+    <span class="others-hint"></span>
+  </div>
+  <div id="row">
+    <input id="input" placeholder="message…" autofocus>
+    <button id="send">send</button>
+  </div>
+</div>
+<script>
+(async () => {
+  const t = fantastic_transport();
+  await t.ready;
+  const me = await t.call(t.agentId, { type: 'reflect' });
+  const upstream = me.upstream_id;
+  if (!upstream) {
+    document.body.innerHTML =
+      `<pre id="err">ai_chat_webapp ${t.agentId}: upstream_id not set.\n` +
+      `Configure with:\n  add ai_chat_webapp upstream_id=&lt;backend_id&gt;\n` +
+      `(backend can be ollama_backend, nvidia_nim_backend, or any agent answering send/history/interrupt)\n` +
+      `or:\n  @core update_agent id=${t.agentId} upstream_id=&lt;backend_id&gt;</pre>`;
+    return;
+  }
+
+  // Stable per-tab/per-user client_id, scoped to this upstream backend.
+  // localStorage so refreshes preserve the chat thread.
+  const CLIENT_KEY = `ai_chat_client_id:${upstream}`;
+  let clientId = localStorage.getItem(CLIENT_KEY);
+  if (!clientId) {
+    clientId = 'web_' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem(CLIENT_KEY, clientId);
+  }
+
+  document.getElementById('agentLabel').textContent = `${t.agentId} → ${upstream}  (client ${clientId})`;
+  const upstreamReflect = await t.call(upstream, { type: 'reflect' });
+  document.getElementById('modelLabel').textContent = upstreamReflect.model || '';
+
+  const dialogEl = document.getElementById('dialog');
+  const queuedEl = document.getElementById('queued');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const phasePill = document.querySelector('#status-footer .phase-pill');
+  const elapsedEl = document.querySelector('#status-footer .elapsed');
+  const hintEl = document.querySelector('#status-footer .hint');
+  const othersHintEl = document.querySelector('#status-footer .others-hint');
+
+  function addMsg(role, text, parent) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + role;
+    div.textContent = text;
+    (parent || dialogEl).appendChild(div);
+    if (parent === dialogEl || !parent) dialogEl.scrollTop = dialogEl.scrollHeight;
+    return div;
+  }
+
+  // ─── Queue + in-flight state ────────────────────────────────
+  // queuedBubbles: temp-key OR send_id → DOM element in #queued.
+  // We mint a temp local_<rand> on submit (server send_id arrives a
+  // moment later via status(queued) and we rebind).
+  const queuedBubbles = new Map();
+  // FIFO order of queued bubbles' keys (so we can promote oldest first).
+  const queuedOrder = [];
+  // inflight: { send_id, userBubble, assistantBubble, toolBlocks: Map<call_id, {el, headEl, argsEl, replyEl}> }
+  let inflight = null;
+  // Locally-keyed bubbles awaiting their server send_id. Oldest first.
+  const localPending = [];
+
+  function setBusyButton(on) {
+    if (on) {
+      sendBtn.textContent = 'stop';
+      sendBtn.classList.add('stop');
+      sendBtn.title = 'interrupt the in-flight generation (queued items remain)';
+    } else {
+      sendBtn.textContent = 'send';
+      sendBtn.classList.remove('stop');
+      sendBtn.title = '';
+    }
+  }
+  function refreshBusy() {
+    setBusyButton(inflight !== null || queuedBubbles.size > 0);
+  }
+
+  // ─── Status footer (phase pill + elapsed) ───────────────────
+  let elapsedTimer = null;
+  let elapsedStart = 0;
+  function setPhase(phase, hint) {
+    phasePill.dataset.phase = phase;
+    phasePill.textContent = phase;
+    hintEl.textContent = hint || '';
+    if (phase === 'thinking' || phase === 'streaming' || phase === 'tool_calling' || phase === 'queued') {
+      if (!elapsedTimer) {
+        elapsedStart = Date.now();
+        elapsedTimer = setInterval(() => {
+          const s = ((Date.now() - elapsedStart) / 1000).toFixed(1);
+          elapsedEl.textContent = `${s}s`;
+        }, 250);
+      }
+    } else {
+      if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+      elapsedEl.textContent = '';
+    }
+  }
+  function setOthersHint(n) {
+    othersHintEl.textContent = n > 0 ? `+${n} from other clients` : '';
+  }
+  setPhase('idle');
+
+  // ─── Tool block helpers ─────────────────────────────────────
+  function makeToolBlock(tool) {
+    const el = document.createElement('div');
+    el.className = 'tool-block pending';
+    el.dataset.callId = tool.call_id || '';
+    const head = document.createElement('div');
+    head.className = 'tool-head';
+    head.innerHTML =
+      `<span class="tool-verb"></span>(<span class="tool-target"></span>)<span class="tool-state"></span>`;
+    head.querySelector('.tool-verb').textContent = tool.verb || '';
+    head.querySelector('.tool-target').textContent = tool.target || '';
+    el.appendChild(head);
+    const det = document.createElement('details');
+    det.className = 'tool-detail';
+    const sum = document.createElement('summary');
+    sum.textContent = 'args';
+    det.appendChild(sum);
+    const argsPre = document.createElement('pre');
+    argsPre.className = 'tool-args';
+    argsPre.textContent = JSON.stringify(tool.args || {}, null, 2);
+    det.appendChild(argsPre);
+    const replyPre = document.createElement('pre');
+    replyPre.className = 'tool-reply';
+    replyPre.textContent = '';
+    det.appendChild(replyPre);
+    el.appendChild(det);
+    return { el, headEl: head, argsEl: argsPre, replyEl: replyPre };
+  }
+  function fillToolReply(handle, replyPreview) {
+    handle.replyEl.textContent = replyPreview || '';
+    handle.el.classList.remove('pending');
+    handle.headEl.querySelector('.tool-state').textContent = '✓';
+  }
+
+  // ─── Bind a server-issued send_id to the oldest pending local bubble.
+  function bindNextLocalToSendId(sendId) {
+    if (!sendId) return;
+    if (queuedBubbles.has(sendId)) return; // already bound
+    const localKey = localPending.shift();
+    if (localKey === undefined) return;
+    const bubble = queuedBubbles.get(localKey);
+    if (!bubble) return;
+    queuedBubbles.delete(localKey);
+    queuedBubbles.set(sendId, bubble);
+    const i = queuedOrder.indexOf(localKey);
+    if (i >= 0) queuedOrder[i] = sendId;
+  }
+
+  function promoteQueuedToInflight(sendId, fallbackText) {
+    let bubble = queuedBubbles.get(sendId);
+    if (!bubble && localPending.length) {
+      bindNextLocalToSendId(sendId);
+      bubble = queuedBubbles.get(sendId);
+    }
+    if (!bubble) {
+      // No bubble matches (e.g. boot-time recovery). Create one.
+      bubble = addMsg('user', fallbackText || '', dialogEl);
+    } else {
+      // Move from #queued into #dialog.
+      bubble.classList.remove('queued');
+      bubble.style.maxWidth = '';
+      bubble.style.fontStyle = '';
+      bubble.style.opacity = '';
+      dialogEl.appendChild(bubble);
+      queuedBubbles.delete(sendId);
+      const i = queuedOrder.indexOf(sendId);
+      if (i >= 0) queuedOrder.splice(i, 1);
+    }
+    const assistantBubble = addMsg('assistant', '', dialogEl);
+    inflight = {
+      send_id: sendId,
+      userBubble: bubble,
+      assistantBubble,
+      toolBlocks: new Map(),
+      streamText: '',
+    };
+    refreshBusy();
+  }
+
+  function appendStreamingText(text) {
+    if (!inflight) return;
+    inflight.streamText += text || '';
+    inflight.assistantBubble.textContent = inflight.streamText;
+    dialogEl.scrollTop = dialogEl.scrollHeight;
+  }
+
+  function handleToolCall(tool) {
+    if (!inflight) return;
+    const callId = tool.call_id || '';
+    let handle = inflight.toolBlocks.get(callId);
+    if (!handle) {
+      handle = makeToolBlock(tool);
+      inflight.toolBlocks.set(callId, handle);
+      inflight.assistantBubble.appendChild(handle.el);
+      dialogEl.scrollTop = dialogEl.scrollHeight;
+    }
+    if ('reply_preview' in tool) {
+      fillToolReply(handle, tool.reply_preview);
+    }
+  }
+
+  function clearInflight() {
+    inflight = null;
+    refreshBusy();
+  }
+
+  // ─── Lifecycle: clear stale inflight on WS disconnect ──────
+  // When the server restarts (or the network blips), the WS dies
+  // mid-stream. The kernel-side _run task is gone, but our local
+  // `inflight` and queued bubbles would otherwise stick around
+  // forever (no `done` event will ever arrive — the source is dead).
+  // On disconnect: drop inflight, drop queue marks, footer says
+  // 'disconnected'. On reconnect: transport.js replays watch +
+  // state_subscribe; we just nudge the footer back to idle. New
+  // user submits start fresh against the new kernel.
+  if (t.onLifecycle) {
+    t.onLifecycle((state) => {
+      if (state === 'disconnected') {
+        if (inflight) {
+          inflight.assistantBubble?.appendChild(
+            Object.assign(document.createElement('div'),
+              { className: 'tool-block', textContent: '— transport disconnected —' })
+          );
+          inflight = null;
+        }
+        for (const [, bubble] of queuedBubbles) bubble.remove();
+        queuedBubbles.clear();
+        queuedOrder.length = 0;
+        localPending.length = 0;
+        refreshBusy();
+        setPhase('idle', 'disconnected — waiting to reconnect');
+      } else if (state === 'connected') {
+        setPhase('idle', '');
+      }
+    });
+  }
+
+  // ─── Subscribe to upstream events ──────────────────────────
+  await t.watch(upstream);
+
+  // Back-compat queued event still fires; prefer status for binding.
+  t.on('queued', (p) => {
+    if (p.client_id && p.client_id !== clientId) return;
+    if (p.source && p.source !== upstream) return;
+    if (p.send_id) bindNextLocalToSendId(p.send_id);
+  });
+
+  t.on('status', (p) => {
+    if (p.client_id && p.client_id !== clientId) return;
+    if (p.source && p.source !== upstream) return;
+    const phase = p.phase;
+    const detail = p.detail || {};
+    const sendId = detail.send_id;
+    if (phase === 'queued') {
+      bindNextLocalToSendId(sendId);
+      setPhase('queued', detail.ahead ? `${detail.ahead} ahead` : '');
+    } else if (phase === 'thinking') {
+      if (!inflight || inflight.send_id !== sendId) {
+        promoteQueuedToInflight(sendId, '');
+      }
+      const hint = detail.waiting_on === 'rate_limit'
+        ? `rate-limited; waiting ${detail.wait_s}s`
+        : 'press stop or esc to interrupt';
+      setPhase('thinking', hint);
+    } else if (phase === 'streaming') {
+      if (!inflight || inflight.send_id !== sendId) {
+        promoteQueuedToInflight(sendId, '');
+      }
+      setPhase('streaming', 'press stop or esc to interrupt');
+    } else if (phase === 'tool_calling') {
+      handleToolCall(detail.tool || {});
+      setPhase('tool_calling', 'press stop or esc to interrupt');
+    } else if (phase === 'done') {
+      setPhase('idle', detail.reason && detail.reason !== 'ok' ? detail.reason : '');
+      // Actual inflight clear happens in `done` handler below.
+    }
+  });
+
+  t.on('token', (p) => {
+    if (p.client_id && p.client_id !== clientId) return;
+    if (p.source && p.source !== upstream) return;
+    appendStreamingText(p.text || '');
+  });
+
+  t.on('done', (p) => {
+    if (p.client_id && p.client_id !== clientId) return;
+    if (p.source && p.source !== upstream) return;
+    clearInflight();
+  });
+
+  // ─── Boot: history + status snapshot rebuild ───────────────
+  const hist = await t.call(upstream, { type: 'history', client_id: clientId });
+  if (hist && hist.messages) {
+    for (const m of hist.messages) addMsg(m.role, m.content || '', dialogEl);
+  }
+  const snap = await t.call(upstream, { type: 'status', client_id: clientId });
+  if (snap) {
+    setOthersHint(snap.others_pending || 0);
+    if (snap.current && snap.current.is_mine) {
+      // Rebuild in-flight: user bubble + assistant placeholder w/
+      // text_so_far. Last tool block (if any) gets re-rendered with
+      // its current state (head pulses if exit hadn't fired yet).
+      const cur = snap.current;
+      const ub = addMsg('user', cur.text || '', dialogEl);
+      const ab = addMsg('assistant', cur.text_so_far || '', dialogEl);
+      inflight = {
+        send_id: cur.send_id,
+        userBubble: ub,
+        assistantBubble: ab,
+        toolBlocks: new Map(),
+        streamText: cur.text_so_far || '',
+      };
+      if (cur.last_tool) {
+        const handle = makeToolBlock(cur.last_tool);
+        inflight.toolBlocks.set(cur.last_tool.call_id || '', handle);
+        ab.appendChild(handle.el);
+        if ('reply_preview' in cur.last_tool) {
+          fillToolReply(handle, cur.last_tool.reply_preview);
+        }
+      }
+      setPhase(cur.phase || 'thinking', 'press stop or esc to interrupt');
+    }
+    for (const entry of snap.mine_pending || []) {
+      const bubble = addMsg('user', entry.text || '', queuedEl);
+      bubble.classList.add('queued');
+      queuedBubbles.set(entry.send_id, bubble);
+      queuedOrder.push(entry.send_id);
+    }
+    refreshBusy();
+  }
+
+  // ─── Submit (fire-and-forget; queue stacks for same client) ─
+  function submit() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    const localKey = 'local_' + Math.random().toString(36).slice(2, 10);
+    const bubble = addMsg('user', text, queuedEl);
+    bubble.classList.add('queued');
+    queuedBubbles.set(localKey, bubble);
+    queuedOrder.push(localKey);
+    localPending.push(localKey);
+    refreshBusy();
+    // No await — bubble graduates via status events; resolution of the
+    // call promise is informational only.
+    t.call(upstream, { type: 'send', text, client_id: clientId }).catch((e) => {
+      // Failed to even reach the backend — surface error inline.
+      addMsg('assistant', 'ERROR: ' + e.message, dialogEl);
+      const b = queuedBubbles.get(localKey);
+      if (b) b.remove();
+      queuedBubbles.delete(localKey);
+      const i = queuedOrder.indexOf(localKey);
+      if (i >= 0) queuedOrder.splice(i, 1);
+      const j = localPending.indexOf(localKey);
+      if (j >= 0) localPending.splice(j, 1);
+      refreshBusy();
+    });
+  }
+
+  function interrupt() {
+    // Cancels in-flight only; queued bubbles remain and will drain.
+    t.call(upstream, { type: 'interrupt' }).catch((e) => {
+      console.warn('[chat] interrupt failed:', e);
+    });
+  }
+
+  sendBtn.addEventListener('click', () => {
+    if (inflight) interrupt();
+    else submit();
+  });
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  });
+  // Global ESC: halt the in-flight generation regardless of focus.
+  // Same semantic as clicking stop. Queued items keep draining.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && inflight) {
+      e.preventDefault();
+      interrupt();
+    }
+  });
+})();
+</script>
+</body>
+</html>

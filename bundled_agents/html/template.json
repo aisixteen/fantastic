@@ -1,8 +1,0 @@
-{
-  "name": "html",
-  "bundle": "html",
-  "parameters": {
-    "default_width": 800,
-    "default_height": 600
-  }
-}

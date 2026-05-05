@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-telemetry-pane"
+version = "0.1.0"
+description = "Fantastic telemetry_pane — live agent visualization GL view for canvas hosts. Subscribes to the kernel state stream and renders each agent as a sprite with its name, backlog dots, and send/emit/drain blips."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+telemetry_pane = "telemetry_pane.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/telemetry_pane"]

@@ -1,8 +1,0 @@
-{
-  "name": "dashboard",
-  "bundle": "dashboard",
-  "parameters": {
-    "default_width": 0,
-    "default_height": 0
-  }
-}

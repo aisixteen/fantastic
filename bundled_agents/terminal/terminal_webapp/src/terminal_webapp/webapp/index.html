@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>terminal</title>
+<style>
+  /* Transparent body so the canvas host's Liquid Glass frame chrome
+     shows through behind the terminal. xterm itself already renders
+     on transparent (allowTransparency + viewport bg below). */
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent; color: #ddd; font-family: monospace; overflow: hidden; }
+  /* Asymmetric right padding (14px vs 8px left) gives the cell grid a few
+     pixels of slack to absorb sub-pixel cell-width drift from font hinting.
+     Without it, the rightmost cell paints into fractional pixels on every
+     line — xterm's wrap markers land mid-cell visually and you get the
+     classic "?" replacement / half-char-break flake on long lines. */
+  #term { width: 100%; height: 100%; padding: 6px 14px 6px 8px; box-sizing: border-box; }
+  #err { padding: 16px; }
+  /* Hard-clip horizontal: even if FitAddon over-proposes by sub-pixel,
+     no horizontal scrollbar appears and the renderer stays aligned. */
+  .xterm, .xterm-viewport { background: transparent !important; overflow-x: hidden !important; }
+  .xterm-viewport { overflow-y: auto !important; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css">
+</head>
+<body>
+<div id="term"></div>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
+<script>
+(async () => {
+  const t = fantastic_transport();
+  await t.ready;
+  const me = await t.call(t.agentId, { type: 'reflect' });
+  const upstream = me.upstream_id;
+  if (!upstream) {
+    document.body.innerHTML =
+      `<pre id="err">terminal_webapp ${t.agentId}: upstream_id not set.\n` +
+      `Configure with:\n  add terminal_webapp upstream_id=&lt;terminal_backend_id&gt;\n` +
+      `or:\n  @core update_agent id=${t.agentId} upstream_id=&lt;terminal_backend_id&gt;</pre>`;
+    return;
+  }
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "'SF Mono', 'Menlo', monospace",
+    allowTransparency: true,
+    theme: { background: '#00000000', foreground: '#e5e5e5', cursor: '#e5e5e5' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  const container = document.getElementById('term');
+  term.open(container);
+
+  // CRITICAL: wait for fonts before measuring cell metrics. xterm's
+  // CharSizeService runs at .open() time using whatever font is
+  // currently resolved — if a webfont (or fallback) hasn't loaded,
+  // cellWidth is wrong and every subsequent fit propagates the error.
+  // See xterm.js issues #1164, #1534, #2630.
+  if (document.fonts && document.fonts.ready) {
+    try { await document.fonts.ready; } catch (e) {}
+  }
+
+  await t.watch(upstream);
+
+  term.onData(async (data) => {
+    await t.call(upstream, { type: 'write', data });
+  });
+  term.onResize(async ({ cols, rows }) => {
+    await t.call(upstream, { type: 'resize', cols, rows });
+  });
+
+  // Smart autoscroll — follow the tail when the user is at bottom;
+  // freeze when they've scrolled up to read older lines. Detected
+  // automatically via the xterm viewport's scroll position.
+  let tailing = true;
+  function updateTailing() {
+    const v = container.querySelector('.xterm-viewport');
+    if (!v) return;
+    tailing = (v.scrollHeight - v.scrollTop - v.clientHeight) < 4;
+  }
+  // Capture phase — catches scrolls inside the xterm viewport.
+  container.addEventListener('scroll', updateTailing, true);
+
+  t.on('output', (e) => {
+    term.write(e.data || '', () => {
+      if (tailing) term.scrollToBottom();
+    });
+  });
+  t.on('closed', () => term.write('\r\n[process closed]\r\n'));
+
+  // tightFit: refit + force a renderer refresh so the canvas re-paints
+  // with current metrics. Debounced via ResizeObserver below.
+  function tightFit() {
+    try {
+      fit.fit();
+      term.refresh(0, term.rows - 1);
+    } catch (e) { /* layout still settling */ }
+  }
+
+  const ro = new ResizeObserver(() => {
+    clearTimeout(ro._t);
+    // Two-stage debounce: wait for ResizeObserver burst to quiet (80ms),
+    // then defer to next animation frame so layout has fully committed
+    // before we measure. Cuts the half-char flake on rapid resize.
+    ro._t = setTimeout(() => requestAnimationFrame(tightFit), 80);
+  });
+  ro.observe(container);
+
+  // Init order matters: fit FIRST (compute cols/rows), then boot the PTY,
+  // then explicitly resize the PTY to match BEFORE replaying scrollback.
+  // Otherwise vim/tmux replay against wrong dimensions and corrupt redraw.
+  tightFit();
+  await t.call(upstream, { type: 'boot' });
+  await t.call(upstream, { type: 'resize', cols: term.cols, rows: term.rows });
+  const r = await t.call(upstream, { type: 'output' });
+  if (r && r.output) term.write(r.output);
+})();
+</script>
+</body>
+</html>

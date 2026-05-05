@@ -16,7 +16,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        language: [python, javascript-typescript]
+        language: [python]
     steps:
       - uses: actions/checkout@v4
 

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-canvas-webapp"
+version = "0.1.0"
+description = "Fantastic canvas webapp — spatial UI rendering agents as iframes."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+canvas_webapp = "canvas_webapp.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/canvas_webapp"]

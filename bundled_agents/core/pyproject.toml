@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-core"
+version = "0.1.0"
+description = "Fantastic core agent — system verbs (list/create/update/delete agents)."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+core = "core.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core"]

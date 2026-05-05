@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-ollama-backend"
+version = "0.1.0"
+description = "Fantastic ollama backend — reflect-driven LLM agent with native tool calls."
+requires-python = ">=3.11"
+dependencies = ["ollama"]
+
+[project.entry-points."fantastic.bundles"]
+ollama_backend = "ollama_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ollama_backend"]

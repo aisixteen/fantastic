@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-terminal-webapp"
+version = "0.1.0"
+description = "Fantastic terminal webapp — xterm UI fronting a terminal backend."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+terminal_webapp = "terminal_webapp.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminal_webapp"]

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-python-runtime"
+version = "0.1.0"
+description = "Fantastic python_runtime — exec Python in a subprocess. Stateless per-call (python -c <code>)."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+python_runtime = "python_runtime.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/python_runtime"]
