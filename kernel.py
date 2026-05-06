@@ -833,6 +833,86 @@ async def cmd_reflect(target: str = "kernel") -> None:
     await cmd_call(target, "reflect", {})
 
 
+def cmd_install(project_dir: str, packages: list[str]) -> None:
+    """Bootstrap a per-project detached venv at <project_dir>/.venv via
+    `uv venv`, install requested packages with `uv pip install`, and
+    point any `python_runtime` agent records under
+    <project_dir>/.fantastic/agents/ at it (`venv: .venv`).
+
+    The result: that project's python_runtime agents run code in their
+    OWN environment (deps isolated from the kernel's substrate venv),
+    while projects without `venv` set keep using sys.executable.
+
+    No CLI to uv: shells out to `uv venv` + `uv pip install`. uv must
+    be on PATH (you got here by running `uv run kernel.py`, so it is).
+    """
+    import shutil
+    import subprocess
+
+    proj = Path(project_dir).expanduser().resolve()
+    if not proj.is_dir():
+        print(f"[install] not a directory: {proj}", file=sys.stderr)
+        sys.exit(2)
+    if shutil.which("uv") is None:
+        print("[install] uv not on PATH; install uv first", file=sys.stderr)
+        sys.exit(2)
+
+    venv_dir = proj / ".venv"
+    print(f"[install] uv venv {venv_dir}", file=sys.stderr)
+    r = subprocess.run(
+        ["uv", "venv", str(venv_dir)],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(r.returncode)
+    print(r.stdout.strip() or "  venv created", file=sys.stderr)
+
+    if packages:
+        cmd = [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(venv_dir / "bin" / "python"),
+            *packages,
+        ]
+        print(f"[install] {' '.join(cmd)}", file=sys.stderr)
+        r = subprocess.run(cmd, cwd=proj, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            sys.exit(r.returncode)
+        print(r.stdout.strip() or "  packages installed", file=sys.stderr)
+
+    # Update any python_runtime agent records in this project to use
+    # the new venv (relative path so the project remains portable).
+    agents_dir = proj / ".fantastic" / "agents"
+    updated = 0
+    if agents_dir.is_dir():
+        for entry in sorted(agents_dir.iterdir()):
+            agent_json = entry / "agent.json"
+            if not agent_json.exists():
+                continue
+            try:
+                rec = json.loads(agent_json.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if rec.get("handler_module") != "python_runtime.tools":
+                continue
+            if rec.get("venv") == ".venv":
+                continue
+            rec["venv"] = ".venv"
+            agent_json.write_text(json.dumps(rec, indent=2))
+            updated += 1
+            print(f"  updated {rec['id']} → venv=.venv", file=sys.stderr)
+    print(
+        f"[install] done — venv={venv_dir} | python_runtime records updated: {updated}",
+        file=sys.stderr,
+    )
+
+
 def _parse_kv(args: list[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for a in args:
@@ -853,45 +933,67 @@ def main_dispatch() -> None:
     if not argv:
         asyncio.run(cmd_repl())
         return
-    sub = argv[0]
-    rest = argv[1:]
+    sub, *rest = argv
     try:
-        if sub == "serve":
-            port = 8888
-            for a in rest:
-                if a.startswith("--port="):
-                    port = int(a.split("=", 1)[1])
-                elif a == "--port" and rest.index(a) + 1 < len(rest):
-                    port = int(rest[rest.index(a) + 1])
-            asyncio.run(cmd_serve(port))
-        elif sub == "call":
-            if len(rest) < 2:
+        match sub:
+            case "serve":
+                port = 8888
+                for i, a in enumerate(rest):
+                    if a.startswith("--port="):
+                        port = int(a.split("=", 1)[1])
+                    elif a == "--port" and i + 1 < len(rest):
+                        port = int(rest[i + 1])
+                asyncio.run(cmd_serve(port))
+
+            case "call":
+                if len(rest) < 2:
+                    print(
+                        "usage: kernel.py call <target_id> <verb> [k=v ...]",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                target, verb, *kv = rest
+                asyncio.run(cmd_call(target, verb, _parse_kv(kv)))
+
+            case "reflect":
+                asyncio.run(cmd_reflect(rest[0] if rest else "kernel"))
+
+            case "install":
+                # Per-project detached venv via uv. Creates
+                # <project>/.venv, installs requested packages, and
+                # points python_runtime records in
+                # <project>/.fantastic/agents/ at the new venv.
+                # Projects without `.venv` keep using sys.executable
+                # (the kernel's installed runtime) — fall-through is
+                # automatic in _resolve_python.
+                if not rest:
+                    print(
+                        "usage: kernel.py install <project_dir> [pkg ...]",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                cmd_install(rest[0], list(rest[1:]))
+
+            case "repl" | "shell":
+                asyncio.run(cmd_repl())
+
+            case "-h" | "--help" | "help":
                 print(
-                    "usage: kernel.py call <target_id> <verb> [k=v ...]",
+                    "fantastic kernel\n"
+                    "  python kernel.py                       # interactive REPL (default)\n"
+                    "  python kernel.py serve [--port 8888]   # headless: web agent on port, idle\n"
+                    "  python kernel.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
+                    "  python kernel.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)\n"
+                    "  python kernel.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it"
+                )
+
+            case _:
+                print(
+                    f"unknown subcommand {sub!r} "
+                    "(try: serve, call, reflect, repl, install)",
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            target, verb, *kv = rest
-            asyncio.run(cmd_call(target, verb, _parse_kv(kv)))
-        elif sub == "reflect":
-            target = rest[0] if rest else "kernel"
-            asyncio.run(cmd_reflect(target))
-        elif sub in ("repl", "shell"):
-            asyncio.run(cmd_repl())
-        elif sub in ("-h", "--help", "help"):
-            print(
-                "fantastic kernel\n"
-                "  python kernel.py                       # interactive REPL (default)\n"
-                "  python kernel.py serve [--port 8888]   # headless: web agent on port, idle\n"
-                "  python kernel.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
-                "  python kernel.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)"
-            )
-        else:
-            print(
-                f"unknown subcommand {sub!r} (try: serve, call, reflect, repl)",
-                file=sys.stderr,
-            )
-            sys.exit(2)
     except KeyboardInterrupt:
         pass
     except RuntimeError as e:
