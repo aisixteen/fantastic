@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-gl-agent"
+version = "0.1.0"
+description = "Fantastic gl_agent — GL-view-as-a-record. Stores `gl_source` (a JS function body run inside the canvas host's `new Function('THREE','scene','t','onFrame','cleanup', source)`) plus an optional `title` directly on agent.json. Mirror of html_agent for WebGL views: spawn one with inline JS, add it to a canvas, no per-bundle scaffolding required."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+gl_agent = "gl_agent.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gl_agent"]

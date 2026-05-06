@@ -21,6 +21,7 @@ dependencies = [
   "fantastic-canvas-backend",
   "fantastic-canvas-webapp",
   "fantastic-telemetry-pane",
+  "fantastic-gl-agent",
   "fantastic-html-agent",
   "fantastic-python-runtime",
 ]
@@ -57,6 +58,7 @@ testpaths = [
   "bundled_agents/canvas/canvas_backend/tests",
   "bundled_agents/canvas/canvas_webapp/tests",
   "bundled_agents/canvas/telemetry_pane/tests",
+  "bundled_agents/gl_agent/tests",
   "bundled_agents/html_agent/tests",
   "bundled_agents/python_runtime/tests",
 ]
@@ -77,6 +79,7 @@ members = [
   "bundled_agents/canvas/canvas_backend",
   "bundled_agents/canvas/canvas_webapp",
   "bundled_agents/canvas/telemetry_pane",
+  "bundled_agents/gl_agent",
   "bundled_agents/html_agent",
   "bundled_agents/python_runtime",
   "installed_agents/*",
@@ -96,5 +99,6 @@ fantastic-ai-chat-webapp = { workspace = true }
 fantastic-canvas-backend = { workspace = true }
 fantastic-canvas-webapp = { workspace = true }
 fantastic-telemetry-pane = { workspace = true }
+fantastic-gl-agent = { workspace = true }
 fantastic-html-agent = { workspace = true }
 fantastic-python-runtime = { workspace = true }

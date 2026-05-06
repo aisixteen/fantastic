@@ -10,6 +10,7 @@ members = [
     "fantastic-cli",
     "fantastic-core",
     "fantastic-file",
+    "fantastic-gl-agent",
     "fantastic-html-agent",
     "fantastic-kernel",
     "fantastic-nvidia-nim-backend",
@@ -227,6 +228,11 @@ version = "0.1.0"
 source = { editable = "bundled_agents/file" }
 
 [[package]]
+name = "fantastic-gl-agent"
+version = "0.1.0"
+source = { editable = "bundled_agents/gl_agent" }
+
+[[package]]
 name = "fantastic-html-agent"
 version = "0.1.0"
 source = { editable = "bundled_agents/html_agent" }
@@ -242,6 +248,7 @@ dependencies = [
     { name = "fantastic-cli" },
     { name = "fantastic-core" },
     { name = "fantastic-file" },
+    { name = "fantastic-gl-agent" },
     { name = "fantastic-html-agent" },
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
@@ -270,6 +277,7 @@ requires-dist = [
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
     { name = "fantastic-core", editable = "bundled_agents/core" },
     { name = "fantastic-file", editable = "bundled_agents/file" },
+    { name = "fantastic-gl-agent", editable = "bundled_agents/gl_agent" },
     { name = "fantastic-html-agent", editable = "bundled_agents/html_agent" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },

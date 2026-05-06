@@ -100,6 +100,7 @@ keep state on disk only and run fine via `python kernel.py call`.
 | `bundled_agents/canvas/canvas_backend/selftest.md` | kernel | dual-verb add_agent (get_webapp / get_gl_view); explicit membership |
 | `bundled_agents/canvas/canvas_webapp/selftest.md` | webapp, web, bus | two-layer host (DOM iframe + GL view); per-agent dispatch on probe |
 | `bundled_agents/canvas/telemetry_pane/selftest.md` | webapp, web | live agent-vis GL view; subscribes to kernel state stream |
+| `bundled_agents/gl_agent/selftest.md` | kernel, http, web | GL-view-as-record agent; mirror of html_agent for inline `gl_source` |
 | `bundled_agents/html_agent/selftest.md` | kernel, http, web | UI-as-record agent; render_html duck type; cross-agent calls from iframe |
 | `bundled_agents/python_runtime/selftest.md` | kernel | subprocess Python exec; timeout / interrupt / cwd |
 
