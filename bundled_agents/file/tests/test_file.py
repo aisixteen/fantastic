@@ -41,6 +41,43 @@ async def test_read_image_returns_base64(seeded_kernel, file_agent, tmp_path):
     assert r["mime"] == "image/png"
 
 
+async def test_read_pdf_returns_raw_bytes_with_mime(
+    seeded_kernel, file_agent, tmp_path
+):
+    """Generic binary (PDF, archive, font, etc.) returns raw bytes +
+    mime so the webapp /file/ proxy can serve it as a real download.
+    Bytes ride the kernel binary protocol over WS; zero-copy in-process.
+    Without this, every non-image binary 404s."""
+    pdf_data = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\nxref\n0 1\ntrailer\n<<>>\n%%EOF\n"
+    (tmp_path / "doc.pdf").write_bytes(pdf_data)
+    r = await seeded_kernel.send(file_agent, {"type": "read", "path": "doc.pdf"})
+    assert "error" not in r, f"PDF read errored: {r}"
+    assert isinstance(r.get("bytes"), (bytes, bytearray)), (
+        "PDF must return raw bytes, not error / base64"
+    )
+    assert bytes(r["bytes"]) == pdf_data
+    assert r["mime"] == "application/pdf"
+    # Sanity: NOT base64 — that would be wasteful + change shape.
+    assert "bytes_b64" not in r
+
+
+async def test_read_unknown_binary_falls_back_to_octet_stream(
+    seeded_kernel, file_agent, tmp_path
+):
+    """Files with no recognizable extension still come back as bytes —
+    just with application/octet-stream as the mime."""
+    # Real non-UTF-8 bytes: lone high-bytes that fail strict utf-8 decode.
+    # `\x00\x01\x02` are valid utf-8 codepoints — using them would route
+    # through the text branch.
+    blob = b"\xff\xfe\xfd\xfc binary blob"
+    # `.bin` (and many short ones) aren't in mimetypes' DB → octet-stream.
+    (tmp_path / "blob.bin").write_bytes(blob)
+    r = await seeded_kernel.send(file_agent, {"type": "read", "path": "blob.bin"})
+    assert isinstance(r.get("bytes"), (bytes, bytearray))
+    assert bytes(r["bytes"]) == blob
+    assert r["mime"] == "application/octet-stream"
+
+
 async def test_list(seeded_kernel, file_agent, tmp_path):
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "b.txt").write_text("b")

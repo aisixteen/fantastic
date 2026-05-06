@@ -16,6 +16,7 @@ Verbs:
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 from pathlib import Path
 
@@ -118,7 +119,7 @@ async def _list(id, payload, kernel):
 
 
 async def _read(id, payload, kernel):
-    """args: path:str (req). Returns {path, content:str} for text files, {path, image_base64, mime} for images. Refuses paths outside root."""
+    """args: path:str (req). Returns {path, content:str} for text, {path, image_base64, mime} for images, {path, bytes:bytes, mime} for any other binary (PDF, fonts, archives, etc.) — raw bytes ride the kernel's binary protocol over WS, zero-copy in-process. Refuses paths outside root."""
     rec = kernel.get(id) or {}
     path = payload.get("path", "")
     try:
@@ -146,7 +147,18 @@ async def _read(id, payload, kernel):
     try:
         content = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return {"error": "binary file (use image read for supported formats)"}
+        # Generic binary: PDF, font, archive, audio, video. Raw bytes —
+        # over WS the kernel's binary protocol (`_binary_path`) auto-
+        # detects + ships in a binary frame; in-process the webapp's
+        # /file/ route reads them and pipes straight to the HTTP
+        # response. No base64 round-trip in either path.
+        data = target.read_bytes()
+        mime, _ = mimetypes.guess_type(target.name)
+        return {
+            "path": path,
+            "bytes": data,
+            "mime": mime or "application/octet-stream",
+        }
     return {"path": path, "content": content}
 
 

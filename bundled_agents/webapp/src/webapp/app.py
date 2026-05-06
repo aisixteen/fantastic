@@ -117,6 +117,14 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
                 base64.b64decode(r["image_base64"]),
                 media_type=r.get("mime", "application/octet-stream"),
             )
+        if isinstance(r.get("bytes"), (bytes, bytearray)):
+            # Generic binary (PDF, font, archive, etc.) — file.read
+            # returns raw bytes + sniffed mime when text decode fails.
+            # Zero-copy in-process: no base64 round-trip.
+            return Response(
+                bytes(r["bytes"]),
+                media_type=r.get("mime", "application/octet-stream"),
+            )
         if "content" in r:
             mime, _ = mimetypes.guess_type(path)
             return Response(

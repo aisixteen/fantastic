@@ -178,6 +178,20 @@ async def test_file_proxy_serves_image_bytes(seeded_kernel, file_agent, tmp_path
         assert r.content == img_bytes
 
 
+async def test_file_proxy_serves_pdf_bytes(seeded_kernel, file_agent, tmp_path):
+    """Generic binary path: PDF (and any other non-text non-image) is
+    served via the file agent's `bytes` field with mime application/pdf.
+    Without this, browser <iframe src="/<file>/file/foo.pdf"> 404s."""
+    pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\nbody\n%%EOF\n"
+    (tmp_path / "doc.pdf").write_bytes(pdf)
+    app = make_app("test_web", seeded_kernel)
+    with TestClient(app) as c:
+        r = c.get(f"/{file_agent}/file/doc.pdf")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/pdf"
+        assert r.content == pdf
+
+
 async def test_file_proxy_404_for_missing_path(seeded_kernel, file_agent):
     app = make_app("test_web", seeded_kernel)
     with TestClient(app) as c:
