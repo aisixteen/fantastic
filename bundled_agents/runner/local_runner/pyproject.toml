@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-local-runner"
+version = "0.1.0"
+description = "Fantastic local runner — `fantastic serve` lifecycle for local projects (subprocess + .fantastic/lock.json)."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+local_runner = "local_runner.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/local_runner"]
