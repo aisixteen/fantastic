@@ -913,6 +913,77 @@ def cmd_install(project_dir: str, packages: list[str]) -> None:
     )
 
 
+def cmd_install_bundle(spec: str, into: str | None) -> None:
+    """`fantastic install-bundle <spec> [--into <project>]`
+
+    Install a third-party fantastic bundle (or any pip-installable
+    package that declares a `fantastic.bundles` entry point) into a
+    Python environment so the kernel discovers it via
+    `importlib.metadata.entry_points`.
+
+    `spec` is anything `uv pip install` accepts:
+        git+https://github.com/user/fantastic-bundle
+        git+https://github.com/user/repo@v0.2.1
+        git+https://github.com/user/repo@some-branch
+        git+https://github.com/user/repo@a3f2b1c
+        git+ssh://git@github.com/user/private-bundle
+        any-pypi-package-name
+        ./path/to/local/bundle
+
+    Targets:
+      no flag         — install into the kernel's own venv
+                        (sys.executable's environment).
+      --into <proj>   — install into <proj>/.venv. The project must
+                        already have a venv; run `fantastic install
+                        <proj>` first if it doesn't, or pass
+                        `--create` to make one on the fly.
+
+    After install, restart any running `kernel.py serve`s — entry
+    points are scanned at process start, so a fresh kernel picks up
+    the new bundle and lists it under `available_bundles` in the
+    /_kernel/reflect primer.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("uv") is None:
+        print("[install-bundle] uv not on PATH; install uv first", file=sys.stderr)
+        sys.exit(2)
+
+    if into:
+        proj = Path(into).expanduser().resolve()
+        venv = proj / ".venv"
+        py = venv / "bin" / "python"
+        if not py.exists():
+            print(
+                f"[install-bundle] no .venv at {venv}\n"
+                f"  -> run: fantastic install {proj}     (creates .venv)\n"
+                f"     then retry this command.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        target = str(py)
+        target_label = f"{proj}/.venv"
+    else:
+        target = sys.executable
+        target_label = "kernel venv (sys.executable)"
+
+    cmd = ["uv", "pip", "install", "--python", target, spec]
+    print(f"[install-bundle] target = {target_label}", file=sys.stderr)
+    print(f"[install-bundle] {' '.join(cmd)}", file=sys.stderr)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        sys.exit(r.returncode)
+    if r.stdout.strip():
+        print(r.stdout.strip(), file=sys.stderr)
+    print(
+        "[install-bundle] done. Restart any running `fantastic serve` "
+        "so the new entry point is discovered.",
+        file=sys.stderr,
+    )
+
+
 def _parse_kv(args: list[str]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for a in args:
@@ -974,6 +1045,38 @@ def main_dispatch() -> None:
                     sys.exit(2)
                 cmd_install(rest[0], list(rest[1:]))
 
+            case "install-bundle":
+                # Pip-install a third-party fantastic bundle (or any
+                # package that declares `[project.entry-points."fantastic.bundles"]`)
+                # into either the kernel's venv (default) or a
+                # specific project's `.venv` (`--into <project>`).
+                # uv pip install handles git URLs natively:
+                #   git+https://github.com/u/r        — main / default branch
+                #   git+https://github.com/u/r@v0.1   — tag
+                #   git+https://github.com/u/r@feat   — branch
+                #   git+https://github.com/u/r@a3f2b1 — commit
+                if not rest:
+                    print(
+                        "usage: kernel.py install-bundle <spec> [--into <project>]\n"
+                        "  spec is a uv pip install argument: a git URL, "
+                        "a PyPI name, or a local path.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                spec = rest[0]
+                into: str | None = None
+                args = list(rest[1:])
+                if "--into" in args:
+                    i = args.index("--into")
+                    if i + 1 >= len(args):
+                        print(
+                            "install-bundle: --into requires a project path",
+                            file=sys.stderr,
+                        )
+                        sys.exit(2)
+                    into = args[i + 1]
+                cmd_install_bundle(spec, into)
+
             case "repl" | "shell":
                 asyncio.run(cmd_repl())
 
@@ -984,13 +1087,14 @@ def main_dispatch() -> None:
                     "  python kernel.py serve [--port 8888]   # headless: web agent on port, idle\n"
                     "  python kernel.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
                     "  python kernel.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)\n"
-                    "  python kernel.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it"
+                    "  python kernel.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it\n"
+                    "  python kernel.py install-bundle <spec> [--into <project>]   # uv pip install a fantastic bundle (git URL / pypi / path) into kernel venv or project's .venv"
                 )
 
             case _:
                 print(
                     f"unknown subcommand {sub!r} "
-                    "(try: serve, call, reflect, repl, install)",
+                    "(try: serve, call, reflect, repl, install, install-bundle)",
                     file=sys.stderr,
                 )
                 sys.exit(2)

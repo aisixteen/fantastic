@@ -79,6 +79,20 @@ discovers them uniformly via `importlib.metadata.entry_points` —
 works for in-tree workspace members AND `pip install` third-party
 plugins (drop in `installed_agents/`).
 
+Install a third-party bundle straight from a git URL (or PyPI, or
+a local path — anything `uv pip install` accepts):
+
+```bash
+fantastic install-bundle git+https://github.com/user/fantastic-bundle
+fantastic install-bundle git+https://github.com/user/repo@v0.2.1   # pin tag
+fantastic install-bundle git+https://github.com/user/repo --into /path/to/project
+```
+
+Default target is the kernel's own venv (sys.executable); `--into
+<project>` installs into that project's `.venv` instead. Restart
+any running `fantastic serve` after install — entry points are
+scanned at process start.
+
 ## Universal patterns
 
 - **`reflect`** — every agent answers `{type:"reflect"}` returning

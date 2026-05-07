@@ -126,6 +126,26 @@ declaring `[project.entry-points."fantastic.bundles"]`. The kernel
 discovers bundles uniformly via `importlib.metadata.entry_points` —
 works for in-tree workspace members AND `pip install` third-party plugins.
 
+Install a third-party bundle from anywhere `uv pip install` accepts:
+
+```bash
+# Into the kernel's own venv (sys.executable); kernel discovers it on next start.
+fantastic install-bundle git+https://github.com/user/fantastic-something
+fantastic install-bundle git+https://github.com/user/repo@v0.2.1      # tag
+fantastic install-bundle git+https://github.com/user/repo@feat-branch # branch
+fantastic install-bundle git+https://github.com/user/repo@a3f2b1c     # commit
+fantastic install-bundle git+ssh://git@github.com/user/private-bundle
+fantastic install-bundle some-pypi-package
+fantastic install-bundle ./local/path/to/bundle
+
+# Into a specific project's .venv (must already exist via `fantastic install <proj>`):
+fantastic install-bundle git+https://... --into /path/to/project
+```
+
+After install, restart any running `fantastic serve`. The new
+bundle shows up in `/_kernel/reflect → available_bundles`, and you
+can `create_agent handler_module=<bundle>.tools` from the substrate.
+
 ## Tests
 
 Two complementary layers:
