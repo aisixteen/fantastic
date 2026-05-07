@@ -32,7 +32,7 @@ dependencies = [
 fantastic = "kernel:main_dispatch"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["kernel.py"]
+only-include = ["kernel.py", "kernel"]
 
 [dependency-groups]
 dev = [
