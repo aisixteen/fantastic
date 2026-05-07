@@ -24,6 +24,8 @@ dependencies = [
   "fantastic-gl-agent",
   "fantastic-html-agent",
   "fantastic-python-runtime",
+  "fantastic-kernel-bridge",
+  "fantastic-ssh-runner",
 ]
 
 [project.scripts]
@@ -59,6 +61,8 @@ testpaths = [
   "bundled_agents/canvas/canvas_webapp/tests",
   "bundled_agents/canvas/telemetry_pane/tests",
   "bundled_agents/gl_agent/tests",
+  "bundled_agents/kernel_bridge/tests",
+  "bundled_agents/ssh_runner/tests",
   "bundled_agents/html_agent/tests",
   "bundled_agents/python_runtime/tests",
 ]
@@ -80,6 +84,8 @@ members = [
   "bundled_agents/canvas/canvas_webapp",
   "bundled_agents/canvas/telemetry_pane",
   "bundled_agents/gl_agent",
+  "bundled_agents/kernel_bridge",
+  "bundled_agents/ssh_runner",
   "bundled_agents/html_agent",
   "bundled_agents/python_runtime",
   "installed_agents/*",
@@ -100,5 +106,7 @@ fantastic-canvas-backend = { workspace = true }
 fantastic-canvas-webapp = { workspace = true }
 fantastic-telemetry-pane = { workspace = true }
 fantastic-gl-agent = { workspace = true }
+fantastic-kernel-bridge = { workspace = true }
+fantastic-ssh-runner = { workspace = true }
 fantastic-html-agent = { workspace = true }
 fantastic-python-runtime = { workspace = true }

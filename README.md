@@ -39,6 +39,13 @@ Plugin-discovered agents, one primitive (`send`), hermetic protocol.
   drift on a slow water wobble. A right-side pane shows the last 10
   messages with kind, sender→target, and a trimmed payload summary.
   Plug into any canvas via `add_agent`.
+- **kernel_bridge + ssh_runner** — cross-host. `ssh_runner` uses
+  subprocess SSH to start/stop a remote `fantastic serve` and keeps
+  a local tunnel open so a canvas can iframe the remote webapp.
+  `kernel_bridge` opens WS (or SSH+WS) to a peer kernel and ships
+  `forward` envelopes — local agents reach remote agents through
+  it without merging the two address spaces. Weak proxy: local→local
+  comms stay direct.
 - **webapps** — UI bundles (`*_webapp`) that hold an `upstream_id`
   pointing at a backend they front. Pure browser code; no compute.
   Duck-typed via `get_webapp` — any agent that returns `{url, ...}` is
@@ -166,7 +173,9 @@ uv run pytest -n auto
     ├── ai/ai_chat_webapp                     # provider-agnostic chat UI
     ├── ai/ollama/ollama_backend              # local LLM (ollama)
     ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible)
-    └── canvas/{canvas_backend, canvas_webapp, telemetry_pane}
+    ├── canvas/{canvas_backend, canvas_webapp, telemetry_pane}
+    ├── kernel_bridge/                      # cross-kernel forward envelopes
+    └── ssh_runner/                         # remote serve lifecycle over ssh
 ```
 
 ## Universal verb

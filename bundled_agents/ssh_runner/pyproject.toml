@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-ssh-runner"
+version = "0.1.0"
+description = "Fantastic ssh_runner — remote `fantastic serve` lifecycle. Each agent represents one project on one host: SSHs to bring up `fantastic serve`, opens a local SSH tunnel for browser/iframe access via the kernel's local_port, and exposes start/stop/restart/status verbs. Pure subprocess SSH, no paramiko. Composes with kernel_bridge (separate bundle) for cross-kernel messaging."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+ssh_runner = "ssh_runner.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ssh_runner"]

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-kernel-bridge"
+version = "0.1.0"
+description = "Fantastic kernel_bridge — cross-kernel agent comms. Pairs of bridge agents on two kernels exchange `forward` envelopes over a transport (memory / WS / SSH+WS) so a local agent can reach a remote agent without merging their address spaces. Weak proxies: local→local stays direct; the bridge inserts itself only when the destination is on the other side."
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=12,<17",
+]
+
+[project.entry-points."fantastic.bundles"]
+kernel_bridge = "kernel_bridge.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kernel_bridge"]

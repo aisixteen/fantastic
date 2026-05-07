@@ -7,7 +7,7 @@ name = "fantastic-webapp"
 version = "0.1.0"
 description = "Fantastic webapp transport — uvicorn HTTP+WS proxy serving agent UIs."
 requires-python = ">=3.11"
-dependencies = ["fastapi", "uvicorn", "websockets"]
+dependencies = ["fastapi", "uvicorn", "websockets>=12,<17"]
 
 [project.entry-points."fantastic.bundles"]
 webapp = "webapp.tools"

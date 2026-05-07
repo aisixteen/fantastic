@@ -13,10 +13,12 @@ members = [
     "fantastic-gl-agent",
     "fantastic-html-agent",
     "fantastic-kernel",
+    "fantastic-kernel-bridge",
     "fantastic-nvidia-nim-backend",
     "fantastic-ollama-backend",
     "fantastic-python-runtime",
     "fantastic-scheduler",
+    "fantastic-ssh-runner",
     "fantastic-telemetry-pane",
     "fantastic-terminal-backend",
     "fantastic-terminal-webapp",
@@ -250,10 +252,12 @@ dependencies = [
     { name = "fantastic-file" },
     { name = "fantastic-gl-agent" },
     { name = "fantastic-html-agent" },
+    { name = "fantastic-kernel-bridge" },
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
     { name = "fantastic-python-runtime" },
     { name = "fantastic-scheduler" },
+    { name = "fantastic-ssh-runner" },
     { name = "fantastic-telemetry-pane" },
     { name = "fantastic-terminal-backend" },
     { name = "fantastic-terminal-webapp" },
@@ -279,10 +283,12 @@ requires-dist = [
     { name = "fantastic-file", editable = "bundled_agents/file" },
     { name = "fantastic-gl-agent", editable = "bundled_agents/gl_agent" },
     { name = "fantastic-html-agent", editable = "bundled_agents/html_agent" },
+    { name = "fantastic-kernel-bridge", editable = "bundled_agents/kernel_bridge" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
     { name = "fantastic-python-runtime", editable = "bundled_agents/python_runtime" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
+    { name = "fantastic-ssh-runner", editable = "bundled_agents/ssh_runner" },
     { name = "fantastic-telemetry-pane", editable = "bundled_agents/canvas/telemetry_pane" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal/terminal_backend" },
     { name = "fantastic-terminal-webapp", editable = "bundled_agents/terminal/terminal_webapp" },
@@ -297,6 +303,17 @@ dev = [
     { name = "pytest-cov", specifier = ">=5" },
     { name = "pytest-xdist", specifier = ">=3.6" },
 ]
+
+[[package]]
+name = "fantastic-kernel-bridge"
+version = "0.1.0"
+source = { editable = "bundled_agents/kernel_bridge" }
+dependencies = [
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "websockets", specifier = ">=12,<17" }]
 
 [[package]]
 name = "fantastic-nvidia-nim-backend"
@@ -331,6 +348,11 @@ version = "0.1.0"
 source = { editable = "bundled_agents/scheduler" }
 
 [[package]]
+name = "fantastic-ssh-runner"
+version = "0.1.0"
+source = { editable = "bundled_agents/ssh_runner" }
+
+[[package]]
 name = "fantastic-telemetry-pane"
 version = "0.1.0"
 source = { editable = "bundled_agents/canvas/telemetry_pane" }
@@ -359,7 +381,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi" },
     { name = "uvicorn" },
-    { name = "websockets" },
+    { name = "websockets", specifier = ">=12,<17" },
 ]
 
 [[package]]

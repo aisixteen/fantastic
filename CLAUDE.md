@@ -70,6 +70,8 @@ fantastic> @core list_agents
 | `ai/ai_chat_webapp` | provider-agnostic chat UI; fronts any backend that answers `send`/`history`/`interrupt` |
 | `canvas/{canvas_backend, canvas_webapp}` | spatial UI host; Liquid-Glass-styled DOM iframes (`get_webapp`) layered with GL views (`get_gl_view`); explicit `add_agent` membership; pure-streaming lifecycle (no polling) |
 | `canvas/telemetry_pane` | live agent-vis GL view — water-floating sprites + sender→receiver neon wires + traveling pulses + last-10 messages pane; runs inside any canvas's WebGL scene |
+| `kernel_bridge` | cross-kernel comms — pairs of bridge agents on two kernels exchange `forward` envelopes over memory / WS / SSH+WS. Reuses webapp/_proxy.py frame protocol; remote needs zero changes. Weak proxy: local→local stays direct |
+| `ssh_runner` | remote `fantastic serve` lifecycle over SSH — start/stop/restart/status + local SSH tunnel for canvas iframing. Pure subprocess ssh; composes with `kernel_bridge` for messaging |
 
 Each bundle is a real Python package with its own `pyproject.toml`,
 declaring `[project.entry-points."fantastic.bundles"]`. `kernel.py`
@@ -201,7 +203,6 @@ These existed in an older codebase iteration; deferred or replaced:
 
 - openai / anthropic / integrated AI bundles (only `ollama` ships).
   Pattern: mirror `ollama_backend`. Recoverable from git history.
-- `instance` bundle (SSH-tunneled connected peers). Niche.
 - `register_template` / `list_templates` — replaced by per-agent
   reflect (single source of truth).
 - `content_alias_file` registry — replaced by the URL convention
