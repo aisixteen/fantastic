@@ -1,12 +1,16 @@
 """Fantastic kernel — CLI entry + match/case router.
 
-The Kernel class and every `cmd_*` handler live in the `kernel/`
-package. This file is just the visible router: parse argv, dispatch
-to a subcommand, exit. Run: `python kernel.py` from this directory.
+Implementation lives in the `kernel/` package. This file exists so
+the match/case dispatch loop is visible at the project root — one
+obvious place to look for "what does `fantastic <subcmd>` do".
 
-(Python prefers the `kernel/` package over this script for `import
-kernel`, so external code imports work as before. Direct invocation
-— `python kernel.py serve` — still routes through this file.)
+Run: `python main.py [<subcommand>] [args...]` or `fantastic …`.
+
+The `fantastic` console script is wired in pyproject.toml as:
+    fantastic = "main:main_dispatch"
+which imports `main_dispatch` from this file directly. External code
+(bundles, tests, conftest) imports from `kernel` (the package), not
+from here.
 """
 
 from __future__ import annotations
@@ -62,7 +66,7 @@ def main_dispatch() -> None:
             case "call":
                 if len(rest) < 2:
                     print(
-                        "usage: kernel.py call <target_id> <verb> [k=v ...]",
+                        "usage: main.py call <target_id> <verb> [k=v ...]",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -82,7 +86,7 @@ def main_dispatch() -> None:
                 # automatic in _resolve_python.
                 if not rest:
                     print(
-                        "usage: kernel.py install <project_dir> [pkg ...]",
+                        "usage: main.py install <project_dir> [pkg ...]",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -100,7 +104,7 @@ def main_dispatch() -> None:
                 #   git+https://github.com/u/r@a3f2b1 — commit
                 if not rest:
                     print(
-                        "usage: kernel.py install-bundle <spec> [--into <project>]\n"
+                        "usage: main.py install-bundle <spec> [--into <project>]\n"
                         "  spec is a uv pip install argument: a git URL, "
                         "a PyPI name, or a local path.",
                         file=sys.stderr,
@@ -126,12 +130,12 @@ def main_dispatch() -> None:
             case "-h" | "--help" | "help":
                 print(
                     "fantastic kernel\n"
-                    "  python kernel.py                       # interactive REPL (default)\n"
-                    "  python kernel.py serve [--port N]     # headless: web agent on port; --port omitted → ephemeral free port\n"
-                    "  python kernel.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
-                    "  python kernel.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)\n"
-                    "  python kernel.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it\n"
-                    "  python kernel.py install-bundle <spec> [--into <project>]   # uv pip install a fantastic bundle (git URL / pypi / path) into kernel venv or project's .venv"
+                    "  python main.py                       # interactive REPL (default)\n"
+                    "  python main.py serve [--port N]     # headless: web agent on port; --port omitted → ephemeral free port\n"
+                    "  python main.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
+                    "  python main.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)\n"
+                    "  python main.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it\n"
+                    "  python main.py install-bundle <spec> [--into <project>]   # uv pip install a fantastic bundle (git URL / pypi / path) into kernel venv or project's .venv"
                 )
 
             case _:

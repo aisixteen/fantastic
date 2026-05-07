@@ -29,10 +29,10 @@ dependencies = [
 ]
 
 [project.scripts]
-fantastic = "kernel:main_dispatch"
+fantastic = "main:main_dispatch"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["kernel.py", "kernel"]
+only-include = ["main.py", "kernel"]
 
 [dependency-groups]
 dev = [

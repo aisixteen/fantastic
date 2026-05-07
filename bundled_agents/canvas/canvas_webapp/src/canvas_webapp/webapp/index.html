@@ -18,13 +18,10 @@
   #canvas.panning .agent-frame iframe,
   body.dragging-frame .agent-frame iframe { pointer-events: none; }
 
-  /* ─── Liquid Glass frame chrome ──────────────────────────────────
-     The canvas (host) styles its own iframe wrappers. Per-agent
-     iframe content is sandboxed and untouched. Three layered
-     effects: translucent dark fill + backdrop-filter blur+saturate
-     for the frosted base, an inset top highlight + hairline rim for
-     the bevel, and a ::before pseudo for the radial specular sheen.
-     Hover/drag escalate the rim toward neon cyan. */
+  /* ─── Subtle glass frame chrome (restored from pre-port aesthetic) ─
+     Quieter than the previous neon-cyan revision: lighter blur, plain
+     2-layer shadow, hover just lifts the border by a couple % without
+     adding colored glow. Buttons use white-on-white tints only. */
   .agent-frame {
     position: absolute;
     border-radius: 14px;
@@ -32,55 +29,41 @@
     display: flex;
     flex-direction: column;
     z-index: 2;
-    background: rgba(20, 22, 36, 0.62);
-    backdrop-filter: blur(28px) saturate(180%) brightness(112%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%) brightness(112%);
+    background: rgba(15, 15, 25, 0.55);
+    backdrop-filter: blur(16px) saturate(1.2);
+    -webkit-backdrop-filter: blur(16px) saturate(1.2);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     box-shadow:
-      inset 0 1px 0 rgba(255,255,255,0.10),
-      0 0 0 1px rgba(255,255,255,0.14),
-      0 24px 48px -12px rgba(0,0,0,0.70),
-      0 8px 16px -4px rgba(0,0,0,0.50);
-    transition: box-shadow .25s ease, transform .25s ease;
-  }
-  .agent-frame::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    border-radius: inherit;
-    background:
-      radial-gradient(1200px 240px at 50% -160px, rgba(255,255,255,0.18), transparent 60%),
-      linear-gradient(180deg, rgba(255,255,255,0.07), transparent 28%);
-    z-index: 1;
+      0 8px 32px rgba(0, 0, 0, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    transition: box-shadow .3s ease, border-color .3s ease;
   }
   .agent-frame:hover {
+    border-color: rgba(255, 255, 255, 0.14);
     box-shadow:
-      inset 0 1px 0 rgba(255,255,255,0.16),
-      0 0 0 1px rgba(180,220,255,0.32),
-      0 28px 56px -12px rgba(0,0,0,0.72),
-      0 0 32px rgba(120,200,255,0.16);
+      0 8px 40px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
   .agent-frame.dragging, .agent-frame.resizing {
+    border-color: rgba(255, 255, 255, 0.20);
     box-shadow:
-      inset 0 1px 0 rgba(255,255,255,0.22),
-      0 0 0 1px rgba(120,220,255,0.55),
-      0 32px 64px -12px rgba(0,0,0,0.85),
-      0 0 60px rgba(80,200,255,0.36);
+      0 12px 48px rgba(0, 0, 0, 0.6),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
 
   .frame-head {
     position: relative;
     z-index: 2;
-    height: 28px;
-    flex: 0 0 28px;
-    padding: 0 12px;
+    min-height: 32px;
+    padding: 9px 12px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-    color: rgba(220,230,245,0.92);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.7);
     font: 600 11px ui-monospace, SFMono-Regular, monospace;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
     cursor: move;
     user-select: none;
   }
@@ -92,19 +75,26 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px; height: 18px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.06);
-    color: rgba(220,230,245,0.85);
+    width: 20px; height: 20px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.7);
     font-size: 11px;
     cursor: pointer;
     user-select: none;
-    transition: background .15s, color .15s, transform .15s;
+    transition: background .15s ease, color .15s ease;
   }
-  .frame-head .reload:hover { background: rgba(120,200,255,0.30); color: #fff; transform: scale(1.08); }
-  .frame-head .lock:hover   { background: rgba(255,209,102,0.30); color: #fff; transform: scale(1.08); }
-  .frame-head .lock.locked  { background: rgba(255,209,102,0.32); color: #ffd166; }
-  .frame-head .close:hover  { background: rgba(255,120,120,0.42); color: #fff; transform: scale(1.08); }
+  .frame-head .reload:hover,
+  .frame-head .lock:hover,
+  .frame-head .close:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.9);
+  }
+  .frame-head .lock.locked {
+    color: #f7768e;
+    background: rgba(247, 118, 142, 0.10);
+  }
 
   .frame-body {
     position: relative;

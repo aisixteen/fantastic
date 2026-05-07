@@ -45,6 +45,11 @@
     fontSize: 13,
     fontFamily: "'SF Mono', 'Menlo', monospace",
     allowTransparency: true,
+    // Don't rewrap scrollback when the iframe resizes. Old lines freeze
+    // at the columns they had when first written; new output wraps at
+    // the current width. Stops the "lines moving around on resize"
+    // jitter that comes with xterm's default reflow.
+    reflowOnResize: false,
     theme: { background: '#00000000', foreground: '#e5e5e5', cursor: '#e5e5e5' },
   });
   const fit = new FitAddon.FitAddon();

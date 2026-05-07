@@ -1,5 +1,7 @@
-"""Public API for the kernel package. `kernel.py` at repo root is the
-match/case CLI router; everything else lives in this package."""
+"""Kernel implementation package. The match/case CLI router lives in
+`main.py` at the repo root for visibility; everything else here.
+External code does `from kernel import Kernel, _current_sender, ...`
+and gets the re-exports below."""
 
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ __all__ = [
     # Bundles
     "_find_bundle_module",
     "_seed_singletons",
-    # CLI handlers
+    # CLI handlers (the match/case router lives in kernel.py at root)
     "cmd_repl",
     "cmd_serve",
     "cmd_call",
