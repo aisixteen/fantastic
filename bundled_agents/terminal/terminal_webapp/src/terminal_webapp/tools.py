@@ -37,12 +37,29 @@ async def _reflect(id, payload, kernel):
 
 
 async def _get_webapp(id, payload, kernel):
-    """No args. Canvas-facing UI descriptor: {url, default_width, default_height, title}."""
+    """No args. Canvas-facing UI descriptor: {url, default_width, default_height, title, header_buttons}.
+
+    `header_buttons` is the duck-typed contract for adding chips to
+    the canvas frame's header (next to lock/reload/close). Each entry:
+      id     — string, identifies the button across postMessage round-trips
+      glyph  — single-char string rendered as the chip's label
+      title  — tooltip on hover
+      toggle — bool; if true, the canvas tracks active/inactive state
+               based on `header_button_state` echoes from the iframe
+    """
     return {
         "url": f"/{id}/",
         "default_width": 600,
         "default_height": 400,
         "title": "xterm",
+        "header_buttons": [
+            {
+                "id": "autoscroll",
+                "glyph": "⇣",
+                "title": "Toggle autoscroll",
+                "toggle": True,
+            },
+        ],
     }
 
 

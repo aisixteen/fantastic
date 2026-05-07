@@ -71,7 +71,8 @@
   .frame-head .actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
   .frame-head .reload,
   .frame-head .lock,
-  .frame-head .close {
+  .frame-head .close,
+  .frame-head .ext {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -87,13 +88,19 @@
   }
   .frame-head .reload:hover,
   .frame-head .lock:hover,
-  .frame-head .close:hover {
+  .frame-head .close:hover,
+  .frame-head .ext:hover {
     background: rgba(255, 255, 255, 0.12);
     color: rgba(255, 255, 255, 0.9);
   }
   .frame-head .lock.locked {
     color: #f7768e;
     background: rgba(247, 118, 142, 0.10);
+  }
+  .frame-head .ext.active {
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.20);
   }
 
   .frame-body {
@@ -371,10 +378,19 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
     el.style.left = r.x + 'px'; el.style.top = r.y + 'px';
     el.style.width = r.w + 'px'; el.style.height = r.h + 'px';
     const locked = !!rec.delete_lock;
+    // Agent-declared extra header chips. Duck-typed via wa.header_buttons
+    // (returned from the agent's get_webapp). Each chip's click is
+    // forwarded to the iframe via postMessage; the iframe echoes back
+    // {type:'header_button_state', id, active} when its internal state
+    // changes, and we toggle the chip's `.active` class accordingly.
+    const extras = (wa.header_buttons || []).map(b =>
+      `<span class="ext" data-bid="${b.id}" data-toggle="${!!b.toggle}" title="${b.title || b.id}">${b.glyph || '·'}</span>`
+    ).join('');
     el.innerHTML = `
       <div class="frame-head">
         <span class="id">${wa.title || rec.id} · <code style="opacity:0.6;font-size:10px">${rec.id}</code></span>
         <span class="actions">
+          ${extras}
           <span class="lock ${locked ? 'locked' : ''}" title="${locked ? 'unlock (allow delete)' : 'lock (refuse delete)'}">${locked ? '🔒' : '🔓'}</span>
           <span class="reload" title="reload">⟳</span>
           <span class="close" title="delete">×</span>
@@ -400,6 +416,17 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
       // inside the iframe.
       e.stopPropagation();
       t.emit(rec.id, { type: 'reload_html' });
+    });
+    // Wire agent-declared header chips (wa.header_buttons). Click →
+    // bus.send(rec.id, {type:'header_button', id}). State echoes
+    // ({type:'header_button_state', id, active, source_id}) from any
+    // iframe are caught by the single global listener registered at
+    // canvas boot — see further below.
+    el.querySelectorAll('.frame-head .actions .ext').forEach(chip => {
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        t.bus.send(rec.id, { type: 'header_button', id: chip.dataset.bid });
+      });
     });
     el.querySelector('.lock').addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -601,6 +628,20 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
   // upstream canvas_backend: membership changes refresh us live.
   await t.watch(upstream);
   t.on('members_updated', () => refresh());
+
+  // Header-chip state echoes. Each framed agent broadcasts its current
+  // toggle state via `bus.broadcast({type:'header_button_state', id,
+  // active})`; we route by source_id back to the matching `.ext` chip
+  // and flip its .active class. One global listener for all frames —
+  // no per-frame leak risk.
+  t.bus.on('header_button_state', (e) => {
+    const f = frames.get(e.source_id);
+    if (!f) return;
+    const chip = f.el.querySelector(
+      `.frame-head .actions .ext[data-bid="${e.id}"]`
+    );
+    if (chip) chip.classList.toggle('active', !!e.active);
+  });
 
   // Note: the kernel state stream subscription that USED to live
   // here moved into the `telemetry_pane` bundle's glview.js. To get

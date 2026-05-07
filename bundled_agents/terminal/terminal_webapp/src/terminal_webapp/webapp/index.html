@@ -75,22 +75,47 @@
     await t.call(upstream, { type: 'resize', cols, rows });
   });
 
-  // Smart autoscroll — follow the tail when the user is at bottom;
-  // freeze when they've scrolled up to read older lines. Detected
-  // automatically via the xterm viewport's scroll position.
-  let tailing = true;
-  function updateTailing() {
-    const v = container.querySelector('.xterm-viewport');
-    if (!v) return;
-    tailing = (v.scrollHeight - v.scrollTop - v.clientHeight) < 4;
+  // Autoscroll — explicit, button-only. Matches the legacy bridge.js
+  // contract: `term.write` alone never scrolls; output overflows below
+  // the viewport and the user controls the scroll position. The button
+  // is the ONLY thing that pulls the viewport to the bottom — and it
+  // does so via a 100ms tick that fires only after output, so a
+  // scrolled-up user can read history without being yanked back UNTIL
+  // new output arrives.
+  //
+  // The button itself lives in the canvas frame's header (declared via
+  // get_webapp's `header_buttons`); the canvas sends
+  // {type:'header_button', id:'autoscroll'} over the browser bus on
+  // click. We broadcast state changes back via
+  // {type:'header_button_state', id, active} so the chip's `.active`
+  // class tracks our internal state.
+  let autoscroll = false;
+  let pendingOutput = false;
+  function broadcastChipState() {
+    t.bus.broadcast({
+      type: 'header_button_state',
+      id: 'autoscroll',
+      active: autoscroll,
+    });
   }
-  // Capture phase — catches scrolls inside the xterm viewport.
-  container.addEventListener('scroll', updateTailing, true);
+  // bus.on auto-filters by target_id (only delivered when target_id
+  // matches our agentId or is absent), so we just look at the verb.
+  t.bus.on('header_button', (e) => {
+    if (e.id !== 'autoscroll') return;
+    autoscroll = !autoscroll;
+    if (autoscroll) pendingOutput = true;  // jump to bottom on next tick
+    broadcastChipState();
+  });
+  setInterval(() => {
+    if (autoscroll && pendingOutput) {
+      term.scrollToBottom();
+      pendingOutput = false;
+    }
+  }, 100);
 
   t.on('output', (e) => {
-    term.write(e.data || '', () => {
-      if (tailing) term.scrollToBottom();
-    });
+    term.write(e.data || '');
+    if (autoscroll) pendingOutput = true;
   });
   t.on('closed', () => term.write('\r\n[process closed]\r\n'));
 

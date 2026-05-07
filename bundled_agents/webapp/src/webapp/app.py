@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+from importlib import resources
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import (
@@ -30,14 +31,19 @@ from . import _proxy
 from ._transport_js import TRANSPORT_JS
 
 _TRANSPORT_TAG = '<script src="/_fantastic/transport.js"></script>'
+_FAVICON_TAG = '<link rel="icon" type="image/png" href="/_assets/favicon.png">'
 
 
 def _inject(html: str) -> str:
     lower = html.lower()
     idx = lower.find("<head>")
+    inject = _TRANSPORT_TAG
+    # Inject default favicon link if the page doesn't already declare one.
+    if "rel=\"icon\"" not in lower and "rel='icon'" not in lower:
+        inject = _FAVICON_TAG + "\n  " + inject
     if idx == -1:
-        return _TRANSPORT_TAG + html
-    return html[: idx + 6] + "\n  " + _TRANSPORT_TAG + html[idx + 6 :]
+        return inject + html
+    return html[: idx + 6] + "\n  " + inject + html[idx + 6 :]
 
 
 def _index_page(agents: list) -> str:
@@ -68,6 +74,20 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
     @app.get("/_fantastic/transport.js", response_class=PlainTextResponse)
     async def transport_js():
         return PlainTextResponse(TRANSPORT_JS, media_type="application/javascript")
+
+    # ─── default favicon (bundled in this package) ──────────────
+    # Served at both /_assets/favicon.png (canonical, what _inject
+    # references) and /favicon.png (browser-default fallback so tabs
+    # without an explicit <link> still get an icon).
+    _favicon_bytes = (resources.files("webapp") / "favicon.png").read_bytes()
+
+    @app.get("/_assets/favicon.png")
+    async def favicon_asset():
+        return Response(_favicon_bytes, media_type="image/png")
+
+    @app.get("/favicon.png")
+    async def favicon_root():
+        return Response(_favicon_bytes, media_type="image/png")
 
     @app.get("/_kernel/reflect")
     async def kernel_reflect(request: Request):
