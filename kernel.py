@@ -747,8 +747,20 @@ async def cmd_repl() -> None:
         print(f"  unknown command: {line!r}  (try: list, add <bundle>, @<id> ...)")
 
 
-async def cmd_serve(port: int = 8888) -> None:
-    """Headless: boot kernel, ensure a webapp agent on `port`, idle forever."""
+async def cmd_serve(port: int | None = None) -> None:
+    """Headless: boot kernel, ensure a webapp agent on `port`, idle forever.
+
+    `port=None` → pick an ephemeral free port. No hardcoded default;
+    operators see exactly which port was chosen instead of guessing.
+    """
+    if port is None:
+        import socket as _socket
+
+        s = _socket.socket()
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+        s.close()
+        print(f"[serve] no --port given, picked free port {port}", file=sys.stderr)
     acquire_serve_lock(port)
     k = Kernel()
     await _seed_singletons(k)
@@ -1008,7 +1020,7 @@ def main_dispatch() -> None:
     try:
         match sub:
             case "serve":
-                port = 8888
+                port: int | None = None
                 for i, a in enumerate(rest):
                     if a.startswith("--port="):
                         port = int(a.split("=", 1)[1])
@@ -1084,7 +1096,7 @@ def main_dispatch() -> None:
                 print(
                     "fantastic kernel\n"
                     "  python kernel.py                       # interactive REPL (default)\n"
-                    "  python kernel.py serve [--port 8888]   # headless: web agent on port, idle\n"
+                    "  python kernel.py serve [--port N]     # headless: web agent on port; --port omitted → ephemeral free port\n"
                     "  python kernel.py call <id> <verb> [k=v ...]   # one-shot RPC, print JSON, exit\n"
                     "  python kernel.py reflect [<id>]        # shorthand: call <id> reflect (default kernel)\n"
                     "  python kernel.py install <project_dir> [pkg ...]   # uv venv <dir>/.venv + install pkgs + point python_runtime records at it\n"

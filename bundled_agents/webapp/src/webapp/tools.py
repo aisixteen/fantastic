@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 
 _servers: dict[str, "_ServerHandle"] = {}
 
-DEFAULT_PORT = 8888
-
 
 class _ServerHandle:
     def __init__(self, server: uvicorn.Server, task: asyncio.Task):
@@ -30,7 +28,13 @@ class _ServerHandle:
 
 async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
     rec = kernel.get(agent_id) or {}
-    port = int(rec.get("port", DEFAULT_PORT))
+    port_val = rec.get("port")
+    if not port_val:
+        raise RuntimeError(
+            f"webapp {agent_id}: rec.port is required (no default). "
+            "Set port on create_agent or via update_agent."
+        )
+    port = int(port_val)
     app = make_app(agent_id, kernel)
     config = uvicorn.Config(
         app,
@@ -40,7 +44,27 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
         loop="asyncio",
     )
     server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve())
+
+    async def _safe_serve():
+        # uvicorn calls sys.exit(1) on bind failure (e.g. port already
+        # in use). SystemExit out of an asyncio task aborts the whole
+        # event loop — taking the kernel down with one bad webapp.
+        # Catch it, log, and return so the kernel keeps running.
+        try:
+            await server.serve()
+        except SystemExit as e:
+            logger.error(
+                "webapp %s :%d serve exited (code=%s) — port likely in use",
+                agent_id,
+                port,
+                e.code,
+            )
+        except Exception as e:
+            logger.error("webapp %s :%d serve failed: %s", agent_id, port, e)
+        finally:
+            _servers.pop(agent_id, None)
+
+    task = asyncio.create_task(_safe_serve())
     handle = _ServerHandle(server, task)
     _servers[agent_id] = handle
     print(f"  [web] {agent_id} listening on http://localhost:{port}/")
@@ -65,10 +89,11 @@ async def _shutdown(agent_id: str) -> bool:
 async def _reflect(id, payload, kernel):
     """Identity + uvicorn port + running flag (process-local; read via the live serve for truth)."""
     rec = kernel.get(id) or {}
+    port_val = rec.get("port")
     return {
         "id": id,
         "sentence": "HTTP+WS transport for the kernel.",
-        "port": int(rec.get("port", DEFAULT_PORT)),
+        "port": int(port_val) if port_val else None,
         "base_route": rec.get("base_route", ""),
         "running": id in _servers,
         "served_agent_count": len(kernel.list()),
@@ -79,7 +104,7 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. Spawns uvicorn on rec.port (default 8888) if not already running. Returns {running:true}."""
+    """Idempotent. Spawns uvicorn on rec.port (required, no default). Returns {running:true}."""
     if id not in _servers:
         await _spawn(id, kernel)
     return {"running": True}

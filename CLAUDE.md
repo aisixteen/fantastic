@@ -175,6 +175,22 @@ uvx ruff format --check kernel.py bundled_agents/ tests/
 uv run pytest -n auto
 ```
 
+## Commits & pushes — ASK FIRST
+
+**Do NOT `git commit` or `git push` unless the user explicitly asks
+for it.** No "I'll just commit this since the work is done" — wait
+for the word.
+
+OK to do without asking: edit files, run `pytest`, run `ruff`,
+create a branch when the user has named it, show diffs (`git diff
+--cached`, `git status`). Anything that touches refs or origin
+needs explicit consent: commit, amend, push, force-push, branch
+delete, tag, rebase, reset --hard.
+
+If you think work should be committed, _say so_ and wait. The cost
+of asking once is low; the cost of an unwanted commit (lost diff
+review, force-push surprise, polluted history) is high.
+
 ## Conventions
 
 - All async (`asyncio` throughout). `pytest-asyncio` with

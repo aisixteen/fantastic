@@ -291,7 +291,12 @@ async def _boot(id, payload, kernel):
             return {"error": "kernel_bridge: memory transport requires test injection"}
         transport = _test_transport_inject.pop(id)
     elif kind == "ws":
-        local_port = int(rec.get("local_port") or rec.get("remote_port") or 8888)
+        port_val = rec.get("local_port") or rec.get("remote_port")
+        if not port_val:
+            return {
+                "error": "kernel_bridge: ws transport requires local_port or remote_port"
+            }
+        local_port = int(port_val)
         host = rec.get("host") or "localhost"
         url = f"ws://{host}:{local_port}/{peer_id}/ws"
         try:
@@ -301,9 +306,12 @@ async def _boot(id, payload, kernel):
     elif kind == "ssh+ws":
         host = rec.get("host")
         local_port = int(rec.get("local_port") or 0)
-        remote_port = int(rec.get("remote_port") or 8888)
-        if not host or not local_port:
-            return {"error": "kernel_bridge: ssh+ws requires host + local_port"}
+        remote_port_val = rec.get("remote_port")
+        if not host or not local_port or not remote_port_val:
+            return {
+                "error": "kernel_bridge: ssh+ws requires host, local_port, remote_port"
+            }
+        remote_port = int(remote_port_val)
         try:
             tunnel = await _open_tunnel(host, local_port, remote_port)
         except Exception as e:

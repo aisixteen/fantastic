@@ -10,7 +10,7 @@ Record fields (set on create_agent):
   remote_path  — project root on the remote box
   remote_cmd   — absolute path to the remote `fantastic` CLI
                  (e.g. /home/me/.venv/bin/fantastic)
-  remote_port  — port the remote `serve` binds (default 8888)
+  remote_port  — port the remote `serve` binds (REQUIRED, no default)
   local_port   — local port the SSH tunnel forwards from
                  (used by `get_webapp` so canvas can iframe)
   entry_path   — URL suffix appended to the local tunnel for
@@ -193,7 +193,7 @@ async def _reflect(id, payload, kernel):
         "host": rec.get("host"),
         "remote_path": rec.get("remote_path"),
         "remote_cmd": rec.get("remote_cmd"),
-        "remote_port": rec.get("remote_port", 8888),
+        "remote_port": rec.get("remote_port"),
         "local_port": rec.get("local_port"),
         "entry_path": rec.get("entry_path", ""),
         "tunnel_pid": st.tunnel_pid,
@@ -215,12 +215,13 @@ async def _start(id, payload, kernel):
     host = rec.get("host")
     rp = rec.get("remote_path")
     cmd = rec.get("remote_cmd")
-    rport = int(rec.get("remote_port", 8888))
+    rport_val = rec.get("remote_port")
     lport = rec.get("local_port")
-    if not (host and rp and cmd and lport):
+    if not (host and rp and cmd and lport and rport_val):
         return {
-            "error": "ssh_runner.start: host, remote_path, remote_cmd, local_port all required"
+            "error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"
         }
+    rport = int(rport_val)
     lport = int(lport)
 
     # Kick off the remote serve. nohup + & detaches so the SSH
