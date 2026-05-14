@@ -1,9 +1,14 @@
-"""REPL utilities — _parse_at, _coerce, _find_bundle_module."""
+"""REPL utilities — _parse_at, _coerce, _find_bundle_module.
+
+These helpers live in `kernel/_modes.py` as module-private helpers
+used by the REPL and argv parser. Tests reach in directly."""
 
 from __future__ import annotations
 
 
-from kernel import _coerce, _find_bundle_module, _parse_at
+from kernel._modes import _coerce, _parse_at
+
+from kernel import _find_bundle_module
 
 
 def test_coerce_bool():
@@ -53,8 +58,7 @@ def test_parse_at_free_text_send():
 
 
 def test_find_bundle_module_resolves_via_entry_points():
-    # 'core' is registered by the workspace's core bundle entry point.
-    assert _find_bundle_module("core") == "core.tools"
+    assert _find_bundle_module("cli") == "cli.tools"
     assert _find_bundle_module("terminal_backend") == "terminal_backend.tools"
     assert _find_bundle_module("ai_chat_webapp") == "ai_chat_webapp.tools"
 

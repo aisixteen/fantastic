@@ -1,11 +1,18 @@
-"""local_runner — `fantastic serve` lifecycle for local projects.
+"""local_runner — `fantastic` lifecycle for local projects.
 
 Each agent represents one project on this machine. Verbs spawn /
-signal a `fantastic serve` subprocess directly (no SSH, no tunnels).
-Live state is read from the project's own `<remote_path>/.fantastic/
-lock.json` — the same file `acquire_serve_lock` writes inside the
-spawned kernel — so records carry only identity and the runner
-introspects truth from disk + `os.kill(pid, 0)` checks.
+signal a `fantastic` subprocess directly (no SSH, no tunnels). The
+spawned kernel rehydrates its persisted `web` agent at boot, so
+`start` works in two steps: (1) one-shot `core create_agent
+handler_module=web.tools port=<free>` to write the record to disk,
+then (2) `subprocess.Popen([cmd])` to spawn the long-running kernel.
+
+Live state is read from two sibling files in the project's
+`.fantastic/` dir:
+
+  - `lock.json` — `{pid:int}`, PID-only (substrate's lock).
+  - `agents/web_*/agent.json` — the web bundle's persisted record,
+    which carries the port (the bundle owns its endpoint info).
 
 Record fields (set on create_agent):
   remote_path  — project root (absolute filesystem path)
@@ -19,13 +26,13 @@ Verbs:
   boot      — no-op (no auto-start; explicit `start` keeps lifecycle intentional)
   shutdown  — alias for `stop`; called by core.delete_agent's universal
               lifecycle hook
-  start     — pick a free port, subprocess.Popen `<remote_cmd> serve
-              --port <port>`, poll `<remote_path>/.fantastic/lock.json`
-              until {pid, port} appears (or timeout)
+  start     — pick a free port, pre-create the web record, spawn the
+              daemon, poll until lock.json appears and the web record
+              has a port
   stop      — read remote pid from lock.json, SIGTERM, wait for death
               (escalate to SIGKILL after 6s), remove stale lock file
   restart   — stop + start
-  status    — {running, pid, port, http_ok}
+  status    — {running, pid, port, ws_ok}
   get_webapp — {url, default_width, default_height, title} when alive,
                else {error}; canvas filters errors so dead instances
                don't render a frame
@@ -39,9 +46,9 @@ import os
 import signal as signal_mod
 import socket
 import subprocess
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+import websockets
 
 LOCK_POLL_TIMEOUT = 30.0
 LOCK_POLL_INTERVAL = 0.5
@@ -77,28 +84,91 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _http_health(port: int) -> bool:
+async def _ws_health(port: int) -> bool:
+    """Probe the daemon's WS verb channel: connect to /core/ws, send a
+    reflect frame, expect a reply within 2s. WS is the verb channel —
+    this proves the kernel is alive AND answering, not just that
+    something is bound to the port."""
+    url = f"ws://localhost:{port}/core/ws"
     try:
-        with urllib.request.urlopen(
-            f"http://localhost:{port}/_kernel/reflect", timeout=2
-        ) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, OSError, TimeoutError):
+        async with asyncio.timeout(2):
+            async with websockets.connect(url) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "call",
+                            "target": "core",
+                            "payload": {"type": "reflect"},
+                            "id": "h",
+                        }
+                    )
+                )
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") == "h" and msg.get("type") in (
+                        "reply",
+                        "error",
+                    ):
+                        return msg.get("type") == "reply"
+    except (TimeoutError, OSError, websockets.WebSocketException):
         return False
 
 
+def _discover_web_port(remote_path: str) -> int | None:
+    """Scan `<remote_path>/.fantastic/agents/*/agent.json` for the first
+    record with `handler_module == 'web.tools'`; return its `port`.
+    Port lives on the web agent record, not in lock.json (which is
+    PID-only)."""
+    agents_dir = Path(remote_path) / ".fantastic" / "agents"
+    if not agents_dir.is_dir():
+        return None
+    for entry in sorted(agents_dir.iterdir()):
+        af = entry / "agent.json"
+        if not af.exists():
+            continue
+        try:
+            rec = json.loads(af.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if rec.get("handler_module") == "web.tools":
+            p = rec.get("port")
+            if isinstance(p, int) and p > 0:
+                return p
+    return None
+
+
 def _live_pid_port(remote_path: str) -> tuple[int | None, int | None]:
-    """Return (pid, port) iff a live serve is recorded; else (None, None)."""
+    """Return (pid, port) iff a live serve is recorded; else (None, None).
+    pid comes from lock.json (PID-only); port from the web agent record."""
     lock = _read_lock(remote_path)
     if not lock:
         return None, None
     pid = lock.get("pid")
-    port = lock.get("port")
     if not isinstance(pid, int) or not _pid_alive(pid):
         return None, None
-    if not isinstance(port, int):
+    port = _discover_web_port(remote_path)
+    if port is None:
         return None, None
     return pid, port
+
+
+def _has_web_record(proj: Path) -> bool:
+    """True if any agent.json under `<proj>/.fantastic/agents/*/` has
+    handler_module == 'web.tools'."""
+    agents_dir = proj / ".fantastic" / "agents"
+    if not agents_dir.is_dir():
+        return False
+    for entry in agents_dir.iterdir():
+        af = entry / "agent.json"
+        if not af.exists():
+            continue
+        try:
+            rec = json.loads(af.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if rec.get("handler_module") == "web.tools":
+            return True
+    return False
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -110,7 +180,7 @@ async def _reflect(id, payload, kernel):
     pid, port = _live_pid_port(rec.get("remote_path", ""))
     return {
         "id": id,
-        "sentence": "Local `fantastic serve` lifecycle (subprocess + lock.json).",
+        "sentence": "Local `fantastic --port N` lifecycle (subprocess + lock.json).",
         "remote_path": rec.get("remote_path"),
         "remote_cmd": rec.get("remote_cmd", "fantastic"),
         "entry_path": rec.get("entry_path", ""),
@@ -129,11 +199,13 @@ async def _boot(id, payload, kernel):
 
 
 async def _start(id, payload, kernel):
-    """No args. Picks a free port, runs `<remote_cmd> serve --port <port>` as a
-    detached subprocess in `<remote_path>`, polls `.fantastic/lock.json` until
-    {pid, port} appears (max ~30s). Returns {started:bool, pid, port} on
-    success, {error, requested_port} on failure (with serve.log tail
-    available at `<remote_path>/.fantastic/serve.log`)."""
+    """No args. Picks a free port, ensures a `web` agent record exists
+    at that port in `<remote_path>/.fantastic/`, then spawns
+    `<remote_cmd>` as a detached subprocess in `<remote_path>`. Polls
+    `.fantastic/lock.json` until {pid, port} appears (max ~30s).
+    Returns {started:bool, pid, port} on success, {error,
+    requested_port} on failure (serve.log tail at
+    `<remote_path>/.fantastic/serve.log`)."""
     rec = kernel.get(id) or {}
     rp = rec.get("remote_path")
     cmd = rec.get("remote_cmd", "fantastic")
@@ -152,10 +224,33 @@ async def _start(id, payload, kernel):
     fant_dir = proj / ".fantastic"
     fant_dir.mkdir(parents=True, exist_ok=True)
     log_path = fant_dir / "serve.log"
+
+    # Step 1: pre-create the web agent record at the chosen port
+    # unless one already exists. One-shot subprocess; web's _boot
+    # spawns uvicorn and the process exits before binding, but the
+    # record persists for the daemon to rehydrate.
+    if not _has_web_record(proj):
+        subprocess.run(
+            [
+                cmd,
+                "core",
+                "create_agent",
+                "handler_module=web.tools",
+                f"port={port}",
+            ],
+            cwd=str(proj),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    # Step 2: spawn the daemon. `_default` rehydrates the web agent
+    # from disk, acquires the lock, blocks while uvicorn serves.
     log = log_path.open("ab", buffering=0)
     try:
         subprocess.Popen(
-            [cmd, "serve", "--port", str(port)],
+            [cmd],
             cwd=str(proj),
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -166,12 +261,15 @@ async def _start(id, payload, kernel):
     finally:
         log.close()
 
-    # Poll lock.json until the spawned kernel writes it.
+    # Poll lock.json until the spawned kernel writes it. The lock is
+    # PID-only — port lives on the web agent record we just persisted.
     deadline = asyncio.get_event_loop().time() + LOCK_POLL_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         info = _read_lock(rp)
-        if info and info.get("pid") and info.get("port"):
-            return {"started": True, "pid": info["pid"], "port": info["port"]}
+        if info and isinstance(info.get("pid"), int):
+            web_port = _discover_web_port(rp)
+            if web_port is not None:
+                return {"started": True, "pid": info["pid"], "port": web_port}
         await asyncio.sleep(LOCK_POLL_INTERVAL)
     return {
         "error": "local_runner.start: lock.json never appeared",
@@ -239,9 +337,10 @@ async def _restart(id, payload, kernel):
 
 
 async def _status(id, payload, kernel):
-    """No args. {running, pid, port, http_ok}. http_ok is a 2s probe to
-    `http://localhost:<port>/_kernel/reflect` — proves the serve is
-    bound and accepting requests, not just that lock.json exists."""
+    """No args. {running, pid, port, ws_ok}. ws_ok is a 2s probe over
+    the WS verb channel (`ws://localhost:<port>/core/ws`, reflect frame
+    → reply). Proves the kernel is alive AND answering, not just that
+    lock.json exists."""
     rec = kernel.get(id) or {}
     rp = rec.get("remote_path", "")
     pid, port = _live_pid_port(rp)
@@ -249,13 +348,14 @@ async def _status(id, payload, kernel):
         "running": pid is not None,
         "pid": pid,
         "port": port,
-        "http_ok": bool(port) and _http_health(port),
+        "ws_ok": bool(port) and await _ws_health(port),
     }
 
 
-async def _shutdown(id, payload, kernel):
-    """Lifecycle hook. Same as stop — called by core.delete_agent before record removal so the spawned kernel doesn't outlive the agent."""
-    return await _stop(id, payload, kernel)
+async def on_delete(agent):
+    """Cascade hook — same as stop: kill the spawned kernel subprocess
+    so it doesn't outlive the agent record."""
+    await _stop(agent.id, {}, agent)
 
 
 async def _get_webapp(id, payload, kernel):
@@ -285,7 +385,6 @@ async def _get_webapp(id, payload, kernel):
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
-    "shutdown": _shutdown,
     "start": _start,
     "stop": _stop,
     "restart": _restart,

@@ -1,0 +1,7 @@
+{
+  "id": "ollama_backend_f4687c",
+  "handler_module": "ollama_backend.tools",
+  "parent_id": "core",
+  "file_agent_id": "file_163fc0",
+  "model": "gemma4:31b-cloud"
+}

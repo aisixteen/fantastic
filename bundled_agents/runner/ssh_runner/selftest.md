@@ -39,15 +39,30 @@ LOCAL_PORT=49001
 
 # Boot a local fantastic to call from
 PORT=18901
-pkill -9 -f "kernel.py serve" 2>/dev/null
+pkill -9 -f "fantastic" 2>/dev/null
 mkdir -p /tmp/sr_test && cd /tmp/sr_test
 uv run --project /Users/oleksandr/Projects/fantastic_canvas \
-  python /Users/oleksandr/Projects/fantastic_canvas/kernel.py serve --port $PORT \
+  python /Users/oleksandr/Projects/fantastic_canvas/fantastic --port $PORT \
   > /tmp/sr.log 2>&1 &
 SPID=$!
 for i in $(seq 1 30); do grep -q "kernel up" /tmp/sr.log && break; sleep 0.3; done
 
-call() { curl -s -X POST "http://localhost:$PORT/$1/call" -H 'content-type: application/json' -d "$2"; }
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
 
 # Provision the runner
 RID=$(call core "{
@@ -65,16 +80,28 @@ echo "runner: $RID"
 # Reflect — should surface the record fields, tunnel_alive=false
 call $RID '{"type":"reflect"}' | python3 -m json.tool
 
-# Start — SSH brings up `fantastic serve` on remote, opens tunnel
+# Start — SSH brings up `fantastic` on remote, opens tunnel
 call $RID '{"type":"start"}' | python3 -m json.tool
 # Expect: {"started": true, "remote_pid": <int>, "tunnel_pid": <int>}
 
-# Status — tunnel_alive + remote_alive + http_ok all true
+# Status — tunnel_alive + remote_alive + ws_ok all true
 sleep 1
 call $RID '{"type":"status"}' | python3 -m json.tool
 
-# Probe the remote kernel through the tunnel
-curl -s http://localhost:$LOCAL_PORT/_kernel/reflect | python3 -m json.tool | head -10
+# Probe the remote kernel through the tunnel over WS
+uv run --active python - "$LOCAL_PORT" <<'PY'
+import asyncio, json, sys, websockets
+port = sys.argv[1]
+async def main():
+  async with websockets.connect(f"ws://localhost:{port}/core/ws") as ws:
+    await ws.send(json.dumps({"type":"call","target":"kernel","payload":{"type":"reflect"},"id":"1"}))
+    while True:
+      m = json.loads(await ws.recv())
+      if m.get("id")=="1" and m.get("type")=="reply":
+        print(json.dumps({k: m["data"].get(k) for k in ("agent_count","available_bundles")}, default=str)[:200])
+        return
+asyncio.run(main())
+PY
 
 # get_webapp — canvas iframes the remote
 call $RID '{"type":"get_webapp"}' | python3 -m json.tool
@@ -85,16 +112,17 @@ call $RID '{"type":"restart"}' | python3 -m json.tool | head
 # Stop — kills tunnel + remote serve
 call $RID '{"type":"stop"}' | python3 -m json.tool
 
-# Cleanup
-call core "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"  # universal shutdown hook fires stop
+# Cleanup — cascade-delete fires the on_delete hook which stops the
+# tunnel + remote serve.
+call core "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"
 kill -9 $SPID
 rm -rf /tmp/sr_test /tmp/sr.log
 ```
 Expected:
 - `start`: `{started: true, remote_pid: <int>, tunnel_pid: <int>}`
 - `status` after start: all four flags true (`tunnel_alive`,
-  `remote_alive`, `http_ok`, `remote_pid`)
-- `curl` to `localhost:$LOCAL_PORT/_kernel/reflect` returns the
+  `remote_alive`, `ws_ok`, `remote_pid`)
+- WS round-trip to `localhost:$LOCAL_PORT/core/ws` returns the
   remote kernel's primer
 - `stop`: tunnel + remote process gone (`status` flags all false)
 
@@ -102,12 +130,13 @@ Regression signals:
 - `start` errors `ssh failed (rc=255)` → SSH key/auth not set up.
   Run `ssh $HOST 'echo ok'` first.
 - `start` errors `remote serve did not write lock.json in time`
-  → remote `fantastic serve` failed; ssh `cat <remote_path>/.fantastic/serve.log`.
-- `start.tunnel_pid` set but `status.http_ok=false` → tunnel up but
+  → remote `fantastic` failed; ssh `cat <remote_path>/.fantastic/serve.log`.
+- `start.tunnel_pid` set but `status.ws_ok=false` → tunnel up but
   remote not listening. Either the remote crashed after lock.json
-  was written, or `remote_port` doesn't match `serve --port`.
-- `delete_agent` doesn't kill the tunnel → universal `shutdown`
-  lifecycle hook regressed.
+  was written, or `remote_port` doesn't match the persisted web
+  agent's port.
+- `delete_agent` doesn't kill the tunnel → `on_delete` cascade hook
+  regressed.
 
 ## Summary
 

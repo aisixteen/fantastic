@@ -1,0 +1,5 @@
+{
+  "id": "telemetry_pane_f56e07",
+  "handler_module": "telemetry_pane.tools",
+  "parent_id": "core"
+}

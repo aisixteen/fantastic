@@ -1,8 +1,16 @@
 """terminal_webapp — UI agent fronting a terminal_backend.
 
-Holds an `upstream_id` pointing at the backend it renders. No state, no
-compute. Real work happens in `webapp/index.html` (read fresh on every
-GET so dev edits show up without restarts).
+Owns its terminal_backend as a **child agent**. Created idempotently on
+first boot via `agent.create("terminal_backend.tools")`; the substrate
+persists the child record under terminal_webapp's directory. On every
+subsequent boot the child already exists from disk — `_boot` finds it
+and skips creation. Cascade delete via the substrate's `delete_agent`
+removes terminal_webapp + cascades through terminal_backend, whose
+`on_delete` hook kills the PTY before the records are removed from disk.
+
+`upstream_id` field on this agent's record tracks the bound backend's
+id (for frontends discovering the pair). Lifecycle is governed by the
+parent-child relationship, not by the field.
 """
 
 from __future__ import annotations
@@ -68,8 +76,28 @@ async def _render_html(id, payload, kernel):
     return {"html": _bundled_html()}
 
 
-async def _boot(id, payload, kernel):
-    """No-op. Returns None."""
+async def _boot(id, payload, agent):
+    """Idempotent first-boot wiring: ensure a terminal_backend child
+    exists. If `agent._children` already has a terminal_backend (the
+    common case after kernel restart), this is a no-op — the child
+    record was rehydrated from disk. On first boot only, we
+    `agent.create` it; the substrate persists, registers in
+    ctx.agents, and fires the new child's `_boot` (which spawns the
+    PTY)."""
+    BACKEND_HM = "terminal_backend.tools"
+    has_backend = any(c.handler_module == BACKEND_HM for c in agent._children.values())
+    if has_backend:
+        return None
+    rec = agent.create(BACKEND_HM)
+    if "error" in rec:
+        return rec
+    # Track the child id on our own record so domain code (the iframe,
+    # canvas frame chrome) can discover the pair without traversing
+    # the children dict.
+    agent.update(id, upstream_id=rec["id"])
+    # Boot the new child via kernel routing — its bundle's _boot fires
+    # and spawns the PTY child process.
+    await agent.send(rec["id"], {"type": "boot"})
     return None
 
 

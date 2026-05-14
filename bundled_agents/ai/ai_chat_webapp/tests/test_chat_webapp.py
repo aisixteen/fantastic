@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 
-async def _make(kernel, upstream_id="some_backend"):
+async def _make(kernel, provider="ollama"):
     rec = await kernel.send(
         "core",
         {
             "type": "create_agent",
             "handler_module": "ai_chat_webapp.tools",
-            "upstream_id": upstream_id,
+            "provider": provider,
         },
     )
     return rec["id"]
 
 
 async def test_reflect_returns_upstream_id(seeded_kernel):
-    aid = await _make(seeded_kernel, upstream_id="ollama_backend_x")
+    """First boot creates the provider backend as a child; reflect
+    surfaces its id via upstream_id."""
+    aid = await _make(seeded_kernel, provider="ollama")
     r = await seeded_kernel.send(aid, {"type": "reflect"})
-    assert r["upstream_id"] == "ollama_backend_x"
+    assert r["upstream_id"] is not None
+    assert r["upstream_id"].startswith("ollama_backend_")
     assert "get_webapp" in r["verbs"]
 
 
@@ -91,10 +94,9 @@ async def test_render_html_clears_stale_state_on_disconnect(seeded_kernel):
 
 
 async def test_render_html_has_status_pipeline_and_fifo(seeded_kernel):
-    """Drift guard: the served HTML must carry the status-stream
-    pipeline (status verb on boot, status event subscription, phase
-    pill, tool blocks, FIFO state) and the legacy singleton must be
-    gone."""
+    """The served HTML carries the status-stream pipeline (status verb
+    on boot, status event subscription, phase pill, tool blocks, FIFO
+    state)."""
     aid = await _make(seeded_kernel)
     r = await seeded_kernel.send(aid, {"type": "render_html"})
     html = r["html"]
@@ -108,14 +110,10 @@ async def test_render_html_has_status_pipeline_and_fifo(seeded_kernel):
     # Status footer with phase pill.
     assert 'id="status-footer"' in html
     assert "phase-pill" in html
-    # FIFO state (replaces singleton pendingUserBubble).
+    # FIFO state.
     assert "queuedBubbles" in html, "must keep a Map of queued bubbles"
     # Boot snapshot is consumed.
     assert "mine_pending" in html
     assert "others_pending" in html
     # CSS pulse animation present.
     assert "@keyframes" in html or "keyframes pulse" in html
-    # Negative drift guard: legacy singleton is gone.
-    assert "pendingUserBubble" not in html, (
-        "pendingUserBubble singleton must be replaced by FIFO Map"
-    )

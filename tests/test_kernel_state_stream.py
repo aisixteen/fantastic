@@ -16,7 +16,7 @@ import asyncio
 
 async def test_no_subscribers_zero_overhead(seeded_kernel):
     """1000 fanouts with no subscribers is a no-op + no error."""
-    assert seeded_kernel._state_subscribers == []
+    assert seeded_kernel.ctx.state_subscribers == []
     for _ in range(1000):
         await seeded_kernel.emit("cli", {"type": "noop"})
 
@@ -242,33 +242,33 @@ async def test_in_flight_bumps_during_handler(seeded_kernel):
     monotonic counter."""
     seen_in_flight: list[int] = []
 
-    async def slow_send():
-        # The act of the handler running is observed via the kernel's
-        # _in_flight dict — at the moment we sample, our handler is
-        # still on the stack.
-        await asyncio.sleep(0)  # yield once
-        seen_in_flight.append(seeded_kernel._in_flight.get("cli", 0))
+    def _cli_in_flight() -> int:
+        cli = seeded_kernel.ctx.agents.get("cli")
+        return cli._in_flight if cli is not None else 0
 
-    # Use cli as a victim agent; we call send and concurrently
-    # introspect _in_flight from another task.
+    async def slow_send():
+        await asyncio.sleep(0)  # yield once
+        seen_in_flight.append(_cli_in_flight())
+
     async def caller():
         await seeded_kernel.send("cli", {"type": "token", "text": "x"})
 
     async def observer():
         # Sample while the send is mid-flight.
         await asyncio.sleep(0)
-        seen_in_flight.append(seeded_kernel._in_flight.get("cli", 0))
+        seen_in_flight.append(_cli_in_flight())
 
     await asyncio.gather(caller(), observer(), slow_send())
     # After everything completes, in_flight is back to 0.
-    assert seeded_kernel._in_flight.get("cli", 0) == 0
+    assert _cli_in_flight() == 0
 
 
 async def test_emit_does_not_bump_in_flight(seeded_kernel):
     """emit() is a broadcast — no handler dispatch, so in_flight unchanged."""
-    pre = seeded_kernel._in_flight.get("cli", 0)
+    cli = seeded_kernel.ctx.agents["cli"]
+    pre = cli._in_flight
     await seeded_kernel.emit("cli", {"type": "noop"})
-    assert seeded_kernel._in_flight.get("cli", 0) == pre
+    assert cli._in_flight == pre
 
 
 async def test_state_snapshot_reports_in_flight_not_qsize(seeded_kernel):
@@ -301,11 +301,15 @@ async def test_lifecycle_added_fires_on_create(seeded_kernel):
 
 
 async def test_lifecycle_added_fires_on_ensure(kernel):
-    """ensure() (singleton path) also fires 'added' for first-time creation."""
+    """ensure() fires 'added' for first-time creation."""
     events: list[dict] = []
     kernel.add_state_subscriber(lambda e: events.append(e))
-    kernel.ensure("core", "core.tools", singleton=True, display_name="core")
-    added = [e for e in events if e["kind"] == "added" and e["agent_id"] == "core"]
+    kernel.ensure("custom_singleton", "file.tools", display_name="custom")
+    added = [
+        e
+        for e in events
+        if e["kind"] == "added" and e["agent_id"] == "custom_singleton"
+    ]
     assert len(added) == 1
 
 
@@ -318,12 +322,12 @@ async def test_lifecycle_updated_fires_on_update(seeded_kernel):
         e for e in events if e["kind"] == "updated" and e["agent_id"] == "file_test2"
     ]
     assert len(updated) == 1
-    assert updated[0]["name"] == "renamed"
+    assert "display_name" in updated[0]["changed"]
 
 
 async def test_lifecycle_removed_fires_on_delete(seeded_kernel):
-    """Notify must fire AFTER the dict mutation: kernel.get(id) inside
-    the callback returns None."""
+    """`removed` event fires AFTER the cascade has cleaned up — get(id)
+    inside the callback already returns None."""
     seeded_kernel.create("file.tools", id="file_test3")
     observations: list[tuple[str, object]] = []
 
@@ -332,7 +336,7 @@ async def test_lifecycle_removed_fires_on_delete(seeded_kernel):
             observations.append(("get", seeded_kernel.get("file_test3")))
 
     seeded_kernel.add_state_subscriber(cb)
-    seeded_kernel.delete("file_test3")
+    await seeded_kernel.delete("file_test3")
     assert observations == [("get", None)], (
         f"callback should observe deletion already applied; got {observations}"
     )

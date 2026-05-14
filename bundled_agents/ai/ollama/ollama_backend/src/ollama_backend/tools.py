@@ -477,11 +477,14 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 ],
             }
         )
-        # Execute each tool_call; append role:tool reply linked by tool_call_id.
-        # Invalidate menu after every tool_call — population may have changed
-        # (create_agent / delete_agent), and even unchanged agents may have
-        # gained/lost verbs via update. Cheap to rebuild on next user turn.
-        for c in tool_calls:
+
+        # Execute tool_calls IN PARALLEL via asyncio.gather. Each runs
+        # its own status entry → kernel.send → status exit → say emit;
+        # gather preserves result order so role:tool messages append in
+        # the order Ollama emitted them. Menu invalidation runs once
+        # per batch (the population may have changed via any of the
+        # parallel create/delete/update calls).
+        async def _exec_one(c):
             args = c["arguments"]
             target = args.get("target_id", "")
             payload = args.get("payload", {})
@@ -503,12 +506,8 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 reply = await kernel.send(target, payload)
             except Exception as e:
                 reply = {"error": str(e)}
-            _invalidate_menu(self_id)
             reply_str = json.dumps(reply, default=str)
-            tool_entry_done = {
-                **tool_entry,
-                "reply_preview": reply_str[:120],
-            }
+            tool_entry_done = {**tool_entry, "reply_preview": reply_str[:120]}
             # EXIT: same call_id, with reply_preview now filled.
             if self_id in _current:
                 _current[self_id]["last_tool"] = tool_entry_done
@@ -525,14 +524,16 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                     "source": self_id,
                 },
             )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": c["id"],
-                    "name": c["name"],
-                    "content": reply_str,
-                }
-            )
+            return {
+                "role": "tool",
+                "tool_call_id": c["id"],
+                "name": c["name"],
+                "content": reply_str,
+            }
+
+        results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
+        _invalidate_menu(self_id)
+        messages.extend(results)
 
     # Status before the back-compat `done` event so subscribers can
     # observe the final phase transition first.

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-web-ws"
+version = "0.1.0"
+description = "Fantastic web_ws — WebSocket verb-invocation surface. Mounted as a route on the parent web's FastAPI app via the duck-typed `get_routes` verb."
+requires-python = ">=3.11"
+dependencies = ["fantastic-web", "fastapi", "websockets>=12,<17"]
+
+[project.entry-points."fantastic.bundles"]
+web_ws = "web_ws.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/web_ws"]

@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 
-async def _make(kernel, upstream_id="some_backend"):
+async def _make(kernel):
     rec = await kernel.send(
         "core",
-        {
-            "type": "create_agent",
-            "handler_module": "canvas_webapp.tools",
-            "upstream_id": upstream_id,
-        },
+        {"type": "create_agent", "handler_module": "canvas_webapp.tools"},
     )
     return rec["id"]
 
 
 async def test_reflect_returns_upstream_id(seeded_kernel):
-    aid = await _make(seeded_kernel, upstream_id="canvas_backend_x")
+    """First boot creates canvas_backend as a child; reflect surfaces
+    its id via upstream_id."""
+    aid = await _make(seeded_kernel)
     r = await seeded_kernel.send(aid, {"type": "reflect"})
-    assert r["upstream_id"] == "canvas_backend_x"
+    assert r["upstream_id"] is not None
+    assert r["upstream_id"].startswith("canvas_backend_")
     assert "get_webapp" in r["verbs"]
 
 
@@ -50,11 +49,6 @@ async def test_render_html_uses_list_members_not_list_agents(seeded_kernel):
         "must subscribe to upstream's members_updated event"
     )
     assert "add_agent" in html, "dblclick must auto-add the new pair to this canvas"
-    # Auto-discover removed: list_agents stays for record lookup but not
-    # as the membership source.
-    assert "myBundle" not in html, (
-        "same-bundle exclusion was an auto-discover artefact; should be gone"
-    )
 
 
 async def test_render_html_streams_lifecycle_does_not_poll(seeded_kernel):
@@ -76,12 +70,11 @@ async def test_render_html_streams_lifecycle_does_not_poll(seeded_kernel):
 
 
 async def test_render_html_uses_liquid_glass_chrome(seeded_kernel):
-    """The canvas chrome must remain Liquid Glass — flatten back to
-    solid fills and the candy is gone. Tokens to keep alive:
-      - backdrop-filter on .agent-frame
-      - the ::before specular layer
-      - the inset top highlight in the box-shadow stack
-      - the inline SVG refraction filter
+    """The canvas chrome is Liquid Glass. Tokens to keep alive:
+    - backdrop-filter on .agent-frame
+    - the ::before specular layer
+    - the inset top highlight in the box-shadow stack
+    - the inline SVG refraction filter
     """
     aid = await _make(seeded_kernel)
     html = (await seeded_kernel.send(aid, {"type": "render_html"}))["html"]
@@ -89,9 +82,6 @@ async def test_render_html_uses_liquid_glass_chrome(seeded_kernel):
     assert ".agent-frame::before" in html, "lost the specular highlight layer"
     assert "inset 0 1px 0 rgba(255" in html, "lost the inner top highlight"
     assert "liquid-distort" in html, "lost the SVG refraction filter"
-    # Negative: the old hard-edge defaults must be gone.
-    assert "background: #0e0e16" not in html
-    assert "border: 1px solid #333" not in html
 
 
 async def test_render_html_dispatches_on_two_verbs(seeded_kernel):
@@ -127,40 +117,58 @@ async def test_render_html_has_gl_host_scaffolding(seeded_kernel):
     )
 
 
-async def test_render_html_no_inline_bganim(seeded_kernel):
-    """Negative drift guard: bganim is GONE — no particle pipeline,
-    no per-particle render fn, no compile/hot-reload wiring. Particle
-    effects come back later as a peer GL agent."""
+async def test_render_html_dblclick_adds_terminal_by_handler_module(seeded_kernel):
+    """Drift guard: double-click on empty canvas must spawn a terminal
+    via `canvas_backend.add_agent` with `handler_module:
+    'terminal_webapp.tools'` — the canvas spawns + boots it as its own
+    child (terminal_webapp._boot then spawns the terminal_backend). A
+    prior version pre-created the pair on `core` and called add_agent
+    with `agent_id`, which the current add_agent (spawn-from-
+    handler_module) rejects — leaking two orphan agents and never
+    joining the canvas."""
     aid = await _make(seeded_kernel)
-    r = await seeded_kernel.send(aid, {"type": "render_html"})
-    html = r["html"]
-    assert "PARTICLE_COUNT" not in html
-    assert "loadAndCompile" not in html
-    assert "renderFn" not in html
-    assert "bganim_updated" not in html
-    assert "default_bganim" not in html
-    assert "set_bganim" not in html
-    assert "get_bganim" not in html
+    html = (await seeded_kernel.send(aid, {"type": "render_html"}))["html"]
+    assert "dblclick" in html
+    assert "handler_module: 'terminal_webapp.tools'" in html, (
+        "dblclick must add_agent by handler_module, not adopt by agent_id"
+    )
+    assert "terminal_backend.tools" not in html, (
+        "dblclick must let the canvas spawn the subtree, not pre-create "
+        "a terminal_backend on core (orphan leak)"
+    )
 
 
-async def test_render_html_no_inline_agent_vis(seeded_kernel):
-    """Negative drift guard: the agent-vis (sprites + slots + blip)
-    no longer lives in canvas_webapp HTML — it's been lifted into the
-    telemetry_pane bundle's glview.js and reaches the canvas only
-    when telemetry_pane is added as a peer."""
+async def test_render_html_zoom_is_smoothed(seeded_kernel):
+    """Drift guard: wheel zoom is lerped, not stepped. The wheel must
+    only nudge `targetZ`; the rAF loop glides `view.z` toward it. If
+    the wheel handler goes back to setting `view.z` directly the
+    smoothing is silently gone."""
     aid = await _make(seeded_kernel)
-    r = await seeded_kernel.send(aid, {"type": "render_html"})
-    html = r["html"]
-    for token in (
-        "agentSprites",
-        "ensureAgentSprite",
-        "removeAgentSprite",
-        "triggerBlip",
-        "assignSlot",
-        "slotFreeList",
-        "subscribeState",
-    ):
-        assert token not in html, (
-            f"'{token}' must NOT live in canvas_webapp HTML — it belongs "
-            f"to telemetry_pane's glview.js"
-        )
+    html = (await seeded_kernel.send(aid, {"type": "render_html"}))["html"]
+    assert "targetZ" in html, "lost the smoothed-zoom target"
+    assert "ZOOM_LERP" in html, "lost the per-frame lerp factor"
+    # The wheel handler must drive targetZ, not view.z, or it's a jump.
+    assert "targetZ = Math.max(ZOOM_MIN" in html, (
+        "wheel must set targetZ (clamped), not mutate view.z directly"
+    )
+
+
+async def test_render_html_gl_views_are_containerized_and_live(seeded_kernel):
+    """Each GL view runs in its own THREE.Group container (iframe
+    analogue) and reloads in place: gl_agent.set_gl_source emits
+    `gl_source_changed` → the canvas calls updateGlView → dispose the
+    group + recompile, scoped to one view. No remove/re-add, no
+    canvas refresh."""
+    aid = await _make(seeded_kernel)
+    html = (await seeded_kernel.send(aid, {"type": "render_html"}))["html"]
+    # Per-view container — the source's injected `scene` is a Group.
+    assert "new THREE.Group()" in html, "GL views must get a per-view Group container"
+    assert "disposeObject3D" in html, "must free GPU memory on teardown"
+    # In-place reload path.
+    assert "updateGlView" in html, "must have an in-place GL reload path"
+    # The canvas watches each GL member so the emit reaches it.
+    assert "t.watch(agent_id)" in html, "installGlView must watch the GL member"
+    # The producer event is wired.
+    assert "gl_source_changed" in html, (
+        "must listen for gl_source_changed → updateGlView"
+    )

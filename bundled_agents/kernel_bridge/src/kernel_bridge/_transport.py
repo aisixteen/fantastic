@@ -16,10 +16,10 @@ Both expose:
     @property
     closed: bool
 
-The shape of `frame` matches the existing webapp/_proxy.py wire
+The shape of `frame` matches the existing web/_proxy.py wire
 protocol — `{type:'call', target, payload, id}` and
 `{type:'reply', id, data}` — so a WSTransport against a real
-fantastic webapp's `/<id>/ws` endpoint just works.
+fantastic web's `/<id>/ws` endpoint just works.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ class MemoryTransport(_BaseTransport):
 
 class WSTransport(_BaseTransport):
     """websockets client connection wrapper. Frames serialize as
-    JSON text (matches webapp/_proxy.py default mode — binary path
+    JSON text (matches web/_proxy.py default mode — binary path
     is reserved for byte-heavy payloads via the kernel's
     binary_protocol; bridges don't currently mint binary)."""
 
@@ -155,5 +155,109 @@ class WSTransport(_BaseTransport):
     async def close(self) -> None:
         try:
             await self._ws.close()
+        except Exception:
+            pass
+
+
+class HTTPTransport(_BaseTransport):
+    """Request/reply transport against a remote `web_rest` surface.
+
+    The remote URL has the shape `http://<host>/<rest_id>/` (trailing
+    slash). For each outbound `call` frame `{type:'call', target,
+    payload, id}`, we POST `payload` to `<base_url><target>` and enqueue
+    the JSON response as a `reply` frame on our internal recv queue.
+
+    Asymmetric by design: there is no server→client push over plain
+    HTTP. `emit`, `watch`, and `state_subscribe` frames raise — use
+    `WSTransport` if you need full duplex. HTTPTransport is for
+    diagnostics + stateless forwarding.
+
+    Weak binding: this transport addresses the remote surface only by
+    URL + path. No shared types with the remote kernel.
+    """
+
+    def __init__(self, base_url: str, client: Any) -> None:
+        # Normalize trailing slash so `base_url + target` is clean.
+        if not base_url.endswith("/"):
+            base_url = base_url + "/"
+        self._base = base_url
+        self._client = client
+        self._in: asyncio.Queue = asyncio.Queue()
+        self._closed = False
+
+    @classmethod
+    async def connect(cls, base_url: str) -> "HTTPTransport":
+        # Local import so memory/ws-only test envs don't require httpx
+        # (it IS a transitive dep via FastAPI's test client, but keep
+        # the import surface small).
+        import httpx
+
+        client = httpx.AsyncClient(timeout=30.0)
+        return cls(base_url, client)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def send(self, frame: dict) -> None:
+        if self._closed:
+            raise ConnectionClosed("HTTPTransport closed")
+        kind = frame.get("type")
+        if kind != "call":
+            raise NotImplementedError(
+                f"HTTPTransport supports only 'call' frames (got {kind!r}); "
+                "use WSTransport for emit/watch/state_subscribe."
+            )
+        # kernel_bridge wraps every outbound call in a `forward` envelope
+        # addressed at the peer bridge: frame = {type:call, target:peer,
+        # payload:{type:forward, target:<inner>, payload:<inner_payload>}}.
+        # HTTP has no peer bridge — the remote `web_rest` dispatches
+        # directly. Unwrap the forward to a one-shot REST POST.
+        payload = frame.get("payload") or {}
+        if isinstance(payload, dict) and payload.get("type") == "forward":
+            target = payload.get("target")
+            body = payload.get("payload") or {}
+        else:
+            target = frame.get("target")
+            body = payload
+        if not target:
+            raise ValueError("HTTPTransport.send: target required")
+        url = self._base + str(target)
+        try:
+            resp = await self._client.post(
+                url,
+                json=body,
+                headers={"content-type": "application/json"},
+            )
+        except Exception as e:
+            raise ConnectionClosed(str(e)) from e
+        # Translate the HTTP response into a `reply` frame matching the
+        # WS protocol shape — the bridge read loop routes it to the
+        # pending Future by `id` (which equals corr_id).
+        corr_id = frame.get("id")
+        if resp.status_code >= 400:
+            await self._in.put(
+                {
+                    "type": "reply",
+                    "id": corr_id,
+                    "data": {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"},
+                }
+            )
+            return
+        try:
+            data = resp.json() if resp.content else None
+        except json.JSONDecodeError:
+            data = {"raw": resp.text}
+        await self._in.put({"type": "reply", "id": corr_id, "data": data})
+
+    async def recv(self) -> dict:
+        if self._closed and self._in.empty():
+            raise ConnectionClosed("HTTPTransport closed")
+        return await self._in.get()
+
+    async def close(self) -> None:
+        self._closed = True
+        try:
+            await self._client.aclose()
         except Exception:
             pass

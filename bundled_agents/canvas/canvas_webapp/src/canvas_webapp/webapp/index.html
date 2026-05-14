@@ -197,12 +197,85 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
   camera.position.set(0, BASE_Y, BASE_Z);
   camera.lookAt(0, LOOK_Y, 0);
 
-  // GL view registry: agent_id -> { cleanup: fn[] }. Each GL agent's
-  // `get_gl_view` source body runs inside its own function scope with
-  // `(THREE, scene, t, onFrame, cleanup)` injected. The host calls
-  // every cleanup closure on remove_agent.
+  // GL view registry: agent_id -> { group, cleanup: fn[] }. Each GL
+  // agent's `get_gl_view` source runs in its own function scope with
+  // `(THREE, scene, t, onFrame, cleanup)` injected — but `scene` is
+  // NOT the shared scene: it's a per-view THREE.Group, the GL analogue
+  // of an html_agent's iframe. Everything the source adds is scoped to
+  // that group, so one view can be disposed + recompiled in place
+  // (updateGlView) without touching the shared scene, renderer, or
+  // sibling views.
   const glViews = new Map();
   const glFrameCbs = new Map();   // agent_id -> Set<fn> (per-frame ticks)
+
+  // Recursively free GPU memory for everything in a view's group:
+  // geometries, materials, and any textures bound to those materials.
+  // THREE's dispose() is idempotent, so a source's own cleanup calling
+  // dispose() too is harmless belt-and-suspenders.
+  function disposeObject3D(obj) {
+    obj.traverse((o) => {
+      if (o.geometry) { try { o.geometry.dispose(); } catch (e) {} }
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) {
+        if (!m) continue;
+        for (const k in m) {
+          const v = m[k];
+          if (v && v.isTexture) { try { v.dispose(); } catch (e) {} }
+        }
+        try { m.dispose(); } catch (e) {}
+      }
+    });
+  }
+
+  // Compile + run one GL source into a fresh per-view group. Internal —
+  // installGlView (first mount) and updateGlView (in-place reload) both
+  // route through here. Returns the new registry entry, or null on a
+  // compile/run failure.
+  function _mountGlSource(agent_id, view) {
+    const group = new THREE.Group();
+    scene.add(group);
+    const cleanup = [];
+    const cbs = new Set();
+    const onFrame = (cb) => { cbs.add(cb); };
+    glFrameCbs.set(agent_id, cbs);
+    try {
+      // `scene` arg is bound to the per-view group — the source's
+      // container. Contract name kept as `scene` so existing GL
+      // sources (telemetry_pane, operator gl_agents) run unchanged.
+      const fn = new Function(
+        'THREE', 'scene', 't', 'onFrame', 'cleanup',
+        view.source,
+      );
+      fn(THREE, group, t, onFrame, cleanup);
+      const entry = { group, cleanup };
+      glViews.set(agent_id, entry);
+      console.log('[gl] mounted', agent_id, '—', view.source.length, 'chars');
+      return entry;
+    } catch (e) {
+      console.error('[gl] mount failed for', agent_id, ':', e);
+      scene.remove(group);
+      disposeObject3D(group);
+      glFrameCbs.delete(agent_id);
+      return null;
+    }
+  }
+
+  // Tear down a view's container: run its cleanup closures (genuine
+  // side-effects — state subs, timers), dispose the group's GPU
+  // resources, drop it from the shared scene, clear its frame ticks.
+  function _teardownGlView(agent_id) {
+    const entry = glViews.get(agent_id);
+    if (!entry) return;
+    for (const fn of entry.cleanup) {
+      try { fn(); } catch (e) { console.error('[gl] cleanup raised:', e); }
+    }
+    if (entry.group) {
+      scene.remove(entry.group);
+      disposeObject3D(entry.group);
+    }
+    glViews.delete(agent_id);
+    glFrameCbs.delete(agent_id);
+  }
 
   function installGlView(agent_id, view) {
     if (glViews.has(agent_id)) return;
@@ -210,32 +283,38 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
       console.warn('[gl] empty view from', agent_id);
       return;
     }
-    const cleanup = [];
-    const cbs = new Set();
-    const onFrame = (cb) => { cbs.add(cb); };
-    glFrameCbs.set(agent_id, cbs);
-    try {
-      const fn = new Function(
-        'THREE', 'scene', 't', 'onFrame', 'cleanup',
-        view.source,
-      );
-      fn(THREE, scene, t, onFrame, cleanup);
-      glViews.set(agent_id, { cleanup });
-      console.log('[gl] installed', agent_id, '—', view.source.length, 'chars');
-    } catch (e) {
-      console.error('[gl] install failed for', agent_id, ':', e);
-      glFrameCbs.delete(agent_id);
+    if (_mountGlSource(agent_id, view)) {
+      // Watch the member so its `gl_source_changed` emit reaches us.
+      t.watch(agent_id);
     }
   }
 
-  function removeGlView(agent_id) {
-    const entry = glViews.get(agent_id);
-    if (!entry) return;
-    for (const fn of entry.cleanup) {
-      try { fn(); } catch (e) { console.error('[gl] cleanup raised:', e); }
+  // In-place reload of one view: re-probe get_gl_view, tear down the
+  // old container, recompile into a fresh group. Keeps the t.watch
+  // standing (no flap) and the same agent id — the GL analogue of
+  // html_agent's set_html → reload_html.
+  async function updateGlView(agent_id) {
+    if (!glViews.has(agent_id)) return;
+    let view = null;
+    try {
+      view = await t.call(agent_id, { type: 'get_gl_view' });
+    } catch (e) {
+      console.error('[gl] updateGlView: get_gl_view failed for', agent_id, e);
+      return;
     }
-    glViews.delete(agent_id);
-    glFrameCbs.delete(agent_id);
+    if (!view || typeof view.source !== 'string' || !view.source) {
+      console.warn('[gl] updateGlView: empty view from', agent_id);
+      return;
+    }
+    _teardownGlView(agent_id);   // disposes the group, runs cleanup
+    _mountGlSource(agent_id, view);
+    console.log('[gl] reloaded in place', agent_id);
+  }
+
+  function removeGlView(agent_id) {
+    if (!glViews.has(agent_id)) return;
+    _teardownGlView(agent_id);
+    t.unwatch(agent_id);
   }
 
   window.addEventListener('resize', () => {
@@ -253,6 +332,20 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
       for (const cb of cbs) {
         try { cb(time); } catch (e) { console.error('[gl] onFrame raised:', e); }
       }
+    }
+    // Smoothed zoom — glide view.z toward targetZ, re-anchoring each
+    // step on the screen-center horizon so the focal point holds. The
+    // per-step offset math mirrors an instant horizon zoom; running it
+    // once per frame just spreads the same transform over the glide.
+    if (view.z !== targetZ) {
+      const cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+      let nextZ = view.z + (targetZ - view.z) * ZOOM_LERP;
+      if (Math.abs(targetZ - nextZ) < 0.0005) nextZ = targetZ;  // snap to rest
+      const ratio = nextZ / view.z;
+      view.ox = cx - (cx - view.ox) * ratio;
+      view.oy = cy - (cy - view.oy) * ratio;
+      view.z = nextZ;
+      applyView();
     }
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
@@ -273,6 +366,15 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
 
   const view = { z: 1, ox: 0, oy: 0 };
   const ZOOM_MIN = 0.1, ZOOM_MAX = 5;
+  // Wheel zoom is smoothed: the wheel only nudges `targetZ`, and the
+  // rAF loop lerps `view.z` toward it (ZOOM_LERP of the gap per frame)
+  // — a soft glide instead of a stepped jump. Each lerp step is
+  // re-anchored on the screen-center horizon so the focal point holds
+  // steady through the whole glide. ZOOM_LERP is tuned snappy: it
+  // takes the edge off the step but settles in a few frames, so the
+  // view doesn't keep sliding after the wheel stops.
+  let targetZ = view.z;
+  const ZOOM_LERP = 0.72;
   function applyView() {
     world.style.transform = `translate(${view.ox}px, ${view.oy}px) scale(${view.z})`;
     applyCamera();
@@ -305,22 +407,22 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
   }
   applyView();
 
-  // Cursor-anchored zoom: keep the canvas point under the cursor fixed.
-  // Wheel over a cell stays inside that cell (e.g. xterm scroll, chat
-  // scroll); only wheel on empty canvas triggers zoom.
+  // Horizon-anchored zoom: the wheel always pulls toward / away from
+  // screen center (the "horizon" focal point), NOT the cursor. Both
+  // layers — the 2D iframe wrapper and the GL scene — zoom around that
+  // one shared point, so they stay locked in sync. A cursor-anchored
+  // zoom would move the 2D focal point per-wheel-event while the GL
+  // camera tracks something else, drifting the layers apart. It's pure
+  // proportional scale (camera.zoom follows view.z) — no dolly/slide.
+  // The wheel only moves `targetZ`; the rAF loop lerps `view.z` toward
+  // it for a smooth glide (see frame()). Wheel over a cell stays
+  // inside that cell (xterm/chat scroll); only wheel on empty canvas
+  // triggers zoom.
   canvas.addEventListener('wheel', (e) => {
     if (e.target.closest('.agent-frame')) return;
     e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
     const factor = e.deltaY > 0 ? 0.95 : 1.05;
-    const newZ = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.z * factor));
-    const ratio = newZ / view.z;
-    view.ox = mx - (mx - view.ox) * ratio;
-    view.oy = my - (my - view.oy) * ratio;
-    view.z = newZ;
-    applyView();
+    targetZ = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetZ * factor));
   }, { passive: false });
 
   // Pan with click-and-hold on empty canvas. Pan only engages after the
@@ -397,7 +499,12 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
         </span>
       </div>
       <div class="frame-body">
-        <iframe src="${wa.url}" loading="lazy"></iframe>
+        <!-- No loading="lazy": canvas frames live in a CSS-transformed
+             world, which defeats the browser's lazy-load viewport check
+             — a "lazy" frame may never load, so its transport.js never
+             connects a WS and reload_html (set_html auto-reload AND the
+             ⟳ button) fans out to zero listeners. Load eagerly. -->
+        <iframe src="${wa.url}"></iframe>
       </div>
       <div class="resize-handle"></div>
     `;
@@ -629,6 +736,16 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
   await t.watch(upstream);
   t.on('members_updated', () => refresh());
 
+  // GL source edits reload the one view in place — no canvas refresh,
+  // no remove/re-add, same agent id. gl_agent.set_gl_source emits
+  // `gl_source_changed` on its own inbox; installGlView t.watch()es
+  // each GL member, so the emit reaches us here. The payload carries
+  // `id` because we host MANY GL views (an html iframe watches only
+  // itself; the canvas watches all its GL members).
+  t.on('gl_source_changed', (p) => {
+    if (p && p.id && glViews.has(p.id)) updateGlView(p.id);
+  });
+
   // Header-chip state echoes. Each framed agent broadcasts its current
   // toggle state via `bus.broadcast({type:'header_button_state', id,
   // active})`; we route by source_id back to the matching `.ext` chip
@@ -649,36 +766,22 @@ import * as THREE from 'https://esm.sh/three@0.160.0';
   // and `add_agent` it to the canvas — its `get_gl_view` source will
   // be installed by the GL host above.
 
-  // Double-click on empty canvas → create a terminal pair at click coords
-  // AND add the new webapp to THIS canvas's membership so it appears here.
+  // Double-click on empty canvas → spawn a terminal pair AS a member
+  // of THIS canvas. `add_agent` does the whole job in one call: it
+  // creates the terminal_webapp as the canvas_backend's child, boots
+  // it (terminal_webapp._boot spawns its own terminal_backend),
+  // probes the renderable contract, and emits `members_updated` →
+  // refresh() renders the new frame here. Passing x/y lands it under
+  // the cursor regardless of current zoom/pan.
   canvas.addEventListener('dblclick', async (e) => {
     if (e.target.closest('.agent-frame')) return;   // ignore dblclick inside frames
-    // Map screen click to world coords so the new frame lands under the
-    // cursor regardless of current zoom/pan.
     const w = screenToWorld(e.clientX, e.clientY);
-    const x = Math.round(w.x);
-    const y = Math.round(w.y);
-    const tb = await t.call('core', {
-      type: 'create_agent',
-      handler_module: 'terminal_backend.tools',
-    });
-    if (!tb || !tb.id) {
-      console.error('[canvas] failed to create terminal_backend:', tb);
-      return;
-    }
-    const tw = await t.call('core', {
-      type: 'create_agent',
+    const ar = await t.call(upstream, {
+      type: 'add_agent',
       handler_module: 'terminal_webapp.tools',
-      upstream_id: tb.id,
-      x, y,
+      x: Math.round(w.x),
+      y: Math.round(w.y),
     });
-    if (!tw || !tw.id) {
-      console.error('[canvas] failed to create terminal_webapp; orphan backend:', tb.id);
-      return;
-    }
-    // Add the fresh webapp to THIS canvas's membership; members_updated
-    // fires → refresh() renders the new frame here only.
-    const ar = await t.call(upstream, { type: 'add_agent', agent_id: tw.id });
     if (ar && ar.error) console.error('[canvas] add_agent failed:', ar.error);
   });
 

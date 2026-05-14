@@ -54,7 +54,6 @@ async def test_reflect_lists_verbs(seeded_kernel):
     for v in (
         "reflect",
         "boot",
-        "shutdown",
         "start",
         "stop",
         "restart",
@@ -100,11 +99,10 @@ async def test_start_requires_all_four_fields(seeded_kernel):
 
 
 async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
-    """Verifies the SSH command we build:
-      ssh test-box 'cd /home/me/proj && mkdir -p .fantastic &&
-                    nohup /home/me/.venv/bin/fantastic serve --port 8888
-                    > .fantastic/serve.log 2>&1 &'
-    plus the lock-poll command + tunnel construction."""
+    """Verifies the SSH command we build: a two-step compound shell
+    command — first persists the web agent record via
+    `fantastic core create_agent handler_module=web.tools port=N`,
+    then nohup-spawns the daemon. Plus the lock-poll + tunnel."""
     calls = []
 
     async def fake_ssh_exec(host, cmd, timeout=30.0):
@@ -140,15 +138,17 @@ async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
     assert r["remote_pid"] == 4242
     assert r["tunnel_pid"] == 5151
 
-    # First SSH call: the boot command. Verify shape.
+    # First SSH call: the compound bootstrap+daemon command.
     boot_cmd = calls[0]["cmd"]
     assert calls[0]["host"] == "test-box"
     assert "cd /home/me/proj" in boot_cmd
     assert "mkdir -p .fantastic" in boot_cmd
     assert "/home/me/.venv/bin/fantastic" in boot_cmd
-    assert "serve --port 8888" in boot_cmd
-    assert "> .fantastic/serve.log 2>&1 &" in boot_cmd
+    # Step 1: create web record at the chosen port.
+    assert "core create_agent handler_module=web.tools port=8888" in boot_cmd
+    # Step 2: nohup the daemon (no flags — boots from disk).
     assert "nohup" in boot_cmd
+    assert "> .fantastic/serve.log 2>&1 &" in boot_cmd
 
     # Subsequent calls: lock.json polls.
     assert any("lock.json" in c["cmd"] for c in calls[1:])
@@ -236,23 +236,24 @@ async def test_status_when_nothing_running(seeded_kernel, runner_record, monkeyp
     async def fake_ssh_exec(host, cmd, timeout=30.0):
         return 0, "", ""  # no lock.json
 
+    async def fake_ws_health(port):
+        return False
+
     monkeypatch.setattr(sr, "_ssh_exec", fake_ssh_exec)
-    monkeypatch.setattr(sr, "_http_health", lambda port: False)
+    monkeypatch.setattr(sr, "_ws_health", fake_ws_health)
 
     rid = await _make(seeded_kernel, **runner_record)
     r = await seeded_kernel.send(rid, {"type": "status"})
     assert r["tunnel_alive"] is False
     assert r["remote_alive"] is False
-    assert r["http_ok"] is False
+    assert r["ws_ok"] is False
     assert r["remote_pid"] is None
 
 
-async def test_shutdown_via_delete_agent_lifecycle(
-    seeded_kernel, runner_record, monkeypatch
-):
-    """core.delete_agent's universal shutdown hook invokes
-    ssh_runner.shutdown (== stop). The runner should clean up
-    silently — no exception even if nothing is running."""
+async def test_on_delete_via_cascade(seeded_kernel, runner_record, monkeypatch):
+    """core.delete_agent's cascade calls ssh_runner.on_delete (== stop).
+    The runner should clean up silently — no exception even if nothing
+    is running."""
     calls = []
 
     async def fake_ssh_exec(host, cmd, timeout=30.0):
@@ -264,7 +265,7 @@ async def test_shutdown_via_delete_agent_lifecycle(
     rid = await _make(seeded_kernel, **runner_record)
     r = await seeded_kernel.send("core", {"type": "delete_agent", "id": rid})
     assert r.get("deleted") is True
-    # The shutdown hook fired: at least one ssh_exec call to read lock.
+    # The on_delete hook fired: at least one ssh_exec call to read lock.
     assert any("lock.json" in c for c in calls)
 
 

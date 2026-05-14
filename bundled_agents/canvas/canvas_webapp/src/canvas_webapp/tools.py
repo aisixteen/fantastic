@@ -54,8 +54,18 @@ async def _render_html(id, payload, kernel):
     return {"html": _bundled_html()}
 
 
-async def _boot(id, payload, kernel):
-    """No-op. Returns None."""
+async def _boot(id, payload, agent):
+    """Idempotent first-boot wiring: ensure a canvas_backend child
+    exists. Subsequent boots find the existing child from disk."""
+    BACKEND_HM = "canvas_backend.tools"
+    has_backend = any(c.handler_module == BACKEND_HM for c in agent._children.values())
+    if has_backend:
+        return None
+    rec = agent.create(BACKEND_HM)
+    if "error" in rec:
+        return rec
+    agent.update(id, upstream_id=rec["id"])
+    await agent.send(rec["id"], {"type": "boot"})
     return None
 
 

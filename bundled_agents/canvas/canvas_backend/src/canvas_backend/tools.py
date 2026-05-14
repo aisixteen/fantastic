@@ -1,20 +1,27 @@
-"""canvas bundle — spatial UI host as an agent.
+"""canvas_backend — spatial UI host as an agent.
 
 The canvas is a web page that renders OTHER agents as positioned iframes.
-Membership is **explicit**: each canvas keeps a `members: [agent_id, ...]`
-list on its own record; the webapp iframes only those agents. There is
-NO auto-include — two canvases can host disjoint sets cleanly.
+Membership is **structural**: agents added to the canvas become its
+children (`agent.create(...)`). The substrate's parent-child cascade
+gives us correct lifecycle for free — delete the canvas and every
+member dies; PTYs/uvicorn/etc. owned by member subtrees are torn
+down via `_shutdown` before records vanish.
 
-Layout is stored on each agent's record: x, y, width, height. Drag/resize
-in the browser sends update_agent through core; everyone watching `core`
-(including this canvas) gets `agent_updated` events.
+Layout is stored on each member's record: x, y, width, height. Drag/
+resize in the browser sends `update_agent` against the canvas; the
+substrate emits `agent_updated` events for the watchers.
 
 Verbs:
   reflect       -> {sentence, member_count, viewport_default, ...}
-  add_agent     args: agent_id:str (req)  -> {ok, members[], already?}
-                  Refused if target doesn't answer get_webapp.
+  add_agent     args: handler_module:str (req) | agent_id:str
+                  Spawn a new member as a child of this canvas (via
+                  agent.create) OR re-parent an existing agent under
+                  this canvas. Refused if the resulting member
+                  doesn't answer get_webapp NOR get_gl_view.
+                  Returns {ok, members[], member_id, already?}.
   remove_agent  args: agent_id:str (req)  -> {removed:bool, members[]}
-  list_members  -> {members:[id,...]}
+                  Cascade-deletes the member (and its subtree).
+  list_members  -> {members:[id,...]}      (this canvas's children)
   discover      args: x, y, w, h          -> {agents:[...]}  spatial intersection
   boot          -> no-op (canvas is browser-driven)
 
@@ -42,30 +49,27 @@ def _intersects(
     return not (ax + aw < bx or bx + bw < ax or ay + ah < by or by + bh < ay)
 
 
-def _members_of(rec: dict | None) -> list[str]:
-    """Defensive read — record may be missing or have non-list members."""
-    if not rec:
-        return []
-    m = rec.get("members")
-    return list(m) if isinstance(m, list) else []
+def _member_ids(agent) -> list[str]:
+    """Direct children of this canvas — the new structural members."""
+    return list(agent._children.keys())
 
 
 # ─── verbs ──────────────────────────────────────────────────────
 
 
-async def _reflect(id, payload, kernel):
+async def _reflect(id, payload, agent):
     """Identity + viewport defaults + member count. No args."""
-    rec = kernel.get(id) or {}
-    members = _members_of(rec)
+    rec = agent.get(id) or {}
+    members = _member_ids(agent)
     return {
         "id": id,
-        "sentence": "Spatial canvas with explicit membership. Renders agents listed in `members` as positioned iframes; drag/resize updates their record.",
+        "sentence": "Spatial canvas with structural membership. Members are this agent's children — cascade-deleted with the canvas.",
         "viewport_default": {
             "width": int(rec.get("width", 1600)),
             "height": int(rec.get("height", 900)),
         },
         "member_count": len(members),
-        "agent_count": len(kernel.list()),
+        "agent_count": len(agent.list()),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
@@ -75,62 +79,84 @@ async def _reflect(id, payload, kernel):
     }
 
 
-async def _boot(id, payload, kernel):
+async def _boot(id, payload, agent):
     """No-op. Returns None."""
     return None
 
 
-async def _list_members(id, payload, kernel):
-    """No args. Returns {members:[agent_id,...]} — explicit list of agents this canvas hosts."""
-    rec = kernel.get(id) or {}
-    return {"members": _members_of(rec)}
+async def _list_members(id, payload, agent):
+    """No args. Returns {members:[agent_id,...]} — this canvas's direct children."""
+    return {"members": _member_ids(agent)}
 
 
-async def _add_agent(id, payload, kernel):
-    """args: agent_id:str (req). Append to this canvas's members. Refused if target answers neither get_webapp NOR get_gl_view (a canvas needs SOMETHING to render — a DOM iframe, a GL view, or both). Idempotent — re-adding returns {ok, already:true} without re-emit. Emits members_updated on first add."""
-    target = payload.get("agent_id")
-    if not target or not isinstance(target, str):
-        return {"error": "add_agent: agent_id (str) required"}
-    if not kernel.get(target):
-        return {"error": f"add_agent: no agent {target!r}"}
-    # Probe both presentation verbs. The canvas hosts two layers (DOM
-    # iframe + GL view) and an agent answering EITHER is addable; one
-    # answering both gets BOTH presentations.
-    wa = await kernel.send(target, {"type": "get_webapp"})
+async def _add_agent(id, payload, agent):
+    """args: handler_module:str (req) [+ x,y,width,height,display_name,...].
+    Spawns a new member as this canvas's child via agent.create. The
+    new agent's `_boot` fires (which may itself create grandchildren —
+    e.g. terminal_webapp → terminal_backend). Returns
+    {ok, member_id, members}.
+
+    Refused if the new agent doesn't answer get_webapp NOR get_gl_view
+    (a canvas needs SOMETHING to render). On refusal, the spawned
+    agent is rolled back via cascade-delete.
+    """
+    handler_module = payload.get("handler_module")
+    if not handler_module or not isinstance(handler_module, str):
+        return {"error": "add_agent: handler_module (str) required"}
+    meta = {
+        k: v
+        for k, v in payload.items()
+        if k not in ("type", "handler_module", "agent_id")
+    }
+    rec = agent.create(handler_module, **meta)
+    if "error" in rec:
+        return rec
+    member_id = rec["id"]
+    # Boot the new child so it can spawn its own subtree (idempotent
+    # bundle-level patterns wire this up — terminal_webapp creates its
+    # backend, etc.).
+    await agent.send(member_id, {"type": "boot"})
+    # Probe the renderable contract.
+    wa = await agent.send(member_id, {"type": "get_webapp"})
     has_dom = isinstance(wa, dict) and wa.get("url") and not wa.get("error")
-    gl = await kernel.send(target, {"type": "get_gl_view"})
+    gl = await agent.send(member_id, {"type": "get_gl_view"})
     has_gl = isinstance(gl, dict) and gl.get("source") and not gl.get("error")
     if not (has_dom or has_gl):
+        # Roll back via cascade delete — kills the spawned agent's
+        # subtree along with it.
+        await agent.delete(member_id)
         return {
-            "error": f"add_agent: {target!r} answers neither get_webapp nor get_gl_view; nothing to render"
+            "error": f"add_agent: {member_id!r} answers neither get_webapp nor get_gl_view; nothing to render"
         }
-    rec = kernel.get(id) or {}
-    members = _members_of(rec)
-    if target in members:
-        return {"ok": True, "members": members, "already": True}
-    members.append(target)
-    kernel.update(id, members=members)
-    await kernel.emit(id, {"type": "members_updated", "members": members})
-    return {"ok": True, "members": members}
+    members = _member_ids(agent)
+    await agent.emit(id, {"type": "members_updated", "members": members})
+    return {"ok": True, "member_id": member_id, "members": members}
 
 
-async def _remove_agent(id, payload, kernel):
-    """args: agent_id:str (req). Remove from members. Idempotent — non-member returns {removed:false} without emit. Emits members_updated when an actual removal happens. Returns {removed:bool, members}."""
+async def _remove_agent(id, payload, agent):
+    """args: agent_id:str (req). Cascade-deletes the member (and its
+    subtree). Idempotent — non-member or unknown id returns
+    {removed:false}. Emits members_updated when an actual removal
+    happens. Returns {removed:bool, members}."""
     target = payload.get("agent_id")
     if not target or not isinstance(target, str):
         return {"error": "remove_agent: agent_id (str) required"}
-    rec = kernel.get(id) or {}
-    members = _members_of(rec)
-    if target not in members:
-        return {"removed": False, "members": members}
-    members.remove(target)
-    kernel.update(id, members=members)
-    await kernel.emit(id, {"type": "members_updated", "members": members})
+    if target not in agent._children:
+        return {"removed": False, "members": _member_ids(agent)}
+    result = await agent.delete(target)
+    if not result.get("deleted"):
+        # Most likely delete_lock somewhere in the subtree.
+        return {"removed": False, **result}
+    members = _member_ids(agent)
+    await agent.emit(id, {"type": "members_updated", "members": members})
     return {"removed": True, "members": members}
 
 
-async def _discover(id, payload, kernel):
-    """args: x:float, y:float, w:float (>0), h:float (>0). Returns {agents:[{id,x,y,width,height},...]} for agents whose rect intersects."""
+async def _discover(id, payload, agent):
+    """args: x:float, y:float, w:float (>0), h:float (>0). Returns
+    {agents:[{id,x,y,width,height},...]} for THIS canvas's members
+    whose rect intersects the query rect. Only direct children — for
+    cross-canvas spatial queries, walk the tree explicitly."""
     x = float(payload.get("x", 0))
     y = float(payload.get("y", 0))
     w = float(payload.get("w", 0))
@@ -139,17 +165,16 @@ async def _discover(id, payload, kernel):
         return {"error": "discover: w and h required and > 0"}
     target_rect = (x, y, w, h)
     hits = []
-    for a in kernel.list():
-        if a["id"] == id:
-            continue
-        if _intersects(_rect(a), target_rect):
+    for child in agent._children.values():
+        rec = child.record
+        if _intersects(_rect(rec), target_rect):
             hits.append(
                 {
-                    "id": a["id"],
-                    "x": a.get("x", 0),
-                    "y": a.get("y", 0),
-                    "width": a.get("width", 320),
-                    "height": a.get("height", 220),
+                    "id": child.id,
+                    "x": rec.get("x", 0),
+                    "y": rec.get("y", 0),
+                    "width": rec.get("width", 320),
+                    "height": rec.get("height", 220),
                 }
             )
     return {"agents": hits}
@@ -168,9 +193,9 @@ VERBS = {
 }
 
 
-async def handler(id: str, payload: dict, kernel) -> dict | None:
+async def handler(id: str, payload: dict, agent) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
         return {"error": f"canvas: unknown type {t!r}"}
-    return await fn(id, payload, kernel)
+    return await fn(id, payload, agent)

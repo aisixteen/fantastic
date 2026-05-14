@@ -2,16 +2,17 @@
 
 > scopes: kernel, pty, http
 > requires: `uv sync`; a real shell at `/bin/sh`; tests run against a
-> running `kernel.py serve` (PTYs are process-memory; can't survive
-> separate `python kernel.py call` invocations)
+> running `fantastic` (PTYs are process-memory; can't survive
+> separate `fantastic call` invocations)
 > out-of-scope: HTTP routes, browser xterm rendering
 
 PTY shell agent. Done-token shell verb, timeout recovery, scrollback.
 
 **Why a running serve is required:** the PTY is a child process of the
-running kernel. `python kernel.py call …` spawns a fresh kernel for
+running kernel. `fantastic call …` spawns a fresh kernel for
 each invocation; the PTY would be killed between calls. We use one
-persistent kernel via `serve` and drive it through HTTP `POST /<id>/call`.
+persistent kernel via `serve` and drive it through a one-shot WS
+`call` frame.
 
 ## Pre-flight
 
@@ -19,13 +20,31 @@ persistent kernel via `serve` and drive it through HTTP `POST /<id>/call`.
 cd new_codebase
 rm -rf .fantastic
 PORT=18910
-pkill -9 -f "kernel.py serve" 2>/dev/null; sleep 0.3
-uv run --active python kernel.py serve --port $PORT > /tmp/s.log 2>&1 &
+pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
+uv run --active fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+# WS verb channel is now a sub-agent of web — spawn under web's id.
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
 
-# helper
-call() { curl -s -X POST "http://localhost:$PORT/$1/call" -H 'content-type: application/json' -d "$2"; }
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
 ```
 
 After all tests:
@@ -94,13 +113,13 @@ call $TB '{"type":"shell","cmd":"echo x"}' | python -m json.tool | grep -F "not 
 ```
 Expected: matches.
 
-### Test 8: shutdown lifecycle — core.delete_agent kills the PTY
+### Test 8: on_delete cascade hook — delete_agent kills the PTY
 
-The kernel's universal teardown hook: `core.delete_agent` sends
-`{type:"shutdown"}` to the agent before removing the record. The
-backend's `shutdown` verb runs `_cleanup` → SIGKILLs the child.
-Without this, a deleted record would leak a live PTY emitting
-output to a dead inbox, ghost-spawning sprites in telemetry views.
+The substrate calls each agent's `on_delete` depth-first during
+cascade-delete. terminal_backend's `on_delete` runs `_cleanup` →
+SIGKILLs the child. Without this, a deleted record would leak a
+live PTY emitting output to a dead inbox, ghost-spawning sprites in
+telemetry views.
 
 ```bash
 TB2=$(call core '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
@@ -109,8 +128,8 @@ call core "{\"type\":\"delete_agent\",\"id\":\"$TB2\"}" >/dev/null
 sleep 0.5
 [ -n "$PID" ] && (kill -0 "$PID" 2>/dev/null && echo "FAIL pid $PID still alive" || echo "PASS pid $PID gone")
 ```
-Expected: `PASS pid <N> gone`. Regression signal: pid alive → shutdown
-verb missing OR core.delete_agent stopped sending it.
+Expected: `PASS pid <N> gone`. Regression signal: pid alive →
+on_delete missing OR cascade stopped invoking it.
 
 ## Summary
 
@@ -123,4 +142,4 @@ verb missing OR core.delete_agent stopped sending it.
 | 5 | write + output round-trip | |
 | 6 | stop kills PTY | |
 | 7 | shell on stopped → error | |
-| 8 | shutdown lifecycle: core.delete_agent → PTY child reaped | |
+| 8 | on_delete cascade hook → PTY child reaped | |

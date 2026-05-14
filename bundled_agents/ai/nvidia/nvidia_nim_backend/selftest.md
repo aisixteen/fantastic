@@ -25,15 +25,33 @@ never in `agent.json`, never returned by reflect.
 cd new_codebase
 rm -rf .fantastic
 PORT=18904
-pkill -9 -f "kernel.py serve" 2>/dev/null
-uv run --active python kernel.py serve --port $PORT > /tmp/n.log 2>&1 &
+pkill -9 -f "fantastic" 2>/dev/null
+uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active python fantastic > /tmp/n.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/n.log 2>/dev/null && break; sleep 0.5; done
 
-FA=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-NB=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_agent_id\":\"$FA\"}" \
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
+
+FA=$(call core '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+NB=$(call core "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_agent_id\":\"$FA\"}" \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 ```
 
@@ -47,26 +65,22 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/n.log
 ### Test 1: `_send` failfast when `file_agent_id` unset
 
 ```bash
-NB2=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-curl -s -X POST "http://localhost:$PORT/$NB2/call" -H 'content-type: application/json' \
-  -d '{"type":"send","text":"hi"}' | python -m json.tool
+NB2=$(call core '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+call $NB2 '{"type":"send","text":"hi"}' | python -m json.tool
 ```
 Expected: `{"error":"nvidia_nim_backend: file_agent_id required"}`.
 
 ### Test 2: `set_api_key` failfast when `file_agent_id` unset
 
 ```bash
-curl -s -X POST "http://localhost:$PORT/$NB2/call" -H 'content-type: application/json' \
-  -d '{"type":"set_api_key","api_key":"nvapi-x"}' | python -m json.tool
+call $NB2 '{"type":"set_api_key","api_key":"nvapi-x"}' | python -m json.tool
 ```
 Expected: `{"error":"nvidia_nim_backend: file_agent_id required"}`.
 
 ### Test 3: `_send` failfast when api_key not set
 
 ```bash
-curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-  -d '{"type":"send","text":"hi"}' | python -m json.tool
+call $NB '{"type":"send","text":"hi"}' | python -m json.tool
 ```
 Expected: `{"error":"nvidia_nim_backend: api_key not set; call set_api_key first"}`.
 
@@ -76,12 +90,10 @@ Skip if `NVAPI_KEY` is unset.
 
 ```bash
 [ -n "$NVAPI_KEY" ] && {
-  curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-    -d "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}" | python -m json.tool
+  call $NB "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}" | python -m json.tool
 
   test -f ".fantastic/agents/$NB/api_key" && echo "key file present"
-  curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-    -d '{"type":"reflect"}' | python -c "import json,sys;d=json.load(sys.stdin);print('has_api_key:',d['has_api_key'])"
+  call $NB '{"type":"reflect"}' | python -c "import json,sys;d=json.load(sys.stdin);print('has_api_key:',d['has_api_key'])"
 } || echo "SKIPPED (no NVAPI_KEY)"
 ```
 Expected: `{"ok": true}`, sidecar exists, `has_api_key: True`. The
@@ -93,8 +105,7 @@ Skip if `NVAPI_KEY` is unset.
 
 ```bash
 [ -n "$NVAPI_KEY" ] && {
-  curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-    -d '{"type":"send","text":"reply with the single word: ok","client_id":"selftest"}' \
+  call $NB '{"type":"send","text":"reply with the single word: ok","client_id":"selftest"}' \
     | python -c "import json,sys;d=json.load(sys.stdin);print(repr(d.get('final','')))"
 } || echo "SKIPPED (no NVAPI_KEY)"
 ```
@@ -107,10 +118,8 @@ Skip if `NVAPI_KEY` is unset.
 
 ```bash
 [ -n "$NVAPI_KEY" ] && {
-  curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-    -d '{"type":"send","text":"my color is blue","client_id":"alice"}' >/dev/null
-  curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-    -d '{"type":"send","text":"my color is red","client_id":"bob"}' >/dev/null
+  call $NB '{"type":"send","text":"my color is blue","client_id":"alice"}' >/dev/null
+  call $NB '{"type":"send","text":"my color is red","client_id":"bob"}' >/dev/null
   ls .fantastic/agents/$NB/chat_*.json
 } || echo "SKIPPED (no NVAPI_KEY)"
 ```
@@ -120,21 +129,17 @@ content.
 ### Test 7: `clear_api_key` removes sidecar; subsequent send refuses
 
 ```bash
-curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-  -d '{"type":"clear_api_key"}' | python -m json.tool
+call $NB '{"type":"clear_api_key"}' | python -m json.tool
 test -f ".fantastic/agents/$NB/api_key" && echo "FAIL: still present" || echo "key file removed"
-curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-  -d '{"type":"send","text":"hi"}' | python -c "import json,sys;d=json.load(sys.stdin);print('error' in d and 'api_key' in d['error'])"
+call $NB '{"type":"send","text":"hi"}' | python -c "import json,sys;d=json.load(sys.stdin);print('error' in d and 'api_key' in d['error'])"
 ```
 Expected: `{"ok": true, "deleted": true}`, file gone, `True`.
 
 ### Test 8: status verb + reflect document the new pipeline
 
 ```bash
-curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-  -d '{"type":"status","client_id":"alice"}' | python -m json.tool
-curl -s -X POST "http://localhost:$PORT/$NB/call" -H 'content-type: application/json' \
-  -d '{"type":"reflect"}' | python -c "
+call $NB '{"type":"status","client_id":"alice"}' | python -m json.tool
+call $NB '{"type":"reflect"}' | python -c "
 import json,sys
 d=json.load(sys.stdin)
 print('status verb:', 'status' in d['verbs'])
@@ -191,11 +196,15 @@ footer. See `bundled_agents/ai/nvidia/nvidia_nim_backend/tests/test_nvidia_nim_h
 Skip if `NVAPI_KEY` is unset. Manual / browser-based.
 
 ```bash
-WB=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d '{"type":"create_agent","handler_module":"webapp.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-CW=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d "{\"type\":\"create_agent\",\"handler_module\":\"ai_chat_webapp.tools\",\"upstream_id\":\"$NB\"}" \
+# Spin up a chat webapp with provider=nvidia_nim. _boot spawns its own
+# NIM backend child as a peer of $NB (each ai_chat_webapp owns one).
+CW=$(call core '{"type":"create_agent","handler_module":"ai_chat_webapp.tools","provider":"nvidia_nim"}' \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+sleep 0.3
+# Discover its auto-spawned NIM backend and configure file_agent_id + api_key.
+NB2=$(call $CW '{"type":"reflect"}' | python -c "import json,sys;print(json.load(sys.stdin)['upstream_id'])")
+call core "{\"type\":\"update_agent\",\"id\":\"$NB2\",\"file_agent_id\":\"$FA\"}"
+call $NB2 "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}"
 echo "open http://localhost:$PORT/$CW/ in browser"
 ```
 Expected: chat UI loads, typing a message streams tokens, stop button

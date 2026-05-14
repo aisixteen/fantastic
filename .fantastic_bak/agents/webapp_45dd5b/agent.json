@@ -1,0 +1,6 @@
+{
+  "id": "webapp_45dd5b",
+  "handler_module": "webapp.tools",
+  "parent_id": "core",
+  "port": 8889
+}

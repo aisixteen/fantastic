@@ -1,18 +1,32 @@
-"""Kernel implementation package. The match/case CLI router lives in
-`main.py` at the repo root for visibility; everything else here.
-External code does `from kernel import Kernel, _current_sender, ...`
-and gets the re-exports below."""
+"""Public API for the fantastic kernel.
+
+The substrate has two types:
+  - `Agent` — recursive node in the kernel tree. Every entity is an
+    Agent (or an Agent subclass like `Core` / `Cli`). Some have
+    children (populated), some don't (leaves).
+  - `Kernel` — tree-wide shared context (flat agents index, state
+    subscribers, bundle resolver cache). NOT an agent.
+
+Composition is explicit and lives in `main.py`:
+
+    kernel = Kernel()
+    core = Core(kernel)              # root agent
+    cli = Cli(kernel, parent=core)   # stdout renderer (child of core)
+
+The substrate (`kernel/`) knows nothing about specific bundles. Any
+class with a `handler(id, payload, agent)` callable in its declared
+`handler_module` plugs in. External code (bundles, tests, conftest)
+imports from this package.
+"""
 
 from __future__ import annotations
 
-from kernel._bundles import _find_bundle_module, _seed_singletons
-from kernel._call import cmd_call, cmd_reflect
+from kernel._agent import Agent
+from kernel._bundles import _find_bundle_module
 from kernel._env import _load_dotenv
-from kernel._install import cmd_install, cmd_install_bundle
+from kernel._modes import dispatch_argv
 from kernel._kernel import (
-    AGENTS_DIR,
     BUNDLE_ENTRY_GROUP,
-    FANTASTIC_DIR,
     INBOX_BOUND,
     Kernel,
     _current_sender,
@@ -20,44 +34,33 @@ from kernel._kernel import (
 )
 from kernel._lock import (
     LOCK_FILE,
+    FantasticLock,
     _pid_alive,
     _read_lock,
-    _release_serve_lock,
-    acquire_serve_lock,
+    acquire_lock,
+    release_lock,
 )
-from kernel._repl import _coerce, _parse_at, _print_result, _read_line, cmd_repl
-from kernel._serve import cmd_serve
 
 __all__ = [
-    # Core
+    # Substrate types
+    "Agent",
     "Kernel",
+    # Constants
     "INBOX_BOUND",
-    "FANTASTIC_DIR",
-    "AGENTS_DIR",
     "BUNDLE_ENTRY_GROUP",
     "_current_sender",
     "_summarize_payload",
     # Lock
     "LOCK_FILE",
-    "acquire_serve_lock",
+    "FantasticLock",
+    "acquire_lock",
     "_pid_alive",
     "_read_lock",
-    "_release_serve_lock",
+    "release_lock",
     # Env
     "_load_dotenv",
     # Bundles
     "_find_bundle_module",
-    "_seed_singletons",
-    # CLI handlers (the match/case router lives in kernel.py at root)
-    "cmd_repl",
-    "cmd_serve",
-    "cmd_call",
-    "cmd_reflect",
-    "cmd_install",
-    "cmd_install_bundle",
-    # REPL helpers
-    "_coerce",
-    "_parse_at",
-    "_print_result",
-    "_read_line",
+    # CLI modes
+    "dispatch_argv",
 ]

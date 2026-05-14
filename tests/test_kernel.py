@@ -1,21 +1,26 @@
-"""Kernel class — storage CRUD + reflect."""
+"""Agent class — storage CRUD + persistence + reflect.
+
+These tests cover the substrate's storage surface on `Agent`. Each
+test gets a fresh root via the `kernel` fixture (which returns the
+root Agent).
+"""
 
 from __future__ import annotations
 
 import json
 
-
-from kernel import Kernel, INBOX_BOUND
+from core import Core
+from kernel import INBOX_BOUND, Kernel
 
 
 def test_create_assigns_id_with_bundle_prefix(kernel):
-    rec = kernel.create("core.tools")
-    assert rec["id"].startswith("core_")
-    assert rec["handler_module"] == "core.tools"
+    rec = kernel.create("file.tools")
+    assert rec["id"].startswith("file_")
+    assert rec["handler_module"] == "file.tools"
 
 
 def test_create_persists_to_disk(kernel, tmp_path):
-    rec = kernel.create("core.tools", model="gemma4")
+    rec = kernel.create("file.tools", model="gemma4")
     f = tmp_path / ".fantastic" / "agents" / rec["id"] / "agent.json"
     assert f.exists()
     on_disk = json.loads(f.read_text())
@@ -24,27 +29,27 @@ def test_create_persists_to_disk(kernel, tmp_path):
 
 
 def test_create_rejects_existing_id(kernel):
-    kernel.create("core.tools", id="dup")
-    r = kernel.create("core.tools", id="dup")
+    kernel.create("file.tools", id="dup")
+    r = kernel.create("file.tools", id="dup")
     assert "error" in r
 
 
 def test_ensure_idempotent(kernel):
-    a = kernel.ensure("singleton", "core.tools", display_name="x")
-    b = kernel.ensure("singleton", "core.tools", display_name="y")
+    a = kernel.ensure("singleton", "file.tools", display_name="x")
+    b = kernel.ensure("singleton", "file.tools", display_name="y")
     assert a["id"] == b["id"]
-    # ensure does NOT overwrite existing
+    # ensure does NOT overwrite existing meta.
     assert b["display_name"] == "x"
 
 
-def test_get_returns_dict_or_none(kernel):
-    kernel.create("core.tools", id="agent1")
+def test_get_returns_record_or_none(kernel):
+    kernel.create("file.tools", id="agent1")
     assert kernel.get("agent1")["id"] == "agent1"
     assert kernel.get("missing") is None
 
 
 def test_update_merges_meta(kernel):
-    kernel.create("core.tools", id="a")
+    kernel.create("file.tools", id="a")
     rec = kernel.update("a", model="x", endpoint="http://localhost")
     assert rec["model"] == "x"
     assert rec["endpoint"] == "http://localhost"
@@ -54,32 +59,44 @@ def test_update_returns_none_for_missing(kernel):
     assert kernel.update("missing", x=1) is None
 
 
-def test_delete_removes(kernel, tmp_path):
-    kernel.create("core.tools", id="del_me")
-    assert kernel.delete("del_me") is True
+async def test_delete_removes(kernel, tmp_path):
+    kernel.create("file.tools", id="del_me")
+    r = await kernel.delete("del_me")
+    assert r["deleted"] is True
     assert kernel.get("del_me") is None
     assert not (tmp_path / ".fantastic" / "agents" / "del_me").exists()
 
 
-def test_delete_refuses_singleton(kernel):
-    kernel.ensure("locked", "core.tools", singleton=True)
-    assert kernel.delete("locked") is False
+async def test_delete_refuses_locked(kernel):
+    """`delete_lock` on a record refuses delete (any agent can
+    self-protect via update_agent)."""
+    kernel.create("file.tools", id="locked", delete_lock=True)
+    r = await kernel.delete("locked")
+    assert r.get("locked") is True
     assert kernel.get("locked") is not None
 
 
 def test_list_returns_all_records(kernel):
-    kernel.create("core.tools", id="a")
-    kernel.create("core.tools", id="b")
+    """`agent.list()` returns flat all records across the whole tree —
+    own id, all descendants."""
+    kernel.create("file.tools", id="a")
+    kernel.create("file.tools", id="b")
     ids = {a["id"] for a in kernel.list()}
-    assert ids == {"a", "b"}
+    # Root is id "core" — included in flat list along with its children.
+    assert {"a", "b"}.issubset(ids)
+    assert "core" in ids
 
 
 def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
+    """Reboot: bootstrap a fresh root in the same dir; agents that
+    were persisted from the previous root rehydrate via _load_children
+    recursively. Same ids, same parent-child links."""
     monkeypatch.chdir(tmp_path)
-    k1 = Kernel()
-    k1.create("core.tools", id="persisted", x=42)
-    # New kernel reads existing state
-    k2 = Kernel()
+    k1 = Core(Kernel(), argv=[])
+    k1.create("file.tools", id="persisted", x=42)
+    # Simulate restart — drop k1, bootstrap again from same dir.
+    del k1
+    k2 = Core(Kernel(), argv=[])
     rec = k2.get("persisted")
     assert rec is not None
     assert rec["x"] == 42
@@ -87,34 +104,37 @@ def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
 
 def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Corrupted file under root's agents/ dir.
     bad_dir = tmp_path / ".fantastic" / "agents" / "broken"
     bad_dir.mkdir(parents=True)
     (bad_dir / "agent.json").write_text("{NOT_JSON")
-    # Should not raise
-    k = Kernel()
+    # Should not raise.
+    k = Core(Kernel(), argv=[])
     assert k.get("broken") is None
 
 
 async def test_reflect_kernel_returns_substrate_primer(seeded_kernel):
+    """`send("kernel", {reflect})` returns root's primer (transports +
+    tree + bundles). Whether you use the magic id "kernel" or root's
+    actual id "core", you get the primer."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
     assert "primitive" in r
     assert "transports" in r
     assert "in_prompt" in r["transports"]
-    assert "well_known" in r
-    assert "core" in r["well_known"]
-    assert "cli" in r["well_known"]
+    assert "tree" in r
+    # cli was seeded as a child of root (well-known singleton).
+    assert "available_bundles" in r
 
 
 async def test_inbox_bounded_drops_oldest(kernel):
-    # Fill an inbox past INBOX_BOUND
+    """Inbox queue is bounded by INBOX_BOUND and drops oldest on
+    overflow (so a slow consumer doesn't block the whole substrate)."""
     target = "x"
-    kernel.create("core.tools", id=target)
+    kernel.create("file.tools", id=target)
     for i in range(INBOX_BOUND + 50):
         await kernel.emit(target, {"type": "spam", "n": i})
-    q = kernel._ensure_inbox(target)
-    # Queue size should not exceed bound; oldest dropped first
+    q = kernel.ctx.inboxes[target]
     assert q.qsize() <= INBOX_BOUND
-    # Newest message must be present (drained from front)
     last = None
     while not q.empty():
         last = q.get_nowait()

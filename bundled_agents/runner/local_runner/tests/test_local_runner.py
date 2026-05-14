@@ -1,9 +1,16 @@
 """Unit tests for local_runner.tools.
 
-Strategy: drive the verbs directly against an in-process Kernel with a
-record + a mocked subprocess.Popen. No real `fantastic` invoked, no
-actual ports bound — we simulate the spawned kernel by writing a fake
-lock.json into the project directory mid-test.
+Strategy: drive the verbs directly against an in-process Kernel with
+a record + a mocked subprocess.Popen. No real `fantastic` invoked, no
+actual ports bound — we simulate the spawned kernel by writing two
+files into the project directory mid-test:
+
+- `.fantastic/lock.json` — PID-only `{pid}` (substrate lock).
+- `.fantastic/agents/web_*/agent.json` — web bundle record with
+  `handler_module: 'web.tools'` and `port: <n>`. local_runner reads
+  the port from here, not from lock.json.
+
+`_set_live()` writes both atomically.
 """
 
 from __future__ import annotations
@@ -11,9 +18,11 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 
 import pytest
 
+from core import Core
 from kernel import Kernel
 from local_runner import tools as lr
 
@@ -21,7 +30,7 @@ from local_runner import tools as lr
 @pytest.fixture
 def k(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    return Kernel()
+    return Core(Kernel(), argv=[])
 
 
 @pytest.fixture
@@ -41,6 +50,23 @@ def _make_rec(k, proj_path, **extra):
     return rec["id"]
 
 
+def _set_live(proj_path, *, pid: int, port: int) -> None:
+    """Simulate a live spawned `fantastic` inside `proj_path`:
+
+    - `lock.json` carries `{pid}` (PID-only — the substrate's lock).
+    - A `web.tools` agent record exists at the chosen port (where the
+      port actually lives now that the lock is PID-only).
+    """
+    fant = proj_path / ".fantastic"
+    fant.mkdir(parents=True, exist_ok=True)
+    (fant / "lock.json").write_text(json.dumps({"pid": pid}))
+    web_dir = fant / "agents" / f"web_{port:06x}"
+    web_dir.mkdir(parents=True, exist_ok=True)
+    (web_dir / "agent.json").write_text(
+        json.dumps({"id": web_dir.name, "handler_module": "web.tools", "port": port})
+    )
+
+
 # ─── reflect ────────────────────────────────────────────────────
 
 
@@ -58,7 +84,6 @@ async def test_reflect_basic_fields(k, proj):
         {
             "reflect",
             "boot",
-            "shutdown",
             "start",
             "stop",
             "restart",
@@ -70,9 +95,9 @@ async def test_reflect_basic_fields(k, proj):
 
 async def test_reflect_running(k, proj):
     aid = _make_rec(k, proj)
-    # Simulate live serve: write lock.json with our own pid (always alive).
-    lock = proj / ".fantastic" / "lock.json"
-    lock.write_text(json.dumps({"pid": os.getpid(), "port": 49001}))
+    # Simulate live serve: pid in lock.json (PID-only) + port on the
+    # web agent record (where it actually lives now).
+    _set_live(proj, pid=os.getpid(), port=49001)
     r = await lr._reflect(aid, {}, k)
     assert r["running"] is True
     assert r["pid"] == os.getpid()
@@ -106,29 +131,59 @@ async def test_start_not_a_directory(k, tmp_path):
 
 async def test_start_already_running(k, proj):
     aid = _make_rec(k, proj)
-    lock = proj / ".fantastic" / "lock.json"
-    lock.write_text(json.dumps({"pid": os.getpid(), "port": 49002}))
+    _set_live(proj, pid=os.getpid(), port=49002)
     r = await lr._start(aid, {}, k)
     assert r["started"] is True
     assert r["already_running"] is True
     assert r["pid"] == os.getpid()
 
 
-async def test_start_spawns_and_polls_lock(k, proj, monkeypatch):
+async def test_start_two_step_bootstrap_then_spawn_daemon(k, proj, monkeypatch):
+    """`_start` pre-creates the web record via a one-shot subprocess
+    (`subprocess.run`), then spawns the daemon via `subprocess.Popen`.
+    The daemon spawn has no flags — `_default` rehydrates the persisted
+    web from disk."""
     aid = _make_rec(k, proj)
     monkeypatch.setattr(lr, "LOCK_POLL_TIMEOUT", 2.0)
     monkeypatch.setattr(lr, "LOCK_POLL_INTERVAL", 0.05)
-    spawned = {}
+
+    runs: list[list[str]] = []
+    spawned: dict = {}
+    chosen_port: dict = {}
+
+    def fake_run(args, **kwargs):
+        # The pre-create step: capture args + simulate the web record
+        # being written to disk so the daemon-spawn step skips
+        # re-creation.
+        runs.append(list(args))
+        # Extract port from kv-arg
+        port_kv = next((a for a in args if a.startswith("port=")), None)
+        if port_kv:
+            chosen_port["port"] = int(port_kv.split("=", 1)[1])
+        agents_dir = proj / ".fantastic" / "agents" / "web_test"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "agent.json").write_text(
+            json.dumps(
+                {
+                    "id": "web_test",
+                    "handler_module": "web.tools",
+                    "parent_id": "core",
+                    "port": chosen_port.get("port", 0),
+                }
+            )
+        )
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
 
     def fake_popen(args, **kwargs):
-        # Capture spawn args, then immediately write the lock.json the
-        # real spawned kernel would write, so the polling loop succeeds.
+        # The daemon spawn — capture args + simulate the kernel
+        # writing lock.json with the persisted port.
         spawned["args"] = args
         spawned["cwd"] = kwargs.get("cwd")
         spawned["start_new_session"] = kwargs.get("start_new_session")
-        port = int(args[args.index("--port") + 1])
         (proj / ".fantastic" / "lock.json").write_text(
-            json.dumps({"pid": os.getpid(), "port": port})
+            json.dumps({"pid": os.getpid(), "port": chosen_port["port"]})
         )
 
         class _P:  # minimal Popen stand-in
@@ -136,13 +191,19 @@ async def test_start_spawns_and_polls_lock(k, proj, monkeypatch):
 
         return _P()
 
+    monkeypatch.setattr(lr.subprocess, "run", fake_run)
     monkeypatch.setattr(lr.subprocess, "Popen", fake_popen)
     r = await lr._start(aid, {}, k)
     assert r["started"] is True
     assert r["pid"] == os.getpid()
     assert isinstance(r["port"], int)
-    assert spawned["args"][:2] == ["fantastic", "serve"]
-    assert "--port" in spawned["args"]
+    # Pre-create step: one run with core create_agent web.tools
+    assert any(
+        "core" in a and "create_agent" in a and "handler_module=web.tools" in a
+        for a in runs
+    ), f"expected create_agent call in runs={runs}"
+    # Daemon spawn: just [cmd] (no flags)
+    assert spawned["args"] == ["fantastic"]
     assert spawned["cwd"] == str(proj)
     assert spawned["start_new_session"] is True
 
@@ -151,6 +212,27 @@ async def test_start_lock_never_appears(k, proj, monkeypatch):
     aid = _make_rec(k, proj)
     monkeypatch.setattr(lr, "LOCK_POLL_TIMEOUT", 0.3)
     monkeypatch.setattr(lr, "LOCK_POLL_INTERVAL", 0.05)
+
+    # Pre-create step succeeds (writes web record); daemon spawn
+    # succeeds but never writes lock.json → poll times out.
+    def fake_run(args, **kwargs):
+        agents_dir = proj / ".fantastic" / "agents" / "web_test"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "agent.json").write_text(
+            json.dumps(
+                {
+                    "id": "web_test",
+                    "handler_module": "web.tools",
+                    "parent_id": "core",
+                    "port": 49000,
+                }
+            )
+        )
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(lr.subprocess, "run", fake_run)
     monkeypatch.setattr(lr.subprocess, "Popen", lambda *a, **kw: type("_P", (), {})())
     r = await lr._start(aid, {}, k)
     assert "error" in r
@@ -163,18 +245,40 @@ async def test_start_uses_custom_remote_cmd(k, proj, monkeypatch):
     monkeypatch.setattr(lr, "LOCK_POLL_TIMEOUT", 1.0)
     monkeypatch.setattr(lr, "LOCK_POLL_INTERVAL", 0.05)
     captured = {}
+    chosen_port: dict = {}
+
+    def fake_run(args, **kwargs):
+        port_kv = next((a for a in args if a.startswith("port=")), None)
+        if port_kv:
+            chosen_port["port"] = int(port_kv.split("=", 1)[1])
+        agents_dir = proj / ".fantastic" / "agents" / "web_test"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "agent.json").write_text(
+            json.dumps(
+                {
+                    "id": "web_test",
+                    "handler_module": "web.tools",
+                    "parent_id": "core",
+                    "port": chosen_port.get("port", 0),
+                }
+            )
+        )
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
 
     def fake_popen(args, **kwargs):
         captured["args"] = args
-        port = int(args[args.index("--port") + 1])
         (proj / ".fantastic" / "lock.json").write_text(
-            json.dumps({"pid": os.getpid(), "port": port})
+            json.dumps({"pid": os.getpid(), "port": chosen_port["port"]})
         )
         return type("_P", (), {})()
 
+    monkeypatch.setattr(lr.subprocess, "run", fake_run)
     monkeypatch.setattr(lr.subprocess, "Popen", fake_popen)
     await lr._start(aid, {}, k)
     assert captured["args"][0] == "/opt/custom/fantastic"
+    assert captured["args"] == ["/opt/custom/fantastic"]  # no flags
 
 
 # ─── stop ───────────────────────────────────────────────────────
@@ -284,18 +388,16 @@ async def test_status_not_running(k, proj):
     r = await lr._status(aid, {}, k)
     assert r["running"] is False
     assert r["pid"] is None
-    assert r["http_ok"] is False
+    assert r["ws_ok"] is False
 
 
-async def test_status_running_no_http(k, proj):
+async def test_status_running_no_ws(k, proj):
     aid = _make_rec(k, proj)
-    (proj / ".fantastic" / "lock.json").write_text(
-        json.dumps({"pid": os.getpid(), "port": 1})  # port 1 unlikely bound
-    )
+    _set_live(proj, pid=os.getpid(), port=1)  # port 1 unlikely bound
     r = await lr._status(aid, {}, k)
     assert r["running"] is True
     assert r["pid"] == os.getpid()
-    assert r["http_ok"] is False  # nothing listening on :1
+    assert r["ws_ok"] is False  # nothing listening on :1
 
 
 # ─── get_webapp ─────────────────────────────────────────────────
@@ -310,9 +412,7 @@ async def test_get_webapp_not_running(k, proj):
 
 async def test_get_webapp_running_returns_url(k, proj):
     aid = _make_rec(k, proj, display_name="myproj", entry_path="canvas/")
-    (proj / ".fantastic" / "lock.json").write_text(
-        json.dumps({"pid": os.getpid(), "port": 49007})
-    )
+    _set_live(proj, pid=os.getpid(), port=49007)
     r = await lr._get_webapp(aid, {}, k)
     assert r["url"] == "http://localhost:49007/canvas/"
     assert r["title"] == "myproj"
@@ -322,18 +422,19 @@ async def test_get_webapp_running_returns_url(k, proj):
 
 async def test_get_webapp_default_entry_path(k, proj):
     aid = _make_rec(k, proj, display_name="bare")
-    (proj / ".fantastic" / "lock.json").write_text(
-        json.dumps({"pid": os.getpid(), "port": 49008})
-    )
+    _set_live(proj, pid=os.getpid(), port=49008)
     r = await lr._get_webapp(aid, {}, k)
     assert r["url"] == "http://localhost:49008/"
 
 
-# ─── shutdown alias ─────────────────────────────────────────────
+# ─── on_delete cascade hook ─────────────────────────────────────
 
 
-async def test_shutdown_calls_stop(k, proj, monkeypatch):
+async def test_on_delete_calls_stop(k, proj, monkeypatch):
+    """on_delete is invoked by the substrate cascade — it must stop
+    the spawned kernel subprocess so it doesn't outlive the agent."""
     aid = _make_rec(k, proj)
+    agent = k.ctx.agents[aid]
     called = {}
 
     async def fake_stop(*a, **kw):
@@ -341,9 +442,8 @@ async def test_shutdown_calls_stop(k, proj, monkeypatch):
         return {"stopped": True}
 
     monkeypatch.setattr(lr, "_stop", fake_stop)
-    r = await lr._shutdown(aid, {}, k)
+    await lr.on_delete(agent)
     assert called.get("stop") is True
-    assert r["stopped"] is True
 
 
 # ─── handler dispatch ───────────────────────────────────────────

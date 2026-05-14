@@ -51,8 +51,29 @@ async def _render_html(id, payload, kernel):
     return {"html": _bundled_html()}
 
 
-async def _boot(id, payload, kernel):
-    """No-op. Returns None."""
+async def _boot(id, payload, agent):
+    """Idempotent first-boot wiring: ensure a provider backend child
+    exists. The provider is selected by the `provider` field on the
+    record (`"ollama"` or `"nvidia_nim"`); default `ollama`. On every
+    subsequent boot, the backend record is already present from disk
+    and this is a no-op.
+
+    Cascade-delete this chat webapp and its provider backend goes
+    with it via the substrate's structural cascade.
+    """
+    rec = agent.get(id) or {}
+    provider = rec.get("provider", "ollama")
+    backend_hm = (
+        "ollama_backend.tools" if provider == "ollama" else "nvidia_nim_backend.tools"
+    )
+    has_backend = any(c.handler_module == backend_hm for c in agent._children.values())
+    if has_backend:
+        return None
+    new_rec = agent.create(backend_hm)
+    if "error" in new_rec:
+        return new_rec
+    agent.update(id, upstream_id=new_rec["id"])
+    await agent.send(new_rec["id"], {"type": "boot"})
     return None
 
 

@@ -1,0 +1,11 @@
+{
+  "id": "ai_chat_webapp_50bb65",
+  "handler_module": "ai_chat_webapp.tools",
+  "parent_id": "core",
+  "upstream_id": "ollama_backend_f4687c",
+  "width": 625,
+  "height": 750,
+  "x": -407,
+  "y": 117,
+  "delete_lock": true
+}

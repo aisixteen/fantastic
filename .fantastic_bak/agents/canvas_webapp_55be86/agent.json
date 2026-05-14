@@ -1,0 +1,6 @@
+{
+  "id": "canvas_webapp_55be86",
+  "handler_module": "canvas_webapp.tools",
+  "parent_id": "core",
+  "upstream_id": "canvas_backend_32e0ca"
+}

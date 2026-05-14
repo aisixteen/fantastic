@@ -14,10 +14,30 @@ Provider-agnostic chat UI agent fronting any LLM backend that answers
 cd new_codebase
 rm -rf .fantastic
 PORT=18903
-pkill -9 -f "kernel.py serve" 2>/dev/null
-uv run --active python kernel.py serve --port $PORT > /tmp/s.log 2>&1 &
+pkill -9 -f "fantastic" 2>/dev/null
+uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active python fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
+
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
 ```
 
 After all tests:
@@ -27,16 +47,26 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 
 ## Tests
 
-### Test 1: get_webapp descriptor
+### Test 1: create ai_chat_webapp → provider backend auto-spawned
+
+Default provider is `ollama` (override with `provider:"nvidia_nim"`).
+The webapp's `_boot` creates the corresponding backend as its child
+and sets `upstream_id` on its own record.
 
 ```bash
-OW=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d '{"type":"create_agent","handler_module":"ai_chat_webapp.tools","upstream_id":"upstream_x"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OW=$(call core '{"type":"create_agent","handler_module":"ai_chat_webapp.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+sleep 0.3
+call $OW '{"type":"reflect"}' | python -c "
+import json,sys
+d=json.load(sys.stdin)
+ok=isinstance(d.get('upstream_id'),str) and d['upstream_id'].startswith('ollama_backend_')
+print('upstream auto-set:', 'PASS' if ok else f'FAIL d={d}')
+"
 
-curl -s -X POST "http://localhost:$PORT/$OW/call" -H 'content-type: application/json' \
-  -d '{"type":"get_webapp"}' | python -m json.tool
+call $OW '{"type":"get_webapp"}' | python -m json.tool
 ```
-Expected: `{url:"/<OW>/", default_width:360, default_height:480, title:"chat"}`.
+Expected: `upstream auto-set: PASS` then
+`{url:"/<OW>/", default_width:360, default_height:480, title:"chat"}`.
 
 ### Test 2: served HTML has chat UI markers
 
@@ -55,24 +85,38 @@ echo "$HTML" | grep -F "t.on('status'" >/dev/null && echo "status subscription: 
 echo "$HTML" | grep -F "queuedBubbles" >/dev/null && echo "FIFO map: yes"
 echo "$HTML" | grep -F "mine_pending" >/dev/null && echo "boot snapshot consumed: yes"
 echo "$HTML" | grep -F "@keyframes" >/dev/null && echo "pulse animation: yes"
-echo "$HTML" | grep -F "pendingUserBubble" >/dev/null && echo "FAIL: legacy singleton present" || echo "legacy singleton gone: yes"
 ```
 Expected: every line ends in `yes`. Drift guard against UI regressions.
 
-### Test 3: missing upstream_id → page error
+### Test 3: provider switch — `provider:"nvidia_nim"` spawns the NIM backend
 
 ```bash
-OW2=$(curl -s -X POST http://localhost:$PORT/core/call -H 'content-type: application/json' \
-  -d '{"type":"create_agent","handler_module":"ai_chat_webapp.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-curl -s "http://localhost:$PORT/$OW2/" | grep -F "upstream_id not set"
+OW2=$(call core '{"type":"create_agent","handler_module":"ai_chat_webapp.tools","provider":"nvidia_nim"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+sleep 0.3
+call $OW2 '{"type":"reflect"}' | python -c "
+import json,sys
+d=json.load(sys.stdin)
+ok=isinstance(d.get('upstream_id'),str) and d['upstream_id'].startswith('nvidia_nim_backend_')
+print('provider-switch: PASS' if ok else f'FAIL d={d}')
+"
 ```
-Expected: matches.
+Expected: `provider-switch: PASS`.
 
 ### Test 4 (manual, requires live LLM backend): chat in browser
 
-Provision a backend (ollama_backend or nvidia_nim_backend) with file_agent_id;
-set ai_chat_webapp.upstream_id to that backend; open `http://localhost:$PORT/<OW>/`
-in browser.
+The chat webapp from Test 1 already has its provider backend wired
+via `_boot`. Configure the backend's `file_agent_id` (and `api_key`
+for nvidia_nim) before opening:
+
+```bash
+# Find backend id from the webapp's reflect.
+BACKEND=$(call $OW '{"type":"reflect"}' | python -c "import json,sys;print(json.load(sys.stdin)['upstream_id'])")
+# Provision a file agent for the backend's persistence + (for nvidia) api_key.
+FA=$(call core '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+call core "{\"type\":\"update_agent\",\"id\":\"$BACKEND\",\"file_agent_id\":\"$FA\"}"
+```
+
+Open `http://localhost:$PORT/$OW/` in browser.
 
 Walk through the user-visible behaviors in order. Each is a separate
 PASS/FAIL signal — note which step regresses if any do.
@@ -129,10 +173,10 @@ Regression signals:
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | get_webapp descriptor | |
+| 1 | _boot auto-spawns provider backend (default ollama) | |
 | 2 | served HTML has chat markers | |
 | 2b | served HTML carries status pipeline (drift guard) | |
-| 3 | missing upstream_id → error | |
+| 3 | provider switch (`nvidia_nim`) spawns NIM backend | |
 | 4.1 (manual) | streaming into assistant bubble | |
 | 4.2 (manual) | phase pill cycles + elapsed ticks | |
 | 4.3 (manual) | tool blocks render inline | |

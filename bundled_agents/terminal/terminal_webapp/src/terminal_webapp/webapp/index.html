@@ -71,6 +71,35 @@
   term.onData(async (data) => {
     await t.call(upstream, { type: 'write', data });
   });
+
+  // Image paste bridge. xterm only pastes text/plain — an image from
+  // the browser clipboard would be silently dropped, and `claude`
+  // running server-side can't reach the browser's clipboard. So grab
+  // the image bytes here and ship them to the backend, which saves a
+  // file and types its path into the PTY (mimics a file drag-drop —
+  // the path-injection pattern Claude Code recognizes). Text paste is
+  // untouched: no image item → xterm handles it as before.
+  document.addEventListener('paste', async (ev) => {
+    const items = (ev.clipboardData && ev.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.kind === 'file' && it.type.startsWith('image/')) {
+        ev.preventDefault();  // don't let xterm process an empty text paste
+        const file = it.getAsFile();
+        if (!file) continue;
+        try {
+          const buf = await file.arrayBuffer();
+          await t.call(upstream, {
+            type: 'paste_image',
+            data: new Uint8Array(buf),
+            mime: it.type,
+          });
+        } catch (e) {
+          term.write('\r\n[image paste failed: ' + (e && e.message) + ']\r\n');
+        }
+        return;
+      }
+    }
+  });
   term.onResize(async ({ cols, rows }) => {
     await t.call(upstream, { type: 'resize', cols, rows });
   });
@@ -113,8 +142,26 @@
     }
   }, 100);
 
+  // Flow control — mirror VSCode's integrated terminal. The backend
+  // detaches its PTY reader once too many emitted chars sit unacked;
+  // we ack each chunk AFTER xterm has actually parsed it (the
+  // term.write callback), buffered so we send at most one ack per
+  // CHAR_COUNT_ACK_SIZE chars (VSCode's AckDataBufferer). This is real
+  // backpressure: the PTY is throttled to the speed xterm can render,
+  // so a pasted script that floods output can't lock up the tab.
+  const CHAR_COUNT_ACK_SIZE = 5000;
+  let unsentAck = 0;
+  function ackChars(n) {
+    unsentAck += n;
+    while (unsentAck >= CHAR_COUNT_ACK_SIZE) {
+      unsentAck -= CHAR_COUNT_ACK_SIZE;
+      t.call(upstream, { type: 'ack', chars: CHAR_COUNT_ACK_SIZE }).catch(() => {});
+    }
+  }
+
   t.on('output', (e) => {
-    term.write(e.data || '');
+    const d = e.data || '';
+    term.write(d, () => ackChars(d.length));
     if (autoscroll) pendingOutput = true;
   });
   t.on('closed', () => term.write('\r\n[process closed]\r\n'));

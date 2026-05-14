@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 
-async def test_reflect_returns_verbs(seeded_kernel):
+async def test_reflect_returns_substrate_primer(seeded_kernel):
+    """Root reflect returns the substrate primer — admin verbs are
+    baked into Agent class itself and answered for any agent. The
+    primer surfaces transports + tree + bundles for discovery."""
     r = await seeded_kernel.send("core", {"type": "reflect"})
-    assert r["sentence"].startswith("Core")
-    for v in (
-        "list_agents",
-        "create_agent",
-        "delete_agent",
-        "update_agent",
-        "boot",
-        "reflect",
-    ):
-        assert v in r["verbs"]
+    assert r["sentence"].startswith("Fantastic kernel")
+    assert "transports" in r
+    assert "tree" in r
+    assert "available_bundles" in r
 
 
 async def test_list_agents(seeded_kernel):
@@ -69,40 +66,30 @@ async def test_delete_agent_emits_event(seeded_kernel):
     assert any(e["type"] == "agent_deleted" for e in events)
 
 
-async def test_delete_agent_sends_shutdown_to_target(seeded_kernel):
-    """delete_agent must dispatch `shutdown` to the agent BEFORE
-    removing its record, symmetric to create_agent's `boot`. This is
-    how bundles tear down process-memory state (PTY children, uvicorn,
-    etc.) — without it, orphan subprocesses outlive their record and
-    keep emitting traffic to a dead inbox.
-
-    We verify by watching the agent's inbox: the shutdown payload
-    lands there before kernel.delete drops the inbox.
-    """
+async def test_delete_agent_calls_on_delete_hook(seeded_kernel, tmp_path):
+    """delete_agent calls each agent's `on_delete` hook depth-first
+    BEFORE removing the record. The default `on_delete` rmtrees the
+    agent's directory; bundles override with `async def on_delete(agent)`
+    in their tools.py to tear down process-memory state (PTY children,
+    uvicorn, etc.)."""
     rec = await seeded_kernel.send(
         "core",
         {"type": "create_agent", "handler_module": "file.tools"},
     )
     aid = rec["id"]
-    seen: list[dict] = []
-    seeded_kernel._ensure_inbox("w")
-    seeded_kernel.watch(aid, "w")
-    await seeded_kernel.send("core", {"type": "delete_agent", "id": aid})
-    q = seeded_kernel._ensure_inbox("w")
-    while not q.empty():
-        seen.append(q.get_nowait())
-    types = [e.get("type") for e in seen]
-    assert "shutdown" in types, (
-        f"expected shutdown to be sent before delete; got {types}"
-    )
+    agent_dir = seeded_kernel.ctx.agents[aid]._root_path
+    assert agent_dir.exists(), f"agent dir should exist pre-delete: {agent_dir}"
+    r = await seeded_kernel.send("core", {"type": "delete_agent", "id": aid})
+    assert r["deleted"] is True
+    # on_delete's default behavior is to rmtree the agent's dir.
+    assert not agent_dir.exists(), f"agent dir should be gone: {agent_dir}"
 
 
-async def test_delete_agent_ignores_unknown_shutdown_verb(seeded_kernel):
-    """Bundles that don't implement `shutdown` return an unknown-verb
-    error from their handler. delete_agent must not abort on that —
-    it's an opt-in lifecycle hook, not a contract."""
-    # file.tools doesn't implement `shutdown`. Delete should still
-    # succeed end-to-end without raising.
+async def test_delete_agent_handler_module_without_on_delete(seeded_kernel):
+    """Bundles that don't define `on_delete` fall through to the
+    default behavior (rmtree own dir). No error."""
+    # file.tools doesn't define on_delete; delete should succeed via
+    # the default rmtree path.
     rec = await seeded_kernel.send(
         "core",
         {"type": "create_agent", "handler_module": "file.tools"},

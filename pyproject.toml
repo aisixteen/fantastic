@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 dependencies = [
   "fantastic-core",
   "fantastic-cli",
-  "fantastic-webapp",
+  "fantastic-web",
+  "fantastic-web-ws",
+  "fantastic-web-rest",
   "fantastic-scheduler",
   "fantastic-file",
   "fantastic-terminal-backend",
@@ -50,7 +52,9 @@ testpaths = [
   "tests",
   "bundled_agents/core/tests",
   "bundled_agents/cli/tests",
-  "bundled_agents/webapp/tests",
+  "bundled_agents/web/host/tests",
+  "bundled_agents/web/web_ws/tests",
+  "bundled_agents/web/web_rest/tests",
   "bundled_agents/scheduler/tests",
   "bundled_agents/file/tests",
   "bundled_agents/terminal/terminal_backend/tests",
@@ -61,11 +65,11 @@ testpaths = [
   "bundled_agents/canvas/canvas_backend/tests",
   "bundled_agents/canvas/canvas_webapp/tests",
   "bundled_agents/canvas/telemetry_pane/tests",
-  "bundled_agents/gl_agent/tests",
+  "bundled_agents/canvas/gl_agent/tests",
+  "bundled_agents/canvas/html_agent/tests",
   "bundled_agents/kernel_bridge/tests",
   "bundled_agents/runner/ssh_runner/tests",
   "bundled_agents/runner/local_runner/tests",
-  "bundled_agents/html_agent/tests",
   "bundled_agents/python_runtime/tests",
 ]
 addopts = "-q"
@@ -74,7 +78,9 @@ addopts = "-q"
 members = [
   "bundled_agents/core",
   "bundled_agents/cli",
-  "bundled_agents/webapp",
+  "bundled_agents/web/host",
+  "bundled_agents/web/web_ws",
+  "bundled_agents/web/web_rest",
   "bundled_agents/scheduler",
   "bundled_agents/file",
   "bundled_agents/terminal/terminal_backend",
@@ -85,11 +91,11 @@ members = [
   "bundled_agents/canvas/canvas_backend",
   "bundled_agents/canvas/canvas_webapp",
   "bundled_agents/canvas/telemetry_pane",
-  "bundled_agents/gl_agent",
+  "bundled_agents/canvas/gl_agent",
+  "bundled_agents/canvas/html_agent",
   "bundled_agents/kernel_bridge",
   "bundled_agents/runner/ssh_runner",
   "bundled_agents/runner/local_runner",
-  "bundled_agents/html_agent",
   "bundled_agents/python_runtime",
   "installed_agents/*",
 ]
@@ -97,7 +103,9 @@ members = [
 [tool.uv.sources]
 fantastic-core = { workspace = true }
 fantastic-cli = { workspace = true }
-fantastic-webapp = { workspace = true }
+fantastic-web = { workspace = true }
+fantastic-web-ws = { workspace = true }
+fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
 fantastic-file = { workspace = true }
 fantastic-terminal-backend = { workspace = true }

@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+from core import Core
 from kernel import Kernel
 from kernel_bridge import tools as kb
 from kernel_bridge._transport import (
@@ -22,10 +23,10 @@ from kernel_bridge._transport import (
 # ─── fixtures ────────────────────────────────────────────────────
 
 
-def _seed(k: Kernel) -> None:
-    """Seed core + cli singletons (cheap; no boot fanout)."""
-    k.ensure("core", "core.tools", singleton=True, display_name="core")
-    k.ensure("cli", "cli.tools", singleton=True, display_name="cli")
+def _seed(k) -> None:
+    """Seed cli singleton (root IS what `core` was; admin verbs are
+    baked into Agent class)."""
+    k.ensure("cli", "cli.tools", display_name="cli")
 
 
 @pytest.fixture
@@ -41,10 +42,10 @@ def two_kernels(tmp_path, monkeypatch):
     b_dir.mkdir()
 
     monkeypatch.chdir(a_dir)
-    ka = Kernel()
+    ka = Core(Kernel(), argv=[])
     _seed(ka)
     monkeypatch.chdir(b_dir)
-    kb_kern = Kernel()
+    kb_kern = Core(Kernel(), argv=[])
     _seed(kb_kern)
     monkeypatch.chdir(tmp_path)
     yield ka, kb_kern
@@ -54,7 +55,7 @@ def two_kernels(tmp_path, monkeypatch):
     kb._test_transport_inject.clear()
 
 
-async def _make_bridge(kernel: Kernel, peer_id: str, transport: str = "memory") -> str:
+async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
     rec = await kernel.send(
         "core",
         {
@@ -112,7 +113,7 @@ async def test_reflect_lists_verbs(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="ignored", transport="memory")
     r = await ka.send(bid, {"type": "reflect"})
-    for v in ("reflect", "boot", "shutdown", "reconnect", "forward"):
+    for v in ("reflect", "boot", "reconnect", "forward"):
         assert v in r["verbs"], f"missing verb {v}"
     assert r["transport"] == "memory"
     assert r["connected"] is False  # not booted yet
@@ -133,10 +134,12 @@ async def test_memory_transport_pair_round_trip(two_kernels):
             "payload": {"type": "reflect"},
         },
     )
-    # The reply is whatever kernel B's core returned for reflect.
+    # The reply is what kernel B's root returns for reflect — the
+    # substrate primer.
     assert isinstance(r, dict), f"non-dict reply: {r!r}"
-    assert r.get("id") == "core", f"reply not from kernel B core: {r}"
-    assert "verbs" in r and "list_agents" in r["verbs"]
+    assert "transports" in r, f"reply not the primer: {r}"
+    assert "tree" in r
+    assert "available_bundles" in r
 
 
 async def test_forward_before_boot_errors(two_kernels):
@@ -165,8 +168,8 @@ async def test_corr_id_namespacing_no_collision(two_kernels):
     assert c2 == f"{b_id}:42"
 
 
-async def test_shutdown_cancels_read_task_and_rejects_pending(two_kernels):
-    """Shutdown must (1) cancel the read_loop task, (2) close the
+async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
+    """on_delete must (1) cancel the read_loop task, (2) close the
     transport, (3) reject any in-flight forward Futures with
     ConnectionError so callers don't hang forever."""
     ka, kb_kern = two_kernels
@@ -178,17 +181,16 @@ async def test_shutdown_cancels_read_task_and_rejects_pending(two_kernels):
     st.pending["dangling"] = fake_fut
     assert st.read_task is not None and not st.read_task.done()
 
-    r = await ka.send(a_id, {"type": "shutdown"})
-    assert r["shutdown"] is True
+    await kb.on_delete(ka.ctx.agents[a_id])
     assert fake_fut.done()
     assert isinstance(fake_fut.exception(), ConnectionError)
     assert st.transport is None
     assert st.read_task is None
 
 
-async def test_shutdown_via_delete_agent_lifecycle(two_kernels):
-    """core.delete_agent fires `shutdown` before removing the record
-    (universal lifecycle hook). The bridge must clean up cleanly."""
+async def test_on_delete_via_cascade(two_kernels):
+    """core.delete_agent calls the bundle's on_delete hook depth-first
+    before removing the record. The bridge must clean up cleanly."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
     assert kb._state(a_id).transport is not None
@@ -264,3 +266,101 @@ async def test_boot_memory_without_injection_errors(two_kernels):
 # collisions). MemoryTransport coverage above proves the framing +
 # correlation + lifecycle paths are correct; the WS path on top is
 # just `WSTransport` swapping in for `MemoryTransport`.
+
+
+# ─── HTTPTransport (request/reply against a remote web_rest) ────
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, body: dict | None):
+        self.status_code = status_code
+        self._body = body
+        # httpx response surface used by HTTPTransport.send.
+        import json as _json
+
+        self.content = b"" if body is None else _json.dumps(body).encode()
+        self.text = "" if body is None else _json.dumps(body)
+
+    def json(self) -> dict | None:
+        return self._body
+
+
+class _FakeHTTPClient:
+    """Minimal in-memory stand-in for httpx.AsyncClient — records POSTs
+    and returns canned replies. Avoids network in the unit suite."""
+
+    def __init__(self, reply: dict | None = None, status: int = 200):
+        self.posted: list[tuple[str, dict]] = []
+        self._reply = reply or {"ok": True}
+        self._status = status
+        self.closed = False
+
+    async def post(self, url: str, json=None, headers=None):
+        self.posted.append((url, json))
+        return _FakeResp(self._status, self._reply)
+
+    async def aclose(self):
+        self.closed = True
+
+
+async def test_http_transport_unwraps_forward_envelope():
+    """Bridge wraps every outbound call in a `forward` envelope. The
+    HTTP transport unwraps to a direct POST against the remote
+    web_rest's `/<rest_id>/<target>` endpoint."""
+    from kernel_bridge._transport import HTTPTransport
+
+    fake = _FakeHTTPClient(reply={"sentence": "remote primer"})
+    t = HTTPTransport("http://h/rest_xyz/", fake)
+    await t.send(
+        {
+            "type": "call",
+            "target": "peer_bridge_b",
+            "payload": {
+                "type": "forward",
+                "target": "core",
+                "payload": {"type": "reflect"},
+                "corr_id": "c1",
+            },
+            "id": "c1",
+        }
+    )
+    # POST landed at <base>/<inner_target>, body == inner payload.
+    assert fake.posted == [("http://h/rest_xyz/core", {"type": "reflect"})]
+    # Reply frame is enqueued with id == corr_id and data == response JSON.
+    reply = await t.recv()
+    assert reply == {"type": "reply", "id": "c1", "data": {"sentence": "remote primer"}}
+
+
+async def test_http_transport_translates_4xx_into_reply_error():
+    from kernel_bridge._transport import HTTPTransport
+
+    fake = _FakeHTTPClient(reply={"error": "boom"}, status=500)
+    t = HTTPTransport("http://h/rest/", fake)
+    await t.send({"type": "call", "target": "core", "payload": {}, "id": "c2"})
+    reply = await t.recv()
+    assert reply["type"] == "reply"
+    assert reply["id"] == "c2"
+    assert "HTTP 500" in reply["data"]["error"]
+
+
+async def test_http_transport_rejects_non_call_frames():
+    from kernel_bridge._transport import HTTPTransport
+
+    fake = _FakeHTTPClient()
+    t = HTTPTransport("http://h/rest/", fake)
+    import pytest
+
+    with pytest.raises(NotImplementedError):
+        await t.send({"type": "emit", "target": "core", "payload": {}})
+
+
+async def test_http_transport_close_idempotent():
+    from kernel_bridge._transport import HTTPTransport
+
+    fake = _FakeHTTPClient()
+    t = HTTPTransport("http://h/rest/", fake)
+    await t.close()
+    assert t.closed is True
+    assert fake.closed is True
+    # Second close is a no-op.
+    await t.close()

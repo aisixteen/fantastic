@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import patch
 
 
 import ollama_backend.tools as ot
@@ -248,10 +247,9 @@ async def test_run_persists_per_client_threads(seeded_kernel, file_agent, tmp_pa
 
 
 async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent):
-    """Old MAX_STEPS=5 cap is gone. Loop continues as long as the
-    model emits tool_calls; safety bounds are SEND_TIMEOUT (180s wall)
-    and the user-callable `interrupt` verb. Verify a 7-step chain
-    (which old code would have truncated at step 5) completes cleanly."""
+    """Loop continues as long as the model emits tool_calls; safety
+    bounds are SEND_TIMEOUT (180s wall) and the user-callable
+    `interrupt` verb. Verify a 7-step chain completes cleanly."""
     oid = await _make_ollama(seeded_kernel, file_agent)
     scripts = [
         [
@@ -293,25 +291,16 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
     oid = await _make_ollama(seeded_kernel, file_agent)
     fp = _FakeProvider([["chunk1 ", "chunk2"]])
     ot._providers[oid] = fp
-    sends: list[tuple[str, dict]] = []
-    emits: list[tuple[str, dict]] = []
-
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
-
+    events: list[dict] = []
+    unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
-            await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        sends = [
+            (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "send"
+        ]
+        emits = [
+            (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "emit"
+        ]
 
         # cli received tokens via kernel.send (so its handler ran).
         cli_tokens = [p for t, p in sends if t == "cli" and p.get("type") == "token"]
@@ -328,6 +317,7 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
         # Stream events carry client_id="cli".
         assert all(p.get("client_id") == "cli" for p in cli_tokens + cli_done)
     finally:
+        unsub()
         ot._providers.pop(oid, None)
 
 
@@ -338,27 +328,18 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent
     oid = await _make_ollama(seeded_kernel, file_agent)
     fp = _FakeProvider([["a", "b"]])
     ot._providers[oid] = fp
-    sends: list[tuple[str, dict]] = []
-    emits: list[tuple[str, dict]] = []
-
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
-
+    events: list[dict] = []
+    unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
-            await seeded_kernel.send(
-                oid, {"type": "send", "text": "hi", "client_id": "web_xyz"}
-            )
+        await seeded_kernel.send(
+            oid, {"type": "send", "text": "hi", "client_id": "web_xyz"}
+        )
+        sends = [
+            (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "send"
+        ]
+        emits = [
+            (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "emit"
+        ]
 
         # Backend's own inbox got the stream, tagged with the web client_id.
         own_tokens = [p for t, p in emits if t == oid and p.get("type") == "token"]
@@ -374,6 +355,7 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent
         ]
         assert cli_stream == [], f"cli leak: {cli_stream}"
     finally:
+        unsub()
         ot._providers.pop(oid, None)
 
 
@@ -484,34 +466,26 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
 
     ot._providers[oid] = _SlowFirst()
 
-    captured: list[tuple[str, dict]] = []
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        captured.append(("send", target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        captured.append(("emit", target, dict(payload)))
-        return await real_emit(target, payload)
-
+    events: list[dict] = []
+    unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
-            t1 = asyncio.create_task(
-                seeded_kernel.send(
-                    oid, {"type": "send", "text": "first", "client_id": "alice"}
-                )
+        t1 = asyncio.create_task(
+            seeded_kernel.send(
+                oid, {"type": "send", "text": "first", "client_id": "alice"}
             )
-            await asyncio.sleep(0.05)  # let t1 acquire the lock
-            t2 = asyncio.create_task(
-                seeded_kernel.send(
-                    oid, {"type": "send", "text": "second", "client_id": "bob"}
-                )
+        )
+        await asyncio.sleep(0.05)  # let t1 acquire the lock
+        t2 = asyncio.create_task(
+            seeded_kernel.send(
+                oid, {"type": "send", "text": "second", "client_id": "bob"}
             )
-            r1, r2 = await asyncio.gather(t1, t2)
+        )
+        r1, r2 = await asyncio.gather(t1, t2)
+        captured = [
+            (e["kind"], e["agent_id"], e["payload"])
+            for e in events
+            if e.get("kind") in ("send", "emit")
+        ]
 
         assert r1["final"] == "ok" and r2["final"] == "ok"
 
@@ -549,6 +523,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
         ]
         assert len(bob_tokens) >= 1
     finally:
+        unsub()
         ot._providers.pop(oid, None)
 
 
@@ -601,30 +576,27 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, file_agent)
 
 def _capture(seeded_kernel):
     """Spy harness: returns (sends, emits, ctx) where ctx is a context
-    manager that patches kernel.send/emit to record dicts."""
+    manager that subscribes to the substrate state stream and splits
+    events into sends/emits with full payloads. Replaces the old
+    patch.object pattern, which can't see bundle-internal sends in
+    the new Agent model where each agent has its own .send method."""
     sends: list[tuple[str, dict]] = []
     emits: list[tuple[str, dict]] = []
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
 
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
+    def _on_event(e: dict) -> None:
+        kind = e.get("kind")
+        if kind == "send":
+            sends.append((e["agent_id"], e["payload"]))
+        elif kind == "emit":
+            emits.append((e["agent_id"], e["payload"]))
 
     class _Ctx:
         def __enter__(self):
-            self._a = patch.object(seeded_kernel, "send", spy_send)
-            self._b = patch.object(seeded_kernel, "emit", spy_emit)
-            self._a.__enter__()
-            self._b.__enter__()
+            self._unsub = seeded_kernel.add_state_subscriber(_on_event)
             return self
 
         def __exit__(self, *exc):
-            self._b.__exit__(*exc)
-            self._a.__exit__(*exc)
+            self._unsub()
             return False
 
     return sends, emits, _Ctx()

@@ -3,7 +3,7 @@
 > scopes: kernel, ai, persistence, http
 > requires: `uv sync`; live ollama at a reachable endpoint with a
 > tool-calling model (gemma4:e2b, llama3.1+, qwen2.5+); tests run
-> against a running `kernel.py serve` so the provider HTTP client +
+> against a running `fantastic` so the provider HTTP client +
 > in-flight tasks stay alive across calls
 > out-of-scope: HTTP routes (covered by webapp selftest), browser
 
@@ -13,7 +13,7 @@ file_agent persistence.
 **Why a running serve is required:** ollama_backend caches the
 `OllamaProvider` HTTP client and in-flight `_run` tasks in
 process-memory. Multi-step tests would lose state between separate
-`kernel.py call` invocations. Drive via serve + HTTP.
+`fantastic call` invocations. Drive via `fantastic` + HTTP.
 
 ## Pre-flight
 
@@ -32,12 +32,30 @@ If unreachable or model missing → STOP, report.
 cd new_codebase
 rm -rf .fantastic
 PORT=18911
-pkill -9 -f "kernel.py serve" 2>/dev/null; sleep 0.3
-uv run --active python kernel.py serve --port $PORT > /tmp/s.log 2>&1 &
+pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
+uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active python fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
 
-call() { curl -s -X POST "http://localhost:$PORT/$1/call" -H 'content-type: application/json' -d "$2"; }
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
 ```
 
 After all tests:
@@ -66,7 +84,7 @@ Expected: matches.
 
 ### Test 3: simple send streams tokens, persists chat_cli.json
 
-The default caller is `client_id="cli"` (REPL/headless flow). With
+The default caller is `client_id="cli"` (REPL/daemon flow). With
 per-client chat storage, the file lives at `chat_cli.json` — passing
 a different `client_id` would write `chat_<that>.json`.
 

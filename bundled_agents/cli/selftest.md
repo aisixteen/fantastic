@@ -6,6 +6,11 @@
 
 Renderer agent. Verifies token/done/say/error/status print correctly.
 
+Cli is **ephemeral** — never persists to disk, composed per-process.
+The pipe-stdin pattern (`echo "..." | fantastic`) is non-tty so Core
+doesn't auto-compose Cli; tests drive it via direct Python composition
+instead.
+
 ## Pre-flight
 
 ```bash
@@ -18,28 +23,69 @@ rm -rf .fantastic
 ### Test 1: say with source prefix
 
 ```bash
-echo "@cli say text=hello source=agent_x" | uv run python kernel.py 2>&1 | grep -F "[agent_x] hello"
+uv run python -c "
+import asyncio
+from kernel import Kernel
+from core import Core
+from cli import Cli
+async def main():
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
+    await k.send('cli', {'type':'say','text':'hello','source':'agent_x'})
+asyncio.run(main())
+" 2>&1 | grep -F "[agent_x] hello"
 ```
 Expected: line containing `[agent_x] hello`.
 
 ### Test 2: token streaming (no newline)
 
 ```bash
-echo "@cli token text=ABCDEF" | uv run python kernel.py 2>&1 | grep -F "ABCDEF"
+uv run python -c "
+import asyncio
+from kernel import Kernel
+from core import Core
+from cli import Cli
+async def main():
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
+    await k.send('cli', {'type':'token','text':'ABCDEF'})
+asyncio.run(main())
+" 2>&1 | grep -F "ABCDEF"
 ```
 Expected: ABCDEF appears in output (no trailing newline from token alone).
 
 ### Test 3: done emits newline
 
 ```bash
-{ echo "@cli token text=part1"; echo "@cli done"; echo "exit"; } | uv run python kernel.py
+uv run python -c "
+import asyncio
+from kernel import Kernel
+from core import Core
+from cli import Cli
+async def main():
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
+    await k.send('cli', {'type':'token','text':'part1'})
+    await k.send('cli', {'type':'done'})
+asyncio.run(main())
+" 2>&1 | grep -F "part1"
 ```
 Expected: `part1` followed by a newline in output.
 
 ### Test 4: error prefixed with ERROR
 
 ```bash
-echo "@cli error text=boom" | uv run python kernel.py 2>&1 | grep -F "ERROR: boom"
+uv run python -c "
+import asyncio
+from kernel import Kernel
+from core import Core
+from cli import Cli
+async def main():
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
+    await k.send('cli', {'type':'error','text':'boom'})
+asyncio.run(main())
+" 2>&1 | grep -F "ERROR: boom"
 ```
 Expected: line with `ERROR: boom`.
 
@@ -49,9 +95,11 @@ Expected: line with `ERROR: boom`.
 uv run python -c "
 import asyncio
 from kernel import Kernel
+from core import Core
+from cli import Cli
 async def main():
-    k = Kernel()
-    k.ensure('cli', 'cli.tools', singleton=True, display_name='cli')
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'queued','detail':{'ahead':2,'send_id':'a'}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'thinking','detail':{}})
     await k.send('cli', {'type':'status','source':'nv_x','phase':'thinking','detail':{'waiting_on':'rate_limit','wait_s':5}})
@@ -76,9 +124,20 @@ and done verbs cover them).
 ### Test 6: reflect lists status as accepted event
 
 ```bash
-echo "@cli reflect" | uv run python kernel.py 2>&1 | grep -F '"status"'
+uv run python -c "
+import asyncio, json
+from kernel import Kernel
+from core import Core
+from cli import Cli
+async def main():
+    k = Core(Kernel(), argv=[])
+    Cli(k.ctx, parent=k)
+    r = await k.send('cli', {'type':'reflect'})
+    print(json.dumps(r, indent=2))
+asyncio.run(main())
+" 2>&1 | grep -F '"status"'
 ```
-Expected: matches inside the `accepts` list.
+Expected: matches inside reflect's `verbs`/`accepts` listing.
 
 ## Summary
 

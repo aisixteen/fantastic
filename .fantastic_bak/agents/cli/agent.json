@@ -1,0 +1,7 @@
+{
+  "id": "cli",
+  "handler_module": "cli.tools",
+  "parent_id": "core",
+  "singleton": true,
+  "display_name": "cli"
+}

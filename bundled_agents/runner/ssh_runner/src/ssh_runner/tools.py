@@ -1,4 +1,4 @@
-"""ssh_runner — remote `fantastic serve` lifecycle.
+"""ssh_runner — remote `fantastic --port N` lifecycle.
 
 Each ssh_runner agent represents one project on one remote host.
 Verbs exec ssh-as-subprocess to control the remote kernel and
@@ -10,7 +10,7 @@ Record fields (set on create_agent):
   remote_path  — project root on the remote box
   remote_cmd   — absolute path to the remote `fantastic` CLI
                  (e.g. /home/me/.venv/bin/fantastic)
-  remote_port  — port the remote `serve` binds (REQUIRED, no default)
+  remote_port  — port the remote daemon binds (REQUIRED, no default)
   local_port   — local port the SSH tunnel forwards from
                  (used by `get_webapp` so canvas can iframe)
   entry_path   — URL suffix appended to the local tunnel for
@@ -23,14 +23,14 @@ Verbs:
               control intentional)
   shutdown  — alias for `stop`; called by core.delete_agent's
               universal lifecycle hook
-  start     — SSH → `cd <remote_path> && nohup <remote_cmd> serve
+  start     — SSH → `cd <remote_path> && nohup <remote_cmd> --port <port>
               --port <remote_port> &`. Polls remote
               `.fantastic/lock.json` to confirm liveness, then
               opens the local SSH tunnel.
   stop      — kill local tunnel (TERM, 2s, KILL); SSH read remote
               pid from lock.json + kill. Idempotent.
   restart   — stop + start.
-  status    — {tunnel_alive, remote_alive, http_ok, remote_pid}
+  status    — {tunnel_alive, remote_alive, ws_ok, remote_pid}
   get_webapp — canvas-facing UI descriptor pointing at the local
                tunnel: {url, default_width, default_height, title}
 
@@ -47,9 +47,9 @@ import os
 import shlex
 import signal as signal_mod
 import subprocess
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
+
+import websockets
 
 REMOTE_LOCK_POLL_TIMEOUT = 30.0
 REMOTE_LOCK_POLL_INTERVAL = 0.5
@@ -170,13 +170,33 @@ def _kill_tunnel(proc: subprocess.Popen | None) -> None:
                 pass
 
 
-def _http_health(local_port: int) -> bool:
+async def _ws_health(local_port: int) -> bool:
+    """End-to-end liveness probe: connect to the local tunnel's
+    `ws://localhost:<local_port>/core/ws`, send a reflect frame, expect
+    a reply within 2s. Proves the tunnel is forwarding AND the remote
+    kernel is alive AND answering."""
+    url = f"ws://localhost:{local_port}/core/ws"
     try:
-        with urllib.request.urlopen(
-            f"http://localhost:{local_port}/_kernel/reflect", timeout=2
-        ) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, OSError, TimeoutError):
+        async with asyncio.timeout(2):
+            async with websockets.connect(url) as ws:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "call",
+                            "target": "core",
+                            "payload": {"type": "reflect"},
+                            "id": "h",
+                        }
+                    )
+                )
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") == "h" and msg.get("type") in (
+                        "reply",
+                        "error",
+                    ):
+                        return msg.get("type") == "reply"
+    except (TimeoutError, OSError, websockets.WebSocketException):
         return False
 
 
@@ -189,7 +209,7 @@ async def _reflect(id, payload, kernel):
     st = _state(id)
     return {
         "id": id,
-        "sentence": "Remote `fantastic serve` lifecycle over SSH.",
+        "sentence": "Remote `fantastic --port N` lifecycle over SSH.",
         "host": rec.get("host"),
         "remote_path": rec.get("remote_path"),
         "remote_cmd": rec.get("remote_cmd"),
@@ -210,7 +230,7 @@ async def _boot(id, payload, kernel):
 
 
 async def _start(id, payload, kernel):
-    """No args. SSHs to `<host>`, runs `cd <remote_path> && nohup <remote_cmd> serve --port <remote_port> > .fantastic/serve.log 2>&1 &`, polls the remote `.fantastic/lock.json` to confirm liveness, then opens the local SSH tunnel `-L <local_port>:localhost:<remote_port>`. Returns {started:bool, remote_pid, tunnel_pid} on success or {error} on failure."""
+    """No args. SSHs to `<host>`, runs `cd <remote_path> && nohup <remote_cmd> --port <remote_port> > .fantastic/serve.log 2>&1 &`, polls the remote `.fantastic/lock.json` to confirm liveness, then opens the local SSH tunnel `-L <local_port>:localhost:<remote_port>`. Returns {started:bool, remote_pid, tunnel_pid} on success or {error} on failure."""
     rec = kernel.get(id) or {}
     host = rec.get("host")
     rp = rec.get("remote_path")
@@ -224,15 +244,19 @@ async def _start(id, payload, kernel):
     rport = int(rport_val)
     lport = int(lport)
 
-    # Kick off the remote serve. nohup + & detaches so the SSH
-    # connection can close while serve keeps running. mkdir -p the
-    # .fantastic dir for the log redirect target.
+    # Two-step bootstrap on the remote:
+    #   1. one-shot `fantastic core create_agent handler_module=web.tools port=N`
+    #      persists the web record (uvicorn task dies with the process,
+    #      but the record stays on disk).
+    #   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
+    #      the persisted web, acquires lock, blocks forever.
     rp_q = shlex.quote(rp)
     cmd_q = shlex.quote(cmd)
     remote = (
         f"cd {rp_q} && mkdir -p .fantastic && "
-        f"nohup {cmd_q} serve --port {rport} "
-        f"> .fantastic/serve.log 2>&1 &"
+        f"{cmd_q} core create_agent handler_module=web.tools port={rport} "
+        f">/dev/null 2>&1 && "
+        f"nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
     )
     rc, out, err = await _ssh_exec(host, remote, timeout=15.0)
     if rc != 0:
@@ -319,7 +343,10 @@ async def _restart(id, payload, kernel):
 
 
 async def _status(id, payload, kernel):
-    """No args. {tunnel_alive, remote_alive, http_ok, remote_pid}. http_ok is a 2s probe to `http://localhost:<local_port>/_kernel/reflect` through the tunnel — proves end-to-end liveness."""
+    """No args. {tunnel_alive, remote_alive, ws_ok, remote_pid}. ws_ok
+    is a 2s probe over the WS verb channel (`ws://localhost:<local_port>
+    /core/ws`, reflect frame → reply) through the SSH tunnel — proves
+    end-to-end liveness."""
     rec = kernel.get(id) or {}
     host = rec.get("host")
     rp = rec.get("remote_path")
@@ -344,18 +371,19 @@ async def _status(id, payload, kernel):
                 remote_alive = rc2 == 0
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
-    http_ok = bool(lport) and tunnel_alive and _http_health(int(lport))
+    ws_ok = bool(lport) and tunnel_alive and await _ws_health(int(lport))
     return {
         "tunnel_alive": tunnel_alive,
         "remote_alive": remote_alive,
         "remote_pid": remote_pid,
-        "http_ok": http_ok,
+        "ws_ok": ws_ok,
     }
 
 
-async def _shutdown(id, payload, kernel):
-    """Lifecycle hook. Same as stop — called by core.delete_agent before record removal so the tunnel + remote serve don't outlive the agent."""
-    return await _stop(id, payload, kernel)
+async def on_delete(agent):
+    """Cascade hook — same as stop: tear down the SSH tunnel + remote
+    serve so they don't outlive the agent record."""
+    await _stop(agent.id, {}, agent)
 
 
 async def _get_webapp(id, payload, kernel):
@@ -380,7 +408,6 @@ async def _get_webapp(id, payload, kernel):
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
-    "shutdown": _shutdown,
     "start": _start,
     "stop": _stop,
     "restart": _restart,

@@ -11,10 +11,8 @@ each agent as a Three.js sprite with name + backlog dots + send/emit
 blip. Add it to any canvas via `canvas_backend.add_agent` to get the
 live system-pulse view.
 
-The agent-vis source previously lived inline in
-`canvas_webapp/index.html`; it now ships in
-`telemetry_pane/glview.js` and reaches a canvas only through the
-generic GL-view dispatch on `add_agent`.
+The agent-vis source ships in `telemetry_pane/glview.js` and reaches
+a canvas through the generic GL-view dispatch on `add_agent`.
 
 ## Pre-flight
 
@@ -22,11 +20,30 @@ generic GL-view dispatch on `add_agent`.
 cd new_codebase
 rm -rf .fantastic
 PORT=18935
-pkill -9 -f "kernel.py serve" 2>/dev/null; sleep 0.5
-uv run --active python kernel.py serve --port $PORT > /tmp/tp.log 2>&1 &
+pkill -9 -f "fantastic" 2>/dev/null; sleep 0.5
+uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active python fantastic > /tmp/tp.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/tp.log 2>/dev/null && break; sleep 0.5; done
-call() { curl -s -X POST "http://localhost:$PORT/$1/call" -H 'content-type: application/json' -d "$2"; }
+
+# This helper opens a one-shot WS, sends a `call` frame, prints reply.
+call() {
+  TARGET="$1" PAYLOAD="$2" PORT="$PORT" uv run --active python - <<'PY'
+import asyncio, json, os, websockets
+target = os.environ["TARGET"]; payload = json.loads(os.environ["PAYLOAD"])
+port = os.environ["PORT"]
+async def main():
+    async with websockets.connect(f"ws://localhost:{port}/{target}/ws") as ws:
+        await ws.send(json.dumps({"type":"call","target":target,"payload":payload,"id":"1"}))
+        while True:
+            m = json.loads(await ws.recv())
+            if m.get("id") == "1" and m.get("type") in ("reply","error"):
+                print(json.dumps(m.get("data"))); return
+asyncio.run(main())
+PY
+}
 ```
 
 After all tests:
@@ -147,11 +164,16 @@ watchers.
 
 ### Test 7 (manual, browser): live agent-vis sprites
 
-Provision a canvas pair + the telemetry pane, open the canvas in a
-browser, and observe the live-pulse view.
+Provision a canvas (its `_boot` spawns the backend automatically) and
+add a telemetry_pane to it. Open the canvas in a browser and observe
+the live-pulse view.
 
 ```bash
-CW=$(call core "{\"type\":\"create_agent\",\"handler_module\":\"canvas_webapp.tools\",\"upstream_id\":\"$CB\"}" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+CW=$(call core '{"type":"create_agent","handler_module":"canvas_webapp.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+sleep 0.3
+CB=$(call $CW '{"type":"reflect"}' | python -c "import json,sys;print(json.load(sys.stdin)['upstream_id'])")
+# Telemetry pane spawns into the canvas's GL layer.
+call $CB "{\"type\":\"add_agent\",\"handler_module\":\"telemetry_pane.tools\"}"
 echo "open http://localhost:$PORT/$CW/ in a browser"
 ```
 

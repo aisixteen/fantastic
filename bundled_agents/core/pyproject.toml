@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "fantastic-core"
 version = "0.1.0"
-description = "Fantastic core agent — system verbs (list/create/update/delete agents)."
+description = "Fantastic core — userland orchestrator. Composes Cli when interactive; dispatches argv to kernel mode functions."
 requires-python = ">=3.11"
 dependencies = []
 
-[project.entry-points."fantastic.bundles"]
-core = "core.tools"
+# Core is NOT a `fantastic.bundles` member — it's the tree root, not a
+# pluggable bundle. main.py imports it directly (`from core import Core`).
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/core"]

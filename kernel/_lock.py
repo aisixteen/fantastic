@@ -1,13 +1,25 @@
-"""Single-instance `serve` lock. `.fantastic/lock.json` carries {pid, port}."""
+"""Per-project-dir PID lock — `.fantastic/lock.json`.
+
+The lock is **PID-only**: one fantastic process per project dir at a
+time, enforced by checking whether the recorded pid is still alive.
+Nothing else lives in the lock file.
+
+Lock file contents: `{pid: int}`. That's it. Endpoint discovery (port
+for HTTP/WS) is a separate concern belonging to whichever bundle
+publishes a transport — not the substrate.
+
+Use the `FantasticLock` context manager rather than calling
+`acquire_lock` / `release_lock` directly — it pairs them safely.
+"""
 
 from __future__ import annotations
 
 import atexit
 import json
 import os
+from pathlib import Path
 
-from kernel._kernel import FANTASTIC_DIR
-
+FANTASTIC_DIR = Path(".fantastic")
 LOCK_FILE = FANTASTIC_DIR / "lock.json"
 
 
@@ -30,32 +42,42 @@ def _read_lock() -> dict | None:
         return None
 
 
-def acquire_serve_lock(port: int) -> None:
-    """Refuse to start `serve` if a live serve is already recorded.
-
-    Writes `.fantastic/lock.json` with `{pid, port}`. Removes it via
-    `atexit` on graceful shutdown. Stale locks (whose pid is dead) are
-    silently overwritten.
-    """
+def acquire_lock() -> None:
+    """Acquire the PID lock for `.fantastic/`. Refuses if another
+    live pid owns it. Stale locks (dead pid) are silently overwritten.
+    atexit-registers release so abnormal exits still clean up."""
     cur = _read_lock()
     if cur:
         cur_pid = cur.get("pid")
-        cur_port = cur.get("port")
         if isinstance(cur_pid, int) and _pid_alive(cur_pid):
             raise RuntimeError(
-                f"kernel already running: pid={cur_pid} port={cur_port}\n"
+                f"another fantastic owns this dir: pid={cur_pid}\n"
                 f"  -> kill it:  kill {cur_pid}\n"
                 f"  -> or, if stale, remove the lock:  rm {LOCK_FILE}"
             )
     FANTASTIC_DIR.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(json.dumps({"pid": os.getpid(), "port": port}))
-    atexit.register(_release_serve_lock)
+    LOCK_FILE.write_text(json.dumps({"pid": os.getpid()}))
+    atexit.register(release_lock)
 
 
-def _release_serve_lock() -> None:
+def release_lock() -> None:
+    """Remove the lock file if this pid owns it. No-op otherwise."""
     cur = _read_lock()
     if cur and cur.get("pid") == os.getpid():
         try:
             LOCK_FILE.unlink()
         except OSError:
             pass
+
+
+class FantasticLock:
+    """Context manager for the PID lock. PID-only — no port, no
+    discovery. Raises `RuntimeError` on `__enter__` if another live
+    pid owns the dir."""
+
+    def __enter__(self) -> "FantasticLock":
+        acquire_lock()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        release_lock()

@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import httpx
 
@@ -332,24 +331,9 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
     nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
     fp = _FakeProvider([["chunk1 ", "chunk2"]])
     nt._providers[nid] = fp
-    sends: list[tuple[str, dict]] = []
-    emits: list[tuple[str, dict]] = []
-
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
-
+    sends, emits, ctx = _capture(seeded_kernel)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
+        with ctx:
             await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
 
         cli_tokens = [p for t, p in sends if t == "cli" and p.get("type") == "token"]
@@ -371,24 +355,9 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent
     nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
     fp = _FakeProvider([["a", "b"]])
     nt._providers[nid] = fp
-    sends: list[tuple[str, dict]] = []
-    emits: list[tuple[str, dict]] = []
-
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
-
+    sends, emits, ctx = _capture(seeded_kernel)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
+        with ctx:
             await seeded_kernel.send(
                 nid, {"type": "send", "text": "hi", "client_id": "web_xyz"}
             )
@@ -480,22 +449,9 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
 
     nt._providers[nid] = _SlowFirst()
 
-    captured: list[tuple[str, str, dict]] = []
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        captured.append(("send", target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        captured.append(("emit", target, dict(payload)))
-        return await real_emit(target, payload)
-
+    sends, emits, ctx = _capture(seeded_kernel)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
+        with ctx:
             t1 = asyncio.create_task(
                 seeded_kernel.send(
                     nid, {"type": "send", "text": "first", "client_id": "alice"}
@@ -513,16 +469,16 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
 
         bob_queued = [
             p
-            for kind, t, p in captured
-            if kind == "emit"
-            and t == nid
-            and p.get("type") == "queued"
-            and p.get("client_id") == "bob"
+            for t, p in emits
+            if t == nid and p.get("type") == "queued" and p.get("client_id") == "bob"
         ]
         assert len(bob_queued) == 1
+        all_pairs = [("send", t, p) for t, p in sends] + [
+            ("emit", t, p) for t, p in emits
+        ]
         alice_queued = [
             p
-            for kind, t, p in captured
+            for kind, t, p in all_pairs
             if p.get("type") == "queued" and p.get("client_id") == "alice"
         ]
         assert alice_queued == []
@@ -664,31 +620,14 @@ async def test_send_retries_once_on_rate_limit(seeded_kernel, file_agent):
     fp = _RateLimitedThenOk()
     nt._providers[nid] = fp
 
-    captured: list[tuple[str, str, dict]] = []
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
-
-    async def spy_send(target, payload):
-        captured.append(("send", target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        captured.append(("emit", target, dict(payload)))
-        return await real_emit(target, payload)
-
+    sends, emits, ctx = _capture(seeded_kernel)
     try:
-        with (
-            patch.object(seeded_kernel, "send", spy_send),
-            patch.object(seeded_kernel, "emit", spy_emit),
-        ):
+        with ctx:
             r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
         assert r["final"] == "ok"
         assert fp.calls == 2  # initial + retry
         # `say` event surfaced the rate-limit wait to the caller (cli).
-        cli_says = [
-            p
-            for kind, t, p in captured
-            if kind == "send" and t == "cli" and p.get("type") == "say"
-        ]
+        cli_says = [p for t, p in sends if t == "cli" and p.get("type") == "say"]
         rate_says = [p for p in cli_says if "rate limited" in p.get("text", "")]
         assert len(rate_says) == 1, f"expected one rate-limit say, got {cli_says}"
     finally:
@@ -787,29 +726,25 @@ def test_key_path_lives_under_agent_dir():
 
 
 def _capture(seeded_kernel):
+    """State-subscriber-based capture of send/emit events. Bundle-
+    internal sends bypass root.send, so we listen on the state stream."""
     sends: list[tuple[str, dict]] = []
     emits: list[tuple[str, dict]] = []
-    real_send, real_emit = seeded_kernel.send, seeded_kernel.emit
 
-    async def spy_send(target, payload):
-        sends.append((target, dict(payload)))
-        return await real_send(target, payload)
-
-    async def spy_emit(target, payload):
-        emits.append((target, dict(payload)))
-        return await real_emit(target, payload)
+    def _on_event(e: dict) -> None:
+        kind = e.get("kind")
+        if kind == "send":
+            sends.append((e["agent_id"], e["payload"]))
+        elif kind == "emit":
+            emits.append((e["agent_id"], e["payload"]))
 
     class _Ctx:
         def __enter__(self):
-            self._a = patch.object(seeded_kernel, "send", spy_send)
-            self._b = patch.object(seeded_kernel, "emit", spy_emit)
-            self._a.__enter__()
-            self._b.__enter__()
+            self._unsub = seeded_kernel.add_state_subscriber(_on_event)
             return self
 
         def __exit__(self, *exc):
-            self._b.__exit__(*exc)
-            self._a.__exit__(*exc)
+            self._unsub()
             return False
 
     return sends, emits, _Ctx()

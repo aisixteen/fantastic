@@ -5,8 +5,8 @@ so the chat UI (`ai_chat_webapp`) and any other caller can swap providers
 by changing `upstream_id` only. Differences from ollama_backend:
 
 - API key required. Stored OUT-OF-BAND in `.fantastic/agents/<id>/api_key`
-  via `file_agent_id`. Never lives in agent.json (which is exposed by
-  `kernel.list()` and `/_agents`). Verbs: `set_api_key`, `clear_api_key`.
+  via `file_agent_id`. Never lives in agent.json (which any reflect
+  caller can see). Verbs: `set_api_key`, `clear_api_key`.
   `reflect` reports `has_api_key:bool` only — never the key value.
 - Provider speaks OpenAI HTTP+SSE; tool_call argument fragments are
   aggregated per index inside the provider. The yield contract is
@@ -213,7 +213,7 @@ def _chat_path(self_id: str, client_id: str) -> str:
 
 def _key_path(self_id: str) -> str:
     """Sidecar file holding the API key. Kept out of agent.json so it
-    never leaks through `kernel.list()` / `/_agents`."""
+    never leaks through `kernel.list()` or any reflect output."""
     return f".fantastic/agents/{self_id}/api_key"
 
 
@@ -515,7 +515,11 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 ],
             }
         )
-        for c in tool_calls:
+
+        # Execute tool_calls IN PARALLEL via asyncio.gather. Order
+        # preserved in results; role:tool messages append in the order
+        # the model emitted them.
+        async def _exec_one(c):
             args = c["arguments"]
             target = args.get("target_id", "")
             payload = args.get("payload", {})
@@ -526,7 +530,6 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 "verb": verb,
                 "args": args,
             }
-            # ENTRY before invocation.
             if self_id in _current:
                 _current[self_id]["last_tool"] = tool_entry
             await _emit_status(
@@ -536,10 +539,8 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 reply = await kernel.send(target, payload)
             except Exception as e:
                 reply = {"error": str(e)}
-            _invalidate_menu(self_id)
             reply_str = json.dumps(reply, default=str)
             tool_entry_done = {**tool_entry, "reply_preview": reply_str[:120]}
-            # EXIT — same call_id, reply_preview filled.
             if self_id in _current:
                 _current[self_id]["last_tool"] = tool_entry_done
             await _emit_status(
@@ -555,14 +556,16 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                     "source": self_id,
                 },
             )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": c["id"],
-                    "name": c["name"],
-                    "content": reply_str,
-                }
-            )
+            return {
+                "role": "tool",
+                "tool_call_id": c["id"],
+                "name": c["name"],
+                "content": reply_str,
+            }
+
+        results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
+        _invalidate_menu(self_id)
+        messages.extend(results)
 
     # Status before the back-compat `done` event.
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
