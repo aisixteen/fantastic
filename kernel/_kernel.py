@@ -129,6 +129,10 @@ class Kernel:
     # `Kernel.create/list/...` delegations route through it.
     root: "Agent | None" = field(default=None)
 
+    # Set once `shutdown()` has walked the tree, so signal handlers
+    # and the atexit safety net don't double-run bundle teardown.
+    _shutdown_complete: bool = field(default=False)
+
     # ─── tree management (front-door API) ──────────────────────
 
     async def send(self, target_id: str, payload: dict) -> dict | None:
@@ -164,6 +168,19 @@ class Kernel:
         if agent.parent is None:
             return {"error": f"cannot delete root agent {agent_id!r}"}
         return await agent.parent.delete(agent_id)
+
+    async def shutdown(self) -> None:
+        """Graceful tree-wide process-shutdown. Depth-first walks
+        every agent's `on_shutdown`/`on_delete` hook to free OS
+        resources (PTYs, subprocesses like `code serve-web`, open
+        sockets) without touching records or disk — the tree
+        survives so the next boot rehydrates cleanly. Idempotent:
+        guarded by `_shutdown_complete`, so the SIGTERM signal
+        handler and the atexit safety net don't double-run."""
+        if self._shutdown_complete or self.root is None:
+            return
+        await self.root.shutdown()
+        self._shutdown_complete = True
 
     def update(self, agent_id: str, **meta: Any) -> dict | None:
         """Patch an agent's meta + persist."""

@@ -44,6 +44,7 @@ import importlib
 import importlib.resources
 import json
 import secrets
+import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Callable
@@ -199,7 +200,17 @@ class Agent:
             src = importlib.resources.files(pkg) / "readme.md"
             if src.is_file():
                 dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        except (ModuleNotFoundError, FileNotFoundError, OSError, TypeError):
+        except (
+            ModuleNotFoundError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            AttributeError,
+        ):
+            # AttributeError covers handler modules that aren't proper
+            # packages (no __spec__.submodule_search_locations) —
+            # single-file modules, synthetic test stubs. No readme to
+            # seed; not a real error.
             pass
 
     def _read_readme(self) -> str | None:
@@ -701,6 +712,51 @@ class Agent:
                 print(f"  [cascade] {self.id} bundle on_delete raised: {e}")
         if not type(self).ephemeral and self._root_path.exists():
             self._rmtree(self._root_path)
+
+    async def shutdown(self) -> None:
+        """Graceful process-shutdown walk. Depth-first like
+        cascade-delete, but DOES NOT touch records, disk, or tree
+        membership — only invokes each bundle's teardown hook to free
+        OS resources (subprocesses, PTYs, open sockets, in-flight
+        tasks). The agent tree survives in `ctx.agents` and on disk,
+        so the next boot rehydrates cleanly.
+
+        Hook resolution per agent: a bundle that wants to distinguish
+        "I'm being shut down, will restart" from "I'm being deleted
+        forever" can define a module-level `on_shutdown(agent)` — this
+        walker calls it. If absent, it falls back to the bundle's
+        `on_delete(agent)` (most bundles just kill subprocesses there,
+        which is exactly what shutdown wants). Run on SIGTERM /
+        SIGINT / SIGHUP (see kernel._modes._default) and as an
+        atexit safety net from main.py."""
+        for cid in list(self._children.keys()):
+            child = self._children.get(cid)
+            if child is None:
+                continue
+            try:
+                await child.shutdown()
+            except Exception as e:
+                print(f"  [shutdown] {cid} raised: {e}", file=sys.stderr)
+        if not self.handler_module:
+            return
+        try:
+            mod = importlib.import_module(self.handler_module)
+        except Exception as e:
+            print(
+                f"  [shutdown] {self.id} import {self.handler_module!r} raised: {e}",
+                file=sys.stderr,
+            )
+            return
+        fn = getattr(mod, "on_shutdown", None) or getattr(mod, "on_delete", None)
+        if fn is None:
+            return
+        try:
+            await fn(self)
+        except Exception as e:
+            print(
+                f"  [shutdown] {self.id} hook raised: {e}",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _rmtree(path: Path) -> None:

@@ -30,6 +30,7 @@ import asyncio
 import json
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -296,16 +297,68 @@ async def _default(kernel) -> None:
         await _boot_all_agents(kernel)
         print("[kernel] up", flush=True)
 
-        tasks: list[Any] = []
+        # Graceful-shutdown plumbing: SIGTERM / SIGINT / SIGHUP set
+        # the stop event, the `wait(FIRST_COMPLETED)` returns, and the
+        # `finally` block walks the tree calling each bundle's
+        # `on_shutdown` / `on_delete` hook so PTYs, `code serve-web`,
+        # uvicorn etc. die before the kernel exits — instead of
+        # being left as orphans for the user to clean up by hand.
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def _request_stop(sig_name: str) -> None:
+            if not stop.is_set():
+                print(
+                    f"\n[kernel] {sig_name} — shutting down...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                stop.set()
+
+        for sig_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, sig_name, None)
+            if sig is None:
+                continue
+            try:
+                loop.add_signal_handler(sig, _request_stop, sig_name)
+            except NotImplementedError:
+                # Windows / non-Unix loops can't install signal
+                # handlers — KeyboardInterrupt still propagates.
+                pass
+
+        tasks: list[asyncio.Task] = []
         if web_agents:
-            tasks.append(_block_forever())
+            tasks.append(asyncio.create_task(_block_forever()))
         if has_repl:
-            tasks.append(_repl_loop(kernel))
+            tasks.append(asyncio.create_task(_repl_loop(kernel)))
+        stop_task = asyncio.create_task(stop.wait())
 
         try:
-            await asyncio.gather(*tasks)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            pass
+            try:
+                await asyncio.wait(
+                    [*tasks, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            # Whatever was still running (the other branch + stop_task
+            # if a real task finished first) — cancel and drain.
+            for t in [*tasks, stop_task]:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, stop_task, return_exceptions=True)
+        finally:
+            # Always-run cleanup: depth-first call each agent's
+            # `on_shutdown` / `on_delete` hook. Idempotent — `Kernel.
+            # shutdown` flips `_shutdown_complete` so the atexit
+            # safety net in main.py is a no-op when the daemon
+            # exited cleanly through here.
+            print("[kernel] tearing down agents...", file=sys.stderr, flush=True)
+            try:
+                await kernel.shutdown()
+            except Exception as e:
+                print(f"[kernel] shutdown raised: {e}", file=sys.stderr)
+            print("[kernel] down", file=sys.stderr, flush=True)
 
 
 async def _block_forever() -> None:

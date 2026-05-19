@@ -164,6 +164,21 @@ scanned at process start.
   page. Same envelope as kernel send, but **bypasses the kernel
   entirely**. Use for high-frequency intra-iframe traffic (cursor,
   drag, audio frames) where round-tripping the server adds nothing.
+- **Iframe URLs — never hardcode a host** — agents that return a URL
+  from `get_webapp` use a path-relative form (`/<agent_id>/`) so the
+  iframe inherits the canvas's `host:port` automatically. Wrappers
+  that embed an **external** HTTP service on a different port (the
+  vscode_fantastic bundle wraps `code serve-web`; future Jupyter /
+  media-server / remote-app bundles will look similar) must build
+  the iframe URL with `window.location.hostname`, not the host
+  serve-web bound to. Browsers treat `localhost` and `127.0.0.1` as
+  different sites (Safari especially partitions storage / cookies /
+  SAB across them), and a cross-site top↔iframe relationship trips
+  workbench-style apps. Hostname-matching keeps top-doc + iframe
+  same-site without exposing the bind on a public interface, and
+  composes naturally with the `ssh_runner` tunnel (the tunnel
+  terminates on the user's localhost, so the hostname stays
+  consistent).
 
 ## Self-bootstrap (for code agents)
 
