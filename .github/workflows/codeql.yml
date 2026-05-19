@@ -15,8 +15,14 @@ jobs:
       security-events: write
       contents: read
     strategy:
+      fail-fast: false
       matrix:
-        language: [python]
+        # GitHub previously auto-registered the javascript-typescript
+        # configuration on refs/heads/main (canvas_webapp/index.html
+        # and other agents serve substantial JS). Omitting it here
+        # makes the PR merge overlay report "1 configuration not
+        # found" because main expects both languages.
+        language: [python, javascript-typescript]
     steps:
       - uses: actions/checkout@v4
 

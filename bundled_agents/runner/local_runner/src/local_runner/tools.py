@@ -57,8 +57,13 @@ STOP_POLL_INTERVAL = 0.1
 
 
 def _free_port() -> int:
+    # Bind to loopback (not "" / 0.0.0.0) — we never actually listen on
+    # the socket, only ask the kernel to allocate a free port number,
+    # so the bind interface is functionally irrelevant. Using "" trips
+    # CodeQL's py/bind-socket-all-network-interfaces; 127.0.0.1 gives
+    # the same allocation behaviour without the security flag.
     s = socket.socket()
-    s.bind(("", 0))
+    s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     return port
