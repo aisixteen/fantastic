@@ -205,8 +205,106 @@ def install(rest: list[str]) -> None:
     )
 
 
+def _parse_git_spec(s: str) -> tuple[str, str | None, str]:
+    """`git+<url>[@ref][#subdirectory=path]` → (url, ref, subdir).
+
+    `s` is the spec WITHOUT the leading `git+`. ref/subdir empty
+    when not present.
+    """
+    subdir = ""
+    if "#" in s:
+        s, frag = s.split("#", 1)
+        for kv in frag.split("&"):
+            k, _, v = kv.partition("=")
+            if k == "subdirectory":
+                subdir = v
+    ref: str | None = None
+    if "://" in s:
+        proto, rest = s.split("://", 1)
+        # ref is after the LAST '@' that isn't part of the userinfo.
+        # uv/pip convention: `git+https://host/path@ref`.
+        if "@" in rest:
+            path, _, candidate = rest.rpartition("@")
+            # ssh-style `user@host` has no '/' before the '@' — skip those.
+            if "/" in path:
+                ref = candidate
+                s = f"{proto}://{path}"
+    return s, ref, subdir
+
+
+def _find_members_in_dir(root: Path) -> list[Path] | None:
+    """Read root/pyproject.toml's [tool.uv.workspace].members and
+    return resolved member directories. None if not a workspace root.
+    """
+    import tomllib
+
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        data = tomllib.loads(pyproject.read_text())
+    except Exception:
+        return None
+    patterns = data.get("tool", {}).get("uv", {}).get("workspace", {}).get("members")
+    if not patterns:
+        return None
+    members: list[Path] = []
+    for pattern in patterns:
+        for member_dir in sorted(root.glob(pattern)):
+            if (member_dir / "pyproject.toml").exists():
+                members.append(member_dir.resolve())
+    return members or None
+
+
+def _resolve_workspace_members(spec: str) -> list[Path] | None:
+    """If `spec` points at a multi-bundle workspace root, return its
+    members. Otherwise None (caller falls back to a normal install).
+
+    Handles two forms:
+      - local path with pyproject.toml + [tool.uv.workspace]
+      - `git+<url>[@ref][#subdirectory=path]` — clones to a tmp dir
+    """
+    p = Path(spec).expanduser()
+    if p.is_dir():
+        return _find_members_in_dir(p.resolve())
+    if spec.startswith("git+"):
+        import tempfile
+
+        url, ref, subdir = _parse_git_spec(spec[4:])
+        tmpdir = Path(tempfile.mkdtemp(prefix="fantastic-bundle-"))
+        r = subprocess.run(
+            ["git", "clone", "--depth", "1", url, str(tmpdir)],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode != 0:
+            # Couldn't clone with depth=1 (e.g. ref isn't HEAD) — try full.
+            r2 = subprocess.run(
+                ["git", "clone", url, str(tmpdir)],
+                capture_output=True,
+                text=True,
+            )
+            if r2.returncode != 0:
+                return None
+        if ref:
+            subprocess.run(
+                ["git", "-C", str(tmpdir), "checkout", ref],
+                capture_output=True,
+                text=True,
+            )
+        root_path = (tmpdir / subdir) if subdir else tmpdir
+        return _find_members_in_dir(root_path)
+    return None
+
+
 def install_bundle(rest: list[str]) -> None:
-    """uv pip install a fantastic bundle into kernel venv or <proj>/.venv."""
+    """uv pip install a fantastic bundle into kernel venv or <proj>/.venv.
+
+    Layout 3 (multi-bundle workspace): if `<spec>` is a directory or
+    git URL whose root carries `[tool.uv.workspace]` with members,
+    each member is installed separately so its entry points register.
+    Otherwise the spec is passed through to `uv pip install` as-is.
+    """
     if not rest:
         print(
             "usage: fantastic install-bundle <spec> [--into <project>]\n"
@@ -252,15 +350,28 @@ def install_bundle(rest: list[str]) -> None:
         target = sys.executable
         target_label = "kernel venv (sys.executable)"
 
-    cmd = ["uv", "pip", "install", "--python", target, spec]
     print(f"[install-bundle] target = {target_label}", file=sys.stderr)
-    print(f"[install-bundle] {' '.join(cmd)}", file=sys.stderr)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stderr.strip(), file=sys.stderr)
-        sys.exit(r.returncode)
-    if r.stdout.strip():
-        print(r.stdout.strip(), file=sys.stderr)
+
+    members = _resolve_workspace_members(spec)
+    if members:
+        print(
+            f"[install-bundle] multi-bundle workspace detected: "
+            f"{len(members)} member(s)",
+            file=sys.stderr,
+        )
+        specs = [str(m) for m in members]
+    else:
+        specs = [spec]
+
+    for one in specs:
+        cmd = ["uv", "pip", "install", "--python", target, one]
+        print(f"[install-bundle] {' '.join(cmd)}", file=sys.stderr)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr.strip(), file=sys.stderr)
+            sys.exit(r.returncode)
+        if r.stdout.strip():
+            print(r.stdout.strip(), file=sys.stderr)
     print(
         "[install-bundle] done. Restart any running daemon "
         "so the new entry point is discovered.",
