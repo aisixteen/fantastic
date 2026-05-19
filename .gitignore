@@ -28,6 +28,7 @@ htmlcov/
 
 # Runtime
 .fantastic/
+.fantastic_bak/
 .cells/
 .mcp.json
 .claude/
