@@ -1,0 +1,44 @@
+# typos.toml — allowlist for `crate-ci/typos`.
+#
+# Run by .github/workflows/spellcheck.yml on every PR. Add a term
+# here when it's an intentional identifier the spell-checker flags
+# as a typo. Keep the list small — every entry weakens the gate.
+
+[default.extend-identifiers]
+# kernel_bridge's bidirectional in-process transport names its
+# queues by direction: q_ab carries A→B, q_ba carries B→A. The
+# pair is symmetric; renaming half breaks the symmetry.
+q_ba = "q_ba"
+q_ab = "q_ab"
+close_b = "close_b"
+close_a = "close_a"
+
+[default.extend-words]
+# Python tests sometimes use single-letter or two-letter locals
+# like `a`, `b`, `ot` for shorthand fixtures. `ot` reads as "object
+# under test" in test_integration.py.
+ot = "ot"
+# `ba`/`ab` appear as suffixes in queue names (see q_ba/q_ab above)
+# AND as part of `kernel_bridge` doc prose ("ba" = B-to-A direction
+# marker). Whole-word allowance covers both.
+ba = "ba"
+ab = "ab"
+# `hel` is a deliberately truncated streaming-chunk fixture in
+# nvidia_nim_backend's tests — simulates an SSE delta that only
+# carries the first 3 chars of "hello". Not a typo of `help`.
+hel = "hel"
+# `unparseable` is a valid English spelling (less common than
+# `unparsable` but in OED). Used in nvidia_nim_backend's Rust doc
+# comment + Python test name. Allowlisted rather than rewritten to
+# avoid touching Python tests we don't otherwise need to edit.
+unparseable = "unparseable"
+
+[files]
+# Don't spellcheck the auto-generated UniFFI Swift binding (it
+# isn't checked into git, but local dev runs may have it cached
+# in worktrees that get scanned anyway).
+extend-exclude = [
+    "rust/packaging/FantasticKernel*/Sources/*/fantastic.swift",
+    "rust/target/",
+    "**/.fantastic/",
+]

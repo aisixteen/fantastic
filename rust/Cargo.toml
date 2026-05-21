@@ -1,0 +1,75 @@
+# Fantastic Kernel — Rust workspace.
+#
+# Each Phase-1 crate has its own Cargo.toml under crates/. See
+# ./README.md for the architecture overview and build instructions.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/fantastic-kernel",
+    "crates/fantastic-bundle",
+    "crates/fantastic-cli",
+    "crates/fantastic-uniffi",
+    "crates/bundles/fantastic-core",
+    "crates/bundles/fantastic-cli-bundle",
+    "crates/bundles/fantastic-web",
+    "crates/bundles/fantastic-web-ws",
+    "crates/bundles/fantastic-web-rest",
+    "crates/bundles/fantastic-file",
+    "crates/bundles/fantastic-html-agent",
+    "crates/bundles/fantastic-canvas-backend",
+    "crates/bundles/fantastic-canvas-webapp",
+    "crates/bundles/fantastic-scheduler",
+    "crates/bundles/fantastic-gl-agent",
+    "crates/bundles/fantastic-telemetry-pane",
+    "crates/bundles/fantastic-ai-chat-webapp",
+    "crates/bundles/fantastic-terminal-webapp",
+    "crates/bundles/fantastic-ollama-backend",
+    "crates/bundles/fantastic-kernel-bridge",
+    "crates/bundles/fantastic-nvidia-nim-backend",
+    "crates/bundles/fantastic-terminal-backend",
+    "crates/bundles/fantastic-python-runtime",
+    "crates/bundles/fantastic-local-runner",
+    "crates/bundles/fantastic-ssh-runner",
+    "crates/uniffi-bindgen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/Alexadar/fantastic_canvas"
+
+[workspace.dependencies]
+# Async runtime — single source of truth so every crate uses the same version.
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# JSON record encoding + WS frames + reflect payloads.
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` so `serde_json::Map` round-trips JSON object key
+# order — matches Python's `dict` insertion-order semantics. Without
+# it, agent.json fields shuffle to alphabetical (BTreeMap), making
+# cross-runtime byte-for-byte parity flaky.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Concurrent maps for kernel.agents + kernel.inboxes.
+dashmap = "6"
+arc-swap = "1"
+
+# HTTP + WS surfaces.
+axum = { version = "0.7", features = ["ws"] }
+tokio-tungstenite = "0.24"
+
+# Path-safety + cross-platform PID checks for the lock file.
+libc = "0.2"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Bundle registration macro.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

@@ -1,0 +1,43 @@
+name: Rust Lint
+
+# Pure-lint CI gate for the Rust workspace. Runs `cargo fmt --check`
+# and `cargo clippy -D warnings` only — no test, no build, no
+# release/xcframework artefacts. Test / build / release ops live in
+# local scripts (`./rust/scripts/quality.sh`,
+# `build-xcframework{,-embedded,-full}.sh`) and are operator-driven,
+# not CI-driven. This workflow only catches lint regressions that
+# slip past a Claude-driven pre-commit sweep.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-build.yml'
+
+jobs:
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

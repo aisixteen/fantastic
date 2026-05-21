@@ -1,0 +1,27 @@
+[package]
+publish = false
+name = "fantastic-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "axum HTTP host — serves /, /<id>/, transport.js, and proxies file reads."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tower = "0.5"
+base64 = "0.22"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio-tungstenite = { workspace = true }
+fantastic-web-ws = { path = "../fantastic-web-ws" }
+fantastic-web-rest = { path = "../fantastic-web-rest" }

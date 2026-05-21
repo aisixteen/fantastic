@@ -1,0 +1,26 @@
+name: Python Lint & Type Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Project moved under `python/` to make room for a forthcoming
+        # Rust port at the repo root. CI steps that touched the Python
+        # tree now run with cwd = python/.
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Ruff lint
+        run: uvx ruff check kernel/ main.py bundled_agents/ tests/
+
+      - name: Ruff format check
+        run: uvx ruff format --check kernel/ main.py bundled_agents/ tests/

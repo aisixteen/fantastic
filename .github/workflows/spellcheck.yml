@@ -1,0 +1,22 @@
+name: Spellcheck
+
+# Spell-check the repo with `typos` — a fast Rust-based typo finder.
+# Pure lint surface, like the other workflows here: no build, no test,
+# no artefacts.
+#
+# `typos` is conservative by default — it flags only well-known typos
+# (e.g. "occured" → "occurred"). Custom allowlist / config lives in
+# `typos.toml` at the repo root if any project term gets flagged.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  spellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@master

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Env
+.env
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.aider.tags.cache.v4/
+.coverage
+htmlcov/
+
+# Runtime
+.fantastic/
+.fantastic_bak/
+.cells/
+.mcp.json
+.claude/
+.config/
+
+# Scratch
+tmp/

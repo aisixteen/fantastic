@@ -1,38 +1,14 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
+# Project-root ignores. Per-tree ignores live alongside the tree
+# (rust/.gitignore for the cargo target dir, python/.gitignore for
+# venv + caches).
 
-# Env
-.env
-.venv/
-env/
+# Scratch / temporary working dir for one-off dumps, notes, traces.
+tmp/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# macOS junk.
 .DS_Store
 
-# Tooling
-.pytest_cache/
-.ruff_cache/
-.aider.tags.cache.v4/
-.coverage
-htmlcov/
-
-# Runtime
+# Kernel workdir state — created when running fantastic from the
+# repo root for dev/testing. Per-tree clones live under rust/ and
+# python/ but the root convenience here gets its own ignore.
 .fantastic/
-.fantastic_bak/
-.cells/
-.mcp.json
-.claude/
-.config/
-
-# Scratch
-tmp/
