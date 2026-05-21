@@ -1,7 +1,7 @@
 # fantastic-kernel
 
 A medium that unifies humans and AIs into a single workspace.
-Recursive `Agent` nodes, one primitive (`send`), plugin-discovered
+Recursive `Agent` nodes, one primitive (`send`), compile-time-linked
 bundles. Every agent answers `{"type":"reflect"}` — the universal
 discovery verb. No client library: the protocol IS the API.
 
@@ -143,7 +143,7 @@ rust/
 ├── Cargo.toml                         workspace root
 ├── crates/
 │   ├── fantastic-kernel/              substrate (Agent + Kernel + send/emit/watch/reflect)
-│   ├── fantastic-bundle/              plugin trait every bundle re-exports
+│   ├── fantastic-bundle/              bundle trait every bundle re-exports
 │   ├── fantastic-cli/                 the `fantastic` binary
 │   ├── fantastic-uniffi/              Swift binding (XCFramework)
 │   └── bundles/
@@ -183,17 +183,14 @@ rust/
     └── FantasticKernelFull/               Swift package — Pro Mac (+ PTY bundles)
 ```
 
-## Plugin model
+## Bundle model
 
 Bundles register at **compile time** — the CLI crate links the
 default set; the `fantastic-uniffi` crate (iOS embedded) links the
-iOS-safe subset. iOS forbids dynamic loading in sandboxed apps, so
-the compile-time model is the only fully-portable option.
-
-Dynamic loading (`libloading` over `installed_agents/*/lib*.dylib`)
-is intentionally NOT supported — same constraint that makes iOS Lite
-viable rules it out everywhere for consistency. If you need a third-
-party bundle, fork + rebuild.
+iOS-safe subset. Adding a bundle to a build means adding its crate
+to the workspace and calling `reg.register(...)` in the relevant
+`register_default_bundles()` site. Same model in both binary
+configurations.
 
 ## Wire surface
 

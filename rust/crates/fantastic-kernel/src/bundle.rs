@@ -1,10 +1,11 @@
-//! Bundle plugin trait + compile-time registry.
+//! Bundle trait + compile-time registry.
 //!
 //! Bundles aren't dynamically loaded — every Rust bundle is a crate
 //! linked into the binary at compile time. The CLI crate links the
 //! default set; the UniFFI crate links a platform-appropriate subset.
-//! (Optional `libloading` for `installed_agents/*/lib*.dylib` lands
-//! behind a non-iOS feature flag in a later phase.)
+//! Adding a bundle to a build means adding its crate to the workspace
+//! and calling `reg.register(...)` in the relevant
+//! `register_default_bundles()` site.
 //!
 //! ## Contract
 //!
@@ -38,7 +39,7 @@ pub type Reply = Option<Value>;
 /// trait signature stays readable.
 pub type BundleError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Plugin trait. Every Rust bundle implements this.
+/// Bundle trait. Every Rust bundle implements this.
 #[async_trait]
 pub trait Bundle: Send + Sync {
     /// Stable bundle name. Matches what's stored in agent.json's

@@ -46,13 +46,17 @@ HTTP surface and one-shots are locked out. Tell the user to add one
 
 ## Weak loading
 
-Agents whose `handler_module` isn't installed in this runtime are
+Agents whose `handler_module` isn't linked into this runtime are
 logged + skipped on boot:
 
     [kernel] skipping agent <id>: bundle <module> not installed in this runtime
 
-The record stays on disk untouched — install the bundle and the
-agent rehydrates intact. Wipe-and-rebuild safe.
+(The log line shape is a wire contract shared with the Python
+runtime — Python uses "installed" because there `pip install` is the
+mechanism; for the Rust runtime "installed" means "linked into the
+binary at compile time".) The record stays on disk untouched —
+boot a build that links the bundle in and the agent rehydrates
+intact. Wipe-and-rebuild safe.
 
 ## Per-agent readmes
 

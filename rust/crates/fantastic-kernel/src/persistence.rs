@@ -15,8 +15,14 @@
 //! **Weak loading**: if a persisted child's `handler_module` isn't in
 //! the active runtime's [`BundleRegistry`], the kernel logs one line
 //! to stderr and skips the agent + its subtree. The record stays on
-//! disk untouched. Install the bundle and the agent rehydrates on
-//! the next boot. The log line shape is part of the contract:
+//! disk untouched. Boot a build whose `register_default_bundles()`
+//! covers that handler_module and the agent rehydrates on next boot.
+//!
+//! The log line shape is part of the wire contract (Python tests +
+//! Rust selftest grep for it verbatim) so the word "installed" is
+//! kept here from the Python lineage — for the Rust runtime it means
+//! "linked into the binary at compile time", not any runtime install
+//! mechanism:
 //!
 //! ```text
 //! [kernel] skipping agent <id>: bundle <module> not installed in this runtime
