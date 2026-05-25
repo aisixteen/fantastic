@@ -500,12 +500,14 @@ dependencies = [
  "fantastic-local-runner",
  "fantastic-nvidia-nim-backend",
  "fantastic-ollama-backend",
+ "fantastic-proxy-agent",
  "fantastic-python-runtime",
  "fantastic-scheduler",
  "fantastic-ssh-runner",
  "fantastic-telemetry-pane",
  "fantastic-terminal-backend",
  "fantastic-terminal-webapp",
+ "fantastic-tools",
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",
@@ -646,6 +648,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-proxy-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-kernel",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-python-runtime"
 version = "0.1.0"
 dependencies = [
@@ -725,9 +738,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-kernel",
+ "fantastic-proxy-agent",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-uniffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fantastic-ai-chat-webapp",
  "fantastic-canvas-backend",
  "fantastic-canvas-webapp",
@@ -740,12 +765,14 @@ dependencies = [
  "fantastic-local-runner",
  "fantastic-nvidia-nim-backend",
  "fantastic-ollama-backend",
+ "fantastic-proxy-agent",
  "fantastic-python-runtime",
  "fantastic-scheduler",
  "fantastic-ssh-runner",
  "fantastic-telemetry-pane",
  "fantastic-terminal-backend",
  "fantastic-terminal-webapp",
+ "fantastic-tools",
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",

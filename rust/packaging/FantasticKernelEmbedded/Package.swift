@@ -30,6 +30,9 @@ let package = Package(
     platforms: [
         .macOS(.v13),
         .iOS(.v16),
+        .tvOS(.v16),
+        .visionOS(.v1),
+        .watchOS(.v9),
     ],
     products: [
         .library(
@@ -45,9 +48,11 @@ let package = Package(
             path: "Sources/FantasticKernelEmbedded"
         ),
         // The binary XCFramework that ships the embedded-tier Rust kernel.
+        // Apple's Xcode 16+ SPM validation requires the .xcframework
+        // directory basename to match the binary-target name exactly.
         .binaryTarget(
             name: "FantasticUniFFIEmbedded",
-            path: "Fantastic-Embedded.xcframework"
+            path: "FantasticUniFFIEmbedded.xcframework"
         ),
     ]
 )

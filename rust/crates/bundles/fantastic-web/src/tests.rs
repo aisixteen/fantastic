@@ -794,3 +794,179 @@ async fn pending_uploads_drop_on_ws_disconnect() {
         .send(&AgentId::from(web_id), json!({"type": "stop"}))
         .await;
 }
+
+// ── /_assets/* — vendored third-party web deps ─────────────────────
+//
+// Three.js + xterm + addon-fit are bundled and served at top-level
+// URLs so canvas/terminal WebView surfaces don't need CDN access.
+// These tests boot the HTTP layer + hit each asset URL with reqwest
+// and verify content-type + non-empty body + immutable cache header.
+
+async fn boot_web_for_assets(kernel: &Arc<Kernel>, port: u16, web_id: &str) {
+    let _ = kernel
+        .send(
+            &AgentId::from("core"),
+            json!({
+                "type": "create_agent",
+                "handler_module": HANDLER_MODULE,
+                "id": web_id,
+                "port": port,
+            }),
+        )
+        .await;
+    let boot_reply = kernel
+        .send(&AgentId::from(web_id), json!({"type": "boot"}))
+        .await;
+    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
+    wait_until_port_accepts(port).await;
+}
+
+#[tokio::test]
+async fn assets_three_js_served_with_javascript_mime() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let web_id = "web_three_js";
+    boot_web_for_assets(&kernel, port, web_id).await;
+
+    let url = format!("http://127.0.0.1:{port}/_assets/three.module.js");
+    let resp = reqwest::get(&url).await.expect("http get");
+    assert_eq!(resp.status().as_u16(), 200, "expected 200");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/javascript"),
+        "content-type was {ct:?}"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.len() > 100_000,
+        "three.module.js looks too small: {} bytes",
+        body.len()
+    );
+    assert!(
+        body.contains("THREE") || body.contains("three"),
+        "body doesn't look like Three.js"
+    );
+
+    kernel
+        .send(&AgentId::from(web_id), json!({"type": "stop"}))
+        .await;
+}
+
+#[tokio::test]
+async fn assets_xterm_js_served_with_javascript_mime() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let web_id = "web_xterm_js";
+    boot_web_for_assets(&kernel, port, web_id).await;
+
+    let url = format!("http://127.0.0.1:{port}/_assets/xterm.min.js");
+    let resp = reqwest::get(&url).await.expect("http get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/javascript"),
+        "content-type was {ct:?}"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.len() > 50_000,
+        "xterm.min.js too small: {} bytes",
+        body.len()
+    );
+
+    kernel
+        .send(&AgentId::from(web_id), json!({"type": "stop"}))
+        .await;
+}
+
+#[tokio::test]
+async fn assets_xterm_css_served_with_css_mime() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let web_id = "web_xterm_css";
+    boot_web_for_assets(&kernel, port, web_id).await;
+
+    let url = format!("http://127.0.0.1:{port}/_assets/xterm.min.css");
+    let resp = reqwest::get(&url).await.expect("http get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("text/css"), "content-type was {ct:?}");
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("xterm"), "css body looks wrong");
+
+    kernel
+        .send(&AgentId::from(web_id), json!({"type": "stop"}))
+        .await;
+}
+
+#[tokio::test]
+async fn assets_xterm_addon_fit_served() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let web_id = "web_addon_fit";
+    boot_web_for_assets(&kernel, port, web_id).await;
+
+    let url = format!("http://127.0.0.1:{port}/_assets/xterm-addon-fit.min.js");
+    let resp = reqwest::get(&url).await.expect("http get");
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/javascript"),
+        "content-type was {ct:?}"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(!body.is_empty());
+
+    kernel
+        .send(&AgentId::from(web_id), json!({"type": "stop"}))
+        .await;
+}
+
+#[tokio::test]
+async fn assets_carry_immutable_cache_control() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, false);
+    let port = free_port();
+    let web_id = "web_cache_ctl";
+    boot_web_for_assets(&kernel, port, web_id).await;
+
+    let url = format!("http://127.0.0.1:{port}/_assets/three.module.js");
+    let resp = reqwest::get(&url).await.expect("http get");
+    let cache = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cache.contains("immutable"),
+        "expected immutable cache-control; got {cache:?}"
+    );
+    assert!(
+        cache.contains("max-age="),
+        "expected max-age in cache-control; got {cache:?}"
+    );
+
+    kernel
+        .send(&AgentId::from(web_id), json!({"type": "stop"}))
+        .await;
+}

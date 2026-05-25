@@ -32,16 +32,29 @@ use crate::agent::{Agent, AgentId, AgentRecord};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
-use serde_json::Map;
+use crate::storage::StorageMode;
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Write an agent's record to its `agent.json`. Idempotent.
+/// Sync an agent's record onto its per-agent `agent.json` ("dirty
+/// binding"): the in-RAM agent and the on-disk file aren't strictly
+/// coupled; this fn brings the file up-to-date for the kernel-managed
+/// fields, leaving every other field on disk alone.
 ///
-/// Ephemeral agents skip persistence entirely.
-pub fn persist(agent: &Agent) -> KernelResult<()> {
-    if agent.ephemeral {
+/// Behaviour:
+/// - **InMemory mode** → no-op (no filesystem at all)
+/// - **Ephemeral agent** → no-op (per-process composition; never persists)
+/// - **Disk mode** → create the agent's dir if missing, read the
+///   existing `agent.json` if any, MERGE the agent's current
+///   `record()` fields into it (overwriting only those keys, leaving
+///   unknown keys + sidecar files untouched), and write the merged
+///   JSON back. NEVER wholesale-overwrites: if a bundle or user has
+///   added fields to `agent.json` that the kernel doesn't manage,
+///   they survive each persist call.
+pub fn persist(agent: &Agent, storage: &StorageMode) -> KernelResult<()> {
+    if storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
     fs::create_dir_all(&agent.root_path).map_err(|e| KernelError::Persistence {
@@ -49,17 +62,43 @@ pub fn persist(agent: &Agent) -> KernelResult<()> {
         source: e,
     })?;
     let path = agent.agent_file();
-    let json = serde_json::to_string_pretty(&agent.record())
-        .expect("AgentRecord is always JSON-serializable");
+    // Read existing JSON (if any) and merge — never wholesale
+    // overwrite. Matches the "dirty binding" contract: the disk is
+    // canonical for fields we don't manage; we update only what we
+    // do.
+    let mut on_disk: Map<String, Value> = if path.exists() {
+        let raw = fs::read_to_string(&path).map_err(|e| KernelError::Persistence {
+            path: path.clone(),
+            source: e,
+        })?;
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Object(m)) => m,
+            // Anything else (corrupt, top-level array, etc.) — start
+            // from scratch rather than refusing.
+            _ => Map::new(),
+        }
+    } else {
+        Map::new()
+    };
+    let record_json =
+        serde_json::to_value(agent.record()).expect("AgentRecord is always JSON-serializable");
+    if let Value::Object(record_map) = record_json {
+        for (k, v) in record_map {
+            on_disk.insert(k, v);
+        }
+    }
+    let json = serde_json::to_string_pretty(&Value::Object(on_disk))
+        .expect("merged record is JSON-serializable");
     fs::write(&path, json).map_err(|e| KernelError::Persistence { path, source: e })?;
     Ok(())
 }
 
 /// Seed a `readme.md` file from a `&str` source (the bundle ships
 /// it via `include_str!`). No-op if the file already exists — we
-/// preserve any user-edited content across reboots.
-pub fn seed_readme(agent: &Agent, readme: &str) -> KernelResult<()> {
-    if agent.ephemeral {
+/// preserve any user-edited content across reboots. No-op in
+/// [`StorageMode::InMemory`] (no filesystem).
+pub fn seed_readme(agent: &Agent, readme: &str, storage: &StorageMode) -> KernelResult<()> {
+    if storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
     let path = agent.readme_file();

@@ -28,6 +28,8 @@ fantastic-terminal-webapp = { path = "../bundles/fantastic-terminal-webapp" }
 fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
 fantastic-kernel-bridge = { path = "../bundles/fantastic-kernel-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
+fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
+fantastic-tools = { path = "../bundles/fantastic-tools" }
 
 # Full-tier (desktop / unsandboxed) bundles. Optional so they only link
 # into the `full` build (Pro Mac). Sandboxed iOS / Lite builds compile
@@ -41,7 +43,9 @@ fantastic-ssh-runner = { path = "../bundles/fantastic-ssh-runner", optional = tr
 tokio = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 uniffi = { version = "0.29", features = ["tokio"] }
+
 [build-dependencies]
 uniffi = { version = "0.29", features = ["build"] }
 

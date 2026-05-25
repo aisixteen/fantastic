@@ -37,6 +37,7 @@ enum KernelError {
     "PortBindFailed",
     "BootFailed",
     "AlreadyRunning",
+    "InvalidSnapshot",
     "Internal",
 };
 

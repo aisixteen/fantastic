@@ -44,9 +44,11 @@ let package = Package(
             path: "Sources/FantasticKernelFull"
         ),
         // The binary XCFramework that ships the full-tier Rust kernel.
+        // Apple's Xcode 16+ SPM validation requires the .xcframework
+        // directory basename to match the binary-target name exactly.
         .binaryTarget(
             name: "FantasticUniFFIFull",
-            path: "Fantastic-Full.xcframework"
+            path: "FantasticUniFFIFull.xcframework"
         ),
     ]
 )

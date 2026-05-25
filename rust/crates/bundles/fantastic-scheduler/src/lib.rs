@@ -159,7 +159,7 @@ fn update_meta(agent_id: &AgentId, kernel: &Kernel, key: &str, value: Value) {
     let mut patch = Map::new();
     patch.insert(key.to_string(), value);
     agent.update_meta(patch);
-    let _ = fantastic_kernel::persistence::persist(&agent);
+    let _ = fantastic_kernel::persistence::persist(&agent, &kernel.storage);
 }
 
 // ── file-agent-routed persistence ───────────────────────────────────

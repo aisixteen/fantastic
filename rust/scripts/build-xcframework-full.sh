@@ -19,7 +19,7 @@ xcf_lib_init
 FEATURES="full"
 SWIFT_MODULE_NAME="FantasticKernelFull"
 PKG_DIR="$RUST_ROOT/packaging/FantasticKernelFull"
-XCF_NAME="Fantastic-Full.xcframework"
+XCF_NAME="FantasticUniFFIFull.xcframework"
 
 # Mac only. iOS device + simulator are explicitly excluded — full-tier
 # bundles use subprocess / PTY syscalls the iOS sandbox forbids; shipping

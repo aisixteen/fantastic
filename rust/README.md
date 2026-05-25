@@ -206,8 +206,37 @@ HTTP + WebSocket:
   abandoned uploads drop on disconnect.
 - **REST** `POST /<rest_id>/<target_id>` body=payload → `kernel.send` → JSON.
   `GET /<rest_id>/_reflect[/<target_id>]` for static discovery.
-- **`.fantastic/`** — on-disk records (`agent.json` per agent,
-  `lock.json` with the daemon's PID).
+- **`.fantastic/`** — disk-mode workdir state. Python-compatible
+  per-agent layout: `agent.json` for the root + `agents/<id>/agent.json`
+  recursively for every child. `lock.json` holds the daemon's PID.
+  Bundle-local sidecar files (chat history, scheduler state, etc.)
+  live next to each agent's `agent.json` in its dir.
+
+## State medium — save/load foundation
+
+The kernel's whole agent tree is materializable as a serializable
+[`KernelState`] in RAM — never as a file on disk. Two storage modes
+pick the *medium*:
+
+| mode | what it does | when |
+|---|---|---|
+| `StorageMode::Disk(workdir)` | Adapter mirrors each agent record onto `<workdir>/.fantastic/agents/<id>/agent.json`. **Dirty binding**: persistence merges kernel-managed fields into the existing JSON — never wholesale-overwrites, never touches sidecar files. Bundles reconcile their own slices when they next touch them. | The standalone CLI; the workspace-kernel embed (Pro Mac, anyone holding a folder). |
+| `StorageMode::InMemory` | No filesystem I/O ever. State lives only in `kernel.agents`. The consumer extracts a snapshot via `kernel.save() -> KernelState` and restores via `kernel.load(state)`. | The Swift app's "brain" kernel — always running, never touches disk, snapshot persists externally (UserDefaults / CloudKit / file). |
+
+Both modes share the same save/load API. The only difference is
+the medium — disk mode also mirrors each agent record to its
+`agent.json` on every mutation:
+
+```rust
+let snapshot: KernelState = kernel.save();          // both modes (pure read)
+let json: String          = kernel.save_json();     // both modes (JSON snapshot)
+kernel.load(snapshot)?;                              // both modes (replace tree)
+kernel.load_json(&json)?;                            // both modes (parse + replace)
+```
+
+`save_json()` output is byte-deterministic for equal in-memory state
+(agents sorted by id), so it composes with content-addressed storage
+and `diff`-style review.
 
 A black-box `scripts/compat-python.sh` runs wire-protocol probes
 against the running binary; CI fails on any divergence.
@@ -215,8 +244,9 @@ against the running binary; CI fails on any divergence.
 ## Cross-runtime workdir compatibility
 
 Same `.fantastic/` directory loads under either Python or Rust
-kernel. Records hydrate from identical JSON. Bundles missing in one
-runtime log a single skip line and the boot continues:
+kernel. Records hydrate from identical per-agent `agent.json` JSON.
+Bundles missing in one runtime log a single skip line and the boot
+continues:
 
     [kernel] skipping agent <id>: bundle <module> not installed in this runtime
 

@@ -30,9 +30,13 @@ pub mod lock;
 pub mod persistence;
 pub mod reflect;
 pub mod send;
+pub mod state;
+pub mod storage;
 
 pub use agent::{Agent, AgentId, AgentRecord};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
 pub use send::{current_sender, with_sender, CURRENT_SENDER};
+pub use state::{KernelState, CURRENT_VERSION};
+pub use storage::StorageMode;

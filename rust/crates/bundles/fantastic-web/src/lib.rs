@@ -66,6 +66,29 @@ pub const TRANSPORT_JS: &str = include_str!("transport.js");
 /// Static `/` index — link tree placeholder.
 pub const ROOT_INDEX_HTML: &str = include_str!("index.html");
 
+// ── Bundled third-party web assets ────────────────────────────────
+//
+// Vendored under `assets/`. Served at top-level `/_assets/<name>`
+// URLs so any WebView surface (canvas, terminal, future ones in this
+// kernel or embedding apps) can reference them without CDN deps.
+// Version-pinned; license attribution in `rust/THIRD_PARTY_LICENSES.md`.
+
+/// Three.js v0.160.0 (minified). Consumed by `fantastic-canvas-webapp`.
+pub const THREE_JS: &str = include_str!("assets/three.module.js");
+
+/// xterm.js v6.0.0 (minified). Consumed by `fantastic-terminal-webapp`.
+pub const XTERM_JS: &str = include_str!("assets/xterm.min.js");
+
+/// xterm.js v6.0.0 default stylesheet. Consumed by `fantastic-terminal-webapp`.
+pub const XTERM_CSS: &str = include_str!("assets/xterm.min.css");
+
+/// xterm.js fit addon v0.11.0 (minified). Consumed by `fantastic-terminal-webapp`.
+pub const XTERM_ADDON_FIT_JS: &str = include_str!("assets/xterm-addon-fit.min.js");
+
+/// `Cache-Control` value for `/_assets/*` — pinned files never change
+/// for a given kernel version, so the browser can hold them indefinitely.
+const ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 /// Live web servers, keyed by web-agent id. Holds the JoinHandle +
 /// the Arc-RwLock'd Router (for hot re-mounting) + the
 /// `routes_changed` state subscriber token (so `stop` / `on_delete`
@@ -325,6 +348,13 @@ fn build_router(state: AppState) -> Router {
         .route("/favicon.ico", get(serve_favicon))
         .route("/favicon.png", get(serve_favicon))
         .route("/_assets/favicon.png", get(serve_favicon))
+        .route("/_assets/three.module.js", get(serve_three_js))
+        .route("/_assets/xterm.min.js", get(serve_xterm_js))
+        .route("/_assets/xterm.min.css", get(serve_xterm_css))
+        .route(
+            "/_assets/xterm-addon-fit.min.js",
+            get(serve_xterm_addon_fit_js),
+        )
         .route("/:agent_id/file/*path", get(serve_file_proxy))
         .route("/:agent_id/", get(serve_agent_render))
         .with_state(state)
@@ -776,6 +806,56 @@ async fn serve_favicon() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "image/png")],
         FAVICON_PNG,
+    )
+        .into_response()
+}
+
+// ── /_assets/* handlers ────────────────────────────────────────────
+
+async fn serve_three_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
+        ],
+        THREE_JS,
+    )
+        .into_response()
+}
+
+async fn serve_xterm_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
+        ],
+        XTERM_JS,
+    )
+        .into_response()
+}
+
+async fn serve_xterm_css() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
+        ],
+        XTERM_CSS,
+    )
+        .into_response()
+}
+
+async fn serve_xterm_addon_fit_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
+        ],
+        XTERM_ADDON_FIT_JS,
     )
         .into_response()
 }

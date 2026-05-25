@@ -113,7 +113,7 @@ impl Bundle for HtmlAgentBundle {
                     let mut guard = agent.meta.write().expect("meta poisoned");
                     guard.remove("html");
                     drop(guard);
-                    let _ = fantastic_kernel::persistence::persist(&agent);
+                    let _ = fantastic_kernel::persistence::persist(&agent, &kernel.storage);
                 }
                 Value::Null
             }

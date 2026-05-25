@@ -79,6 +79,11 @@ pub(crate) async fn create_from_payload(
         }
     }
 
+    // In Disk mode the agent's `root_path` is also where bundles can
+    // write sidecar files (chat history, schedules, etc.). In
+    // InMemory mode the path is composed but never read — bundles
+    // that try to write a sidecar there will surface the fs error
+    // themselves.
     let root_path = parent.children_dir().join(&id);
     let new_agent = Agent::new(
         AgentId::from(id.as_str()),
@@ -90,12 +95,15 @@ pub(crate) async fn create_from_payload(
     );
     // Persist + seed readme (the bundle ships its readme via the
     // `Bundle::readme()` method; we read it from the registry).
-    if let Err(e) = persistence::persist(&new_agent) {
+    // Both calls are no-ops in InMemory mode; in Disk mode they
+    // create the per-agent dir and merge fields into agent.json
+    // (never wholesale overwrite — see `persistence::persist` docs).
+    if let Err(e) = persistence::persist(&new_agent, &kernel.storage) {
         return json!({ "error": format!("persist: {e}") });
     }
     if let Some(bundle) = kernel.bundles.get(hm) {
         if let Some(readme) = bundle.readme() {
-            let _ = persistence::seed_readme(&new_agent, readme);
+            let _ = persistence::seed_readme(&new_agent, readme, &kernel.storage);
         }
     }
 
@@ -235,8 +243,10 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     }
     // Unregister + drop inbox.
     kernel.unregister(&target.id);
-    // Disk cleanup (skip ephemeral).
-    if !target.ephemeral && target.root_path.exists() {
+    // Disk cleanup. Removes the agent's own dir (its agent.json +
+    // any sidecars bundles wrote there). InMemory mode never has
+    // on-disk sidecars; skip entirely.
+    if kernel.storage.is_disk() && !target.ephemeral && target.root_path.exists() {
         let _ = std::fs::remove_dir_all(&target.root_path);
     }
     let event = json!({ "type": "removed", "id": target.id.0 });

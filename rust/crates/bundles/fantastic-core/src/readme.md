@@ -54,9 +54,9 @@ logged + skipped on boot:
 (The log line shape is a wire contract shared with the Python
 runtime — Python uses "installed" because there `pip install` is the
 mechanism; for the Rust runtime "installed" means "linked into the
-binary at compile time".) The record stays on disk untouched —
-boot a build that links the bundle in and the agent rehydrates
-intact. Wipe-and-rebuild safe.
+binary at compile time".) The record stays on disk untouched in its
+per-agent `agent.json` — boot a build that links the bundle in and
+the agent rehydrates intact. Wipe-and-rebuild safe.
 
 ## Per-agent readmes
 

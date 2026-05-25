@@ -134,7 +134,7 @@ impl Bundle for GlAgentBundle {
                         guard.insert("title".to_string(), Value::String(title.to_string()));
                     }
                 }
-                let _ = fantastic_kernel::persistence::persist(&agent);
+                let _ = fantastic_kernel::persistence::persist(&agent, &kernel.storage);
                 // Emit gl_source_changed on self. Carry `id` in the
                 // payload: a canvas hosting many GL members needs to
                 // know which view changed (unlike an html iframe,

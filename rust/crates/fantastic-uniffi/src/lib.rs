@@ -51,6 +51,11 @@ pub enum KernelError {
     /// without an intervening `shutdown()`.
     #[error("already running")]
     AlreadyRunning,
+    /// A `Kernel::load` call received a snapshot that was malformed,
+    /// missing a root, had a duplicate id, dangling parent_id, or a
+    /// schema version this kernel doesn't understand.
+    #[error("invalid snapshot: {0}")]
+    InvalidSnapshot(String),
     /// Catch-all for unexpected failures.
     #[error("internal: {0}")]
     Internal(String),
@@ -106,6 +111,14 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register(
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
+    );
+    reg.register(
+        fantastic_proxy_agent::HANDLER_MODULE,
+        fantastic_proxy_agent::ProxyAgentBundle::new(),
+    );
+    reg.register(
+        fantastic_tools::HANDLER_MODULE,
+        fantastic_tools::ToolsBundle::new(),
     );
 
     // ── Full-tier-only (subprocess / fork / dynamic loading).
@@ -188,6 +201,44 @@ pub async fn start_kernel(workdir: String, port_hint: u16) -> Result<Arc<Kernel>
     Ok(Arc::new(Kernel::new_inner(
         booted.kernel,
         workdir_path,
+        web_id,
+        actual_port,
+    )))
+}
+
+/// Boot a brain-tier kernel — no workdir, no lock file, no on-disk
+/// state. Everything lives in process memory; the consumer extracts
+/// state via [`Kernel::save`] (returns JSON) and restores it via
+/// [`Kernel::load`].
+///
+/// Mode parity with [`start_kernel`]: ensures a web agent and boots
+/// it, so the brain still serves HTTP / WS on `127.0.0.1:<port>` the
+/// embedding app can point a WebView at. The wire surface is
+/// identical to a disk-backed kernel after boot — Swift consumers
+/// treat both kernel handles the same way (`sendJson`, `subscribe`,
+/// etc.).
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn start_kernel_in_memory(port_hint: u16) -> Result<Arc<Kernel>, KernelError> {
+    let opts = BootstrapOptions::in_memory();
+    let booted = bootstrap::bootstrap(register_default_bundles(), opts)
+        .map_err(|e| KernelError::BootFailed(format!("{e}")))?;
+    let kernel_arc = Arc::clone(&booted.kernel);
+    let web_id = ensure_web_agent(&kernel_arc, port_hint).await?;
+    let boot_reply = kernel_arc.send(&web_id, json!({"type": "boot"})).await;
+    if let Some(err) = boot_reply.get("error").and_then(Value::as_str) {
+        return Err(KernelError::PortBindFailed(err.to_string()));
+    }
+    let actual_port = boot_reply
+        .get("port")
+        .and_then(Value::as_u64)
+        .map(|p| p as u16)
+        .unwrap_or(port_hint);
+    // Workdir field is a never-read sentinel — Kernel::new_inner
+    // requires one but the shutdown path skips lock release when the
+    // underlying storage is InMemory.
+    Ok(Arc::new(Kernel::new_inner(
+        booted.kernel,
+        PathBuf::new(),
         web_id,
         actual_port,
     )))
@@ -287,6 +338,56 @@ impl Kernel {
             .remove_state_subscriber(fantastic_kernel::kernel::SubscriberToken(token));
     }
 
+    /// Snapshot the kernel's current state as a JSON string.
+    ///
+    /// Both storage modes answer this — Disk-mode callers usually
+    /// don't need it (state.json is already on disk), but it's useful
+    /// for cross-process inspection and "export this workdir" UX.
+    /// InMemory consumers (Swift brain kernel) call this to persist
+    /// state externally (UserDefaults, CloudKit, file) and
+    /// `kernel.load(json)` later to restore.
+    ///
+    /// Output is byte-deterministic for equal in-memory state —
+    /// agents are sorted by id (ASCII) inside the snapshot.
+    pub fn save(&self) -> String {
+        self.inner.save_json()
+    }
+
+    /// Replace the kernel's agent tree with the snapshot in `json`.
+    ///
+    /// Drops every currently-registered agent + closes their inboxes,
+    /// then rebuilds the tree from the snapshot. Weak-load: agents
+    /// whose `handler_module` isn't in this kernel's bundle registry
+    /// are logged + skipped along with their subtree.
+    ///
+    /// In Disk mode the new state is also flushed to
+    /// `<workdir>/.fantastic/state.json` so subsequent boots see the
+    /// loaded state.
+    ///
+    /// Errors:
+    /// - [`KernelError::InvalidSnapshot`] if the JSON doesn't parse,
+    ///   if the snapshot's schema version is too new, if it has no
+    ///   root, has duplicate ids, or has dangling parent references.
+    pub fn load(&self, json: String) -> Result<(), KernelError> {
+        self.inner.load_json(&json).map_err(|e| match e {
+            fantastic_kernel::KernelError::InvalidSnapshot(msg) => {
+                KernelError::InvalidSnapshot(msg)
+            }
+            other => KernelError::Internal(format!("{other}")),
+        })?;
+        // For Disk mode, persist each loaded agent to its on-disk
+        // dir. The merge-only `persist` won't delete dirs of agents
+        // that USED to be in this kernel but aren't in the new
+        // snapshot — those stay on disk per the dirty-binding
+        // contract ("agents will reconcile when they next touch
+        // them"). The brain kernel use case is InMemory, which
+        // no-ops here.
+        for entry in self.inner.agents.iter() {
+            let _ = fantastic_kernel::persistence::persist(entry.value(), &self.inner.storage);
+        }
+        Ok(())
+    }
+
     /// Stop the listener, release the workdir lock. Idempotent.
     pub fn shutdown(&self) {
         let mut g = self.stopped.lock().expect("stopped poisoned");
@@ -340,6 +441,239 @@ impl Kernel {
 impl Drop for Kernel {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+// ── ProxyAgent bridge (host-implemented agents) ────────────────────
+//
+// The `proxy_agent.tools` bundle forwards every verb to a host
+// implementation keyed by agent_id. Swift implements `ProxyAgent`;
+// the kernel routes verbs to it. Two-way: hosts handle inbound
+// verbs synchronously (returning JSON acks/replies); outbound
+// SwiftUI-originated sends use `send_json_as` for sender
+// attribution; outbound async events use `proxy_emit` to fan out
+// on the agent's own inbox.
+//
+// Generic — ships on every platform (no cfg gate). Linux / Windows
+// builds get it too since a Rust host (egui, slint, tests) is just
+// as valid as a Swift host.
+
+/// Apple-side / Swift / any-host trait. Hosts implement this and
+/// register an instance per agent_id via
+/// [`Kernel::register_proxy_agent`].
+///
+/// Methods are sync because UniFFI 0.29 callback interfaces don't
+/// support `async`. Swift impls that need async (SwiftUI updates,
+/// network calls) should kick off a `Task { @MainActor in … }`
+/// inside `handle` and return immediately with a sync ack.
+#[uniffi::export(callback_interface)]
+pub trait ProxyAgent: Send + Sync {
+    /// Verb dispatch. JSON in, JSON out. Reply can be a real
+    /// response or a fire-and-forget ack like `{"ok":true}`.
+    fn handle(&self, payload_json: String) -> String;
+
+    /// Fired when the agent's `boot` verb dispatches. Default: noop.
+    fn on_boot(&self) {}
+
+    /// Fired during cascade-delete (before the agent unregisters).
+    /// Default: noop. The bundle drops the host from its registry
+    /// after this — no `unregister_proxy_agent` call needed.
+    fn on_delete(&self) {}
+}
+
+/// Bridge — implements the bundle-crate's [`ProxyAgentHost`] trait
+/// by forwarding to the UniFFI callback. One per registered host.
+struct SwiftProxyHostAdapter {
+    inner: Arc<dyn ProxyAgent>,
+}
+
+impl SwiftProxyHostAdapter {
+    fn new(inner: Box<dyn ProxyAgent>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::from(inner),
+        })
+    }
+}
+
+impl fantastic_proxy_agent::ProxyAgentHost for SwiftProxyHostAdapter {
+    fn handle(&self, payload_json: String) -> String {
+        self.inner.handle(payload_json)
+    }
+    fn on_boot(&self) {
+        self.inner.on_boot();
+    }
+    fn on_delete(&self) {
+        self.inner.on_delete();
+    }
+}
+
+/// Sync methods on the `Kernel` handle that manage proxy_agent
+/// host registration. Registration is sync — just slots an entry
+/// into the bundle's process-global host map.
+#[uniffi::export]
+impl Kernel {
+    /// Install a Swift host for the given proxy_agent. Replaces any
+    /// previously-registered host for the same id. Best practice is
+    /// to call this BEFORE creating the agent so the first verb
+    /// dispatch finds the host; the bundle gracefully degrades to
+    /// `{error, reason:"no_host"}` until registration completes.
+    pub fn register_proxy_agent(&self, agent_id: String, host: Box<dyn ProxyAgent>) {
+        let adapter = SwiftProxyHostAdapter::new(host);
+        fantastic_proxy_agent::register_host(AgentId::from(agent_id.as_str()), adapter);
+    }
+
+    /// Drop the host for the given proxy_agent. Returns whether a
+    /// host was registered. No-op if nothing was installed.
+    /// Standard cascade-delete also clears the host (`Bundle::on_delete`
+    /// hook on the bundle), so explicit unregister is rarely needed.
+    pub fn unregister_proxy_agent(&self, agent_id: String) -> bool {
+        let id = AgentId::from(agent_id.as_str());
+        let had = fantastic_proxy_agent::host_for(&id).is_some();
+        fantastic_proxy_agent::unregister_host(&id);
+        had
+    }
+}
+
+/// Async methods on the `Kernel` handle that the UI uses for
+/// outbound traffic (`send_json_as` with sender attribution +
+/// `proxy_emit` for fan-out on the agent's own inbox).
+#[uniffi::export(async_runtime = "tokio")]
+impl Kernel {
+    /// JSON-in, JSON-out RPC like `send_json` — but tags the
+    /// dispatch with `sender_id` so state events attribute correctly.
+    /// SwiftUI's input handlers call this to send AS the UI agent
+    /// rather than as an untagged external client.
+    pub async fn send_json_as(
+        &self,
+        sender_id: String,
+        target_id: String,
+        payload_json: String,
+    ) -> String {
+        let payload: Value = serde_json::from_str(&payload_json)
+            .unwrap_or_else(|_| json!({"error": "send_json_as: payload not valid JSON"}));
+        let target = AgentId::from(target_id.as_str());
+        let sender = AgentId::from(sender_id.as_str());
+        let kernel = Arc::clone(&self.inner);
+        let reply = fantastic_kernel::send::with_sender(sender, async move {
+            kernel.send(&target, payload).await
+        })
+        .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Fire an event on `agent_id`'s own inbox. Watchers receive
+    /// via the standard `kernel.emit` fan-out. The UI uses this to
+    /// broadcast state changes ("focus_changed", "selection_set",
+    /// streaming tokens, etc.) without driving an RPC.
+    pub async fn proxy_emit(&self, agent_id: String, event_json: String) {
+        let event: Value = serde_json::from_str(&event_json)
+            .unwrap_or_else(|_| json!({"error": "proxy_emit: event not valid JSON"}));
+        self.inner
+            .emit(&AgentId::from(agent_id.as_str()), event)
+            .await;
+    }
+}
+
+// ── Tools bridge (registrable LLM tool calling) ────────────────────
+//
+// The `tools.tools` bundle holds a process-global map of registered
+// tools (name → {agent_id, verb, schema, sender}). LLM-using bundles
+// (FM, ollama, …) pull `list_for_llm` before each model call;
+// `dispatch_tool` is the LLM → kernel → dispatch_target round-trip.
+//
+// These wrappers are sugar over `kernel.send(target_id="tools", …)`:
+// they take structured params so Swift callers don't have to build
+// JSON strings, then forward to the bundle.
+
+/// Thin async wrappers around `kernel.send(target="tools", ...)` so
+/// Swift callers don't have to build JSON strings. The bundle itself
+/// is the same regardless of which path you take.
+#[uniffi::export(async_runtime = "tokio")]
+impl Kernel {
+    /// Register a tool. `sender_id` is the cleanup key — pass the
+    /// agent id that owns this registration. `verb` defaults to the
+    /// tool name when `None`. `parameters_schema_json` is the JSON
+    /// Schema for the tool's args (FM uses it for guided generation).
+    pub async fn register_tool(
+        &self,
+        sender_id: String,
+        name: String,
+        agent_id: String,
+        verb: Option<String>,
+        description: String,
+        parameters_schema_json: String,
+    ) -> String {
+        let schema: Value = serde_json::from_str(&parameters_schema_json).unwrap_or(Value::Null);
+        let mut payload = serde_json::Map::new();
+        payload.insert("type".to_string(), Value::String("register".to_string()));
+        payload.insert("name".to_string(), Value::String(name));
+        payload.insert("agent_id".to_string(), Value::String(agent_id));
+        payload.insert("description".to_string(), Value::String(description));
+        payload.insert("parameters_schema".to_string(), schema);
+        payload.insert("sender".to_string(), Value::String(sender_id));
+        if let Some(v) = verb {
+            payload.insert("verb".to_string(), Value::String(v));
+        }
+        let reply = self
+            .inner
+            .send(&AgentId::from("tools"), Value::Object(payload))
+            .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Drop one tool by name. Returns `{ok: true, name}` on hit,
+    /// `{error, reason: "not_found"}` if no such tool.
+    pub async fn unregister_tool(&self, _sender_id: String, name: String) -> String {
+        let reply = self
+            .inner
+            .send(
+                &AgentId::from("tools"),
+                json!({"type":"unregister","name": name}),
+            )
+            .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Drop every tool registered with `sender_id`. Returns
+    /// `{ok: true, removed: <n>, sender}`. Use this on logout / mode
+    /// change / agent teardown.
+    pub async fn unregister_tools_by_sender(&self, sender_id: String) -> String {
+        let reply = self
+            .inner
+            .send(
+                &AgentId::from("tools"),
+                json!({"type":"unregister_by_sender","sender": sender_id}),
+            )
+            .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// Fetch the current tool list in Apple-FM / OpenAI-compatible
+    /// shape: `{tools: [{name, description, parameters}]}`. Pass this
+    /// directly to `LanguageModelSession(tools:)` after wrapping each
+    /// entry in a `Tool` conformance.
+    pub async fn list_tools_for_llm(&self) -> String {
+        let reply = self
+            .inner
+            .send(&AgentId::from("tools"), json!({"type":"list_for_llm"}))
+            .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
+    }
+
+    /// LLM → kernel: invoke a tool by name with JSON-encoded args.
+    /// Returns the raw reply from the dispatch target (whatever
+    /// `kernel.send(entry.agent_id, ...)` produced). Feed this back
+    /// to the `LanguageModelSession` as the tool's output.
+    pub async fn dispatch_tool(&self, name: String, arguments_json: String) -> String {
+        let args: Value = serde_json::from_str(&arguments_json).unwrap_or(Value::Null);
+        let reply = self
+            .inner
+            .send(
+                &AgentId::from("tools"),
+                json!({"type":"dispatch","name": name,"arguments": args}),
+            )
+            .await;
+        serde_json::to_string(&reply).unwrap_or_else(|_| "null".to_string())
     }
 }
 

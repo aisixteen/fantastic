@@ -65,6 +65,14 @@ fn register_default_bundles() -> BundleRegistry {
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
     );
+    reg.register(
+        fantastic_proxy_agent::HANDLER_MODULE,
+        fantastic_proxy_agent::ProxyAgentBundle::new(),
+    );
+    reg.register(
+        fantastic_tools::HANDLER_MODULE,
+        fantastic_tools::ToolsBundle::new(),
+    );
 
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //

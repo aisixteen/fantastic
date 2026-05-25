@@ -31,7 +31,14 @@ impl crate::Bundle for CountingBundle {
 }
 
 fn mk_kernel(deletes: Arc<AtomicUsize>) -> Arc<Kernel> {
-    let mut kernel = Kernel::new();
+    mk_kernel_with_storage(deletes, crate::storage::StorageMode::InMemory)
+}
+
+fn mk_kernel_with_storage(
+    deletes: Arc<AtomicUsize>,
+    storage: crate::storage::StorageMode,
+) -> Arc<Kernel> {
+    let mut kernel = Kernel::with_storage(storage);
     kernel
         .bundles
         .register("counting.tools", CountingBundle { deletes });
@@ -52,7 +59,12 @@ async fn mint_id_format_is_bundle_underscore_hex6() {
 async fn create_then_delete_unregisters_and_calls_hook() {
     let tmp = tempfile::TempDir::new().unwrap();
     let deletes = Arc::new(AtomicUsize::new(0));
-    let kernel = mk_kernel(Arc::clone(&deletes));
+    // Disk-backed kernel so persistence::persist actually writes per-agent
+    // agent.json files (the assertions below rely on that).
+    let kernel = mk_kernel_with_storage(
+        Arc::clone(&deletes),
+        crate::storage::StorageMode::Disk(tmp.path().to_path_buf()),
+    );
     // Stand up a root pointing at the tempdir.
     let root = Agent::new(
         AgentId::from("core"),

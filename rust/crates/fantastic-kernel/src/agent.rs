@@ -49,7 +49,7 @@ impl std::fmt::Display for AgentId {
 /// `meta` flattens into the JSON object — `display_name`, `port`,
 /// `root`, etc. all appear at the top level alongside `id` /
 /// `handler_module` / `parent_id`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRecord {
     /// Agent id (unique tree-wide).
     pub id: String,

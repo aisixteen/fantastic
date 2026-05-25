@@ -67,6 +67,13 @@ pub enum KernelError {
     /// callers that want the typed variant get it here.
     #[error("agent {0:?} carries delete_lock")]
     DeleteLocked(String),
+
+    /// A [`crate::Kernel::load`] or [`crate::Kernel::load_json`] call
+    /// received a snapshot that couldn't be parsed, was missing a
+    /// root, had a duplicate id, or had a schema version this kernel
+    /// doesn't understand.
+    #[error("invalid kernel snapshot: {0}")]
+    InvalidSnapshot(String),
 }
 
 /// Convenience alias.

@@ -2,10 +2,16 @@
 //! and weak-load skip+log fires the documented contract line.
 
 use async_trait::async_trait;
-use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Kernel, Reply};
+use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Kernel, Reply, StorageMode};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
+
+/// Disk-mode storage rooted at the tempdir — short helper used by
+/// the persist callsites below.
+fn disk_storage(tmp: &TempDir) -> StorageMode {
+    StorageMode::Disk(tmp.path().to_path_buf())
+}
 
 // A noop bundle so we can register a recognized handler_module for
 // the weak-load contrast tests (known vs unknown).
@@ -45,7 +51,7 @@ fn persist_then_read_record_round_trips() {
         root_path.clone(),
         false,
     );
-    fantastic_kernel::persistence::persist(&agent).expect("write");
+    fantastic_kernel::persistence::persist(&agent, &disk_storage(&tmp)).expect("write");
     let rec = fantastic_kernel::persistence::read_record_at(&root_path.join("agent.json"))
         .expect("read ok")
         .expect("file exists");
@@ -68,7 +74,7 @@ fn ephemeral_agents_skip_persistence() {
         root_path.clone(),
         true, // ephemeral
     );
-    fantastic_kernel::persistence::persist(&agent).expect("noop ok");
+    fantastic_kernel::persistence::persist(&agent, &disk_storage(&tmp)).expect("noop ok");
     assert!(!root_path.exists(), "ephemeral must not create dir");
 }
 
@@ -84,13 +90,14 @@ fn seed_readme_is_idempotent_and_preserves_user_edits() {
         root_path.clone(),
         false,
     );
-    fantastic_kernel::persistence::seed_readme(&agent, "first").expect("seed");
+    let storage = disk_storage(&tmp);
+    fantastic_kernel::persistence::seed_readme(&agent, "first", &storage).expect("seed");
     let readme = root_path.join("readme.md");
     assert_eq!(std::fs::read_to_string(&readme).unwrap(), "first");
     // User edits the readme.
     std::fs::write(&readme, "USER EDIT").unwrap();
     // Second seed call must NOT overwrite.
-    fantastic_kernel::persistence::seed_readme(&agent, "second").expect("seed");
+    fantastic_kernel::persistence::seed_readme(&agent, "second", &storage).expect("seed");
     assert_eq!(std::fs::read_to_string(&readme).unwrap(), "USER EDIT");
 }
 

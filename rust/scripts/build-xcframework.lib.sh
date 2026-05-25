@@ -108,19 +108,25 @@ xcf_lipo_mac() {
     fi
 }
 
-# Stage the iOS simulator slice. Same .a as `aarch64-apple-ios-sim` but
-# renamed so xcodebuild can distinguish it from the device slice in
-# AvailableLibraries. Skipped if no sim targets.
+# Stage each simulator slice with a UNIQUE filename so xcodebuild's
+# -create-xcframework -library flag doesn't collide when multiple Apple
+# platforms (iOS sim + visionOS sim + tvOS sim) all ship a sim variant.
+# xcodebuild reads the slice's Mach-O metadata to pick the right
+# LibraryIdentifier (ios-arm64-simulator / xros-arm64-simulator / …) —
+# filename is just for argv hygiene.
 xcf_stage_sim() {
-    SIM_LIB=""
-    if (( ${#TARGETS_SIM[@]} >= 1 )); then
-        echo "[xcf] iOS sim slice (${TARGETS_SIM[0]})..."
-        SIM_LIB="$BINDINGS_DIR/libfantastic_uniffi-iossim.a"
-        cp "$RUST_ROOT/target/${TARGETS_SIM[0]}/release/libfantastic_uniffi.a" "$SIM_LIB"
-    fi
+    SIM_LIBS=()
+    for t in "${TARGETS_SIM[@]+"${TARGETS_SIM[@]}"}"; do
+        echo "[xcf] sim slice ($t)..."
+        local staged="$BINDINGS_DIR/libfantastic_uniffi-${t}.a"
+        cp "$RUST_ROOT/target/$t/release/libfantastic_uniffi.a" "$staged"
+        SIM_LIBS+=("$staged")
+    done
 }
 
-# Assemble the XCFramework from whatever slices got built.
+# Assemble the XCFramework from every built slice. Multi-platform: each
+# TARGETS_DEVICE entry becomes its own -library; each staged sim slice
+# becomes its own -library; the Mac fat slice (if present) is one more.
 xcf_bundle() {
     local xcf_out="$PKG_DIR/$XCF_NAME"
     echo "[xcf] xcodebuild -create-xcframework → $XCF_NAME ..."
@@ -128,16 +134,16 @@ xcf_bundle() {
     mkdir -p "$PKG_DIR"
 
     local args=()
-    # Device iOS slice(s).
-    if (( ${#TARGETS_DEVICE[@]} >= 1 )); then
-        args+=( -library "$RUST_ROOT/target/${TARGETS_DEVICE[0]}/release/libfantastic_uniffi.a"
+    # Device slices — one per platform (iOS arm64, visionOS arm64, …).
+    for t in "${TARGETS_DEVICE[@]+"${TARGETS_DEVICE[@]}"}"; do
+        args+=( -library "$RUST_ROOT/target/$t/release/libfantastic_uniffi.a"
                 -headers "$HEADERS_DIR" )
-    fi
-    # Sim slice (if staged).
-    if [[ -n "$SIM_LIB" ]]; then
-        args+=( -library "$SIM_LIB"
+    done
+    # Simulator slices (already staged with unique filenames).
+    for lib in "${SIM_LIBS[@]+"${SIM_LIBS[@]}"}"; do
+        args+=( -library "$lib"
                 -headers "$HEADERS_DIR" )
-    fi
+    done
     # Mac (lipo'd or single).
     if [[ -n "$MAC_FAT" ]]; then
         args+=( -library "$MAC_FAT"

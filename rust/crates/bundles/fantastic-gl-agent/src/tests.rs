@@ -1,13 +1,18 @@
 //! Unit tests for this bundle crate.
 
 use super::*;
-use fantastic_kernel::{Agent, BundleRegistry};
+use fantastic_kernel::{Agent, BundleRegistry, StorageMode};
 use serde_json::Map;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, Arc<Agent>) {
-    let mut kernel = Kernel::new();
+    // Disk-backed kernel so `persistence::persist` actually writes
+    // per-agent agent.json files (the assertions in
+    // `set_gl_source_persists_and_emits` rely on the auto-write).
+    // Tests that don't care about persistence use the default
+    // Kernel::new() = InMemory.
+    let mut kernel = Kernel::with_storage(StorageMode::Disk(tmp.path().to_path_buf()));
     kernel.bundles.register(HANDLER_MODULE, GlAgentBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
@@ -100,7 +105,7 @@ async fn set_gl_source_persists_and_emits() {
     let event = rx.try_recv().expect("watcher should receive the emit");
     assert_eq!(event["type"], "gl_source_changed");
 
-    // Persistence: agent.json holds gl_source.
+    // Persistence: g2's agent.json holds gl_source.
     let path = tmp.path().join(".fantastic/agents/g2/agent.json");
     let raw = std::fs::read_to_string(&path).expect("agent.json written");
     let rec: Value = serde_json::from_str(&raw).unwrap();
