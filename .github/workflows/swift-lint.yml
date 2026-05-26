@@ -1,0 +1,46 @@
+name: Swift Lint
+
+# Pure-lint CI gate for the Swift workspace at `swift/`. Runs
+# `swift-format lint` only — no `swift build`, no `swift test`,
+# no archive, no signed artefacts. Build + test happen locally
+# (the pre-commit sweep) or in `swift/scripts/release.sh`, not CI.
+#
+# Project style is configured at `swift/.swift-format`. Lint emits
+# warnings (advisory) rather than hard failures on style nits — flip
+# to `--strict` when the codebase is auto-formatted clean.
+#
+# Spell-checking is its own workflow (`spellcheck.yml`) and runs
+# repo-wide via `crate-ci/typos`.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'swift/**'
+      - '.github/workflows/swift-lint.yml'
+
+jobs:
+  lint:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: swift
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          # Pin a recent Xcode that ships Swift 6.0+. macos-latest
+          # changes its default Xcode over time; pin explicitly so
+          # the toolchain doesn't drift.
+          sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || true
+          swift --version
+
+      - name: Install swift-format
+        # Xcode bundles swift-format inside the toolchain but doesn't
+        # add it to PATH on the GitHub runner. Brew is the lightest
+        # way to get a top-level `swift-format` executable.
+        run: brew install swift-format
+
+      - name: swift-format lint
+        run: swift-format lint --recursive Sources Tests

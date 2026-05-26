@@ -34,18 +34,12 @@ hel = "hel"
 unparseable = "unparseable"
 
 [files]
-# Don't spellcheck the auto-generated UniFFI Swift binding (it
-# isn't checked into git, but local dev runs may have it cached
-# in worktrees that get scanned anyway).
-#
-# Also skip vendored third-party JS / CSS assets — minified bundles
+# Skip vendored third-party JS / CSS assets — minified bundles
 # contain mangled identifiers (e.g. Three.js's `metalness`, `LOD`,
 # minified two-letter symbols `Ue`, `Pn`, `Nd`) that typos
-# heuristics flag as misspellings. License attribution lives in
-# rust/THIRD_PARTY_LICENSES.md.
+# heuristics flag as misspellings.
 extend-exclude = [
-    "rust/packaging/FantasticKernel*/Sources/*/fantastic.swift",
-    "rust/target/",
     "**/.fantastic/",
-    "rust/crates/bundles/fantastic-web/src/assets/",
+    "**/.build/",
+    "swift/Sources/FantasticWeb/Resources/",
 ]

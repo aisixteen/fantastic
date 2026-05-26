@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "name": "Debug fantastic (swift)",
+            "target": "fantastic",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug fantastic (swift)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "name": "Release fantastic (swift)",
+            "target": "fantastic",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release fantastic (swift)"
+        }
+    ]
+}
