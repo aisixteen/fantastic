@@ -74,16 +74,21 @@ print('PASS')
 Expected: `PASS` (the body holds either the canvas link or an agent-tree marker).
 Failure-mode: `curl: (7) Failed to connect` → port 18080 not bound (container died or `-p` mapping wrong). Non-zero exit on the `python3` line → `web.tools` isn't returning the substrate tree index.
 
-### 4. `rest` — kernel reflect through web_rest  [ rest ]
+### 4. `rest` — kernel reflect (bundle catalog) through web_rest  [ rest ]
+
+`?bundles=all` composes the installable-bundle catalog into the reply
+under `bundles` (the old top-level `available_bundles` key is gone —
+reflect is now uniform, with the catalog behind the `bundles` flag).
 
 ```bash
-curl -sf "http://localhost:18080/$REST_ID/_reflect" | python3 -c "
+curl -sf "http://localhost:18080/$REST_ID/_reflect?bundles=all" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-assert 'transports' in d, f'no transports: {list(d)}'
-assert 'available_bundles' in d
-assert len(d['available_bundles']) >= 20, f'expected >=20 bundles, got {len(d[\"available_bundles\"])}'
-print('PASS, bundles:', len(d['available_bundles']))
+assert d.get('id') == 'core', f'id={d.get(\"id\")}'
+assert 'tree' in d, f'no tree: {list(d)}'
+assert 'bundles' in d, f'no bundles: {list(d)}'
+assert len(d['bundles']) >= 20, f'expected >=20 bundles, got {len(d[\"bundles\"])}'
+print('PASS, bundles:', len(d['bundles']))
 "
 ```
 Expected: `PASS, bundles: <N>` with `N >= 20`.
@@ -101,7 +106,8 @@ async def main():
             m = json.loads(await ws.recv())
             if m.get("id") == "1" and m.get("type") in ("reply","error"):
                 assert m["type"] == "reply", f"got error: {m}"
-                assert "transports" in m["data"], "reply missing primer"
+                d = m["data"]
+                assert d.get("id") == "core" and "tree" in d, f"reply not a uniform reflect: {list(d)}"
                 print("PASS")
                 return
 asyncio.run(main())
@@ -217,7 +223,7 @@ rm -f /tmp/ft-member-id /tmp/ft-install.log /tmp/ft-shutdown.log
 | 1 | image | image | | |
 | 2 | boot | boot | | |
 | 3 | http | http | | |
-| 4 | rest | rest | | |
+| 4 | rest (kernel reflect + ?bundles=all catalog) | rest | | |
 | 5 | ws | ws | | |
 | 6 | canvas | canvas, http, rest | | |
 | 7 | add-member | add-member, canvas, rest | | |

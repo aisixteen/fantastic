@@ -53,9 +53,9 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
         r = c.post("/rest_xyz/core", json={"type": "reflect"})
         assert r.status_code == 200
         body = r.json()
-        # The substrate primer comes back — has transports + tree.
-        assert "transports" in body
-        assert "tree" in body
+        # Root's uniform reflect comes back — id + tree (default all).
+        assert body["id"] == "core"
+        assert body["tree"]["id"] == "core"
 
 
 def test_post_endpoint_rejects_non_object_body(seeded_kernel):
@@ -90,8 +90,9 @@ def test_post_endpoint_rejects_bad_json(seeded_kernel):
 # ─── GET _reflect shortcuts (browser-pastable) ──────────────────
 
 
-def test_get_reflect_root_returns_primer(seeded_kernel):
-    """GET /<rest_id>/_reflect (no target) defaults to kernel → primer."""
+def test_get_reflect_root_returns_tree(seeded_kernel):
+    """GET /<rest_id>/_reflect (no target) defaults to the root → uniform
+    reflect with the tree. `?bundles=all` adds the catalog."""
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect",
@@ -102,10 +103,12 @@ def test_get_reflect_root_returns_primer(seeded_kernel):
         r = c.get("/rest_xyz/_reflect")
         assert r.status_code == 200
         body = r.json()
-        # The substrate primer has transports + tree + available_bundles.
-        assert "transports" in body
-        assert "tree" in body
-        assert "available_bundles" in body
+        assert body["id"] == "core"
+        assert body["tree"]["id"] == "core"
+        assert "transports" not in body
+        # opt-in catalog via the bundles tier
+        cat = c.get("/rest_xyz/_reflect?bundles=all").json()
+        assert any(b["name"] == "file" for b in cat["bundles"])
 
 
 def test_get_reflect_target_returns_agent_reflect(seeded_kernel):
@@ -120,9 +123,8 @@ def test_get_reflect_target_returns_agent_reflect(seeded_kernel):
         r = c.get("/rest_xyz/_reflect/core")
         assert r.status_code == 200
         body = r.json()
-        # core reflect IS the primer (root's reflect returns the primer).
-        assert "transports" in body
-        assert "tree" in body
+        assert body["id"] == "core"
+        assert body["tree"]["id"] == "core"
 
 
 def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):

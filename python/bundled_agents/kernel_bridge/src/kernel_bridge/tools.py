@@ -1,8 +1,8 @@
-"""kernel_bridge — cross-kernel agent comms.
+"""kernel_bridge — cross-kernel agent comms (WS-only, asymmetric).
 
-Pairs of bridge agents on two kernels exchange `forward` envelopes
-over a transport (memory / WS / SSH+WS). A local agent that wants
-to reach a remote agent does:
+A bridge agent on kernel A opens a WS connection to kernel B's
+`web_ws` endpoint and ships **raw** call frames over it. A local
+agent that wants to reach a remote agent does:
 
     await kernel.send(local_bridge_id, {
         "type": "forward",
@@ -10,10 +10,24 @@ to reach a remote agent does:
         "payload": {"type": "reflect"},
     })
 
-The local bridge wraps that into a `call` frame addressed to the
-peer bridge on the remote side, sends it over the transport, awaits
-the matching `reply` frame (correlated by namespaced `corr_id`), and
-returns the unwrapped reply.
+The bridge sends `{type:'call', id, target, payload}` over the WS,
+B's `web_ws` dispatches it via `kernel.send(target, payload)` exactly
+like a browser call, and the matching `{type:'reply', id, data}` flows
+back. **No B-side bridge agent needed** — the bridge is an asymmetric
+client; the server side is whatever WS-speaking surface B exposes
+(typically `web_ws`).
+
+Streaming uses the same WS protocol's watch frames:
+
+    await kernel.send(local_bridge_id, {
+        "type": "watch_remote",
+        "target": "<remote_agent_id>",
+    })
+
+This sends `{type:'watch', src:<target>}` to B. As `<target>` emits,
+B's `web_ws` sends `{type:'event', payload}` frames back. The local
+bridge re-emits each one on its own inbox so local watchers see the
+remote stream via the standard `kernel.watch(<bridge_id>, ...)`.
 
 Weak proxies: local→local agent comms remain direct
 `kernel.send`. The bridge inserts itself only when the destination
@@ -46,7 +60,6 @@ from typing import Any
 
 from kernel_bridge._transport import (
     ConnectionClosed,
-    HTTPTransport,
     WSTransport,
     _BaseTransport,
 )
@@ -171,13 +184,21 @@ def _kill_tunnel(proc: subprocess.Popen | None) -> None:
 
 
 async def _read_loop(id: str, kernel: Any) -> None:
-    """Long-lived consumer of the transport. Two frame shapes:
+    """Long-lived consumer of the transport. Three frame shapes:
 
-      - inbound `call` whose payload is a `forward` envelope
-        addressed at this kernel: unwrap, kernel.send, send `reply`
-        back wrapping the result;
-      - inbound `reply` with `id` matching one of our pending
-        outbound corr_ids: resolve the Future.
+      - inbound `call` — `{type:'call', id, target, payload}`.
+        Dispatch via `kernel.send(target, payload)`, send the result
+        back as `{type:'reply', id, data}`. In production (WS) the
+        bridge is a pure client and never sees inbound calls — its
+        peer is the remote's `web_ws`, not another bridge. This
+        branch exists for MemoryTransport-paired tests where two
+        in-process bridges shake hands.
+      - inbound `reply` — `{type:'reply', id, data}`. Resolve the
+        pending Future for `id`.
+      - inbound `event` — `{type:'event', payload}` from a remote
+        `watch` subscription. Re-emit on the bridge's local inbox so
+        local watchers see the stream via the standard
+        `kernel.watch(<bridge_id>, ...)` mechanism.
 
     On ConnectionClosed (peer dropped, ssh tunnel collapsed): emit
     `{type:'bridge_down'}` on the bridge agent's own inbox so
@@ -196,26 +217,10 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 break
             ftype = frame.get("type")
             if ftype == "call":
-                # Inbound forward envelope from the peer bridge.
+                target = frame.get("target")
                 payload = frame.get("payload") or {}
-                if payload.get("type") != "forward":
-                    # Unknown call shape — not addressed at our
-                    # forward dispatcher. Reply with an error so the
-                    # peer's pending Future resolves cleanly.
-                    await transport.send(
-                        {
-                            "type": "reply",
-                            "id": frame.get("id"),
-                            "data": {
-                                "error": f"kernel_bridge: unknown call payload type {payload.get('type')!r}"
-                            },
-                        }
-                    )
-                    continue
-                target = payload.get("target")
-                inner = payload.get("payload") or {}
                 try:
-                    reply = await kernel.send(target, inner)
+                    reply = await kernel.send(target, payload)
                 except Exception as e:
                     reply = {"error": f"kernel_bridge: kernel.send raised: {e}"}
                 await transport.send(
@@ -229,8 +234,21 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 fut = st.pending.pop(frame.get("id"), None)
                 if fut is not None and not fut.done():
                     fut.set_result(frame.get("data"))
-            # Other frame types (event etc.) are not used by the
-            # bridge protocol; ignore so the loop stays robust.
+            elif ftype == "error":
+                # The remote's web_ws emits `{type:"error", id, error}`
+                # when its dispatch RAISES (vs a verb-level error dict,
+                # which rides back as a `reply`). Fail the pending
+                # forward promptly instead of letting it hang to the
+                # timeout. Matches the Rust bridge's `error` branch.
+                fut = st.pending.pop(frame.get("id"), None)
+                if fut is not None and not fut.done():
+                    fut.set_result({"error": f"remote error: {frame.get('error')}"})
+            elif ftype == "event":
+                try:
+                    await kernel.emit(id, frame.get("payload") or {})
+                except Exception:
+                    pass
+            # Other frame types are ignored so the loop stays robust.
     finally:
         # Surface drop, fail pending, leave state in a re-bootable
         # shape (transport=None) so reconnect works.
@@ -253,7 +271,7 @@ async def _reflect(id, payload, kernel):
     st = _state(id)
     return {
         "id": id,
-        "sentence": "Cross-kernel comms bridge — pairs over WS/memory; weak proxy.",
+        "sentence": "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); weak proxy.",
         "transport": st.transport_kind or rec.get("transport") or "ws",
         "connected": st.transport is not None and not st.transport.closed,
         "host": rec.get("host"),
@@ -268,12 +286,13 @@ async def _reflect(id, payload, kernel):
         "emits": {
             "bridge_up": "{type:'bridge_up'} — emitted on this agent's inbox after a successful boot",
             "bridge_down": "{type:'bridge_down'} — emitted when the transport drops (peer closed, tunnel died)",
+            "<remote event>": "events from `watch_remote` subscriptions are re-emitted on this agent's inbox with their original `{type, ...}` shape",
         },
     }
 
 
 async def _boot(id, payload, kernel):
-    """No args. Reads `transport` (memory|ws|ssh+ws|http), `peer_id` (ws/ssh+ws) or `url` (http), plus transport-specific fields off the agent record. Builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."""
+    """No args. Reads `transport` (memory|ws|ssh+ws), `peer_id` (WS path segment on the remote — typically the id of a web_ws-served agent like `core`), plus transport-specific fields off the agent record. Builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."""
     rec = kernel.get(id) or {}
     st = _state(id)
     if st.transport is not None and not st.transport.closed:
@@ -281,7 +300,7 @@ async def _boot(id, payload, kernel):
 
     kind = rec.get("transport") or "ws"
     peer_id = rec.get("peer_id")
-    if not peer_id and kind not in ("memory", "http"):
+    if not peer_id and kind != "memory":
         return {"error": "kernel_bridge: peer_id required for ws/ssh+ws transports"}
 
     transport: _BaseTransport
@@ -328,16 +347,6 @@ async def _boot(id, payload, kernel):
             st.tunnel_proc = None
             st.tunnel_pid = None
             return {"error": f"kernel_bridge: ws over tunnel failed: {e}"}
-    elif kind == "http":
-        url = rec.get("url")
-        if not url:
-            return {
-                "error": "kernel_bridge: http transport requires `url` (e.g. http://host/<rest_id>/)"
-            }
-        try:
-            transport = await HTTPTransport.connect(url)
-        except Exception as e:
-            return {"error": f"kernel_bridge: http connect failed: {e}"}
     else:
         return {"error": f"kernel_bridge: unknown transport {kind!r}"}
 
@@ -383,7 +392,7 @@ async def _reconnect(id, payload, kernel):
 
 
 async def _forward(id, payload, kernel):
-    """args: target:str (req — id on the REMOTE kernel), payload:dict (req), timeout:float? (default 30s). Wraps + ships the inner payload to the peer bridge, awaits the matching reply, returns the unwrapped result. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
+    """args: target:str (req — id on the REMOTE kernel), payload:dict (req), timeout:float? (default 30s). Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given."""
     target = payload.get("target")
     inner = payload.get("payload")
     if not target or not isinstance(inner, dict):
@@ -396,23 +405,15 @@ async def _forward(id, payload, kernel):
     if st.transport is None or st.transport.closed:
         return {"error": "kernel_bridge.forward: not connected (call boot first)"}
 
-    rec = kernel.get(id) or {}
-    peer_id = rec.get("peer_id")
-
     corr = _next_corr(id, st)
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
     st.pending[corr] = fut
 
     frame = {
         "type": "call",
-        "target": peer_id,
-        "payload": {
-            "type": "forward",
-            "target": target,
-            "payload": inner,
-            "corr_id": corr,
-        },
-        "id": corr,  # frame.id == corr_id — single layer of correlation
+        "id": corr,
+        "target": target,
+        "payload": inner,
     }
     try:
         await st.transport.send(frame)
@@ -429,6 +430,38 @@ async def _forward(id, payload, kernel):
         return {"error": f"kernel_bridge.forward: {e}"}
 
 
+async def _watch_remote(id, payload, kernel):
+    """args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport. Subsequent `{type:'event'}` frames from the remote arrive via the read loop and are re-emitted on THIS bridge agent's inbox. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)` and see the remote stream. Idempotent on the wire (web_ws de-dups via its own `watching` set)."""
+    target = payload.get("target")
+    if not target or not isinstance(target, str):
+        return {"error": "kernel_bridge.watch_remote: target (str) required"}
+    st = _state(id)
+    if st.transport is None or st.transport.closed:
+        return {"error": "kernel_bridge.watch_remote: not connected (call boot first)"}
+    try:
+        await st.transport.send({"type": "watch", "src": target})
+    except ConnectionClosed as e:
+        return {"error": f"kernel_bridge.watch_remote: send failed: {e}"}
+    return {"ok": True, "watching": target}
+
+
+async def _unwatch_remote(id, payload, kernel):
+    """args: target:str (req — id previously passed to watch_remote). Sends `{type:'unwatch', src:<target>}` to the remote so it stops emitting events for this subscription. Events already in-flight on the wire are still delivered + re-emitted."""
+    target = payload.get("target")
+    if not target or not isinstance(target, str):
+        return {"error": "kernel_bridge.unwatch_remote: target (str) required"}
+    st = _state(id)
+    if st.transport is None or st.transport.closed:
+        return {
+            "error": "kernel_bridge.unwatch_remote: not connected (call boot first)"
+        }
+    try:
+        await st.transport.send({"type": "unwatch", "src": target})
+    except ConnectionClosed as e:
+        return {"error": f"kernel_bridge.unwatch_remote: send failed: {e}"}
+    return {"ok": True, "unwatched": target}
+
+
 # ─── dispatch ───────────────────────────────────────────────────
 
 
@@ -437,6 +470,8 @@ VERBS = {
     "boot": _boot,
     "reconnect": _reconnect,
     "forward": _forward,
+    "watch_remote": _watch_remote,
+    "unwatch_remote": _unwatch_remote,
 }
 
 

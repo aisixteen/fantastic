@@ -5,6 +5,16 @@ A medium that unifies humans and AIs into a single workspace. Recursive
 (`send(target_id, payload)`), plugin-discovered bundles. Every agent
 answers `{type:"reflect"}` — the universal discovery verb.
 
+> **This is the canonical reference implementation** of the Fantastic
+> protocol. When other runtimes (`swift/`, the Apple app's embedded
+> kernel) disagree with this kernel on wire shape, on-disk format,
+> verb payloads, or reflect output, the other runtime is wrong. The
+> protocol surface lives in this file (sections "Architecture",
+> "Universal patterns", "Storage policy") — no separate spec doc.
+> Cross-runtime drift is caught mechanically by
+> `swift/Tests/FantasticParityTests`, which spawns this kernel and
+> byte-diffs replies.
+
 ## Architecture
 
 ```
@@ -33,9 +43,9 @@ answers `{type:"reflect"}` — the universal discovery verb.
 ```
 
 **No client library. The protocol IS the API.** A code agent (Claude,
-LLM CLI) bootstraps from a single WS `kernel.reflect` round-trip
-(open `ws://host/<any-agent>/ws`, send a `call` frame with
-`target:"kernel", payload:{type:"reflect"}`).
+LLM CLI) bootstraps from `.fantastic/readme.md` on disk, or from a single
+WS `kernel.reflect` round-trip (open `ws://host/<any-agent>/ws`, send a
+`call` frame with `target:"kernel", payload:{type:"reflect", readme:true}`).
 
 ## Run
 
@@ -91,7 +101,7 @@ fantastic> @core list_agents
 | `ai/ai_chat_webapp` | provider-agnostic chat UI; fronts any backend that answers `send`/`history`/`interrupt` |
 | `canvas/{canvas_backend, canvas_webapp}` | spatial UI host; Liquid-Glass-styled DOM iframes (`get_webapp`) layered with GL views (`get_gl_view`); explicit `add_agent` membership; pure-streaming lifecycle (no polling). Each GL view runs in its own `THREE.Group` container — live `set_gl_source` reload in place (`gl_source_changed`), no canvas refresh. Wheel zoom is horizon-anchored (pulls toward screen center, 2D + GL locked in sync) and smoothed (rAF-lerped toward a `targetZ`). |
 | `canvas/telemetry_pane` | live agent-vis GL view — water-floating sprites + sender→receiver neon wires + traveling pulses + last-10 messages pane; runs inside any canvas's WebGL scene |
-| `kernel_bridge` | cross-kernel comms — pairs of bridge agents exchange `forward` envelopes over memory / WS / SSH+WS / HTTP. WS targets the remote's `web_ws` surface (full duplex); HTTP targets `web_rest` (request/reply only). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. |
+| `kernel_bridge` | cross-kernel comms — **WS-only, asymmetric**. A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. |
 | `ssh_runner` | remote `fantastic` lifecycle over SSH — start/stop/restart/status + local SSH tunnel for canvas iframing. Pure subprocess ssh; composes with `kernel_bridge` for messaging |
 
 Each bundle is a real Python package with its own `pyproject.toml`,
@@ -116,10 +126,16 @@ scanned at process start.
 
 ## Universal patterns
 
-- **`reflect`** — every agent answers `{type:"reflect"}` returning
-  `{id, sentence, verbs:{name:doc}, emits:{type:shape}, ...flat state}`.
-  Verb signatures live in their docstrings; `reflect` derives them
-  automatically. Discovery is one round-trip.
+- **`reflect`** — every agent answers `{type:"reflect"}` returning the
+  ADDRESSED agent uniformly: `{id, sentence, display_name, description?,
+  verbs:{name:doc}, emits:{type:shape}, ...flat state}`. Root is NOT
+  special (no `primer`). Compose the reply with flags:
+  `tree=all|ids|none` (default `all` — nested distilled subtree; `ids` =
+  flat descendant-id index), `bundles=all|ids|none` (default `none` —
+  the installable-bundle catalog), `readme=true` (attach the agent's
+  readme.md; legacy `return_readme` honored). Verb signatures live in
+  docstrings; `reflect` derives them. Discovery is one round-trip;
+  transport/wire docs live in the root readme (`reflect readme=true`).
 - **`render_html`** — duck-typed presentation. Any agent that returns
   `{html:str}` from `render_html` gets that body served at `/<id>/`
   with `transport.js` auto-injected. html_agent stores its body on
@@ -182,24 +198,27 @@ scanned at process start.
 
 ## Self-bootstrap (for code agents)
 
+The substrate is self-describing through the root readme — which a code
+agent gets either by reading `.fantastic/readme.md` off disk (no process,
+no socket needed) or with one reflect:
+
 Open `ws://host/<any-agent>/ws` and send
-`{"type":"call","target":"kernel","payload":{"type":"reflect"},"id":"1"}`.
+`{"type":"call","target":"kernel","payload":{"type":"reflect","readme":true,"bundles":"all"},"id":"1"}`.
 The reply carries:
 
-- `transports.{in_process, in_prompt, cli, ws}` — every invocation
-  form, including the actual WS URL template with the current
-  host:port.
-- `available_bundles` — every entry-point-discovered bundle (what
-  you can `create_agent` from).
-- `agents` — every running agent record.
-- `binary_protocol` — `[4-byte BE H | JSON header | M-byte body]`
-  WS frame format for byte-heavy payloads.
-- `browser_bus` — the BroadcastChannel envelope shape.
+- `readme` — the root readme: every transport (in_process / in_prompt /
+  cli / ws / rest / binary-frame / browser-bus), the reflect surface,
+  the `kernel` alias, and the `.fantastic/lock.json` daemon rule. This
+  is where transport/wire docs live now (they left the reflect JSON).
+- `tree` — the live agent tree (default `all`; `tree:"ids"` for a cheap
+  id index).
+- `bundles` — with `bundles:"all"`, every installable bundle (what you
+  can `create_agent` from); `bundles:"ids"` for names only.
 
-Per-agent reflect carries `verbs: {name: doc-line}` so an LLM caller
-can compose any `payload` from the docstring without source diving.
-"If you find yourself reading kernel/ to discover a transport URL,
-that's a primer regression — flag it."
+Per-agent reflect carries `verbs: {name: doc-line}` so an LLM caller can
+compose any `payload` from the docstring without source diving. "If you
+find yourself reading kernel/ to discover a transport URL, that's a
+regression — it belongs in the root readme."
 
 ## Tests
 

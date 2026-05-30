@@ -368,8 +368,12 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
 
 
 async def _assemble(self_id: str, user_text: str, kernel, client_id: str) -> list[dict]:
-    primer = await kernel.send("kernel", {"type": "reflect"})
-    me = await kernel.send(self_id, {"type": "reflect"})
+    # Lean substrate context for the system prompt: an id-index of the
+    # tree + the bundle catalog by name (not the full nested tree).
+    primer = await kernel.send(
+        "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
+    )
+    me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
 
     if self_id not in _menu_cache:
         _menu_cache[self_id] = await _build_menu(self_id, kernel)

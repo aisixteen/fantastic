@@ -1,2 +1,2 @@
-# kernel_bridge — cross-kernel comms
-Pairs of bridge agents forward `send` envelopes between kernels over memory / WS / SSH+WS / HTTP transports. Weak binding — the remote is addressed by URL + path only, no shared types.
+# kernel_bridge — cross-kernel comms (WS-only, asymmetric)
+A bridge agent opens a WS to the remote kernel's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). Weak binding — the remote is addressed by URL + path only, no shared types. Weak proxy — local→local stays direct `kernel.send`.

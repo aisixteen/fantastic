@@ -33,6 +33,7 @@ public struct TerminalWebappBundle: AgentBundle {
         case "reflect":
             return [
                 "id": .string(agentId.value),
+                "sentence": .string("xterm UI fronting an upstream terminal backend."),
                 "kind": .string("terminal_webapp"),
                 "upstream_id": kernel.agent(agentId)?.metaValue(forKey: "upstream_id") ?? .null,
                 "verbs": [

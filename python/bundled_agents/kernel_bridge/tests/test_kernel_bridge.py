@@ -1,9 +1,11 @@
-"""kernel_bridge — verbs + memory-transport round-trip + WS integration.
+"""kernel_bridge — verbs + memory-transport round-trip + streaming.
 
-Most tests use MemoryTransport (no network, no SSH, no real WS).
-One integration test wires two real `make_app()` instances over a
-real `websockets` client — the WS path WITHOUT SSH, since SSH would
-require a live host.
+Tests use MemoryTransport (no network, no SSH, no real WS). The
+WS path is covered by integration tests (real Python ↔ Python and
+Python ↔ Swift over real websockets) at the repo root in
+`integration_tests/`. MemoryTransport coverage here proves the
+framing + correlation + lifecycle paths; WSTransport on top is just
+a transport swap.
 """
 
 from __future__ import annotations
@@ -70,7 +72,15 @@ async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
 
 async def _wire_memory_pair(ka, kb_kern):
     """Build two paired MemoryTransports, create a bridge on each
-    kernel, inject the transports, boot. Returns (b_a_id, b_b_id)."""
+    kernel, inject the transports, boot. Returns (b_a_id, b_b_id).
+
+    The asymmetric WS model in production doesn't need a B-side
+    bridge — B's `web_ws` handles inbound call frames directly. For
+    memory-transport tests we still pair two bridges because there's
+    no `web_ws` in-process; each bridge's `_read_loop` plays the
+    "inbound call dispatcher" role that `web_ws._on_call` plays over
+    a real WS.
+    """
     # Allocate ids first so each can know its peer.
     rec_a = await ka.send(
         "core",
@@ -113,7 +123,14 @@ async def test_reflect_lists_verbs(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="ignored", transport="memory")
     r = await ka.send(bid, {"type": "reflect"})
-    for v in ("reflect", "boot", "reconnect", "forward"):
+    for v in (
+        "reflect",
+        "boot",
+        "reconnect",
+        "forward",
+        "watch_remote",
+        "unwatch_remote",
+    ):
         assert v in r["verbs"], f"missing verb {v}"
     assert r["transport"] == "memory"
     assert r["connected"] is False  # not booted yet
@@ -135,11 +152,11 @@ async def test_memory_transport_pair_round_trip(two_kernels):
         },
     )
     # The reply is what kernel B's root returns for reflect — the
-    # substrate primer.
+    # uniform identity + tree (transports moved to the readme).
     assert isinstance(r, dict), f"non-dict reply: {r!r}"
-    assert "transports" in r, f"reply not the primer: {r}"
-    assert "tree" in r
-    assert "available_bundles" in r
+    assert r["id"] == "core", f"reply not B's root reflect: {r}"
+    assert r["tree"]["id"] == "core"
+    assert "transports" not in r
 
 
 async def test_forward_before_boot_errors(two_kernels):
@@ -201,14 +218,15 @@ async def test_on_delete_via_cascade(two_kernels):
     assert kb._state(a_id).read_task is None
 
 
-async def test_inbound_unknown_call_payload_replies_error(two_kernels):
-    """If a peer sends a `call` whose payload isn't a forward
-    envelope, A's read_loop must reply with a structured error so
-    the peer's pending Future resolves cleanly (not hang forever).
+async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
+    """When a peer sends a `call` whose `target` doesn't exist on this
+    kernel, A's read_loop must reply with a structured error so the
+    peer's pending Future resolves cleanly (not hang forever).
 
-    Test design: only A is a real bridge with a read_loop. B is a
-    raw MemoryTransport — it sends the frame and reads the reply
-    directly without a competing read_loop draining the queue.
+    Test design: only A is a real bridge with a read_loop. The
+    "peer" side uses a raw MemoryTransport — it sends the frame and
+    reads the reply directly without a competing read_loop draining
+    the queue.
     """
     ka, _ = two_kernels
     rec_a = await ka.send(
@@ -226,13 +244,63 @@ async def test_inbound_unknown_call_payload_replies_error(two_kernels):
     r = await ka.send(a_id, {"type": "boot"})
     assert r.get("booted") is True
 
-    frame = {"type": "call", "payload": {"type": "garbage"}, "id": "test_corr"}
+    frame = {
+        "type": "call",
+        "id": "test_corr",
+        "target": "no_such_agent_xyz",
+        "payload": {"type": "reflect"},
+    }
     await mt_test.send(frame)
 
     reply = await asyncio.wait_for(mt_test.recv(), timeout=2.0)
     assert reply["type"] == "reply"
     assert reply["id"] == "test_corr"
     assert "error" in reply["data"]
+
+
+async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
+    """A remote `web_ws` emits `{type:"error", id, error}` when its
+    dispatch RAISES (vs a verb-level error dict, which rides back as a
+    `reply`). The bridge's read loop must fail the pending forward
+    PROMPTLY with that error — not let it hang to the timeout. Regression
+    for the cross-runtime error-frame gap (rust handled it; py/swift
+    didn't)."""
+    ka, _ = two_kernels
+    rec_a = await ka.send(
+        "core",
+        {
+            "type": "create_agent",
+            "handler_module": "kernel_bridge.tools",
+            "transport": "memory",
+            "peer_id": "stand_in",
+        },
+    )
+    a_id = rec_a["id"]
+    mt_a, mt_peer = MemoryTransport.pair()
+    kb._test_transport_inject[a_id] = mt_a
+    await ka.send(a_id, {"type": "boot"})
+
+    # Fire a forward with a long timeout; if the error frame isn't
+    # handled, this would hang ~30s. The test's wait_for(2s) guards.
+    fwd = asyncio.create_task(
+        ka.send(
+            a_id,
+            {
+                "type": "forward",
+                "target": "whatever",
+                "payload": {"type": "reflect"},
+                "timeout": 30.0,
+            },
+        )
+    )
+    # Read A's outbound call frame to learn the corr id, then echo an
+    # error frame with the same id (what a raising remote produces).
+    call = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
+    assert call["type"] == "call"
+    await mt_peer.send({"type": "error", "id": call["id"], "error": "boom"})
+
+    reply = await asyncio.wait_for(fwd, timeout=2.0)
+    assert "error" in reply and "boom" in reply["error"], reply
 
 
 async def test_unknown_verb_errors(two_kernels):
@@ -259,108 +327,101 @@ async def test_boot_memory_without_injection_errors(two_kernels):
     assert "error" in r and "memory transport" in r["error"]
 
 
-# WS integration (real two-kernel ws round-trip) is exercised by the
-# manual selftest against a live `fantastic serve` — keeping it out
-# of the unit suite avoids the loopback-in-single-process fragility
-# (two kernels sharing the module-level _bridges dict + id namespace
-# collisions). MemoryTransport coverage above proves the framing +
-# correlation + lifecycle paths are correct; the WS path on top is
-# just `WSTransport` swapping in for `MemoryTransport`.
+# ─── streaming (watch_remote + event re-emit) ────────────────────
 
 
-# ─── HTTPTransport (request/reply against a remote web_rest) ────
-
-
-class _FakeResp:
-    def __init__(self, status_code: int, body: dict | None):
-        self.status_code = status_code
-        self._body = body
-        # httpx response surface used by HTTPTransport.send.
-        import json as _json
-
-        self.content = b"" if body is None else _json.dumps(body).encode()
-        self.text = "" if body is None else _json.dumps(body)
-
-    def json(self) -> dict | None:
-        return self._body
-
-
-class _FakeHTTPClient:
-    """Minimal in-memory stand-in for httpx.AsyncClient — records POSTs
-    and returns canned replies. Avoids network in the unit suite."""
-
-    def __init__(self, reply: dict | None = None, status: int = 200):
-        self.posted: list[tuple[str, dict]] = []
-        self._reply = reply or {"ok": True}
-        self._status = status
-        self.closed = False
-
-    async def post(self, url: str, json=None, headers=None):
-        self.posted.append((url, json))
-        return _FakeResp(self._status, self._reply)
-
-    async def aclose(self):
-        self.closed = True
-
-
-async def test_http_transport_unwraps_forward_envelope():
-    """Bridge wraps every outbound call in a `forward` envelope. The
-    HTTP transport unwraps to a direct POST against the remote
-    web_rest's `/<rest_id>/<target>` endpoint."""
-    from kernel_bridge._transport import HTTPTransport
-
-    fake = _FakeHTTPClient(reply={"sentence": "remote primer"})
-    t = HTTPTransport("http://h/rest_xyz/", fake)
-    await t.send(
+async def test_watch_remote_sends_watch_frame(two_kernels):
+    """watch_remote sends `{type:'watch', src:<target>}` over the
+    transport. The remote-side (in tests: a raw MemoryTransport peer
+    standing in for web_ws) receives the frame as the next-out item."""
+    ka, _ = two_kernels
+    rec_a = await ka.send(
+        "core",
         {
-            "type": "call",
-            "target": "peer_bridge_b",
-            "payload": {
-                "type": "forward",
-                "target": "core",
-                "payload": {"type": "reflect"},
-                "corr_id": "c1",
-            },
-            "id": "c1",
-        }
+            "type": "create_agent",
+            "handler_module": "kernel_bridge.tools",
+            "transport": "memory",
+            "peer_id": "stand_in",
+        },
     )
-    # POST landed at <base>/<inner_target>, body == inner payload.
-    assert fake.posted == [("http://h/rest_xyz/core", {"type": "reflect"})]
-    # Reply frame is enqueued with id == corr_id and data == response JSON.
-    reply = await t.recv()
-    assert reply == {"type": "reply", "id": "c1", "data": {"sentence": "remote primer"}}
+    a_id = rec_a["id"]
+    mt_a, mt_peer = MemoryTransport.pair()
+    kb._test_transport_inject[a_id] = mt_a
+    r = await ka.send(a_id, {"type": "boot"})
+    assert r.get("booted") is True
+
+    r = await ka.send(a_id, {"type": "watch_remote", "target": "remote_core"})
+    assert r == {"ok": True, "watching": "remote_core"}
+
+    frame = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
+    assert frame == {"type": "watch", "src": "remote_core"}
 
 
-async def test_http_transport_translates_4xx_into_reply_error():
-    from kernel_bridge._transport import HTTPTransport
+async def test_event_frame_re_emits_on_bridge_inbox(two_kernels):
+    """When the remote sends `{type:'event', payload}`, the bridge's
+    read loop re-emits `payload` on the bridge agent's own inbox so
+    local watchers see remote streams via `kernel.watch(<bridge>, ...)`."""
+    ka, _ = two_kernels
+    rec_a = await ka.send(
+        "core",
+        {
+            "type": "create_agent",
+            "handler_module": "kernel_bridge.tools",
+            "transport": "memory",
+            "peer_id": "stand_in",
+        },
+    )
+    a_id = rec_a["id"]
+    mt_a, mt_peer = MemoryTransport.pair()
+    kb._test_transport_inject[a_id] = mt_a
+    r = await ka.send(a_id, {"type": "boot"})
+    assert r.get("booted") is True
 
-    fake = _FakeHTTPClient(reply={"error": "boom"}, status=500)
-    t = HTTPTransport("http://h/rest/", fake)
-    await t.send({"type": "call", "target": "core", "payload": {}, "id": "c2"})
-    reply = await t.recv()
-    assert reply["type"] == "reply"
-    assert reply["id"] == "c2"
-    assert "HTTP 500" in reply["data"]["error"]
+    # Attach a synthetic watcher to the bridge BEFORE the event
+    # arrives. `_watcher_ids` is the substrate's fanout target set —
+    # any id in it gets a copy of every payload emitted on the bridge.
+    ka.ctx.ensure_inbox("test_watcher")
+    ka.ctx.agents[a_id]._watcher_ids.add("test_watcher")
+
+    await mt_peer.send({"type": "event", "payload": {"type": "token", "text": "hi"}})
+
+    watcher_inbox = ka.ctx.inboxes["test_watcher"]
+    ev = await asyncio.wait_for(watcher_inbox.get(), timeout=2.0)
+    assert ev.get("type") == "token" and ev.get("text") == "hi", (
+        f"expected re-emitted token event, got: {ev}"
+    )
 
 
-async def test_http_transport_rejects_non_call_frames():
-    from kernel_bridge._transport import HTTPTransport
+async def test_unwatch_remote_sends_unwatch_frame(two_kernels):
+    """unwatch_remote sends `{type:'unwatch', src:<target>}` so the
+    remote stops pushing events for that subscription."""
+    ka, _ = two_kernels
+    rec_a = await ka.send(
+        "core",
+        {
+            "type": "create_agent",
+            "handler_module": "kernel_bridge.tools",
+            "transport": "memory",
+            "peer_id": "stand_in",
+        },
+    )
+    a_id = rec_a["id"]
+    mt_a, mt_peer = MemoryTransport.pair()
+    kb._test_transport_inject[a_id] = mt_a
+    await ka.send(a_id, {"type": "boot"})
 
-    fake = _FakeHTTPClient()
-    t = HTTPTransport("http://h/rest/", fake)
-    import pytest
+    await ka.send(a_id, {"type": "watch_remote", "target": "remote_core"})
+    _watch = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
 
-    with pytest.raises(NotImplementedError):
-        await t.send({"type": "emit", "target": "core", "payload": {}})
+    r = await ka.send(a_id, {"type": "unwatch_remote", "target": "remote_core"})
+    assert r == {"ok": True, "unwatched": "remote_core"}
+    frame = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
+    assert frame == {"type": "unwatch", "src": "remote_core"}
 
 
-async def test_http_transport_close_idempotent():
-    from kernel_bridge._transport import HTTPTransport
-
-    fake = _FakeHTTPClient()
-    t = HTTPTransport("http://h/rest/", fake)
-    await t.close()
-    assert t.closed is True
-    assert fake.closed is True
-    # Second close is a no-op.
-    await t.close()
+# WS integration (real two-kernel ws round-trip + streaming) is
+# exercised by the integration tests at the repo root in
+# `integration_tests/`. MemoryTransport coverage above proves the
+# framing + correlation + lifecycle + event re-emission paths; the
+# WS path on top is just `WSTransport` swapping in for
+# `MemoryTransport`.

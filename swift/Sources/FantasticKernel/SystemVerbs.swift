@@ -281,25 +281,70 @@ private func mintId(_ bundle: String) -> String {
 }
 
 extension Kernel {
-    /// `reflect` reply for an agent with no `handler_module` (the
-    /// root and other bare agents). Mirrors Rust's
-    /// `crate::reflect::reflect` for the bare path.
-    func reflectBare(_ agent: Agent) -> JSON {
-        var children: [JSON] = []
-        for cid in agent.childIds() {
-            if let c = self.agent(cid) {
-                children.append(
-                    .object([
-                        "id": .string(c.id.value),
-                        "handler_module": c.handlerModule.map { .string($0) } ?? .null,
-                    ]))
-            }
+    /// Uniform reflect identity for a bare agent (the root, or any node
+    /// with no handler_module): id + sentence + record fields + flat
+    /// meta. Bundle agents build their own identity in their handler; the
+    /// substrate appends tree/bundles/readme to BOTH via
+    /// `applyReflectFlags`, so the root is not special-cased. Mirrors
+    /// Rust's `reflect::reflect_identity` / Python's `_reflect_identity`.
+    func reflectIdentity(_ agent: Agent) -> JSON {
+        var obj: OrderedDictionary<String, JSON> = [:]
+        obj["id"] = .string(agent.id.value)
+        obj["sentence"] = .string(sentenceFor(agent))
+        obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
+        obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
+        obj["display_name"] = .string(agent.displayName ?? agent.id.value)
+        if let d = agent.descriptionMeta {
+            obj["description"] = .string(d)
         }
-        return .object([
-            "id": .string(agent.id.value),
-            "sentence": .string("Bare agent (no handler_module) — answers substrate verbs only."),
-            "handler_module": .null,
-            "children": .array(children),
-        ])
+        // Flatten current meta into the reply for visibility.
+        for (k, v) in agent.meta where obj[k] == nil {
+            obj[k] = v
+        }
+        return .object(obj)
+    }
+
+    func sentenceFor(_ agent: Agent) -> String {
+        agent.parentId == nil
+            ? "Fantastic kernel. Everything is reachable by sending messages to agents."
+            : "Bare agent (no handler_module) — answers substrate verbs only."
+    }
+
+    /// Nested distilled subtree `{id, parent_id, handler_module,
+    /// display_name, description?, children}` (the `tree=all` shape;
+    /// children sorted by id).
+    func treeNode(_ agent: Agent) -> JSON {
+        var obj: OrderedDictionary<String, JSON> = [:]
+        obj["id"] = .string(agent.id.value)
+        obj["parent_id"] = agent.parentId.map { .string($0.value) } ?? .null
+        obj["handler_module"] = agent.handlerModule.map { .string($0) } ?? .null
+        obj["display_name"] = .string(agent.displayName ?? agent.id.value)
+        if let d = agent.descriptionMeta {
+            obj["description"] = .string(d)
+        }
+        let kids = agent.childIds()
+            .compactMap { self.agent($0) }
+            .sorted { $0.id.value < $1.id.value }
+        obj["children"] = .array(kids.map { treeNode($0) })
+        return .object(obj)
+    }
+
+    /// Flat id index of an agent + all descendants (DFS, self first,
+    /// children sorted by id). The cheap `tree=ids` tier.
+    func descendantIds(_ agent: Agent) -> [String] {
+        var out = [agent.id.value]
+        let kids = agent.childIds()
+            .compactMap { self.agent($0) }
+            .sorted { $0.id.value < $1.id.value }
+        for c in kids { out.append(contentsOf: descendantIds(c)) }
+        return out
+    }
+
+    /// The installable-bundle catalog as `(name, handlerModule)` pairs,
+    /// sorted by name. The `bundles=all`/`bundles=ids` source.
+    func availableBundles() -> [(name: String, handlerModule: String)] {
+        bundles.snapshot()
+            .map { (handlerModule, bundle) in (bundle.name, handlerModule) }
+            .sorted { $0.name < $1.name }
     }
 }

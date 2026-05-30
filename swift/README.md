@@ -4,9 +4,15 @@ Native Swift kernel for Apple platforms. macOS, iOS, iPadOS,
 visionOS, tvOS, watchOS. Used in-process by the Apple app — no
 UniFFI, no XCFramework, no native subprocess required.
 
-The reference kernel for non-Apple deployments is in
-[`../python/`](../python/). Wire format + on-disk shape are
-byte-compatible between them.
+**Python (`../python/`) is the canonical reference for the Fantastic
+protocol.** This Swift kernel mirrors Python's wire shape (HTTP
+routes, WS frames, system verb payloads), on-disk format
+(`.fantastic/` layout, `agent.json` indent=2 pretty), and reflect
+contract. Drift from Python is a bug. Mechanical drift detection
+runs in [`Tests/FantasticParityTests`](Tests/FantasticParityTests/) —
+spawns the Python kernel as a subprocess and byte-diffs JSON replies
+against this Swift kernel's output. Gated via `PYTHON_KERNEL_BIN`
+env var; skipped cleanly when unset.
 
 ## What's in the box
 
@@ -66,7 +72,7 @@ kernel modules.
 | terminal_webapp | `FantasticTerminalWebapp` | both | xterm.js frontend |
 | telemetry_pane | `FantasticTelemetryPane` | both | event firehose UI |
 | cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
-| kernel_bridge | `FantasticKernelBridge` | both | in-memory + WS + HTTP transports |
+| kernel_bridge | `FantasticKernelBridge` | both | in-memory + WS transports (asymmetric; WS targets remote `web_ws`) |
 | web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE |
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry |

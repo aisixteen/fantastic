@@ -103,43 +103,73 @@ extension Kernel {
             unregister(a.id)
         }
 
-        // Reconstruct in parent-first order (Rust uses BFS / sorted
-        // by parent count; the snapshot is already sorted by id so
-        // parents land before children for typical workdir layouts).
-        // Two-pass: first create all agents, then wire children.
+        // Compute the base rootPath for the substrate root. In disk
+        // mode, this is `<workdir>/.fantastic`. In in-memory mode,
+        // it's an empty URL — no persistence ever fires for in-memory
+        // agents, so the value doesn't matter beyond being consistent.
+        let baseRoot: URL
+        if let workdir = storage.workdir {
+            baseRoot = workdir.appendingPathComponent(".fantastic")
+        } else {
+            baseRoot = URL(fileURLWithPath: "")
+        }
+
+        // Build a top-down construction: each agent's rootPath is
+        // parent.childrenDir/<id>. Without this, subsequent
+        // `create_agent` writes after hydration would land in the
+        // wrong directory (e.g. `<cwd>/agents/<id>/` instead of
+        // `<workdir>/.fantastic/agents/<id>/`).
         var registry: [AgentId: Agent] = [:]
-        for rec in state.agents {
-            let id = AgentId(rec.id)
+
+        func construct(_ rec: AgentRecord, parentRootPath: URL?) {
             // Weak-load: skip if handler_module is set but unknown.
+            // The agent shell still registers so children can wire,
+            // but verbs targeting it return "no bundle" until the
+            // bundle lands. Mirrors Python's weak-load policy.
             if let hm = rec.handlerModule, bundles.get(hm) == nil {
-                // Still register the agent shell so child rewiring
-                // works; verbs that target it will return
-                // "no bundle for handler_module" until the bundle
-                // lands. Matches Rust's weak-load behaviour.
                 _ = hm
             }
+            let rootPath: URL
+            if let pr = parentRootPath {
+                rootPath = pr
+                    .appendingPathComponent("agents")
+                    .appendingPathComponent(rec.id)
+            } else {
+                rootPath = baseRoot
+            }
             let agent = Agent(
-                id: id,
+                id: AgentId(rec.id),
                 handlerModule: rec.handlerModule,
                 parentId: rec.parentId.map { AgentId($0) },
                 meta: rec.meta,
-                rootPath: URL(fileURLWithPath: "")
+                rootPath: rootPath
             )
-            registry[id] = agent
+            registry[agent.id] = agent
             register(agent)
+            // Recurse into this agent's children (records that name
+            // it as their parent_id).
+            for child in state.agents where child.parentId == rec.id {
+                construct(child, parentRootPath: rootPath)
+            }
         }
+
+        // Start from the root (parent_id == nil). Required to exist
+        // by the validation pass above.
+        if let rootRec = state.agents.first(where: { $0.parentId == nil }) {
+            construct(rootRec, parentRootPath: nil)
+            if let rootAgent = registry[AgentId(rootRec.id)] {
+                setRoot(rootAgent)
+            }
+        }
+
+        // Wire parent-child relationships now that every agent has a
+        // proper rootPath.
         for rec in state.agents {
             if let pid = rec.parentId, let parent = registry[AgentId(pid)],
                 let child = registry[AgentId(rec.id)]
             {
                 parent.insertChild(child)
             }
-        }
-        // Set root.
-        if let rootRec = state.agents.first(where: { $0.parentId == nil }),
-            let rootAgent = registry[AgentId(rootRec.id)]
-        {
-            setRoot(rootAgent)
         }
     }
 }

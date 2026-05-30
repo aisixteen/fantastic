@@ -37,14 +37,13 @@ extension Kernel {
             await dispatch(target: target, payload: payload)
         }
 
-        // Reflect post-process: when payload.return_readme == true,
-        // attach the target's readme.md content as reply.readme.
-        if verb == "reflect", payload["return_readme"].asBool == true {
-            if case .object = reply, storage.isDisk {
-                let readme = (try? String(
-                    contentsOf: target.readmeFile, encoding: .utf8)) ?? ""
-                reply["readme"] = readme.isEmpty ? .null : .string(readme)
-            }
+        // Universal reflect post-process: compose every reflect reply
+        // with the tree/bundles/readme flags + the `description` field.
+        // Applied to bundle reflects and bare-agent reflects alike, so
+        // the surface is uniform. Mirrors Python's `_apply_reflect_flags`
+        // / Rust's `apply_reflect_flags`.
+        if verb == "reflect" {
+            applyReflectFlags(target, payload, &reply)
         }
 
         // State event + watcher fanout.
@@ -92,6 +91,58 @@ extension Kernel {
         }
     }
 
+    /// Append the composable reflect flags to any reflect reply —
+    /// applied uniformly to bare-agent and bundle reflects. `tree`
+    /// defaults to `all`, `bundles` to `none`, `readme` to false (legacy
+    /// `return_readme` honored). Non-object replies pass through.
+    func applyReflectFlags(_ target: Agent, _ payload: JSON, _ reply: inout JSON) {
+        guard case .object(var obj) = reply else { return }
+        // `description` is a substrate meta field — surface it on every
+        // reflect (bundle handlers don't know about it) unless already set.
+        if obj["description"] == nil, let d = target.descriptionMeta {
+            obj["description"] = .string(d)
+        }
+        switch payload["tree"].asString ?? "all" {
+        case "all": obj["tree"] = treeNode(target)
+        case "ids": obj["tree"] = .array(descendantIds(target).map { .string($0) })
+        default: break  // "none" → omit
+        }
+        switch payload["bundles"].asString ?? "none" {
+        case "all":
+            obj["bundles"] = .array(
+                availableBundles().map {
+                    .object([
+                        "name": .string($0.name),
+                        "handler_module": .string($0.handlerModule),
+                    ])
+                })
+        case "ids":
+            obj["bundles"] = .array(availableBundles().map { .string($0.name) })
+        default: break  // "none" → omit
+        }
+        if payload["readme"].asBool == true || payload["return_readme"].asBool == true {
+            obj["readme"] = readReadme(target)
+        }
+        reply = .object(obj)
+    }
+
+    /// The addressed agent's readme.md (string) or null. On disk, read
+    /// the seeded file; for the root with no on-disk file (in-memory
+    /// mode), fall back to the embedded canonical readme so
+    /// `reflect readme=true` returns the same bytes the seed would.
+    private func readReadme(_ target: Agent) -> JSON {
+        if storage.isDisk,
+            let s = try? String(contentsOf: target.readmeFile, encoding: .utf8),
+            !s.isEmpty
+        {
+            return .string(s)
+        }
+        if target.parentId == nil {
+            return .string(RootReadme.text)
+        }
+        return .null
+    }
+
     // ── internals ───────────────────────────────────────────────
 
     private func dispatch(target: Agent, payload: JSON) async -> JSON {
@@ -108,7 +159,7 @@ extension Kernel {
             case "boot", "shutdown":
                 return .null
             case "reflect":
-                return reflectBare(target)
+                return reflectIdentity(target)
             default:
                 return .object([
                     "error":

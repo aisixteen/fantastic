@@ -1,0 +1,9 @@
+target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock IS committed — fantastic-cli is a binary crate, so a
+# reproducible lockfile is part of the artifact contract.
+
+# Runtime state — tests that drive the CLI may leak this if
+# they forget to use a tempdir for their workdir.
+.fantastic/

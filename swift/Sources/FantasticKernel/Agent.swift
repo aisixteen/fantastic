@@ -72,6 +72,14 @@ public final class Agent: @unchecked Sendable {
         metaValue(forKey: "display_name")?.asString
     }
 
+    /// Optional short `description` (from meta) — a one-line "what this
+    /// agent does", surfaced in every reflect. Set via
+    /// create_agent / update_agent. (Named `descriptionMeta` to avoid
+    /// colliding with `CustomStringConvertible.description`.)
+    public var descriptionMeta: String? {
+        metaValue(forKey: "description")?.asString
+    }
+
     public var isDeleteLocked: Bool {
         metaValue(forKey: "delete_lock")?.asBool ?? false
     }

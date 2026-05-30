@@ -43,7 +43,10 @@ async def main():
         for _ in range(5):
             m = json.loads(await ws.recv())
             if m.get('id')=='1' and m.get('type')=='reply':
-                print('PASS' if 'transports' in m['data'] else 'FAIL'); return
+                d = m['data']
+                # Uniform reflect: identity + tree, no legacy primer keys.
+                ok = d.get('id') == 'core' and 'tree' in d and 'transports' not in d
+                print('PASS' if ok else f'FAIL keys={list(d)}'); return
 asyncio.run(main())
 "
 ```

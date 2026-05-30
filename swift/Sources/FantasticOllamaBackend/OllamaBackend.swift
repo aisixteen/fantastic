@@ -38,6 +38,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
         case "reflect":
             return [
                 "id": .string(agent.id.value),
+                "sentence": .string("Ollama-backed LLM agent (native tool-calling)."),
                 "kind": .string("ollama_backend"),
                 "provider": .string("ollama"),
                 "host": .string(host(agent: agent)),

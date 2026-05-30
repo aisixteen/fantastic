@@ -36,6 +36,7 @@ let package = Package(
         .library(name: "FantasticKernel", targets: ["FantasticKernel"]),
         .library(name: "FantasticBundles", targets: [
             "FantasticFile",
+            "FantasticYamlState",
             "FantasticProxyAgent",
             "FantasticTools",
             "FantasticHtmlAgent",
@@ -49,8 +50,11 @@ let package = Package(
             "FantasticCliBundle",
             "FantasticKernelBridge",
             "FantasticWeb",
+            "FantasticWebWS",
+            "FantasticWebRest",
             "FantasticOllamaBackend",
             "FantasticNvidiaNimBackend",
+            "FantasticFoundationModelsBackend",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
 
@@ -65,6 +69,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
     ],
     targets: [
         // ── Core ─────────────────────────────────────────────────
@@ -79,7 +84,8 @@ let package = Package(
             dependencies: [
                 "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
-            ]
+            ],
+            resources: [.copy("Resources/root_readme.md")]
         ),
         .testTarget(
             name: "FantasticKernelTests",
@@ -91,6 +97,12 @@ let package = Package(
             name: "FantasticFile",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+        .target(
+            name: "FantasticYamlState",
+            dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "Yams", package: "Yams")]
         ),
         .target(
             name: "FantasticProxyAgent",
@@ -156,6 +168,21 @@ let package = Package(
                 .copy("Resources/transport.js"),
             ]
         ),
+        // Composable web surfaces (children of a `web` host). They run
+        // no server — they return `get_routes` descriptors the host
+        // mounts. WS handling is the host's shared proxy, so neither
+        // depends on FantasticWeb (no cycle).
+        .target(
+            name: "FantasticWebWS",
+            dependencies: ["FantasticKernel", "FantasticJSON"]
+        ),
+        .target(
+            name: "FantasticWebRest",
+            dependencies: [
+                "FantasticKernel", "FantasticJSON",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+            ]
+        ),
 
         // ── LLM backends (Phase 5 / 8D) ──────────────────────────
         .target(
@@ -165,6 +192,11 @@ let package = Package(
         ),
         .target(
             name: "FantasticNvidiaNimBackend",
+            dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+        .target(
+            name: "FantasticFoundationModelsBackend",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
@@ -200,8 +232,10 @@ let package = Package(
                 "FantasticCanvasBackend", "FantasticCanvasWebapp",
                 "FantasticAiChatWebapp", "FantasticTerminalWebapp",
                 "FantasticTelemetryPane", "FantasticCliBundle",
-                "FantasticKernelBridge", "FantasticWeb",
+                "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
+                "FantasticYamlState",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
+                "FantasticFoundationModelsBackend",
                 "FantasticLocalRunner", "FantasticPythonRuntime",
                 "FantasticSshRunner", "FantasticTerminalBackend",
             ]
@@ -255,6 +289,10 @@ let package = Package(
                 "FantasticKernelStartup", "FantasticKernel", "FantasticJSON",
             ]
         ),
+        .testTarget(
+            name: "FantasticCLITests",
+            dependencies: ["Fantastic", "FantasticJSON", "FantasticKernel"]
+        ),
 
         .testTarget(
             name: "FantasticBundlesTests",
@@ -265,7 +303,9 @@ let package = Package(
                 "FantasticCanvasBackend", "FantasticCanvasWebapp",
                 "FantasticAiChatWebapp", "FantasticTerminalWebapp",
                 "FantasticTelemetryPane", "FantasticCliBundle",
-                "FantasticKernelBridge", "FantasticWeb",
+                "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
+                "FantasticYamlState", "FantasticKernelStartup",
+                "FantasticFoundationModelsBackend",
             ]
         ),
     ]

@@ -129,10 +129,24 @@ struct HTTPServerTests {
         #expect(body.contains("/_fantastic/transport.js"))
     }
 
-    @Test func acceptsPostVerbToAgent() async throws {
+    @Test func webRestPostDispatchesBodyVerb() async throws {
+        // REST moved out of the host into the `web_rest` child (parity
+        // with Python): POST /<rest_id>/<target> with the verb in the
+        // BODY. Seed a web_rest child + mount it, then dispatch.
         let kernel = try await startKernelInMemory(portHint: 0)
         _ = await kernel.send(
             AgentId("web"), .object(["type": .string("boot")]))
+        let rec = await kernel.send(
+            AgentId("web"),
+            .object([
+                "type": .string("create_agent"),
+                "handler_module": .string("web_rest.tools"),
+                "id": .string("rest"),
+            ]))
+        let restId = rec["id"].asString ?? "rest"
+        _ = await kernel.send(
+            AgentId("web"),
+            .object(["type": .string("mount"), "child_id": .string(restId)]))
         defer {
             Task {
                 _ = await kernel.send(
@@ -140,10 +154,11 @@ struct HTTPServerTests {
             }
         }
         let port = kernel.httpPort()
-        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/core/list_agents")!)
+        var req = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/\(restId)/core")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = "{}".data(using: .utf8)
+        req.httpBody = "{\"type\":\"list_agents\"}".data(using: .utf8)
         let (data, response) = try await URLSession.shared.data(for: req)
         let http = try #require(response as? HTTPURLResponse)
         #expect(http.statusCode == 200)

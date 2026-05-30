@@ -28,12 +28,15 @@ Strict rules:
 - If a regression signal in a test triggers, **STOP** that file's
   remaining tests and flag it.
 - Do not invent expected output — ask if the spec is unclear.
-- A correctly-deployed `fantastic` answers `kernel.reflect` over WS
-  with every URL/transport/bundle/agent you need to issue your first
-  send. Open `ws://host/<any-agent>/ws` and send `{"type":"call",
-  "target":"kernel","payload":{"type":"reflect"},"id":"1"}`. If you
-  find yourself reading `kernel/` source or `web/app.py` to figure
-  out a transport URL — that's a primer regression. Stop and flag it.
+- A correctly-deployed `fantastic` hands you the whole substrate in one
+  call: `reflect readme=true` returns the addressed agent's identity +
+  the root readme (every transport URL / bundle / agent you need to
+  issue your first send). Over WS: open `ws://host/<any-agent>/ws` and
+  send `{"type":"call","target":"kernel","payload":{"type":"reflect",
+  "readme":true,"bundles":"all"},"id":"1"}`. The transport/wire prose
+  lives in that readme now, not in the reflect JSON. If you find
+  yourself reading `kernel/` source or `web/app.py` to figure out a
+  transport URL — that's a regression. Stop and flag it.
 
 ## Stateful bundles need a running `serve`
 
@@ -127,6 +130,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/web/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
 | `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, history.jsonl, file_agent_id failfast |
 | `bundled_agents/file/selftest.md` | kernel, persistence | read/write/list/delete/rename/mkdir, path safety |
+| `bundled_agents/yaml_state/selftest.md` | kernel, persistence | durable YAML memory agent — read/keys/set/delete/replace/state_yaml, mode (mem/data), disk-is-truth, cascade cleanup |
 | `bundled_agents/terminal/terminal_backend/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/terminal/terminal_webapp/selftest.md` | webapp, web | get_webapp + xterm UI in browser |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
@@ -137,7 +141,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/canvas/telemetry_pane/selftest.md` | webapp, web | live agent-vis GL view; subscribes to kernel state stream |
 | `bundled_agents/canvas/gl_agent/selftest.md` | kernel, http, web | GL-view-as-record agent; mirror of html_agent for inline `gl_source` |
 | `bundled_agents/canvas/html_agent/selftest.md` | kernel, http, web | UI-as-record agent; render_html duck type; cross-agent calls from iframe |
-| `bundled_agents/kernel_bridge/selftest.md` | kernel, ws, ssh | cross-kernel forward envelopes; memory + WS + SSH+WS transports |
+| `bundled_agents/kernel_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
 | `bundled_agents/ssh_runner/selftest.md` | kernel, ssh | remote `fantastic` lifecycle; SSH tunnel for canvas iframing |
 | `bundled_agents/python_runtime/selftest.md` | kernel | subprocess Python exec; timeout / interrupt / cwd |
 

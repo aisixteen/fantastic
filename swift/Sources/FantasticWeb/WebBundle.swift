@@ -115,6 +115,50 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         }
     }
 
+    // ── Route-provider composition (mirrors Python's get_routes pull) ──
+
+    /// Walk the web agent's children, pull each one's `get_routes`, and
+    /// mount the returned specs. Returns the ids of children that
+    /// contributed at least one route.
+    private func mountAllSurfaces(server: WebServer, webId: AgentId, kernel: Kernel)
+        async -> [AgentId]
+    {
+        guard let web = kernel.agent(webId) else { return [] }
+        var mounted: [AgentId] = []
+        for child in web.childIds() {
+            if await mountSurface(server: server, childId: child, kernel: kernel) {
+                mounted.append(child)
+            }
+        }
+        return mounted
+    }
+
+    /// Pull one child's `get_routes` and mount the returned specs
+    /// (unmount-first). Returns whether any route was mounted. Children
+    /// that don't answer `get_routes` are silently skipped (weak).
+    @discardableResult
+    private func mountSurface(server: WebServer, childId: AgentId, kernel: Kernel)
+        async -> Bool
+    {
+        let reply = await kernel.send(childId, .object(["type": .string("get_routes")]))
+        guard let routes = reply["routes"].asArray, !routes.isEmpty else {
+            return false
+        }
+        var specs: [RouteSpec] = []
+        for r in routes {
+            guard let kindStr = r["kind"].asString,
+                let kind = RouteKind(rawValue: kindStr),
+                let path = r["path"].asString
+            else { continue }
+            let method = r["method"].asString ?? "GET"
+            specs.append(
+                RouteSpec(kind: kind, method: method, path: path, ownerId: childId))
+        }
+        guard !specs.isEmpty else { return false }
+        server.mountRoutes(specs, for: childId)
+        return true
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
@@ -130,7 +174,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                 "id": .string(agent.id.value),
                 "kind": .string("web"),
                 "sentence": .string(
-                    "HTTP host — exposes /<id>/, /_fantastic/transport.js, /_assets/* + per-child get_routes."
+                    "HTTP rendering host — serves /, /<id>/, /<id>/file/<path>, /_fantastic/transport.js, /_assets/*. WS + REST surfaces are composable children (web_ws / web_rest); at boot the host pulls each child's get_routes and mounts them."
                 ),
                 "port": agent.metaValue(forKey: "port") ?? .null,
                 "running": agent.metaValue(forKey: "running") ?? .bool(false),
@@ -142,10 +186,15 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                         ])
                     }),
                 "verbs": [
-                    "boot": "Marks the agent running (real HTTP listener wired by host).",
-                    "shutdown": "Marks the agent stopped.",
+                    "boot": "Starts the HTTP listener + pulls each child's get_routes and mounts them.",
+                    "shutdown": "Stops the listener.",
+                    "mount": "args: child_id. Re-pull + remount one child's routes (hot-swap).",
+                    "unmount": "args: child_id. Drop a child's mounted routes.",
                     "render": "args: agent_id. Returns the agent's render_html reply + transport.js injection.",
                     "asset": "args: path. Returns the vendored asset for /_assets/* or /_fantastic/transport.js.",
+                ] as JSON,
+                "emits": [
+                    "—": "rendering host emits nothing; surfaces emit on their own inboxes"
                 ] as JSON,
             ] as JSON
         case "boot":
@@ -159,14 +208,20 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             }
             let portHint = UInt16(agent.metaValue(forKey: "port")?.asInt ?? 0)
             let server = WebServer(kernel: kernel, agentId: agent.id)
-            installWebSocketUpgrade(on: server, kernel: kernel)
             do {
                 let port = try server.start(portHint: portHint)
                 setServer(server, for: agent.id)
+                // Walk this web's children and mount each one's
+                // contributed routes (analog of Python's
+                // `_mount_all_surfaces`). The host is rendering-only;
+                // WS/REST surfaces are composable children.
+                let surfaces = await mountAllSurfaces(
+                    server: server, webId: agent.id, kernel: kernel)
                 return .object([
                     "ok": .bool(true),
                     "running": .bool(true),
                     "port": .integer(Int64(port)),
+                    "surfaces": .array(surfaces.map { .string($0.value) }),
                 ])
             } catch {
                 return .object([
@@ -174,6 +229,29 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
                     "reason": .string("port_bind_failed"),
                 ])
             }
+        case "mount":
+            // args: child_id. (Re)pull a single child's get_routes and
+            // remount onto the live server. Hot-swap after boot.
+            guard let childStr = payload["child_id"].asString else {
+                return .object(["error": .string("web.mount: child_id required")])
+            }
+            guard let server = serverFor(agent.id) else {
+                return .object(["error": .string("web.mount: not running")])
+            }
+            let mounted = await mountSurface(
+                server: server, childId: AgentId(childStr), kernel: kernel)
+            return .object([
+                "mounted": .bool(mounted),
+                "child_id": .string(childStr),
+            ])
+        case "unmount":
+            guard let childStr = payload["child_id"].asString else {
+                return .object(["error": .string("web.unmount: child_id required")])
+            }
+            if let server = serverFor(agent.id) {
+                server.unmountRoutes(for: AgentId(childStr))
+            }
+            return .object(["unmounted": .bool(true), "child_id": .string(childStr)])
         case "shutdown", "stop":
             if let server = serverFor(agent.id) {
                 server.stop()

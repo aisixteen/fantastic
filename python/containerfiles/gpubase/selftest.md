@@ -71,7 +71,7 @@ rm -rf "$WORKDIR"
 | 1 | image | image | PASS | 3.33 GB — over slim's 1.5 GB threshold, but expected for CUDA runtime libs |
 | 2 | boot | boot | PASS | `[kernel] up`; `web_*` + `canvas_webapp_*` present in agents tree |
 | 3 | http | http | PASS | `/` renders agent tree |
-| 4 | rest | rest | PASS | kernel reflect returns 20 bundles |
+| 4 | rest | rest | PASS | kernel reflect `?bundles=all` returns 20 bundles |
 | 5 | ws | ws | PASS | call/reflect round-trip on `/core/ws` |
 | 6 | canvas | canvas, http, rest | PASS | canvas HTML + empty members list on fresh workdir |
 | 7 | add-member | add-member, canvas, rest | PASS | `html_agent_<hex>` created, listed, `GET /<id>/` → 200 |

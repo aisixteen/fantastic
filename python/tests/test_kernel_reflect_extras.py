@@ -1,87 +1,46 @@
-"""Substrate primer (root reflect) — must self-describe transports,
-bundles, agents tree, binary_protocol, and browser_bus enough that
-one reflect round-trip bootstraps a remote caller.
+"""Uniform `reflect` surface — the composable flags (tree / bundles /
+readme), the `description` field, and the guarantee that the old
+root-only `primer` keys are GONE (transports/wire docs moved into the
+root readme; `available_bundles` is now the `bundles` flag).
 """
 
 from __future__ import annotations
 
+_PRIMER_KEYS_GONE = (
+    "transports",
+    "primitive",
+    "envelope",
+    "universal_verb",
+    "binary_protocol",
+    "browser_bus",
+    "well_known",
+    "agent_count",
+    "available_bundles",
+)
 
-async def test_reflect_includes_binary_protocol(seeded_kernel):
+
+async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
+    """Root reflect is the uniform identity — no special primer shape."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "binary_protocol" in r
-    bp = r["binary_protocol"]
-    assert "trigger" in bp
-    assert "wire_format" in bp
-    assert "header_field" in bp
-    assert "_binary_path" in bp["header_field"]
+    assert r["id"] == "core"
+    assert r["sentence"].startswith("Fantastic kernel")
+    assert r["parent_id"] is None
+    for k in _PRIMER_KEYS_GONE:
+        assert k not in r, f"deleted primer key {k!r} still present"
 
 
-async def test_reflect_includes_browser_bus(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "browser_bus" in r
-    bb = r["browser_bus"]
-    assert bb["channel"] == "fantastic"
-    assert "BroadcastChannel" in bb["transport"]
-    assert "bus" in bb["available_in_js"]
+async def test_kernel_alias_equals_core(seeded_kernel):
+    """`kernel` is an alias for the root; reflecting it == reflecting core."""
+    via_alias = await seeded_kernel.send("kernel", {"type": "reflect"})
+    via_id = await seeded_kernel.send("core", {"type": "reflect"})
+    assert via_alias == via_id
 
 
-async def test_reflect_browser_bus_envelope_documented(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    bb = r["browser_bus"]
-    for k in ("type", "target_id", "source_id"):
-        assert k in bb["envelope"]
+# ─── tree tiers ────────────────────────────────────────────────
 
 
-async def test_reflect_transports_in_process(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "transports" in r
-    ip = r["transports"]["in_process"]
-    assert "agent.send" in ip["shape"]
-    assert "use_when" in ip
-
-
-async def test_reflect_transports_in_prompt(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    inp = r["transports"]["in_prompt"]
-    assert "<send" in inp["shape"]
-    assert inp.get("example", "").startswith("<send")
-
-
-async def test_reflect_transports_cli(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    cli = r["transports"]["cli"]
-    # The one-shot form is `fantastic <id> <verb>` — there is no
-    # `call` subcommand (that token would be read as an agent id).
-    assert cli["shape"].startswith("fantastic <agent_id> <verb>")
-    assert cli["shorthand"].startswith("fantastic reflect")
-
-
-async def test_reflect_drops_top_level_send_syntax(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "send_syntax" not in r
-    assert "example" not in r
-
-
-async def test_reflect_available_bundles_lists_workspace(seeded_kernel):
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    bundles = r["available_bundles"]
-    assert isinstance(bundles, list)
-    assert len(bundles) >= 2
-    names = {b["name"] for b in bundles}
-    assert "cli" in names
-    assert "file" in names
-    # sorted
-    sorted_names = [b["name"] for b in bundles]
-    assert sorted_names == sorted(sorted_names)
-    for b in bundles:
-        assert set(b.keys()) == {"name", "handler_module"}
-        assert b["handler_module"].endswith(".tools")
-
-
-async def test_reflect_tree_includes_seeded_agents(seeded_kernel):
-    """Root primer's `tree` field shows root + all descendants in
-    nested form. With the seeded fixture (cli singleton), root has at
-    least one child."""
+async def test_reflect_tree_all_default(seeded_kernel):
+    """Default tree=all: nested distilled subtree rooted at the agent."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
     tree = r["tree"]
     assert tree["id"] == "core"
@@ -89,9 +48,84 @@ async def test_reflect_tree_includes_seeded_agents(seeded_kernel):
     assert "cli" in child_ids
 
 
-async def test_reflect_well_known_present(seeded_kernel):
-    """`well_known` is the named-singleton index. Empty by default; bundles
-    that want to publish themselves write to ctx.well_known on boot."""
+async def test_reflect_tree_ids(seeded_kernel):
+    """tree=ids: a flat descendant-id list (self first)."""
+    r = await seeded_kernel.send("kernel", {"type": "reflect", "tree": "ids"})
+    assert isinstance(r["tree"], list)
+    assert r["tree"][0] == "core"
+    assert "cli" in r["tree"]
+
+
+async def test_reflect_tree_none_omits(seeded_kernel):
+    """tree=none: no tree key at all."""
+    r = await seeded_kernel.send("kernel", {"type": "reflect", "tree": "none"})
+    assert "tree" not in r
+
+
+# ─── bundles tiers ─────────────────────────────────────────────
+
+
+async def test_reflect_bundles_default_omitted(seeded_kernel):
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "well_known" in r
-    assert isinstance(r["well_known"], dict)
+    assert "bundles" not in r
+
+
+async def test_reflect_bundles_all(seeded_kernel):
+    r = await seeded_kernel.send("kernel", {"type": "reflect", "bundles": "all"})
+    bundles = r["bundles"]
+    assert isinstance(bundles, list)
+    names = [b["name"] for b in bundles]
+    assert "cli" in names and "file" in names
+    assert names == sorted(names)
+    for b in bundles:
+        assert set(b.keys()) == {"name", "handler_module"}
+        assert b["handler_module"].endswith(".tools")
+
+
+async def test_reflect_bundles_ids(seeded_kernel):
+    r = await seeded_kernel.send("kernel", {"type": "reflect", "bundles": "ids"})
+    assert isinstance(r["bundles"], list)
+    assert all(isinstance(n, str) for n in r["bundles"])
+    assert "file" in r["bundles"]
+    assert r["bundles"] == sorted(r["bundles"])
+
+
+# ─── readme tier ───────────────────────────────────────────────
+
+
+async def test_reflect_readme_default_omitted(seeded_kernel):
+    r = await seeded_kernel.send("kernel", {"type": "reflect"})
+    assert "readme" not in r
+
+
+async def test_reflect_readme_flag_and_legacy(seeded_kernel):
+    """readme=true attaches the root readme; legacy return_readme also works."""
+    new = await seeded_kernel.send("kernel", {"type": "reflect", "readme": True})
+    legacy = await seeded_kernel.send(
+        "kernel", {"type": "reflect", "return_readme": True}
+    )
+    assert isinstance(new["readme"], str)
+    assert "Fantastic kernel" in new["readme"]
+    assert legacy["readme"] == new["readme"]
+
+
+# ─── description field ─────────────────────────────────────────
+
+
+async def test_reflect_description_surfaces_top_and_tree(seeded_kernel):
+    """description set at create surfaces both at top-level reflect of the
+    agent AND in its node inside a tree=all walk of the parent."""
+    rec = await seeded_kernel.send(
+        "core",
+        {
+            "type": "create_agent",
+            "handler_module": "file.tools",
+            "description": "holds my notes",
+        },
+    )
+    fid = rec["id"]
+    own = await seeded_kernel.send(fid, {"type": "reflect"})
+    assert own["description"] == "holds my notes"
+    root = await seeded_kernel.send("kernel", {"type": "reflect"})
+    node = next(c for c in root["tree"]["children"] if c["id"] == fid)
+    assert node["description"] == "holds my notes"

@@ -26,10 +26,65 @@ import FantasticJSON
 import FantasticKernel
 import Foundation
 import Network
+import OrderedCollections
 
 #if canImport(Darwin)
     import Darwin
 #endif
+
+/// Errors thrown by `WebServer.start`.
+public enum WebServerError: Error {
+    /// The `NWListener` did not reach `.ready` within the startup
+    /// timeout — the bound port never resolved.
+    case listenerStartTimeout
+}
+
+/// Surface kind a child agent's route contributes. Mirrors the
+/// `kind` field of Python's `get_routes` descriptors.
+public enum RouteKind: String, Sendable {
+    case websocket
+    case http
+}
+
+/// A route contributed by a child agent (web_ws / web_rest), pulled
+/// at host boot via the child's `get_routes` verb. The Swift analog of
+/// Python's `{kind, path, method, endpoint}` descriptor — but the
+/// endpoint isn't a serializable closure, so `kind` selects the
+/// host's shared handler: `.websocket` runs the shared WS proxy;
+/// `.http` calls the owner's `handle_route` verb.
+public struct RouteSpec: Sendable {
+    public let kind: RouteKind
+    public let method: String  // uppercased; "GET" for websocket upgrades
+    public let template: [String]  // path segments; `{name}` captures a param
+    public let ownerId: AgentId
+
+    public init(kind: RouteKind, method: String, path: String, ownerId: AgentId) {
+        self.kind = kind
+        self.method = method.uppercased()
+        self.template = RouteSpec.segments(path)
+        self.ownerId = ownerId
+    }
+
+    static func segments(_ path: String) -> [String] {
+        path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    }
+
+    /// Match request `segments` against this template. Returns the
+    /// captured `{param}` values, or nil if no match.
+    func match(method: String, segments: [String]) -> [String: String]? {
+        guard self.method == method.uppercased() else { return nil }
+        guard template.count == segments.count else { return nil }
+        var params: [String: String] = [:]
+        for (t, s) in zip(template, segments) {
+            if t.hasPrefix("{") && t.hasSuffix("}") {
+                params[String(t.dropFirst().dropLast())] = s
+            } else if t != s {
+                return nil
+            }
+        }
+        return params
+    }
+}
 
 /// Server lifecycle owner. Started by `WebBundle.boot`, stopped by
 /// `WebBundle.shutdown`. One instance per `web.tools` agent.
@@ -40,14 +95,59 @@ public final class WebServer: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: Set<ObjectIdentifier> = []
 
-    /// Optional WebSocket upgrade handler installed in 8C. When
-    /// non-nil, `Upgrade: websocket` requests are forwarded here.
-    public var webSocketUpgrade:
-        ((_ agentId: String, _ connection: NWConnection, _ request: HTTPRequest) -> Void)?
+    /// Dedicated queues so the listener's state callbacks never
+    /// compete with blocked `semaphore.wait` threads on the global
+    /// pool. Under heavy parallel load (e.g. the full test suite
+    /// booting many servers at once) routing the listener through
+    /// `.global()` could starve the pool and delay `.ready` past the
+    /// startup timeout, surfacing as a spurious port-0 boot. A private
+    /// serial queue for the listener + a concurrent queue for
+    /// connections keeps startup deterministic.
+    private let listenerQueue = DispatchQueue(label: "fantastic.web.listener")
+    private let connectionQueue = DispatchQueue(
+        label: "fantastic.web.connections", attributes: .concurrent)
+
+    /// Dynamic routes contributed by child surface agents (web_ws /
+    /// web_rest), pulled at host boot via each child's `get_routes`.
+    /// Guarded by `lock`. The host serves only rendering routes
+    /// natively; WS + REST live here (parity with Python — `web` is
+    /// rendering-only, surfaces are composable children).
+    private var dynamicRoutes: [RouteSpec] = []
 
     public init(kernel: Kernel, agentId: AgentId) {
         self.kernel = kernel
         self.agentId = agentId
+    }
+
+    /// Replace the routes owned by `owner` with `specs` (unmount-first,
+    /// so re-mounting is idempotent). Called from `WebBundle` after
+    /// pulling a child's `get_routes`.
+    public func mountRoutes(_ specs: [RouteSpec], for owner: AgentId) {
+        lock.lock()
+        defer { lock.unlock() }
+        dynamicRoutes.removeAll { $0.ownerId == owner }
+        dynamicRoutes.append(contentsOf: specs)
+    }
+
+    /// Drop every route owned by `owner`.
+    public func unmountRoutes(for owner: AgentId) {
+        lock.lock()
+        defer { lock.unlock() }
+        dynamicRoutes.removeAll { $0.ownerId == owner }
+    }
+
+    private func matchRoute(method: String, segments: [String])
+        -> (RouteSpec, [String: String])?
+    {
+        lock.lock()
+        let routes = dynamicRoutes
+        lock.unlock()
+        for spec in routes {
+            if let params = spec.match(method: method, segments: segments) {
+                return (spec, params)
+            }
+        }
+        return nil
     }
 
     /// Start the listener. If `portHint` is 0, the OS picks any
@@ -93,14 +193,19 @@ public final class WebServer: @unchecked Sendable {
                 break
             }
         }
-        listener.start(queue: .global())
-        _ = semaphore.wait(timeout: .now() + .seconds(5))
+        listener.start(queue: listenerQueue)
+        let waitResult = semaphore.wait(timeout: .now() + .seconds(5))
         result.lock.lock()
         let err = result.error
         let resolvedPort = result.port
         result.lock.unlock()
         if let err = err {
             throw err
+        }
+        // Fail loudly on timeout rather than silently returning port 0
+        // (which would later surface as a confusing "can't connect").
+        if waitResult == .timedOut {
+            throw WebServerError.listenerStartTimeout
         }
         // Sync port back into the kernel + the web agent's meta.
         kernel.setHttpPort(resolvedPort)
@@ -142,7 +247,7 @@ public final class WebServer: @unchecked Sendable {
                 break
             }
         }
-        connection.start(queue: .global())
+        connection.start(queue: connectionQueue)
     }
 
     private func readRequest(_ connection: NWConnection, accumulated: Data = Data()) {
@@ -177,44 +282,110 @@ public final class WebServer: @unchecked Sendable {
     // MARK: - Request handling
 
     private func handle(request: HTTPRequest, on connection: NWConnection) async {
-        // WebSocket upgrade hook (filled in by 8C).
-        if request.headers["Upgrade"]?.lowercased() == "websocket",
-            let agentSegment = request.firstPathSegment,
-            request.path.hasSuffix("/ws"),
-            let handler = webSocketUpgrade
+        // Strip the query string before routing; keep it for dynamic
+        // HTTP handlers (e.g. web_rest's `?readme=1`).
+        let (pathOnly, query) = splitQuery(request.path)
+        let segments = RouteSpec.segments(pathOnly)
+        let isWSUpgrade = request.headers["Upgrade"]?.lowercased() == "websocket"
+
+        // ── Built-in rendering routes (host owns these) ──
+        switch (request.method, pathOnly) {
+        case ("GET", "/"):
+            await write(response: await serveIndex(), to: connection)
+            return
+        case ("GET", "/_fantastic/transport.js"):
+            // URL matches python/web/host/app.py — keeps the bundled
+            // transport.js reachable at the same path on both runtimes.
+            await write(
+                response: HTTPResponse(
+                    status: 200, contentType: "application/javascript",
+                    body: WebAssets.transportJS.data(using: .utf8) ?? Data()),
+                to: connection)
+            return
+        case ("GET", "/favicon.png"):
+            await write(
+                response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
+                to: connection)
+            return
+        case ("GET", let path) where path.hasPrefix("/_assets/"):
+            if let asset = WebAssets.body(forPath: path) {
+                await write(
+                    response: HTTPResponse(
+                        status: 200, contentType: asset.contentType,
+                        body: asset.body.data(using: .utf8) ?? Data(),
+                        extraHeaders: [
+                            "Cache-Control": "public, max-age=31536000, immutable"
+                        ]),
+                    to: connection)
+            } else {
+                await write(
+                    response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
+                    to: connection)
+            }
+            return
+        default:
+            break
+        }
+
+        // ── Dynamic surfaces (web_ws / web_rest children) ──
+        if isWSUpgrade {
+            // WS is opt-in: served only when a web_ws child contributed
+            // a `/{host_id}/ws` route. No route → 404 (parity: Python's
+            // host doesn't serve WS without web_ws).
+            if let (spec, params) = matchRoute(method: "GET", segments: segments),
+                spec.kind == .websocket,
+                let hostId = params["host_id"]
+            {
+                runWebSocketProxy(
+                    hostId: hostId, connection: connection, request: request, kernel: kernel)
+                return
+            }
+            await write(
+                response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
+                to: connection)
+            return
+        }
+        if let (spec, params) = matchRoute(method: request.method, segments: segments),
+            spec.kind == .http
         {
-            handler(agentSegment, connection, request)
+            let resp = await dispatchHTTPRoute(
+                spec: spec, params: params, query: query, request: request)
+            await write(response: resp, to: connection)
             return
         }
 
-        let response: HTTPResponse
-        switch (request.method, request.path) {
-        case ("GET", "/"):
-            response = await serveIndex()
-        case ("GET", "/_fantastic/transport.js"):
-            // URL matches python/web/host/app.py:122 — keeps the
-            // bundled transport.js reachable at the same path on
-            // both runtimes so identical HTML can target either.
-            response = HTTPResponse(
-                status: 200, contentType: "application/javascript",
-                body: WebAssets.transportJS.data(using: .utf8) ?? Data())
-        case ("GET", "/favicon.png"):
-            response = HTTPResponse(status: 404, contentType: "text/plain", body: Data())
-        case ("GET", let path) where path.hasPrefix("/_assets/"):
-            if let asset = WebAssets.body(forPath: path) {
-                response = HTTPResponse(
-                    status: 200, contentType: asset.contentType,
-                    body: asset.body.data(using: .utf8) ?? Data(),
-                    extraHeaders: [
-                        "Cache-Control": "public, max-age=31536000, immutable"
-                    ])
-            } else {
-                response = HTTPResponse(status: 404, contentType: "text/plain", body: Data())
-            }
-        default:
-            response = await serveAgentRoute(request: request)
-        }
-        await write(response: response, to: connection)
+        // ── Built-in agent rendering routes (GET /<id>/, /<id>/file) ──
+        await write(response: await serveAgentRoute(request: request), to: connection)
+    }
+
+    /// Forward a matched HTTP route to its owning child agent via the
+    /// `handle_route` verb. The owner returns `{status, content_type,
+    /// body}` which we translate into an `HTTPResponse`.
+    private func dispatchHTTPRoute(
+        spec: RouteSpec, params: [String: String], query: [String: String],
+        request: HTTPRequest
+    ) async -> HTTPResponse {
+        let bodyStr = request.body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        var paramsObj: OrderedDictionary<String, JSON> = [:]
+        for (k, v) in params { paramsObj[k] = .string(v) }
+        var queryObj: OrderedDictionary<String, JSON> = [:]
+        for (k, v) in query { queryObj[k] = .string(v) }
+        let reply = await kernel.send(
+            spec.ownerId,
+            .object([
+                "type": .string("handle_route"),
+                "method": .string(request.method),
+                "path": .string(request.path),
+                "params": .object(paramsObj),
+                "query": .object(queryObj),
+                "body": .string(bodyStr),
+            ]))
+        let status = Int(reply["status"].asInt ?? 200)
+        let contentType = reply["content_type"].asString ?? "application/json"
+        let bodyOut = reply["body"].asString ?? ""
+        return HTTPResponse(
+            status: status, contentType: contentType,
+            body: bodyOut.data(using: .utf8) ?? Data())
     }
 
     private func serveIndex() async -> HTTPResponse {
@@ -289,33 +460,30 @@ public final class WebServer: @unchecked Sendable {
                 body: (reply["error"].asString ?? "no content").data(using: .utf8)
                     ?? Data())
         }
-        // `POST /<id>/<verb>` → kernel.send(agent, {type:verb, ...body})
-        if request.method == "POST" {
-            let pathBits = request.path.split(separator: "/", omittingEmptySubsequences: true)
-                .map(String.init)
-            guard pathBits.count >= 2 else {
-                return HTTPResponse(
-                    status: 400, contentType: "text/plain",
-                    body: "expected /<id>/<verb>".data(using: .utf8) ?? Data())
-            }
-            let verb = pathBits[1]
-            var payload: JSON = .object(["type": .string(verb)])
-            if let body = request.body, !body.isEmpty,
-                let parsed = try? JSON.parse(body),
-                case let .object(dict) = parsed
-            {
-                var merged = dict
-                merged["type"] = .string(verb)
-                payload = .object(merged)
-            }
-            let reply = await kernel.send(agentTarget, payload)
-            return HTTPResponse(
-                status: 200, contentType: "application/json",
-                body: reply.serialize().data(using: .utf8) ?? Data())
-        }
+        // POST/REST surfaces are no longer served by the host — they
+        // live in the `web_rest` child (parity with Python). An
+        // unmatched request that reached here is a 404.
         return HTTPResponse(
             status: 404, contentType: "text/plain",
             body: "no route".data(using: .utf8) ?? Data())
+    }
+
+    /// Split a request path into its path component + parsed query
+    /// dict. `/a/b?x=1&y=2` → (`/a/b`, [x:1, y:2]).
+    private func splitQuery(_ path: String) -> (String, [String: String]) {
+        guard let q = path.firstIndex(of: "?") else { return (path, [:]) }
+        let pathOnly = String(path[..<q])
+        let queryStr = String(path[path.index(after: q)...])
+        var query: [String: String] = [:]
+        for pair in queryStr.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            if kv.count == 2 {
+                query[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
+            } else if kv.count == 1 {
+                query[kv[0]] = ""
+            }
+        }
+        return (pathOnly, query)
     }
 
     private func write(response: HTTPResponse, to connection: NWConnection) async {

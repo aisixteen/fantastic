@@ -69,21 +69,25 @@ Expected: `PASS`. The page is rendered from
 `bundled_agents/web/src/web/templates/index.html` with the dynamic
 `<ul>` tree substituted.
 
-### Test 2: WS primer round-trip (substrate metadata)
+### Test 2: WS reflect round-trip (uniform identity + tree)
 
-The primer is reached over WS by calling `kernel.reflect`.
+`reflect` is the one uniform discovery verb, reached over WS by calling
+`kernel.reflect`. The reply is the root agent's identity plus its
+`tree`; the old primer keys (`transports`, `available_bundles`,
+`agent_count`, …) are gone — that prose moved into the root readme
+(`reflect readme=true`). Add `bundles=all` to get the catalog.
 
 ```bash
 call kernel '{"type":"reflect"}' | python -c "
 import json, sys
 d = json.loads(sys.stdin.read())
-need = ['primitive','envelope','transports','well_known','tree',
-        'available_bundles','binary_protocol','browser_bus','agent_count']
-missing = [k for k in need if k not in d]
-assert not missing, f'missing top-level: {missing}'
-names = {b['name'] for b in d['available_bundles']}
-for n in ('cli','web'):
-    assert n in names, f'{n} missing from available_bundles'
+assert d.get('id') == 'core', f'id={d.get(\"id\")}'
+assert 'sentence' in d and 'tree' in d, f'keys={list(d)}'
+# Old primer keys must be gone.
+gone = [k for k in ('transports','primitive','envelope','browser_bus',
+                    'binary_protocol','agent_count','available_bundles',
+                    'well_known') if k in d]
+assert not gone, f'stale primer keys leaked: {gone}'
 def walk_ids(n, out):
     out.append(n['id'])
     for c in n.get('children', []):
@@ -313,7 +317,7 @@ drop because addRay(null, …) finds no source sprite.
 | # | Test | Pass |
 |---|------|------|
 | 1 | GET / serves index HTML | |
-| 2 | WS kernel.reflect primer round-trip | |
+| 2 | WS kernel.reflect round-trip (uniform identity + tree) | |
 | 3 | transport.js has bus + binary | |
 | 4 | WS call frame → core/reflect | |
 | 5 | /<missing>/ → 404 | |

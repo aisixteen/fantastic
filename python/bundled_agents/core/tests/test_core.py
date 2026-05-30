@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 
-async def test_reflect_returns_substrate_primer(seeded_kernel):
-    """Root reflect returns the substrate primer — admin verbs are
-    baked into Agent class itself and answered for any agent. The
-    primer surfaces transports + tree + bundles for discovery."""
+async def test_reflect_returns_uniform_identity(seeded_kernel):
+    """Root reflect returns the uniform identity + tree (default all).
+    Transports/wire docs moved to the root readme; the bundle catalog is
+    now the opt-in `bundles` flag (not in a plain reflect)."""
     r = await seeded_kernel.send("core", {"type": "reflect"})
     assert r["sentence"].startswith("Fantastic kernel")
-    assert "transports" in r
-    assert "tree" in r
-    assert "available_bundles" in r
+    assert r["tree"]["id"] == "core"
+    assert "transports" not in r
+    assert "available_bundles" not in r
+    catalog = await seeded_kernel.send("core", {"type": "reflect", "bundles": "all"})
+    assert any(b["name"] == "file" for b in catalog["bundles"])
 
 
 async def test_list_agents(seeded_kernel):

@@ -39,10 +39,14 @@ public struct CanvasBackendBundle: AgentBundle {
                 "sentence": .string("Spatial UI host — children = members."),
                 "member_count": .integer(Int64(agent.childIds().count)),
                 "verbs": [
-                    "add_agent": "args: handler_module (or agent_id), x?, y?, w?, h?.",
+                    "add_agent": "args: handler_module (req), x?, y?, width?, height?.",
                     "remove_agent": "args: agent_id.",
-                    "discover": "args: x, y, w, h. Returns intersecting members.",
+                    "discover": "args: x, y, w(>0), h(>0). Returns {agents:[{id,x,y,width,height}]} intersecting the query rect.",
                     "list_members": "Returns [{id}] for every child.",
+                ] as JSON,
+                "emits": [
+                    "members_updated":
+                        "{type:'members_updated', members:[id,...]} — broadcast on this canvas's inbox after every add_agent / remove_agent"
                 ] as JSON,
             ] as JSON
         case "boot", "shutdown":
@@ -180,22 +184,42 @@ public struct CanvasBackendBundle: AgentBundle {
     }
 
     /// Spatial bbox query over members' meta (x/y/width/height).
+    ///
+    /// Canonical shape (Python `canvas_backend._discover`): requires
+    /// `w` and `h` > 0; returns
+    /// `{agents:[{id,x,y,width,height}, ...]}` for this canvas's
+    /// direct children whose rect intersects the query rect.
+    /// Intersection is edge-inclusive (touching counts), matching
+    /// Python's `_intersects`.
     private func discoverVerb(canvasAgent: Agent, payload: JSON, kernel: Kernel) -> JSON {
         let x = payload["x"].asDouble ?? 0
         let y = payload["y"].asDouble ?? 0
         let w = payload["w"].asDouble ?? 0
         let h = payload["h"].asDouble ?? 0
+        if w <= 0 || h <= 0 {
+            return .object(["error": .string("discover: w and h required and > 0")])
+        }
         var hits: [JSON] = []
         for cid in canvasAgent.childIds() {
             guard let child = kernel.agent(cid) else { continue }
             let mx = child.metaValue(forKey: "x")?.asDouble ?? 0
             let my = child.metaValue(forKey: "y")?.asDouble ?? 0
             let mw = child.metaValue(forKey: "width")?.asDouble ?? 320
-            let mh = child.metaValue(forKey: "height")?.asDouble ?? 240
-            if mx < x + w && mx + mw > x && my < y + h && my + mh > y {
-                hits.append(.string(cid.value))
+            let mh = child.metaValue(forKey: "height")?.asDouble ?? 220
+            // Edge-inclusive intersection (Python parity): NOT
+            // (mx+mw < x OR x+w < mx OR my+mh < y OR y+h < my).
+            let disjoint = mx + mw < x || x + w < mx || my + mh < y || y + h < my
+            if !disjoint {
+                hits.append(
+                    .object([
+                        "id": .string(cid.value),
+                        "x": .double(mx),
+                        "y": .double(my),
+                        "width": .double(mw),
+                        "height": .double(mh),
+                    ]))
             }
         }
-        return .object(["members": .array(hits)])
+        return .object(["agents": .array(hits)])
     }
 }

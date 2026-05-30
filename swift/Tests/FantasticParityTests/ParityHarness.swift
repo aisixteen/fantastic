@@ -1,18 +1,27 @@
-// Cross-runtime parity test harness.
+// Cross-runtime parity test harness — Python (canonical) ↔ Swift.
 //
-// Fires identical verb payloads at both kernels:
-//   - the in-process Swift kernel
-//   - the Rust kernel binary spawned as a subprocess
+// Spawns the Python kernel CLI as a subprocess and fires identical
+// verb payloads at both kernels. Diffs the JSON replies field-by-
+// field; wire-format drift fails loudly here before it bites a real
+// app consumer.
 //
-// Diffs the JSON replies field-by-field. Wire-format drift fails
-// loudly here before it bites the Apple app.
+// Python is the canonical reference for the Fantastic protocol — when
+// the two kernels disagree on wire shape, on-disk format, or verb
+// payloads, the Swift kernel is wrong. This test is the mechanical
+// drift detector that survives author memory.
 //
-// CI gating: tests skip cleanly when `RUST_KERNEL_BIN` env var is
-// unset or the binary isn't executable. To run locally:
+// CI gating: the suite returns cleanly (no recorded failures) when
+// `PYTHON_KERNEL_BIN` env var is unset or the binary isn't
+// executable. To run locally:
 //
-//     cargo build --release --bin fantastic
-//     RUST_KERNEL_BIN=/path/to/rust/target/release/fantastic \
+//     cd python && uv sync
+//     PYTHON_KERNEL_BIN="$(realpath ~/Projects/fantastic_canvas/python/.venv/bin/fantastic)" \
 //         swift test --filter FantasticParityTests
+//
+// The previous Rust-targeted version of this harness lived at this
+// path; Rust workspace retired with PR #20. Python takes the role
+// because it's the canonical reference; the harness shape (subprocess
+// + JSON diff) is preserved.
 
 #if os(macOS)
 
@@ -22,10 +31,12 @@
     import Foundation
     import Testing
 
-    /// Skip the test cleanly when the Rust binary isn't available.
-    private func rustBinaryURL() -> URL? {
+    /// Locate the Python kernel's `fantastic` entry-point. Returns
+    /// `nil` (causing tests to skip cleanly) when the env var is
+    /// unset or the binary isn't executable on this host.
+    private func pythonBinaryURL() -> URL? {
         let env = ProcessInfo.processInfo.environment
-        guard let path = env["RUST_KERNEL_BIN"],
+        guard let path = env["PYTHON_KERNEL_BIN"],
             FileManager.default.isExecutableFile(atPath: path)
         else {
             return nil
@@ -33,9 +44,10 @@
         return URL(fileURLWithPath: path)
     }
 
-    /// Run `fantastic <id> <verb> [k=v ...]` against the Rust binary
-    /// and capture stdout. Returns the parsed JSON reply.
-    private func rustOneShot(
+    /// Run `fantastic <agentId> <verb> [k=v ...]` against the Python
+    /// kernel's CLI. The Python CLI's one-shot RPC mode prints the
+    /// JSON reply to stdout and exits.
+    private func pythonOneShot(
         binary: URL,
         workdir: URL,
         agentId: String,
@@ -59,9 +71,33 @@
         return try JSON.parse(data)
     }
 
-    /// Compare two JSON values, returning `nil` on match or a string
-    /// describing the first divergence. Object key order is checked
-    /// because both runtimes preserve insertion order.
+    /// Run `fantastic reflect [<id>]` against the Python kernel's
+    /// dedicated shorthand mode.
+    private func pythonReflect(
+        binary: URL, workdir: URL, agentId: String = "core",
+        args: [String: String] = [:]
+    ) throws -> JSON {
+        let proc = Process()
+        proc.executableURL = binary
+        proc.currentDirectoryURL = workdir
+        var argList = ["reflect", agentId]
+        for (k, v) in args.sorted(by: { $0.key < $1.key }) {
+            argList.append("\(k)=\(v)")
+        }
+        proc.arguments = argList
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        try proc.run()
+        proc.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return try JSON.parse(data)
+    }
+
+    /// Compare two JSON values, returning `nil` on match or a
+    /// human-readable string describing the first divergence. Object
+    /// key insertion order IS checked because both runtimes preserve
+    /// it (Python via `dict` order, Swift via `OrderedDictionary`).
     private func diffJSON(_ a: JSON, _ b: JSON, path: String = "$") -> String? {
         switch (a, b) {
         case (.null, .null), (.bool, .bool), (.integer, .integer),
@@ -97,59 +133,181 @@
         }
     }
 
-    @Suite("Cross-runtime parity (Rust ↔ Swift)", .serialized)
+    @Suite("Cross-runtime parity (Python ↔ Swift)", .serialized)
     struct CrossRuntimeParityTests {
-        @Test func reflectOnBareCore() async throws {
-            guard let binary = rustBinaryURL() else {
-                Issue.record("RUST_KERNEL_BIN not set; skipping")
+
+        @Test func reflectOnRootHasSharedTopKeys() async throws {
+            guard let binary = pythonBinaryURL() else {
+                // Skip cleanly — no Issue.record. Empty suite passes
+                // when PYTHON_KERNEL_BIN is unset.
                 return
             }
             let tmp = makeTempDir()
             defer { try? FileManager.default.removeItem(at: tmp) }
 
-            // Rust side: `fantastic reflect` (one-shot CLI mode).
-            let rustReply = try rustOneShot(
-                binary: binary, workdir: tmp,
-                agentId: "reflect", verb: "")  // one-shot reflect mode
-            // The Rust CLI's "fantastic reflect" form has its own
-            // arg parsing — pass via run.
-            let proc = Process()
-            proc.executableURL = binary
-            proc.currentDirectoryURL = tmp
-            proc.arguments = ["reflect"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            try proc.run()
-            proc.waitUntilExit()
-            let rustData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let rustJSON = try JSON.parse(rustData)
+            // Python side.
+            let pyReply = try pythonReflect(binary: binary, workdir: tmp)
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swiftJSON = await kernel.send(
+            let swReply = await kernel.send(
                 AgentId("core"), .object(["type": .string("reflect")]))
 
-            // The "id" field should match. Other fields may differ in
-            // version-specific details; pin only the stable surface.
-            #expect(rustJSON["id"].asString == swiftJSON["id"].asString)
-            _ = rustReply  // silence unused-var
+            // Both must answer with an `id` field — the most basic
+            // reflect contract.
+            #expect(pyReply["id"].asString != nil, "python reflect lacks 'id'")
+            #expect(swReply["id"].asString != nil, "swift reflect lacks 'id'")
+            #expect(
+                pyReply["id"].asString == swReply["id"].asString,
+                "root id mismatch: python=\(pyReply["id"].asString ?? "nil") swift=\(swReply["id"].asString ?? "nil")"
+            )
         }
 
         @Test func listAgentsShape() async throws {
-            guard rustBinaryURL() != nil else {
-                Issue.record("RUST_KERNEL_BIN not set; skipping")
-                return
-            }
+            guard let binary = pythonBinaryURL() else { return }
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            // Python side.
+            let pyReply = try pythonOneShot(
+                binary: binary, workdir: tmp,
+                agentId: "core", verb: "list_agents")
+
+            // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swiftJSON = await kernel.send(
+            let swReply = await kernel.send(
                 AgentId("core"), .object(["type": .string("list_agents")]))
-            // Shape check: top-level has "agents" array.
-            #expect(swiftJSON["agents"].asArray != nil)
-            // Cross-runtime check: the Rust kernel's list_agents on
-            // a virgin in-memory boot returns the same shape — at
-            // minimum, "agents" is an array. We don't require a
-            // specific count because Rust's CLI mode auto-creates
-            // different agents than Swift's startKernelInMemory.
+
+            // Top-level shape: both must have an `agents` array.
+            #expect(pyReply["agents"].asArray != nil, "python list_agents lacks 'agents'")
+            #expect(swReply["agents"].asArray != nil, "swift list_agents lacks 'agents'")
+
+            // Each agent entry must carry `id` and (if a non-root)
+            // `handler_module`. Don't pin the agent set (initial
+            // bundles differ between runtimes); pin only that every
+            // entry has the required shape.
+            for arr in [pyReply["agents"].asArray ?? [], swReply["agents"].asArray ?? []] {
+                for entry in arr {
+                    #expect(entry["id"].asString != nil, "agent entry missing 'id': \(entry.serialize())")
+                }
+            }
+        }
+
+        /// The new uniform reflect contract: both runtimes return
+        /// `{id, sentence, tree, ...}` with NONE of the old primer keys,
+        /// and `bundles` omitted by default.
+        @Test func reflectContractParity() async throws {
+            guard let binary = pythonBinaryURL() else { return }
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            let pyReply = try pythonReflect(binary: binary, workdir: tmp)
+            let kernel = try await startKernelInMemory(portHint: 0)
+            let swReply = await kernel.send(
+                AgentId("core"), .object(["type": .string("reflect")]))
+
+            let gone = [
+                "transports", "primitive", "envelope", "universal_verb",
+                "binary_protocol", "browser_bus", "well_known",
+                "agent_count", "available_bundles",
+            ]
+            for (label, r) in [("python", pyReply), ("swift", swReply)] {
+                #expect(r["id"].asString == "core", "\(label) reflect id != core")
+                #expect(r["sentence"].asString != nil, "\(label) reflect lacks sentence")
+                #expect(r["tree"]["id"].asString == "core", "\(label) reflect tree.id != core")
+                #expect(r["bundles"].asArray == nil, "\(label) reflect has bundles by default")
+                for k in gone {
+                    #expect(r[k] == nil || r[k] == .null, "\(label) reflect still has primer key \(k)")
+                }
+            }
+        }
+
+        /// `reflect tree=ids` → a flat string-id list (root first) on
+        /// both runtimes; `reflect bundles=all` → a `{name, handler_module}`
+        /// array on both (don't pin the set — bundle lists differ).
+        @Test func reflectTreeIdsAndBundlesParity() async throws {
+            guard let binary = pythonBinaryURL() else { return }
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            let pyIds = try pythonReflect(
+                binary: binary, workdir: tmp, args: ["tree": "ids"])
+            let kernel = try await startKernelInMemory(portHint: 0)
+            let swIds = await kernel.send(
+                AgentId("core"),
+                .object(["type": .string("reflect"), "tree": .string("ids")]))
+            for (label, r) in [("python", pyIds), ("swift", swIds)] {
+                let arr = r["tree"].asArray
+                #expect(arr != nil, "\(label) tree=ids not an array")
+                #expect(arr?.first?.asString == "core", "\(label) tree=ids root not first")
+            }
+
+            let pyB = try pythonReflect(
+                binary: binary, workdir: tmp, args: ["bundles": "all"])
+            let swB = await kernel.send(
+                AgentId("core"),
+                .object(["type": .string("reflect"), "bundles": .string("all")]))
+            for (label, r) in [("python", pyB), ("swift", swB)] {
+                let arr = r["bundles"].asArray
+                #expect(arr != nil && !(arr!.isEmpty), "\(label) bundles=all empty")
+                #expect(
+                    arr?.first?["name"].asString != nil
+                        && arr?.first?["handler_module"].asString != nil,
+                    "\(label) bundles=all entry missing name/handler_module")
+            }
+        }
+
+        /// `reflect readme=true` returns the canonical root readme on
+        /// BOTH runtimes — and Swift's embedded copy is byte-identical to
+        /// Python's. This is the cross-runtime readme parity sentinel.
+        @Test func rootReadmeByteIdenticalParity() async throws {
+            guard let binary = pythonBinaryURL() else { return }
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            let pyReply = try pythonReflect(
+                binary: binary, workdir: tmp, args: ["readme": "true"])
+            let pyReadme = pyReply["readme"].asString
+            #expect(pyReadme != nil, "python reflect readme=true lacks readme")
+            #expect(
+                pyReadme?.hasPrefix("# This is a Fantastic kernel.") == true,
+                "python readme not the canonical doc")
+
+            // Swift's embedded readme must equal Python's, byte-for-byte.
+            #expect(
+                RootReadme.text == pyReadme,
+                "Swift RootReadme.text diverged from Python's canonical readme")
+
+            // And Swift's reflect readme=true returns the same bytes.
+            let kernel = try await startKernelInMemory(portHint: 0)
+            let swReply = await kernel.send(
+                AgentId("core"),
+                .object(["type": .string("reflect"), "readme": .bool(true)]))
+            #expect(
+                swReply["readme"].asString == pyReadme,
+                "Swift reflect readme=true diverged from Python")
+        }
+
+        @Test func reflectErrorEnvelopeShape() async throws {
+            guard let binary = pythonBinaryURL() else { return }
+            let tmp = makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            // Both should return an `error` field for a non-existent
+            // agent id. The wire shape is `{error: String, ...}`.
+            let pyReply = try pythonReflect(
+                binary: binary, workdir: tmp, agentId: "nonexistent_xyz")
+            let kernel = try await startKernelInMemory(portHint: 0)
+            let swReply = await kernel.send(
+                AgentId("nonexistent_xyz"),
+                .object(["type": .string("reflect")]))
+
+            #expect(
+                pyReply["error"].asString != nil,
+                "python missing error on missing agent: \(pyReply.serialize())")
+            #expect(
+                swReply["error"].asString != nil,
+                "swift missing error on missing agent: \(swReply.serialize())")
         }
     }
 

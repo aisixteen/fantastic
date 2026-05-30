@@ -34,7 +34,12 @@ struct StartKernelInMemoryTests {
     }
 
     @Test func httpPortIsZeroPreListener() async throws {
-        let kernel = try await startKernelInMemory(portHint: 0)
+        // `httpPort()` defaults to 0 until a WebServer binds. Use a
+        // bare kernel here: `startKernelInMemory` creates a `web`
+        // agent, and `create_agent` auto-fires `boot` (canonical —
+        // Python's create_agent wraps create with a boot send), so
+        // web would already be listening on a real port.
+        let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
         #expect(kernel.httpPort() == 0)
     }
 }

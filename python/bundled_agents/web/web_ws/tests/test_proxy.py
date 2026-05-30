@@ -35,8 +35,8 @@ def _read_until_reply(ws, call_id, max_frames=10):
 
 
 def test_ws_call_returns_reply(client, seeded_kernel):
-    """Send `reflect` to root via WS — the substrate primer comes back
-    (transports, agents tree, etc.)."""
+    """Send `reflect` to root via WS — the uniform identity + tree comes
+    back (no primer keys; transports moved to the readme)."""
     with client.websocket_connect("/core/ws") as ws:
         ws.send_text(
             json.dumps(
@@ -49,10 +49,9 @@ def test_ws_call_returns_reply(client, seeded_kernel):
             )
         )
         msg = _read_until_reply(ws, "1")
-        # Root primer keys.
-        assert "transports" in msg["data"]
-        assert "tree" in msg["data"]
-        assert "available_bundles" in msg["data"]
+        assert msg["data"]["id"] == "core"
+        assert msg["data"]["tree"]["id"] == "core"
+        assert "transports" not in msg["data"]
 
 
 def test_ws_emit_no_reply(client, seeded_kernel):

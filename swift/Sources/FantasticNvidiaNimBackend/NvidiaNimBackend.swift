@@ -40,6 +40,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
         case "reflect":
             return [
                 "id": .string(agent.id.value),
+                "sentence": .string("NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling)."),
                 "kind": .string("nvidia_nim_backend"),
                 "provider": .string("nvidia_nim"),
                 "host": .string(host(agent: agent)),

@@ -16,14 +16,22 @@ fantastic_canvas/
 └── swift/    production runtime for Apple — Network.framework + URLSession, 122 tests
 ```
 
-- **Python** (`python/`) — the reference. Used today by anyone
-  running fantastic on a server or developing new bundles against
-  the smallest dependency surface. Run with `cd python && uv sync &&
-  uv run fantastic`. See [`python/README.md`](python/README.md).
+- **Python** (`python/`) — **the canonical reference**. When
+  implementations disagree, Python is correct. Other runtimes
+  mirror its wire shape, on-disk format, and verb payloads. The
+  protocol surface (HTTP routes, WS frames, system verbs, reflect
+  contract, on-disk layout) is documented inside Python's
+  [`CLAUDE.md`](python/CLAUDE.md); no separate protocol spec
+  exists. Run with `cd python && uv sync && uv run fantastic`.
+  See [`python/README.md`](python/README.md).
 - **Swift** (`swift/`) — same behavior, fits inside a sandboxed iOS
-  / iPadOS / visionOS app and runs unsandboxed on macOS Pro. Run
-  with `cd swift && swift run fantastic`. See
-  [`swift/README.md`](swift/README.md).
+  / iPadOS / visionOS app and runs unsandboxed on macOS Pro.
+  Mirrors Python; drift from Python's wire/on-disk/verb shape is
+  a bug. The cross-runtime conformance test at
+  [`swift/Tests/FantasticParityTests`](swift/Tests/FantasticParityTests)
+  spawns the Python kernel and byte-diffs replies as the
+  mechanical drift detector. Run with `cd swift && swift run
+  fantastic`. See [`swift/README.md`](swift/README.md).
 
 **One runtime is active per workdir at a time.** The existing
 `.fantastic/lock.json` PID guard enforces it — there is no concurrent

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-yaml-state"
+version = "0.1.0"
+description = "Fantastic yaml_state agent — durable YAML key-value memory agent (mem/data)."
+requires-python = ">=3.11"
+dependencies = ["pyyaml>=6"]
+
+[project.entry-points."fantastic.bundles"]
+yaml_state = "yaml_state.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yaml_state"]

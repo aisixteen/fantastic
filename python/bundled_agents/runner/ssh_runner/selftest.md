@@ -98,7 +98,7 @@ async def main():
     while True:
       m = json.loads(await ws.recv())
       if m.get("id")=="1" and m.get("type")=="reply":
-        print(json.dumps({k: m["data"].get(k) for k in ("agent_count","available_bundles")}, default=str)[:200])
+        print(json.dumps({k: m["data"].get(k) for k in ("id","tree")}, default=str)[:200])
         return
 asyncio.run(main())
 PY
@@ -123,7 +123,7 @@ Expected:
 - `status` after start: all four flags true (`tunnel_alive`,
   `remote_alive`, `ws_ok`, `remote_pid`)
 - WS round-trip to `localhost:$LOCAL_PORT/core/ws` returns the
-  remote kernel's primer
+  remote kernel's reflect (id + tree)
 - `stop`: tunnel + remote process gone (`status` flags all false)
 
 Regression signals:

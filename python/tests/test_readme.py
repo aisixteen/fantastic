@@ -76,15 +76,17 @@ async def test_reflect_return_readme_null_when_absent(seeded_kernel):
     assert r["readme"] is None
 
 
-async def test_kernel_reflect_return_readme_is_root_readme(kernel):
-    """`reflect kernel` with return_readme → the root's readme
-    (`.fantastic/readme.md`), the bootstrap primer."""
-    r = await kernel.send("kernel", {"type": "reflect", "return_readme": True})
-    assert "readme" in r
+async def test_kernel_reflect_readme_is_root_readme(kernel):
+    """`reflect kernel readme=true` → the root's readme
+    (`.fantastic/readme.md`), the bootstrap doc. Both the new `readme`
+    flag and the legacy `return_readme` work and agree."""
+    r = await kernel.send("kernel", {"type": "reflect", "readme": True})
     assert isinstance(r["readme"], str)
-    # Core's readme is the bootstrap primer.
     assert "Fantastic kernel" in r["readme"]
-    assert "return_readme" in r["readme"]
+    # The readme documents the reflect surface (the bootstrap doc).
+    assert "reflect" in r["readme"]
+    legacy = await kernel.send("kernel", {"type": "reflect", "return_readme": True})
+    assert legacy["readme"] == r["readme"]
 
 
 async def test_root_readme_seeded_on_disk(kernel):

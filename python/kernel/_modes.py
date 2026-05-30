@@ -114,10 +114,12 @@ async def call(kernel, target: str, rest: list[str]) -> None:
 
 async def reflect(kernel, rest: list[str]) -> None:
     """Sugar for `<target> reflect [k=v ...]`. Default target:
-    'kernel'. The first token is the target unless it's a `k=v` pair,
-    so `fantastic reflect return_readme=true` reflects the kernel with
-    the flag, and `fantastic reflect <id> return_readme=true` reflects
-    that agent.
+    'kernel' (the tree root). The first token is the target unless it's
+    a `k=v` pair, so `fantastic reflect readme=true` reflects the root
+    with the flag, and `fantastic reflect <id> tree=ids` reflects that
+    agent. Compose the reply with `tree=all|ids|none` (default all),
+    `bundles=all|ids|none` (default none), `readme=true` (legacy
+    `return_readme` still honored).
 
     Read-only — dispatched in-process WITHOUT the PID lock, so it
     works whether or not a daemon owns the dir. A one-shot kernel sees

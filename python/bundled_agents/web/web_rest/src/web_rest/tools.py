@@ -71,11 +71,19 @@ def _make_post_endpoint(self_id: str, kernel):
 
 
 def _reflect_payload(request: Request) -> dict:
-    """Reflect payload, honoring the `?readme=1` query flag so the
-    browser-pastable GET shortcuts can pull an agent's readme too."""
+    """Reflect payload, composing the reply from query flags so the
+    browser-pastable GET shortcuts work: `?readme=1` attaches the
+    readme; `?tree=all|ids|none` and `?bundles=all|ids|none` pick the
+    tiers (defaults: tree=all, bundles omitted)."""
     payload: dict = {"type": "reflect"}
     if request.query_params.get("readme") in ("1", "true", "yes"):
-        payload["return_readme"] = True
+        payload["readme"] = True
+    tree = request.query_params.get("tree")
+    if tree in ("all", "ids", "none"):
+        payload["tree"] = tree
+    bundles = request.query_params.get("bundles")
+    if bundles in ("all", "ids", "none"):
+        payload["bundles"] = bundles
     return payload
 
 
@@ -127,7 +135,7 @@ async def _reflect(id, payload, kernel):
             f'curl -X POST -H "content-type: application/json" '
             f'-d \'{{"type":"reflect"}}\' http://<host>/{id}/<target_id>'
         ),
-        "curl_reflect": f"curl http://<host>/{id}/_reflect           # substrate primer",
+        "curl_reflect": f"curl http://<host>/{id}/_reflect           # root reflect (tree)",
         "curl_reflect_target": f"curl http://<host>/{id}/_reflect/<target_id>  # any agent",
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()

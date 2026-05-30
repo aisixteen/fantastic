@@ -34,15 +34,16 @@ rm -rf .fantastic /tmp/serve.log
 
 ## Tests
 
-### Test 1: POST /<rest_id>/core body={type:reflect} returns primer
+### Test 1: POST /<rest_id>/core body={type:reflect} returns core's reflect
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
   -d '{"type":"reflect"}' http://localhost:$PORT/$RID/core | python -c "
 import json, sys
 d = json.load(sys.stdin)
-assert 'transports' in d, f'no transports: {list(d)}'
-assert 'tree' in d
+assert d.get('id') == 'core', f'id={d.get(\"id\")}'
+assert 'tree' in d, f'no tree: {list(d)}'
+assert 'transports' not in d, f'stale primer key leaked: {list(d)}'
 print('PASS')
 "
 ```
@@ -93,28 +94,47 @@ asyncio.run(main())
 RID2=$(cat /tmp/rid2)
 sleep 0.3
 # Both URLs answer separately.
-curl -s -X POST -d '{"type":"reflect"}' http://localhost:$PORT/$RID/core | python -c "import json,sys;print('rid1' if 'transports' in json.load(sys.stdin) else 'FAIL')"
-curl -s -X POST -d '{"type":"reflect"}' http://localhost:$PORT/$RID2/core | python -c "import json,sys;print('rid2' if 'transports' in json.load(sys.stdin) else 'FAIL')"
+curl -s -X POST -d '{"type":"reflect"}' http://localhost:$PORT/$RID/core | python -c "import json,sys;print('rid1' if json.load(sys.stdin).get('id')=='core' else 'FAIL')"
+curl -s -X POST -d '{"type":"reflect"}' http://localhost:$PORT/$RID2/core | python -c "import json,sys;print('rid2' if json.load(sys.stdin).get('id')=='core' else 'FAIL')"
 ```
 Expected: `rid1` and `rid2`. Regression signal: one of the URLs 404s →
 web_rest got the path literal wrong (must embed self_id).
 
-### Test 6: GET /<rest_id>/_reflect → substrate primer (browser-pastable)
+### Test 6: GET /<rest_id>/_reflect → kernel reflect (browser-pastable)
 
 Default-no-target GET maps to `kernel.reflect`. Open the URL in a
-browser address bar → JSON. No body, no headers.
+browser address bar → JSON. No body, no headers. Query-string flags
+compose the reply exactly like the verb's `tree` / `bundles` / `readme`
+fields.
 
 ```bash
+# Bare GET → the root identity + tree (no legacy primer keys).
 curl -s http://localhost:$PORT/$RID/_reflect | python -c "
 import json, sys
 d = json.load(sys.stdin)
-assert 'transports' in d
+assert d.get('id') == 'core', f'id={d.get(\"id\")}'
 assert 'tree' in d
-assert 'available_bundles' in d
-print('PASS')
+assert 'transports' not in d and 'available_bundles' not in d, f'stale primer keys: {list(d)}'
+print('bare: PASS')
+"
+# ?bundles=all → the installable-bundle catalog rides in `bundles`.
+curl -s "http://localhost:$PORT/$RID/_reflect?bundles=all" | python -c "
+import json, sys
+d = json.load(sys.stdin)
+bs = d.get('bundles')
+assert isinstance(bs, list) and len(bs) >= 20, f'bundles={bs!r}'
+assert {'name','handler_module'} <= set(bs[0]), f'bundle shape={bs[0]}'
+print('bundles=all: PASS')
+"
+# ?readme=1 → the root readme (bootstrap primer) attached.
+curl -s "http://localhost:$PORT/$RID/_reflect?readme=1" | python -c "
+import json, sys
+d = json.load(sys.stdin)
+assert isinstance(d.get('readme'), str) and d['readme'].startswith('# This is a Fantastic kernel.'), repr((d.get('readme') or '')[:60])
+print('readme=1: PASS')
 "
 ```
-Expected: `PASS`.
+Expected: `bare: PASS`, `bundles=all: PASS`, `readme=1: PASS`.
 
 ### Test 7: GET /<rest_id>/_reflect/<target_id> → that agent's reflect
 
@@ -122,9 +142,10 @@ Expected: `PASS`.
 curl -s http://localhost:$PORT/$RID/_reflect/core | python -c "
 import json, sys
 d = json.load(sys.stdin)
-# core reflect IS the primer (root reflect returns it).
-assert 'transports' in d
+# core reflect is the root agent's uniform identity + tree.
+assert d.get('id') == 'core', f'id={d.get(\"id\")}'
 assert 'tree' in d
+assert 'transports' not in d, f'stale primer key: {list(d)}'
 print('PASS')
 "
 ```
@@ -172,12 +193,12 @@ unmounts every route the surface owned.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | POST → primer | |
+| 1 | POST → core reflect (identity + tree) | |
 | 2 | POST → list_agents | |
 | 3 | bad JSON → 400 | |
 | 4 | non-object body → 400 | |
 | 5 | two rest instances coexist | |
-| 6 | GET /_reflect → primer | |
+| 6 | GET /_reflect → kernel reflect (+ ?bundles=all, ?readme=1) | |
 | 7 | GET /_reflect/<id> → agent reflect | |
 | 8 | GET /_reflect/<missing> → error JSON | |
 | 9 | delete → URLs 404 (POST + GET) | |

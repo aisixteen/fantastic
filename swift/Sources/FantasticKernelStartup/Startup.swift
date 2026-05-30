@@ -16,6 +16,7 @@ import FantasticCanvasBackend
 import FantasticCanvasWebapp
 import FantasticCliBundle
 import FantasticFile
+import FantasticFoundationModelsBackend
 import FantasticGlAgent
 import FantasticHtmlAgent
 import FantasticJSON
@@ -29,6 +30,9 @@ import FantasticTelemetryPane
 import FantasticTerminalWebapp
 import FantasticTools
 import FantasticWeb
+import FantasticWebRest
+import FantasticWebWS
+import FantasticYamlState
 import Foundation
 
 #if os(macOS)
@@ -44,6 +48,7 @@ import Foundation
 public func defaultBundleRegistry() -> BundleRegistry {
     let r = BundleRegistry()
     r.register("file.tools", FileBundle())
+    r.register("yaml_state.tools", YamlStateBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
     r.register("html_agent.tools", HtmlAgentBundle())
@@ -56,8 +61,11 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("telemetry_pane.tools", TelemetryPaneBundle())
     r.register("kernel_bridge.tools", KernelBridgeBundle())
     r.register("web.tools", WebBundle())
+    r.register("web_ws.tools", WebWSBundle())
+    r.register("web_rest.tools", WebRestBundle())
     r.register("ollama_backend.tools", OllamaBackendBundle())
     r.register("nvidia_nim_backend.tools", NvidiaNimBundle())
+    r.register("foundation_models_backend.tools", FoundationModelsBackendBundle())
     #if os(macOS)
         r.register("local_runner.tools", LocalRunnerBundle())
         r.register("python_runtime.tools", PythonRuntimeBundle())
@@ -106,9 +114,16 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
     return kernel
 }
 
-/// Boot a disk-backed kernel that hydrates from `<workdir>/.fantastic`.
-/// Phase 8H wires the workdir bootstrap + flock; until then, this
-/// behaves as in-memory mode rooted at the workdir path.
+/// Boot a disk-backed kernel that hydrates from
+/// `<workdir>/.fantastic/agents/<id>/agent.json` files written by
+/// any Fantastic implementation (Python is canonical; Swift writes
+/// the same shape via `Persistence.persist`).
+///
+/// Mirrors Python's daemon-mode startup contract: the kernel loads
+/// whatever persisted state is on disk + weak-loads (skips agents
+/// whose handler_module isn't installed in this runtime). No agents
+/// are auto-created — composition is explicit, the operator decides
+/// what to seed.
 ///
 /// Throws `KernelStartupError.workdirInvalid` if the workdir doesn't
 /// exist or isn't readable.
@@ -119,7 +134,8 @@ public func startKernel(
     let url = URL(fileURLWithPath: workdir, isDirectory: true)
     let fm = FileManager.default
     var isDir: ObjCBool = false
-    guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+    guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
+    else {
         throw KernelStartupError.workdirInvalid(workdir)
     }
     let kernel = Kernel(
@@ -128,6 +144,14 @@ public func startKernel(
     )
     let dotFantastic = url.appendingPathComponent(".fantastic")
     try? fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
+    // Seed `.fantastic/readme.md` (the substrate doc) if missing — the
+    // root has no handler_module, so per-bundle readme seeding skips it.
+    // Mirrors Rust's `seed_root_readme` / Python's `Core._seed_root_readme`.
+    RootReadme.seed(workdir: url)
+
+    // Register a bare `core` root agent. If the workdir has a
+    // persisted `core` record, `kernel.load()` below will replace
+    // this one with the disk-backed shape (carrying meta etc.).
     let root = Agent(
         id: AgentId("core"),
         handlerModule: nil,
@@ -137,18 +161,43 @@ public func startKernel(
     kernel.register(root)
     kernel.setRoot(root)
 
-    // 8H will hydrate persisted children here. Today the kernel
-    // boots empty alongside the workdir.
+    // Hydrate persisted children. Reads every
+    // <workdir>/.fantastic/agents/<id>/agent.json into an
+    // AgentRecord, wraps them in a KernelState, and calls
+    // `kernel.load(_:)`. `kernel.load` already implements weak-load
+    // — agents whose handler_module isn't in the current bundle
+    // registry are skipped silently. Same byte-shape guarantee
+    // Python provides.
+    let agentsDir = dotFantastic.appendingPathComponent("agents")
+    let records = Persistence.readAllAgentRecords(from: agentsDir)
+    if !records.isEmpty {
+        // Ensure a root exists in the snapshot — `kernel.load`
+        // requires exactly one parent_id == nil entry. If the
+        // workdir lacks one (rare; happens if a user wipes core
+        // but leaves children), reuse the in-memory `core` we
+        // just registered.
+        var fullRecords = records
+        let hasRoot = records.contains { $0.parentId == nil }
+        if !hasRoot {
+            fullRecords.insert(
+                AgentRecord(
+                    id: "core", handlerModule: nil, parentId: nil, meta: [:]),
+                at: 0)
+        }
+        let state = KernelState(agents: fullRecords)
+        do {
+            try kernel.load(state)
+        } catch {
+            FileHandle.standardError.write(
+                "[kernel] hydration from \(agentsDir.path) failed: \(error)\n"
+                    .data(using: .utf8) ?? Data())
+            throw error
+        }
+    }
 
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
-            "type": .string("create_agent"),
-            "handler_module": .string("web.tools"),
-            "id": .string("web"),
-            "port": .integer(Int64(portHint)),
-        ])
-    )
+    _ = portHint  // unused now; CLI / daemon mode passes port via
+    // meta on the persisted `web` record. portHint was a vestige
+    // of the old auto-create-web path.
 
     return kernel
 }

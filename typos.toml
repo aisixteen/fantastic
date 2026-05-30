@@ -32,6 +32,10 @@ hel = "hel"
 # comment + Python test name. Allowlisted rather than rewritten to
 # avoid touching Python tests we don't otherwise need to edit.
 unparseable = "unparseable"
+# `ags` is a deliberate shorthand local for "agents" in a selftest
+# python one-liner (`ags = json.load(...)['agents']`), same spirit as
+# `ot`/`hel` above.
+ags = "ags"
 
 [files]
 # Skip vendored third-party JS / CSS assets — minified bundles
@@ -42,4 +46,8 @@ extend-exclude = [
     "**/.fantastic/",
     "**/.build/",
     "swift/Sources/FantasticWeb/Resources/",
+    # Rust mirror of the same vendored assets (Three.js `metalness`/`lod`/
+    # `LOD`, xterm minified two-letter symbols). The Swift copy is already
+    # excluded above; the Rust kernel restoration brought the same files in.
+    "rust/crates/bundles/fantastic-web/src/assets/",
 ]

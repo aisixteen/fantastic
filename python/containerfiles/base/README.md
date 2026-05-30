@@ -114,11 +114,12 @@ deeper — find the `web_rest` id and hit its reflect:
 ```bash
 WEB_ID=$(podman exec "$NAME" ls /workdir/.fantastic/agents | grep '^web_')
 REST_ID=$(podman exec "$NAME" ls "/workdir/.fantastic/agents/$WEB_ID/agents" | grep '^web_rest_')
-curl -s "http://localhost:8080/$REST_ID/_reflect" | python3 -m json.tool | head -40
+curl -s "http://localhost:8080/$REST_ID/_reflect?bundles=all" | python3 -m json.tool | head -40
 ```
 
-`available_bundles` in the reply lists every standard bundle the
-image ships — what you can `create_agent` from.
+`bundles` in the reply (composed in by the `?bundles=all` flag) lists
+every standard bundle the image ships — what you can `create_agent`
+from.
 
 ## The canvas
 
@@ -171,14 +172,16 @@ container exits 0.
 ## Inspect
 
 ```bash
-podman exec "$NAME" fantastic reflect return_readme=true   # live primer w/ bundle readmes
-podman logs "$NAME"                                         # kernel stdout/stderr
+podman exec "$NAME" fantastic reflect readme=true bundles=all   # live identity + tree + catalog + root readme
+podman logs "$NAME"                                             # kernel stdout/stderr
 ```
 
-`reflect return_readme=true` returns the bootstrap reflection an LLM
-needs to drive the system: transports, `available_bundles`, agent
-tree, binary protocol, browser bus — same shape as the WS bootstrap,
-plus per-bundle readmes inline.
+`reflect readme=true` returns the bootstrap an LLM needs to drive the
+system: the addressed agent's identity, the live agent `tree`, and the
+root readme (every transport, the bundle catalog behind `bundles=all`,
+the binary protocol, the browser bus) — same shape as the WS bootstrap.
+The transport/wire prose lives in that readme now, not in the reflect
+JSON. (`return_readme=true` is still honored as a legacy alias.)
 
 ## One container = one workdir
 

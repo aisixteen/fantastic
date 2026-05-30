@@ -12,3 +12,6 @@ tmp/
 # repo root for dev/testing. Per-tree clones live under rust/ and
 # python/ but the root convenience here gets its own ignore.
 .fantastic/
+
+# Claude Code harness state (scheduled tasks, etc.)
+.claude/

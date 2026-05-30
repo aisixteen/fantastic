@@ -1,0 +1,18 @@
+[package]
+publish = false
+name = "fantastic-yaml-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "YAML key-value memory agent — durable get/set/keys/delete/replace/state_yaml (mem/data)."
+
+[dependencies]
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

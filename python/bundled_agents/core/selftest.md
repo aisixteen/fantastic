@@ -23,17 +23,80 @@ cd /tmp/core_test
 
 ## Tests
 
-### Test 1: kernel reflect (substrate primer)
+### Test 1: kernel reflect (uniform identity + composable flags)
+
+`reflect` is ONE uniform verb. A reply on ANY agent (root included) is
+that agent's identity — `{id, sentence, display_name, parent_id,
+handler_module, description?, verbs?, ...flat state}` — plus whatever
+the `tree` / `bundles` / `readme` flags compose in. Root is NOT
+special: there is no `primer`. The transport/wire prose that used to
+ride in reflect now lives in the root readme (`reflect readme=true`).
 
 ```bash
-fantastic reflect
+# Default reply: identity + the nested distilled subtree under `tree`.
+fantastic reflect | python -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['id'] == 'core', f'id={d.get(\"id\")}'
+assert 'sentence' in d and 'tree' in d, f'keys={list(d)}'
+# Old primer keys are GONE.
+gone = [k for k in ('transports','primitive','envelope','browser_bus',
+                     'binary_protocol','agent_count','available_bundles',
+                     'well_known','universal_verb') if k in d]
+assert not gone, f'stale primer keys leaked: {gone}'
+# Default tree=all → nested subtree rooted at the agent.
+assert isinstance(d['tree'], dict) and d['tree']['id'] == 'core'
+print('uniform-shape: PASS')
+"
+# tree=ids → flat descendant-id list (cheap scan).
+fantastic reflect tree=ids | python -c "
+import json, sys
+d = json.load(sys.stdin)
+assert isinstance(d['tree'], list) and 'core' in d['tree'], f'tree={d[\"tree\"]}'
+print('tree=ids: PASS')
+"
+# bundles=all → the installable-bundle catalog ({name, handler_module}).
+fantastic reflect bundles=all | python -c "
+import json, sys
+d = json.load(sys.stdin)
+bs = d.get('bundles')
+assert isinstance(bs, list) and len(bs) >= 20, f'bundles={bs!r}'
+assert {'name','handler_module'} <= set(bs[0]), f'bundle shape={bs[0]}'
+print('bundles=all: PASS')
+"
+# readme=true → the addressed agent's readme.md attached (root → primer).
+fantastic reflect readme=true | python -c "
+import json, sys
+d = json.load(sys.stdin)
+assert isinstance(d.get('readme'), str), f'readme type={type(d.get(\"readme\"))}'
+assert d['readme'].startswith('# This is a Fantastic kernel.'), d['readme'][:60]
+print('readme=true: PASS')
+"
 ```
-Expected: JSON containing `primitive`, `envelope`, `tree`,
-`browser_bus`, `binary_protocol`. The `tree` field carries the root
-+ its descendants (default depth=full, distilled per node). After a
-fresh start, `agent_count` >= 2 (root `core` + auto-seeded `cli`).
-Regression signal: missing `browser_bus`, `binary_protocol`, or
-`tree` → reflect primer regressed.
+Expected: `uniform-shape: PASS`, `tree=ids: PASS`, `bundles=all: PASS`,
+`readme=true: PASS`. Regression signal: any old primer key
+(`transports`, `available_bundles`, `agent_count`, `browser_bus`,
+`binary_protocol`) reappearing in the reflect JSON → the primer/reflect
+collapse regressed; or `tree`/`bundles`/`readme` not composing → a flag
+stopped being honored.
+
+### Test 1b: `description` round-trips through reflect
+
+`create_agent … description="…"` stamps a one-line "what this agent is
+for" that surfaces top-level in every reflect (and in each tree node).
+
+```bash
+rm -rf .fantastic
+ID=$(fantastic core create_agent handler_module=file.tools description="x" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+fantastic $ID reflect | python -c "
+import json, sys
+d = json.load(sys.stdin)
+print('description-roundtrip: PASS' if d.get('description') == 'x' else f'FAIL d={d}')"
+rm -rf .fantastic
+```
+Expected: `description-roundtrip: PASS`. Regression signal: missing
+`description` key → create_agent dropped the field, or reflect stopped
+surfacing it.
 
 ### Test 2: list_agents (flat all)
 
@@ -188,7 +251,9 @@ rm -rf .fantastic
 fantastic reflect >/dev/null    # any invocation constructs Core
 test -f .fantastic/readme.md && echo "  root readme on disk: OK"
 grep -qF "Fantastic kernel" .fantastic/readme.md && echo "  is the primer: OK"
-grep -qF "return_readme" .fantastic/readme.md && echo "  documents the flag: OK"
+# The readme documents the readme flag (canonical `readme=true`; the
+# legacy `return_readme` spelling still works and may also appear).
+grep -qEF -e "readme=true" -e "return_readme" .fantastic/readme.md && echo "  documents the flag: OK"
 rm -rf .fantastic
 ```
 Expected: all three `OK` lines. Regression signal: missing file →
@@ -206,7 +271,10 @@ rm -rf .fantastic
 Expected: both `OK`. The substrate copies `<bundle>/readme.md` into
 the new agent's dir on create (copy-if-missing).
 
-### Test 13: reflect return_readme flag — lean by default, readme on request
+### Test 13: reflect readme flag — lean by default, readme on request
+
+The canonical flag is `readme=true`; the legacy `return_readme=true`
+spelling still works as an alias.
 
 ```bash
 rm -rf .fantastic
@@ -216,20 +284,26 @@ fantastic $ID reflect | python -c "
 import json,sys; d=json.load(sys.stdin)
 print('lean-by-default: PASS' if 'readme' not in d else f'FAIL keys={list(d)}')"
 # With the flag: readme content attached.
+fantastic $ID reflect readme=true | python -c "
+import json,sys; d=json.load(sys.stdin)
+ok = isinstance(d.get('readme'), str) and 'file' in d['readme'].lower()
+print('readme=true: PASS' if ok else 'FAIL')"
+# Legacy spelling still honored.
 fantastic $ID reflect return_readme=true | python -c "
 import json,sys; d=json.load(sys.stdin)
 ok = isinstance(d.get('readme'), str) and 'file' in d['readme'].lower()
-print('return_readme: PASS' if ok else 'FAIL')"
+print('return_readme alias: PASS' if ok else 'FAIL')"
 # Same on the kernel target → the root readme (bootstrap primer).
-fantastic reflect return_readme=true | python -c "
+fantastic reflect readme=true | python -c "
 import json,sys; d=json.load(sys.stdin)
 ok = isinstance(d.get('readme'), str) and 'Fantastic kernel' in d['readme']
 print('kernel-readme: PASS' if ok else 'FAIL')"
 rm -rf .fantastic
 ```
-Expected: `lean-by-default: PASS`, `return_readme: PASS`,
-`kernel-readme: PASS`. Reflect stays lean unless the flag is set;
-`reflect kernel return_readme=true` returns `.fantastic/readme.md`.
+Expected: `lean-by-default: PASS`, `readme=true: PASS`,
+`return_readme alias: PASS`, `kernel-readme: PASS`. Reflect stays lean
+unless the flag is set; `reflect kernel readme=true` returns
+`.fantastic/readme.md`.
 
 ### Test 14: `fantastic --help` prints the CLI cheatsheet (kernel/help.md)
 
@@ -265,7 +339,8 @@ rm -rf /tmp/core_test
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | kernel reflect contains primer fields + tree | |
+| 1 | kernel reflect — uniform identity + tree/bundles/readme flags | |
+| 1b | description round-trips through reflect | |
 | 2 | list_agents | |
 | 3 | create_agent + auto-boot | |
 | 4 | update_agent persists + emits | |
@@ -277,5 +352,5 @@ rm -rf /tmp/core_test
 | 10 | unknown verb / unknown agent rejected cleanly | |
 | 11 | root readme seeded (bootstrap primer on disk) | |
 | 12 | create_agent seeds bundle readme into agent dir | |
-| 13 | reflect return_readme flag (lean default, readme on request) | |
+| 13 | reflect readme flag (lean default, readme on request; return_readme alias) | |
 | 14 | --help prints the CLI cheatsheet (kernel/help.md) | |

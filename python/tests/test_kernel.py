@@ -161,17 +161,18 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
     ) in err
 
 
-async def test_reflect_kernel_returns_substrate_primer(seeded_kernel):
-    """`send("kernel", {reflect})` returns root's primer (transports +
-    tree + bundles). Whether you use the magic id "kernel" or root's
-    actual id "core", you get the primer."""
+async def test_reflect_kernel_returns_uniform_identity(seeded_kernel):
+    """`send("kernel", {reflect})` returns the root's uniform identity +
+    tree (default all). The alias "kernel" and the real id "core" give
+    the same reply. Old primer keys (transports etc.) are gone — they
+    live in the root readme now."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert "primitive" in r
-    assert "transports" in r
-    assert "in_prompt" in r["transports"]
-    assert "tree" in r
-    # cli was seeded as a child of root (well-known singleton).
-    assert "available_bundles" in r
+    assert r["id"] == "core"
+    assert r["sentence"].startswith("Fantastic kernel")
+    assert r["tree"]["id"] == "core"
+    assert "transports" not in r
+    assert "available_bundles" not in r
+    assert r == await seeded_kernel.send("core", {"type": "reflect"})
 
 
 async def test_inbox_bounded_drops_oldest(kernel):

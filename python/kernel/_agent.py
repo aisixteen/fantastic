@@ -289,6 +289,15 @@ class Agent:
         v = self._meta.get("display_name")
         return v if isinstance(v, str) else None
 
+    @property
+    def description(self) -> str | None:
+        """Optional short meta saying what this agent does. Surfaced in
+        every reflect (top-level + distilled tree nodes). Set via
+        create_agent / update_agent. Forward-looking: a persistent-memory
+        agent uses it to tell an LLM what the memory holds."""
+        v = self._meta.get("description")
+        return v if isinstance(v, str) else None
+
     # ─── public API: routing ───────────────────────────────────
 
     async def send(self, target_id: str, payload: dict) -> dict | None:
@@ -300,30 +309,102 @@ class Agent:
         """
         if target_id == "kernel":
             target = self._root()
-            # `kernel.reflect` returns the substrate primer (root primer).
+            # `kernel` is an alias for the tree root. reflect is a pure
+            # read — answer it from the root's identity without a full
+            # dispatch (no telemetry fanout); flags applied below.
             if payload.get("type") == "reflect":
-                reply = target.primer()
-                return self._maybe_attach_readme(target, payload, reply)
+                return self._apply_reflect_flags(
+                    target, payload, target._reflect_identity()
+                )
         else:
             target = self.ctx.agents.get(target_id)
         if target is None:
             return {"error": f"no agent {target_id!r}"}
         reply = await target._dispatch(payload)
-        return self._maybe_attach_readme(target, payload, reply)
+        return self._apply_reflect_flags(target, payload, reply)
+
+    def _reflect_identity(self) -> dict:
+        """Uniform reflect identity for a bare agent (the root, or any
+        node without a handler_module): id + sentence + record fields +
+        flat meta. Bundle agents answer reflect via their own handler;
+        the substrate appends the tree/bundles/readme flags uniformly in
+        `_apply_reflect_flags`, so root is NOT special-cased."""
+        node: dict[str, Any] = {
+            "id": self.id,
+            "sentence": self._sentence(),
+            "parent_id": self.parent.id if self.parent else None,
+            "handler_module": self.handler_module,
+            "display_name": self.display_name or self.id,
+        }
+        if self.description is not None:
+            node["description"] = self.description
+        for k, v in self._meta.items():
+            node.setdefault(k, v)
+        return node
+
+    def _sentence(self) -> str:
+        if self.parent is None:
+            return (
+                "Fantastic kernel. Everything is reachable by sending "
+                "messages to agents."
+            )
+        return "Bare agent (no handler_module) — answers substrate verbs only."
 
     @staticmethod
-    def _maybe_attach_readme(target, payload, reply):
-        """Post-process a `reflect` reply: when the caller passed
-        `return_readme: true`, attach the target agent's `readme.md`
-        content as `reply["readme"]` (or None if it has none). Default
-        is off — reflect stays lean unless asked."""
-        if (
-            payload.get("type") == "reflect"
-            and payload.get("return_readme")
-            and isinstance(reply, dict)
-        ):
+    def _apply_reflect_flags(target, payload, reply):
+        """Compose any reflect reply with the universal flags — applied
+        uniformly to bare-agent and bundle reflects alike:
+
+        - `tree=all|ids|none` (default all): `all` nests the distilled
+          subtree; `ids` is a flat descendant-id index; `none` omits it.
+        - `bundles=all|ids|none` (default none): `all` is the
+          {name, handler_module} catalog; `ids` is bare names; `none`
+          omits it.
+        - `readme=true` (legacy `return_readme` also honored): attach the
+          agent's readme.md (string or null). Atomic — one agent.
+
+        Transport/wire docs are NOT here — they live in the root readme
+        (`reflect readme=true`)."""
+        if payload.get("type") != "reflect" or not isinstance(reply, dict):
+            return reply
+        # `description` is a substrate meta field — surface it on EVERY
+        # reflect (bundle handlers don't know about it), unless the
+        # reply already set one.
+        if target.description is not None and "description" not in reply:
+            reply["description"] = target.description
+        tree = payload.get("tree", "all")
+        if tree == "all":
+            reply["tree"] = target._tree(depth=None, details=False, current_depth=0)
+        elif tree == "ids":
+            reply["tree"] = target._descendant_ids()
+        bundles = payload.get("bundles", "none")
+        if bundles == "all":
+            reply["bundles"] = target._available_bundles()
+        elif bundles == "ids":
+            reply["bundles"] = [b["name"] for b in target._available_bundles()]
+        if payload.get("readme") or payload.get("return_readme"):
             reply["readme"] = target._read_readme()
         return reply
+
+    def _descendant_ids(self) -> list[str]:
+        """Flat id index of self + all descendants (DFS, self first)."""
+        out = [self.id]
+        for c in self._children.values():
+            out.extend(c._descendant_ids())
+        return out
+
+    @staticmethod
+    def _available_bundles() -> list[dict]:
+        """Entry-point-discovered installable bundles, sorted by name.
+        Recomputed live, so a freshly installed bundle shows up on the
+        next reflect."""
+        return sorted(
+            (
+                {"name": ep.name, "handler_module": ep.value}
+                for ep in entry_points(group=BUNDLE_ENTRY_GROUP)
+            ),
+            key=lambda b: b["name"],
+        )
 
     async def emit(self, target_id: str, payload: dict) -> None:
         """Drop a payload into target_id's inbox + tell watchers.
@@ -499,15 +580,12 @@ class Agent:
             if not self.handler_module:
                 # Bare agents (root) handle a few universal verbs natively:
                 # - boot/shutdown: no-op (no process state to manage)
-                # - reflect: substrate primer if root, else distilled summary
+                # - reflect: uniform identity (the tree/bundles/readme
+                #   flags are appended by _apply_reflect_flags in send())
                 if verb in ("boot", "shutdown"):
                     return None
                 if verb == "reflect":
-                    return (
-                        self.primer()
-                        if self.parent is None
-                        else self._node_summary(details=True)
-                    )
+                    return self._reflect_identity()
                 return {
                     "error": f"agent {self.id!r} has no handler_module; cannot answer verb {verb!r}"
                 }
@@ -587,8 +665,6 @@ class Agent:
     # ─── system verbs (native) ─────────────────────────────────
 
     async def _handle_system_verb(self, verb: str, payload: dict) -> dict | None:
-        if verb == "reflect":
-            return self._verb_reflect(payload)
         if verb == "list_agents":
             return self._verb_list_agents(payload)
         if verb == "create_agent":
@@ -598,12 +674,6 @@ class Agent:
         if verb == "delete_agent":
             return await self._verb_delete_agent(payload)
         return {"error": f"unhandled system verb {verb!r}"}
-
-    def _verb_reflect(self, payload: dict) -> dict:
-        depth = payload.get("depth", None)
-        flat = bool(payload.get("flat", False))
-        details = bool(payload.get("details", False))
-        return self.reflect(depth=depth, flat=flat, details=details, root_view=False)
 
     def _verb_list_agents(self, payload: dict) -> dict:
         # Flat list of every agent's record (global registry). For
@@ -802,35 +872,6 @@ class Agent:
             node = node.parent
         return node
 
-    def reflect(
-        self,
-        *,
-        depth: int | None = None,
-        flat: bool = False,
-        details: bool = False,
-        root_view: bool = True,
-    ) -> dict:
-        """Return a tree (default) or flat list describing this agent
-        and its descendants.
-
-        - `depth=None` → unbounded recursion
-        - `depth=0` → just self, no children
-        - `flat=False` → nested tree with `children:[...]`
-        - `flat=True` → flat list, each carrying `parent_id`
-        - `details=False` → distilled (id, parent_id, handler_module, display_name)
-        - `details=True` → full per-agent (verbs from VERBS dict, meta)
-        - `root_view=True` (default) → applies the discovery contract:
-          distilled is the default; details opt-in
-        - `root_view=False` (per-agent direct reflect) → defaults to
-          full detail (since the caller already chose this agent)
-        """
-        effective_details = details or (not root_view)
-        if flat:
-            out: list[dict] = []
-            self._flatten(out, depth=depth, details=effective_details, current_depth=0)
-            return {"agents": out, "agent_count": len(out)}
-        return self._tree(depth=depth, details=effective_details, current_depth=0)
-
     def _node_summary(self, *, details: bool) -> dict:
         node: dict[str, Any] = {
             "id": self.id,
@@ -838,6 +879,8 @@ class Agent:
             "handler_module": self.handler_module,
             "display_name": self.display_name or self.id,
         }
+        if self.description is not None:
+            node["description"] = self.description
         if not details:
             return node
         node.update(self._meta)
@@ -866,72 +909,9 @@ class Agent:
             node["children"] = []
         return node
 
-    def _flatten(
-        self,
-        out: list[dict],
-        *,
-        depth: int | None,
-        details: bool,
-        current_depth: int,
-    ) -> None:
-        out.append(self._node_summary(details=details))
-        if depth is None or current_depth < depth:
-            for c in self._children.values():
-                c._flatten(
-                    out, depth=depth, details=details, current_depth=current_depth + 1
-                )
-
-    # ─── primer (root-only substrate description) ──────────────
-
-    def primer(self) -> dict:
-        """Substrate primer — what `kernel.reflect` returns over WS
-        and what CLI `reflect` prints. Tree-style structural reflect
-        plus wire/transport metadata external tools need to bootstrap.
-        Only meaningful on root."""
-        bundles = sorted(
-            (
-                {"name": ep.name, "handler_module": ep.value}
-                for ep in entry_points(group=BUNDLE_ENTRY_GROUP)
-            ),
-            key=lambda b: b["name"],
-        )
-        return {
-            "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
-            "primitive": "send(target_id, payload) -> reply | None",
-            "envelope": '{"type": "<verb>", ...fields}',
-            "universal_verb": "reflect — every agent answers it; returns identity + flat state dict.",
-            "transports": {
-                "in_process": {
-                    "shape": "await agent.send(target_id, payload)",
-                    "use_when": "Python code running inside the kernel process.",
-                },
-                "in_prompt": {
-                    "shape": '<send id="<agent_id>" payload=\'{"type":"<verb>", ...}\'/>',
-                    "use_when": "agentic LLM loops emitting XML-tagged tool calls.",
-                    "example": '<send id="<agent_id>" payload=\'{"type":"list_agents"}\'/>',
-                },
-                "cli": {
-                    "shape": "fantastic <agent_id> <verb> [k=v ...]",
-                    "shorthand": "fantastic reflect [<agent_id>]",
-                    "note": "one-shot — refused while a daemon owns the dir; use the web surface then.",
-                },
-            },
-            "well_known": dict(self.ctx.well_known),
-            "tree": self.reflect(),
-            "available_bundles": bundles,
-            "agent_count": len(self.ctx.agents),
-            "binary_protocol": {
-                "trigger": "any bytes value anywhere in the payload",
-                "wire_format": "WS binary frame: [4-byte BE uint32 H | H-byte JSON header | M-byte raw bytes]",
-                "header_field": "_binary_path names the dotted-path field whose value is the body",
-                "purpose": "skip base64+JSON encoding for high-throughput byte payloads (audio, image, video)",
-            },
-            "browser_bus": {
-                "channel": "fantastic",
-                "envelope": "{type, target_id, source_id, ...fields}",
-                "transport": "BroadcastChannel (browser-only; structured-clone)",
-                "scope": "intra-browser messaging between iframes; bypasses kernel.send entirely",
-                "available_in_js": "fantastic_transport().bus",
-                "use_when": "UI-internal traffic (audio frames, drag events, cursor) where round-tripping the server adds no value",
-            },
-        }
+    # ─── reflect surface ───────────────────────────────────────
+    #
+    # The composable `reflect` flags (tree / bundles / readme) live in
+    # `_apply_reflect_flags` (next to `send`). There is no `primer()` —
+    # transport/wire docs moved into the root readme (`reflect
+    # readme=true`); `available_bundles` is now the `bundles` flag.

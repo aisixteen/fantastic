@@ -1,0 +1,32 @@
+# yaml_state — a memory agent (durable state)
+
+A YAML key-value store that survives the context boundary — a first-class agent
+you mount EVERYWHERE: global (under the root) or local (under any agent), long-
+or short-term memory, or component/UI state. The `mode` meta picks the
+discipline (same verbs either way):
+- `data` — current state (UI, hyperparams, selection); overwrite-in-place.
+- `mem` — durable facts to remember (names, preferences, decisions); accrete keyed facts.
+
+**Your memory is auto-loaded into your context on boot — read it, don't re-fetch.**
+
+## When to use
+- The moment the user tells you something worth keeping → `set` it on a `mem` agent.
+- When durable state changes → `set` it on a `data` agent.
+- Reading: it's already injected; only `read` / `keys` when you need a key not in context.
+
+## Verbs
+- `read {key?}` — value at `key` (whole doc if omitted).
+- `keys {}` — list keys + sizes (the table-of-contents).
+- `set {key, value}` — upsert one key.
+- `delete {key}` — prune a key.
+- `replace {doc}` — overwrite the whole store (`{}` clears).
+- `state_yaml {}` — the whole store as YAML (the block injected on boot).
+
+## Recipes
+- Remember a fact → `set {key:"user.name", value:"Ada"}`.
+- Save state → `set {key:"ui.zoom", value:1.5}`.
+- Reuse keys, don't duplicate → `keys` first; use descriptive namespaced keys
+  (`domain.subject.attribute`).
+- Self-contained values (the fact AND its why) →
+  `set {key:"decision.db", value:"postgres — chosen over mysql for JSON support, 2026-05"}`.
+- Prune → `delete {key}` or `replace {doc}`.

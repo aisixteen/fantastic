@@ -117,10 +117,12 @@ the kernel's lock file prevents that).
 - **kernel_bridge + ssh_runner** — cross-host. `ssh_runner` uses
   subprocess SSH to start/stop a remote `fantastic` and keeps
   a local tunnel open so a canvas can iframe the remote webapp.
-  `kernel_bridge` opens WS (or SSH+WS) to a peer kernel and ships
-  `forward` envelopes — local agents reach remote agents through it
-  without merging the two address spaces. Weak proxy: local→local
-  comms stay direct.
+  `kernel_bridge` opens WS (or SSH+WS) to a peer kernel's `web_ws`
+  and ships raw call frames (asymmetric — no peer bridge needed);
+  local agents reach remote agents through it without merging the two
+  address spaces, and `watch_remote` streams a remote agent's emits
+  back onto the bridge's inbox. Weak proxy: local→local comms stay
+  direct.
 - **browser-only message bus** — every served page also gets
   `fantastic_transport().bus`, a `BroadcastChannel("fantastic")`
   wrapper. Same envelope as kernel send (`{type, target_id,
@@ -217,9 +219,11 @@ to either surface to get the substrate primer (transports,
 bootstrap from one WS or HTTP round-trip.
 
 **Weak binding for bridges.** `kernel_bridge` reaches a remote
-kernel's surfaces by URL + path only — `ws://host/<host>/ws` for the
-WS bridge, `http://host/<rest>/` for the HTTP bridge. No shared
-Python types cross the wire.
+kernel's `web_ws` by URL + path only — `ws://host/<peer_id>/ws`,
+where `<peer_id>` is just the WS path segment (typically `core`). No
+shared Python types cross the wire. (WS-only since the REST bridge
+transport was dropped; the `web_rest` diagnostic surface is
+unrelated and still ships.)
 
 ## Plugin system
 
@@ -307,7 +311,7 @@ uv run pytest -n auto
     ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible)
     ├── canvas/{canvas_backend, canvas_webapp, telemetry_pane,
     │           html_agent, gl_agent}         # spatial host + inline content cells
-    ├── kernel_bridge/                        # cross-kernel forward envelopes
+    ├── kernel_bridge/                        # cross-kernel WS bridge (asymmetric)
     └── runner/{local_runner, ssh_runner}     # spawn local / remote `fantastic`
 ```
 

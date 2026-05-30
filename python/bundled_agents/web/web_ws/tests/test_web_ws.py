@@ -50,6 +50,7 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
             for _ in range(8):
                 msg = json.loads(ws.receive_text())
                 if msg.get("type") == "reply" and msg.get("id") == "1":
-                    assert "transports" in (msg.get("data") or {})
+                    data = msg.get("data") or {}
+                    assert data["id"] == "core" and "tree" in data
                     return
             pytest.fail("no reply frame received")
