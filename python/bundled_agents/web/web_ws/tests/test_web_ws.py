@@ -36,12 +36,12 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
         "/{host_id}/ws", _make_endpoint("test_ws", seeded_kernel)
     )
     with TestClient(app) as c:
-        with c.websocket_connect("/core/ws") as ws:
+        with c.websocket_connect("/fs_loader/ws") as ws:
             ws.send_text(
                 json.dumps(
                     {
                         "type": "call",
-                        "target": "core",
+                        "target": "fs_loader",
                         "payload": {"type": "reflect"},
                         "id": "1",
                     }
@@ -51,6 +51,6 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
                 msg = json.loads(ws.receive_text())
                 if msg.get("type") == "reply" and msg.get("id") == "1":
                     data = msg.get("data") or {}
-                    assert data["id"] == "core" and "tree" in data
+                    assert data["id"] == "fs_loader" and "tree" in data
                     return
             pytest.fail("no reply frame received")

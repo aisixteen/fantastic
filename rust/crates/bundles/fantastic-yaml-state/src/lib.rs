@@ -29,7 +29,7 @@ use std::sync::Arc;
 pub const README: &str = include_str!("readme.md");
 
 const MEM_SENTENCE: &str = "Your durable memory. Facts you must remember across sessions live here — auto-loaded into your context on boot. `set` a descriptive key the moment the user tells you something worth keeping (a name, a preference, a decision). Your current facts are already in your context — read them, don't re-fetch.";
-const DATA_SENTENCE: &str = "Your durable scratch-state (UI state, hyperparams, current selection). One value per key, overwrite-in-place; auto-loaded into your context on boot.";
+const DATA_SENTENCE: &str = "Your durable scratch-state (component state, config, run params, current selection). One value per key, overwrite-in-place; auto-loaded into your context on boot.";
 
 pub struct YamlStateBundle;
 

@@ -189,3 +189,16 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+--------------------------------------------------------------------------------
+
+TRADEMARK NOTICE (separate from, and not part of, the Apache-2.0 grant above)
+
+   "Aisixteen Fantastic" and the "AISIXTEEN" word mark (USPTO reg. 7,238,635)
+   are trademarks of AISixteen. The Apache License, Version 2.0 above licenses
+   the source code only; consistent with its Section 6 (Trademarks), it grants
+   NO permission to use these names or marks. A fork or redistribution must not
+   use "Aisixteen Fantastic" or "AISIXTEEN" to identify itself without prior
+   written permission. The on-disk ".fantastic" workdir format is a brand asset
+   of the project. Any managed cloud / relay / sync layer is a separate,
+   separately-licensed offering not covered by this file.

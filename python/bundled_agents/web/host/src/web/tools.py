@@ -1,7 +1,8 @@
 """webapp bundle — uvicorn HTTP host.
 
 `web` owns the FastAPI app + uvicorn task. Rendering routes are baked
-in (`/`, `/<id>/`, `/<id>/file/<path>`, transport.js, favicon). Verb-
+in (`/`, `/<id>/file/<path>`, favicon — no server-side `/<id>/` render
+route and no transport.js; all UI is the TS frontend). Verb-
 invocation routes are NOT — those live in sub-agent bundles (`web_ws`,
 `web_rest`) that declare their routes via the duck-typed `get_routes`
 verb. On boot, web walks its children and mounts whatever they return
@@ -90,7 +91,7 @@ async def _mount_all_surfaces(handle: _ServerHandle, kernel, web_agent_id: str) 
     web_agent = kernel.ctx.agents.get(web_agent_id)
     if web_agent is None:
         return
-    for cid in list(web_agent._children.keys()):
+    for cid in web_agent.child_ids():
         await _mount_surface(handle, kernel, cid)
 
 

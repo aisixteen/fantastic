@@ -10,7 +10,7 @@
 //
 // Trade-offs vs Rust:
 //   - No flow control window (ack-per-5K-chars) in the initial
-//     port; xterm-webapp ack verbs are accepted but treated as no-op.
+//     port; ack verbs are accepted but treated as no-op.
 //   - 5 MB output cap not enforced (Apple's terminal flow control
 //     covers most cases; revisit if a flood actually shows up).
 
@@ -30,6 +30,13 @@
         private let lock = NSLock()
         private var sessions: [AgentId: PtySession] = [:]
 
+        public var readme: String? {
+            """
+            terminal_backend — PTY shell session as an agent. One PTY per agent; process-memory state only.
+            Verbs: reflect, boot, input/write, ack, resize, paste_image, shutdown/stop. Output streams to this agent's own inbox as {type:"output", chunk} (a client watches it).
+            """
+        }
+
         public func handle(
             agentId: AgentId,
             payload: JSON,
@@ -44,7 +51,7 @@
                 return [
                     "id": .string(agent.id.value),
                     "kind": .string("terminal_backend"),
-                    "sentence": .string("PTY-backed shell session."),
+                    "sentence": .string("PTY shell session."),
                     "running": .bool(sessionFor(agent.id) != nil),
                     "verbs": [
                         "boot": "Spawns the shell (defaults to $SHELL or /bin/zsh).",

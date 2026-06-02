@@ -5,7 +5,7 @@ from __future__ import annotations
 
 async def _make_scheduler(kernel, file_agent_id):
     rec = await kernel.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "scheduler.tools",
@@ -24,10 +24,10 @@ async def test_reflect_includes_file_agent_id(seeded_kernel, file_agent):
 
 async def test_boot_requires_file_agent_id(seeded_kernel):
     rec = await seeded_kernel.send(
-        "core",
+        "fs_loader",
         {"type": "create_agent", "handler_module": "scheduler.tools"},
     )
-    # boot was auto-called by core; explicit reboot should still fail
+    # boot was auto-called by fs_loader; explicit reboot should still fail
     r = await seeded_kernel.send(rec["id"], {"type": "boot"})
     assert "error" in r
     assert "file_agent_id" in r["error"]
@@ -35,7 +35,7 @@ async def test_boot_requires_file_agent_id(seeded_kernel):
 
 async def test_schedule_requires_file_agent_id(seeded_kernel):
     rec = await seeded_kernel.send(
-        "core",
+        "fs_loader",
         {"type": "create_agent", "handler_module": "scheduler.tools"},
     )
     r = await seeded_kernel.send(

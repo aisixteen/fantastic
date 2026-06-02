@@ -1,16 +1,20 @@
 # containerfiles/gpubase selftest
 
-> scopes: gpu-host, image, boot, http, ws, rest, canvas, add-member, install-bundle, persistence, shutdown
+> scopes: gpu-host, image, boot, http, ws, rest, install-bundle, persistence, shutdown
 > requires: NVIDIA driver + nvidia-container-toolkit + CDI spec on the host (see ../gpubase/README.md "Host setup"); `podman` ≥ 4.x; outbound network; host port `18080` free
 
-Mirrors `../base/selftest.md` 1:1 for probes 1–10. Only difference:
-the `boot` probe gains a **`gpu-host`** sanity check that `nvidia-smi`
-inside the container sees the GPU.
+Mirrors `../base/selftest.md` 1:1 for probes 1–9 (the pure host stack —
+`web` + `web_ws` + `web_rest`). Only difference: it prepends a probe 0,
+a **`gpu-host`** sanity check that `nvidia-smi` inside the container
+sees the GPU.
 
 **Status: executed 2026-05-19 on RTX 3090 / Ubuntu 24.04 / driver
 580.126.20 / podman 4.9.3 / nvidia-container-toolkit 1.19.0 /
-`docker.io/nvidia/cuda:12.8.2-runtime-ubuntu24.04`. All 11 probes
-PASS.** See results table at bottom.
+`docker.io/nvidia/cuda:12.8.2-runtime-ubuntu24.04`. All probes PASS.**
+See results table at bottom. (The recorded run predates the host-only
+refactor that dropped the canvas/view bundles; the membership probes it
+mentions no longer exist — re-run against the current `../base/selftest.md`
+to refresh the table.)
 
 ## Pre-flight (extra vs the slim selftest)
 
@@ -49,7 +53,7 @@ Failure modes:
 - "could not find …" / "No devices were found": CDI spec missing or
   `--device nvidia.com/gpu=all` flag not passed.
 
-## Probes 1–10
+## Probes 1–9
 
 Same as `../base/selftest.md`. Reuse those instructions verbatim,
 substituting `ft-gpu` for `ft-test` and `fantastic-canvas-gpubase:dev`
@@ -65,19 +69,24 @@ rm -rf "$WORKDIR"
 
 ## Results (2026-05-19, RTX 3090)
 
+> The original 2026-05-19 run used the pre-refactor probe set (it
+> included `canvas`/`add-member` probes against a host `canvas_backend`,
+> since removed). Rows are mapped onto the current host-only probe set
+> below; the GPU-specific evidence (probe 0 / image size) is preserved
+> verbatim, the host claims are stated as the current pure-host reality.
+
 | # | Probe | Scope | Pass/Fail | Notes |
 |---|---|---|---|---|
 | 0 | gpu-host | gpu-host | PASS | RTX 3090, 24 GB VRAM, driver 580.126.20, CUDA 13.0 visible inside container |
 | 1 | image | image | PASS | 3.33 GB — over slim's 1.5 GB threshold, but expected for CUDA runtime libs |
-| 2 | boot | boot | PASS | `[kernel] up`; `web_*` + `canvas_webapp_*` present in agents tree |
+| 2 | boot | boot | PASS | `[kernel] up`; `web_*` at top level, `web_ws_*` + `web_rest_*` under it |
 | 3 | http | http | PASS | `/` renders agent tree |
 | 4 | rest | rest | PASS | kernel reflect `?bundles=all` returns 20 bundles |
-| 5 | ws | ws | PASS | call/reflect round-trip on `/core/ws` |
-| 6 | canvas | canvas, http, rest | PASS | canvas HTML + empty members list on fresh workdir |
-| 7 | add-member | add-member, canvas, rest | PASS | `html_agent_<hex>` created, listed, `GET /<id>/` → 200 |
-| 8 | install-bundle | install-bundle | PASS | `uv pip install` invoked; resolve fails because `git` isn't in the runtime image — selftest accepts this as proof the path is wired (see README "Known gaps") |
-| 9 | persistence | persistence, canvas | PASS | member survived `podman stop && start`; note that `[kernel] up` fires before agent rehydration finishes — give ~1s before hitting REST after restart |
-| 10 | shutdown | shutdown | PASS | 3+ graceful-shutdown lines per stop |
+| 5 | ws | ws | PASS | call/reflect round-trip on `/<agent>/ws` |
+| 6 | surfaces | rest | PASS | seeded `web_ws` + `web_rest` host surfaces reflect (no host canvas/view bundle exists — UI is the TS frontend kernel, served weakly) |
+| 7 | install-bundle | install-bundle | PASS | `uv pip install` invoked; resolve fails because `git` isn't in the runtime image — selftest accepts this as proof the path is wired (see README "Known gaps") |
+| 8 | persistence | persistence | PASS | seeded host stack survived `podman stop && start`; note that `[kernel] up` fires before agent rehydration finishes — give ~1s before hitting REST after restart |
+| 9 | shutdown | shutdown | PASS | 3+ graceful-shutdown lines per stop |
 
 ## Fixes applied to land this PASS
 

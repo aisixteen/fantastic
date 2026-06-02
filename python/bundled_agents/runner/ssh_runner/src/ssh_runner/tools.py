@@ -14,14 +14,14 @@ Record fields (set on create_agent):
   local_port   — local port the SSH tunnel forwards from
                  (used by `get_webapp` so canvas can iframe)
   entry_path   — URL suffix appended to the local tunnel for
-                 `get_webapp` (e.g. "<canvas_webapp_id>/" so the
+                 `get_webapp` (e.g. "<html_agent_id>/" so the
                  iframe lands directly on the remote canvas)
 
 Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps remote
               control intentional)
-  shutdown  — alias for `stop`; called by core.delete_agent's
+  shutdown  — alias for `stop`; called by fs_loader.delete_agent's
               universal lifecycle hook
   start     — SSH → `cd <remote_path> && nohup <remote_cmd> --port <port>
               --port <remote_port> &`. Polls remote
@@ -172,10 +172,10 @@ def _kill_tunnel(proc: subprocess.Popen | None) -> None:
 
 async def _ws_health(local_port: int) -> bool:
     """End-to-end liveness probe: connect to the local tunnel's
-    `ws://localhost:<local_port>/core/ws`, send a reflect frame, expect
+    `ws://localhost:<local_port>/fs_loader/ws`, send a reflect frame, expect
     a reply within 2s. Proves the tunnel is forwarding AND the remote
     kernel is alive AND answering."""
-    url = f"ws://localhost:{local_port}/core/ws"
+    url = f"ws://localhost:{local_port}/fs_loader/ws"
     try:
         async with asyncio.timeout(2):
             async with websockets.connect(url) as ws:
@@ -183,7 +183,7 @@ async def _ws_health(local_port: int) -> bool:
                     json.dumps(
                         {
                             "type": "call",
-                            "target": "core",
+                            "target": "fs_loader",
                             "payload": {"type": "reflect"},
                             "id": "h",
                         }
@@ -243,9 +243,12 @@ async def _start(id, payload, kernel):
         }
     rport = int(rport_val)
     lport = int(lport)
+    # Which HTTP bundle to bootstrap on the remote — overridable on the record
+    # (default the standard web bundle), so it's explicit config, not baked in.
+    web_module = rec.get("web_module", "web.tools")
 
     # Two-step bootstrap on the remote:
-    #   1. one-shot `fantastic core create_agent handler_module=web.tools port=N`
+    #   1. one-shot `fantastic fs_loader create_agent handler_module=web.tools port=N`
     #      persists the web record (uvicorn task dies with the process,
     #      but the record stays on disk).
     #   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
@@ -254,7 +257,7 @@ async def _start(id, payload, kernel):
     cmd_q = shlex.quote(cmd)
     remote = (
         f"cd {rp_q} && mkdir -p .fantastic && "
-        f"{cmd_q} core create_agent handler_module=web.tools port={rport} "
+        f"{cmd_q} fs_loader create_agent handler_module={shlex.quote(web_module)} port={rport} "
         f">/dev/null 2>&1 && "
         f"nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
     )
@@ -345,7 +348,7 @@ async def _restart(id, payload, kernel):
 async def _status(id, payload, kernel):
     """No args. {tunnel_alive, remote_alive, ws_ok, remote_pid}. ws_ok
     is a 2s probe over the WS verb channel (`ws://localhost:<local_port>
-    /core/ws`, reflect frame → reply) through the SSH tunnel — proves
+    /fs_loader/ws`, reflect frame → reply) through the SSH tunnel — proves
     end-to-end liveness."""
     rec = kernel.get(id) or {}
     host = rec.get("host")

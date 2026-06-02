@@ -7,7 +7,7 @@ care which bundles exist; this is purely for the lookup convenience.
 
 A bundle is anything with a `handler(id, payload, agent)` callable in
 its declared module. Construction is explicit (e.g. `Cli(kernel,
-parent=core)`); the substrate never instantiates a bundle by name.
+parent=fs_loader)`); the substrate never instantiates a bundle by name.
 """
 
 from __future__ import annotations

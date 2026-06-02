@@ -110,6 +110,14 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
     // pulled via tool call into the single-turn context, NOT via
     // session transcript.
 
+    public var readme: String? {
+        """
+        foundation_models_backend — Apple on-device Foundation Models LLM backend.
+        Verbs: send/history/interrupt/backend_state. Same LLM backend contract as \
+        ollama_backend; runs stateless against the native on-device model.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
@@ -802,9 +810,8 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             Create a new agent in the kernel. Returns the new \
             agent's auto-generated id on success, or {error:…} if \
             the handler_module is unknown. Common handler modules: \
-            file.tools, html_agent.tools, scheduler.tools, \
-            canvas_backend.tools, canvas_webapp.tools, \
-            ai_chat_webapp.tools, terminal_webapp.tools.
+            file.tools, scheduler.tools, web.tools, \
+            yaml_state.tools, ollama_backend.tools.
             """
         }
 
@@ -812,7 +819,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         struct Arguments {
             @Guide(
                 description:
-                    "The handler_module string, e.g. 'file.tools' or 'canvas_backend.tools'.")
+                    "The handler_module string, e.g. 'file.tools' or 'scheduler.tools'.")
             let handlerModule: String
         }
 

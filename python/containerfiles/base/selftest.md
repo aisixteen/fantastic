@@ -1,10 +1,10 @@
 # containerfiles/base selftest
 
-> scopes: image, boot, http, ws, rest, canvas, add-member, install-bundle, persistence, shutdown
-> requires: `podman` on `$PATH`; repo cloned at cwd; host port `18080` free; Python 3 with `websockets` available to the operator (probe 5 only); outbound network for probe 8 (`install-bundle`)
+> scopes: image, boot, http, ws, rest, install-bundle, persistence, shutdown
+> requires: `podman` on `$PATH`; repo cloned at cwd; host port `18080` free; Python 3 with `websockets` available to the operator (probe 5 only); outbound network for probe 7 (`install-bundle`)
 > drives the container end-to-end from OUTSIDE: build → run → probe → restart → stop. NOT pytest.
 
-Verifies that `containerfiles/base/Containerfile` + `entrypoint.sh` ship a working fantastic kernel — base image boots a full canvas stack (`web` + `web_ws` + `web_rest` + `canvas_webapp` → `canvas_backend`) on first run, exposes HTTP/WS/REST on port 8080, accepts canvas members, supports `install-bundle`, survives restart, and shuts down cleanly on SIGTERM.
+Verifies that `containerfiles/base/Containerfile` + `entrypoint.sh` ship a working fantastic kernel — base image boots the host transport stack (`web` + `web_ws` + `web_rest`) on first run, exposes HTTP/WS/REST on port 8080, supports `install-bundle`, survives restart, and shuts down cleanly on SIGTERM. The host is pure data/compute/transport — the UI is the TS frontend kernel (`ts/`), served weakly and not exercised here.
 
 Port `18080` is used on the host (mapped to container `8080`) to dodge collisions with anything already serving locally.
 
@@ -34,12 +34,11 @@ for i in $(seq 1 60); do
 done
 podman logs ft-test 2>&1 | grep -q "\[kernel\] up" || { echo "FAIL: kernel never came up"; exit 1; }
 
-# IDs the probes will reuse (top-level web + nested rest + canvas backend).
+# IDs the probes will reuse (top-level web + its nested ws/rest surfaces).
 WEB_ID=$(podman exec ft-test ls /workdir/.fantastic/agents | grep '^web_' | head -1)
 REST_ID=$(podman exec ft-test ls "/workdir/.fantastic/agents/$WEB_ID/agents" | grep '^web_rest_' | head -1)
-CANVAS_WEBAPP_ID=$(podman exec ft-test ls /workdir/.fantastic/agents | grep '^canvas_webapp_' | head -1)
-CANVAS_BACKEND_ID=$(podman exec ft-test ls "/workdir/.fantastic/agents/$CANVAS_WEBAPP_ID/agents" | grep '^canvas_backend_' | head -1)
-echo "WEB_ID=$WEB_ID REST_ID=$REST_ID CANVAS_WEBAPP_ID=$CANVAS_WEBAPP_ID CANVAS_BACKEND_ID=$CANVAS_BACKEND_ID"
+WS_ID=$(podman exec ft-test ls "/workdir/.fantastic/agents/$WEB_ID/agents" | grep '^web_ws_' | head -1)
+echo "WEB_ID=$WEB_ID REST_ID=$REST_ID WS_ID=$WS_ID"
 ```
 
 ## Probes
@@ -57,9 +56,10 @@ Failure-mode: build failed → check the build log for `uv sync` resolution erro
 ```bash
 podman logs ft-test 2>&1 | grep -E "\[kernel\] up"
 podman exec ft-test ls /workdir/.fantastic/agents | sort
+podman exec ft-test ls "/workdir/.fantastic/agents/$WEB_ID/agents" | sort
 ```
-Expected: `[kernel] up` printed once; the `ls` lists at least one `web_<hex>` and one `canvas_webapp_<hex>` at the top level.
-Failure-mode: no `[kernel] up` → entrypoint failed during the seed step OR uvicorn never bound. Missing `canvas_webapp_` → `canvas_webapp.tools` seed line in `entrypoint.sh` regressed.
+Expected: `[kernel] up` printed once; the top-level `ls` lists one `web_<hex>`, and that web agent's own `agents/` holds a `web_ws_<hex>` and a `web_rest_<hex>`.
+Failure-mode: no `[kernel] up` → entrypoint failed during the seed step OR uvicorn never bound. Missing `web_ws_`/`web_rest_` under the web agent → a `web_ws.tools` / `web_rest.tools` seed line in `entrypoint.sh` regressed.
 
 ### 3. `http` — index served at `/`  [ http ]
 
@@ -116,57 +116,34 @@ PY
 Expected: `PASS`.
 Failure-mode: connection refused → `web_ws` didn't mount; `error` frame back → kernel reflect verb regressed.
 
-### 6. `canvas` — canvas page renders + member list is empty  [ canvas | http | rest ]
+### 6. `surfaces` — seeded transport children reflect as host agents  [ rest ]
+
+The host is pure data/compute/transport — there is no `canvas_backend`
+or any view/webapp bundle on it. The UI is the TS frontend kernel
+(`ts/`), served weakly and federated over `web_ws`; it is not seeded by
+this image and is not exercised here. The host-side check is that the
+two call surfaces the entrypoint seeds under `web` — `web_ws` and
+`web_rest` — are live host agents that answer `reflect`.
 
 ```bash
-curl -sf "http://localhost:18080/$CANVAS_WEBAPP_ID/" | python3 -c "
-import sys
-body = sys.stdin.read()
-for needle in ('glViews', 'dblclick', 'canvas-world'):
-    assert needle in body, f'canvas HTML missing {needle!r}'
-print('PASS')
-"
-curl -sf -X POST -H 'content-type: application/json' \
-  -d '{\"type\":\"list_members\"}' \
-  "http://localhost:18080/$REST_ID/$CANVAS_BACKEND_ID" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-assert d.get('members') == [], f'expected empty members, got {d}'
-print('PASS')
-"
-```
-Expected: two `PASS` lines.
-Failure-mode: missing needle → `canvas_webapp` template changed without updating the probe. Non-empty members on a fresh workdir → entrypoint accidentally seeded a member.
-
-### 7. `add-member` — REST add_agent lands a member  [ add-member | canvas | rest ]
-
-```bash
-ADD_REPLY=$(curl -sf -X POST -H 'content-type: application/json' \
-  -d '{\"type\":\"add_agent\",\"handler_module\":\"html_agent.tools\",\"x\":100,\"y\":100}' \
-  "http://localhost:18080/$REST_ID/$CANVAS_BACKEND_ID")
-echo "$ADD_REPLY" | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-assert d.get('ok') is True, f'add_agent did not return ok: {d}'
-assert d.get('member_id', '').startswith('html_agent_'), f'unexpected member_id: {d}'
-assert d['member_id'] in d.get('members', []), f'member missing from list: {d}'
-print(d['member_id'])
-" | tee /tmp/ft-member-id
-MEMBER_ID=$(cat /tmp/ft-member-id)
-curl -sf -X POST -H 'content-type: application/json' \
-  -d '{\"type\":\"list_members\"}' \
-  "http://localhost:18080/$REST_ID/$CANVAS_BACKEND_ID" | python3 -c "
+curl -sf "http://localhost:18080/$REST_ID/_reflect" | python3 -c "
 import json, sys, os
 d = json.load(sys.stdin)
-assert os.environ['MEMBER_ID'] in d.get('members', []), f'member not in list: {d}'
-print('PASS')
-" MEMBER_ID="$MEMBER_ID"
-curl -sf -o /dev/null -w '%{http_code}\n' "http://localhost:18080/$MEMBER_ID/" | grep -q '^200$' && echo "PASS GET /<member>/"
+assert d.get('id') == os.environ['REST_ID'], f'reflect id mismatch: {d.get(\"id\")}'
+print('PASS web_rest reflect')
+" REST_ID="$REST_ID"
+curl -sf "http://localhost:18080/$REST_ID/$WS_ID" -X POST \
+  -H 'content-type: application/json' -d '{\"type\":\"reflect\"}' | python3 -c "
+import json, sys, os
+d = json.load(sys.stdin)
+assert d.get('id') == os.environ['WS_ID'], f'reflect id mismatch: {d.get(\"id\")}'
+print('PASS web_ws reflect')
+" WS_ID="$WS_ID"
 ```
-Expected: prints the new `html_agent_<hex>` id, then `PASS`, then `PASS GET /<member>/`.
-Failure-mode: `ok:false` reply → `canvas_backend.add_agent` regressed; 404 on the GET → `html_agent` not actually mounted into the agent tree.
+Expected: `PASS web_rest reflect` then `PASS web_ws reflect`.
+Failure-mode: 404 / id mismatch → a `web_ws.tools` / `web_rest.tools` seed line in `entrypoint.sh` regressed, or the surfaces didn't mount on the web app.
 
-### 8. `install-bundle` — uv pip install path is wired  [ install-bundle ]
+### 7. `install-bundle` — uv pip install path is wired  [ install-bundle ]
 
 ```bash
 podman exec ft-test fantastic install-bundle git+https://github.com/Alexadar/fantastic_canvas.git 2>&1 | tee /tmp/ft-install.log
@@ -176,29 +153,27 @@ Expected: the log shows `uv pip install` activity. The repo itself is NOT a bund
 Failure-mode: `install-bundle` verb missing → `fantastic` printed a usage banner instead. `uv` not on `$PATH` in the final image → command-not-found.
 TODO: when a public test bundle exists, replace the URL with `git+https://github.com/<user>/<test-bundle>` and assert exit 0 + a new entry-point appears in a follow-up reflect. Acceptable to mark this row `[pending]` until then.
 
-### 9. `persistence` — survive stop/start, member stays  [ persistence | canvas ]
+### 8. `persistence` — survive stop/start, seeded host agents stay  [ persistence ]
 
 ```bash
-MEMBER_ID=$(cat /tmp/ft-member-id)
 podman stop ft-test
 podman start ft-test
 for i in $(seq 1 60); do
   podman logs ft-test 2>&1 | tail -50 | grep -q "\[kernel\] up" && break
   sleep 0.5
 done
-curl -sf -X POST -H 'content-type: application/json' \
-  -d '{\"type\":\"list_members\"}' \
-  "http://localhost:18080/$REST_ID/$CANVAS_BACKEND_ID" | python3 -c "
+# the web_rest surface seeded on first boot must still answer reflect.
+curl -sf "http://localhost:18080/$REST_ID/_reflect" | python3 -c "
 import json, sys, os
 d = json.load(sys.stdin)
-assert os.environ['MEMBER_ID'] in d.get('members', []), f'member lost across restart: {d}'
+assert d.get('id') == os.environ['REST_ID'], f'web_rest lost across restart: {d}'
 print('PASS')
-" MEMBER_ID="$MEMBER_ID"
+" REST_ID="$REST_ID"
 ```
-Expected: `PASS` — the html_agent member added in probe 7 is still listed.
-Failure-mode: kernel never comes back up → graceful-shutdown regressed and the agent tree didn't persist; member missing → `canvas_backend` membership not written to disk.
+Expected: `PASS` — the `web_rest` surface seeded on first boot is still live after the restart.
+Failure-mode: kernel never comes back up → graceful-shutdown regressed and the agent tree didn't persist; 404 / id mismatch → the seeded web stack wasn't written to disk.
 
-### 10. `shutdown` — SIGTERM is graceful  [ shutdown ]
+### 9. `shutdown` — SIGTERM is graceful  [ shutdown ]
 
 ```bash
 podman stop ft-test
@@ -213,7 +188,7 @@ Failure-mode: `podman stop` blocks ~10s before SIGKILL → signal handler missin
 ```bash
 podman rm -f ft-test
 rm -rf "$WORKDIR"
-rm -f /tmp/ft-member-id /tmp/ft-install.log /tmp/ft-shutdown.log
+rm -f /tmp/ft-install.log /tmp/ft-shutdown.log
 ```
 
 ## Results
@@ -225,10 +200,9 @@ rm -f /tmp/ft-member-id /tmp/ft-install.log /tmp/ft-shutdown.log
 | 3 | http | http | | |
 | 4 | rest (kernel reflect + ?bundles=all catalog) | rest | | |
 | 5 | ws | ws | | |
-| 6 | canvas | canvas, http, rest | | |
-| 7 | add-member | add-member, canvas, rest | | |
-| 8 | install-bundle | install-bundle | | |
-| 9 | persistence | persistence, canvas | | |
-| 10 | shutdown | shutdown | | |
+| 6 | surfaces (web_ws + web_rest reflect) | rest | | |
+| 7 | install-bundle | install-bundle | | |
+| 8 | persistence | persistence | | |
+| 9 | shutdown | shutdown | | |
 
-All 10 PASS = container is healthy. Any FAIL → see Notes.
+All 9 PASS = container is healthy. Any FAIL → see Notes.

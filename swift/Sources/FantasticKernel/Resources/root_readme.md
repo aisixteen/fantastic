@@ -125,21 +125,30 @@ Agents are recursive — an agent can own children. `create_agent
 handler_module=<bundle>.tools` spawns one (as a child of whatever you
 call it on); `delete_agent` cascades depth-first.
 
-A `canvas_webapp` is a spatial UI; its `canvas_backend` child holds
-members — `add_agent handler_module=X` spawns a member, `list_members`
-lists them, `remove_agent` cascades one out. To drive a project's
-canvas: reflect the canvas_backend with `readme=true`, then
-add/inspect/remove members.
+## Two kernels — host and frontend
 
-## If you are a terminal inside a canvas
+This kernel is the HOST: data, compute, and transport agents. The UI —
+the spatial canvas and every view (terminal, chat, gl, html content) —
+is a SEPARATE frontend kernel (the `ts/` package) that federates over
+the same WS wire. The host never names or knows the frontend: it serves
+the built frontend GENERICALLY through a `file` agent rooted at the
+frontend's `dist`, so the page loads over `/<file_id>/file/<path>` and
+then talks back to host agents by id. Views are frontend agents, not
+host bundles — binding stays weak (id + duck-typed verbs, never type).
 
-You may be `claude` running in a `terminal_backend` PTY that is a member
-of some canvas. To find the canvas you live on: reflect yourself, then
-walk `parent_id` up the tree —
-`terminal_backend → terminal_webapp → canvas_backend → canvas_webapp`.
-Once you have the `canvas_backend` id, you can `add_agent` siblings next
-to yourself, `list_members`, or reshape the canvas you're in. (If your
-own agent id isn't obvious, `reflect tree=ids` shows every id — find the
-`terminal_backend` node whose PTY is yours.)
+To serve the frontend, an operator creates a `file` agent pointed at the
+frontend build and a `web` host (with `web_ws` for the live wire); the
+browser opens the file route and connects its WS. Nothing here couples
+to the view layer.
+
+## If you are a backend with no view
+
+You may be `claude` running in a `terminal_backend` PTY, or any headless
+worker, with no UI attached. That is normal — backends run weakly bound,
+and a frontend view attaches or detaches without touching you. To place
+yourself in the tree: reflect yourself, then walk `parent_id` up to your
+host parent. `reflect tree=ids` shows every id if your own isn't obvious.
+You can `create_agent` siblings, reshape your subtree, or wire to peers
+by id regardless of which kernel owns them.
 
 To learn ANY agent: reflect it with `readme=true`.

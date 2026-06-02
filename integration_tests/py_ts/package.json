@@ -1,0 +1,9 @@
+{
+  "name": "fantastic-py-ts-itest",
+  "private": true,
+  "type": "module",
+  "description": "Python<->TS cross-runtime integration tests: boot a real python `fantastic` host and drive the TS frontend kernel in a real browser over the bridge. Node-driven sibling of the pytest bridge suite in ../. Zero deps — node's built-in test runner + native TS type-stripping; tests import the frontend kernel from ../../ts/src and the host harness from ./_host.ts.",
+  "scripts": {
+    "test:integration": "node --test --test-force-exit \"*.itest.ts\""
+  }
+}

@@ -205,7 +205,7 @@ impl Kernel {
     /// Does NOT fire `boot` hooks — matches the existing
     /// `persistence::load_children` semantics. The bootstrap caller
     /// dispatches `{type:"boot"}` to whichever agents need it
-    /// (typically the web agent, terminal_webapps via their `_boot`,
+    /// (typically the web agent, or a bundle that boots paired agents,
     /// etc.). For brain-kernel-style snapshot reload, the consumer
     /// can iterate `kernel.agents` post-load and fire boot themselves
     /// if needed.

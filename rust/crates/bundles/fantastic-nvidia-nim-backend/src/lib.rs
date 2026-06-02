@@ -13,7 +13,7 @@
 //! ## AI rehaul backlog (TODO — not in scope for the current port)
 //!
 //! These items will need a coordinated redesign across all LLM
-//! backends + ai_chat_webapp before the next major bump:
+//! backends before the next major bump:
 //!
 //! 1. Cross-backend conversation portability — today history lives
 //!    in `<backend>/chat_<client>.json`. Switching `upstream_id`

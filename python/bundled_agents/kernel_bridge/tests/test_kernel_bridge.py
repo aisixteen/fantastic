@@ -14,8 +14,7 @@ import asyncio
 
 import pytest
 
-from core import Core
-from kernel import Kernel
+from _testkit import boot_root
 from kernel_bridge import tools as kb
 from kernel_bridge._transport import (
     MemoryTransport,
@@ -26,7 +25,7 @@ from kernel_bridge._transport import (
 
 
 def _seed(k) -> None:
-    """Seed cli singleton (root IS what `core` was; admin verbs are
+    """Seed cli singleton (root IS what `fs_loader` was; admin verbs are
     baked into Agent class)."""
     k.ensure("cli", "cli.tools", display_name="cli")
 
@@ -44,10 +43,10 @@ def two_kernels(tmp_path, monkeypatch):
     b_dir.mkdir()
 
     monkeypatch.chdir(a_dir)
-    ka = Core(Kernel(), argv=[])
+    ka = boot_root()
     _seed(ka)
     monkeypatch.chdir(b_dir)
-    kb_kern = Core(Kernel(), argv=[])
+    kb_kern = boot_root()
     _seed(kb_kern)
     monkeypatch.chdir(tmp_path)
     yield ka, kb_kern
@@ -59,7 +58,7 @@ def two_kernels(tmp_path, monkeypatch):
 
 async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
     rec = await kernel.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -83,7 +82,7 @@ async def _wire_memory_pair(ka, kb_kern):
     """
     # Allocate ids first so each can know its peer.
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -93,7 +92,7 @@ async def _wire_memory_pair(ka, kb_kern):
     )
     a_id = rec_a["id"]
     rec_b = await kb_kern.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -138,24 +137,24 @@ async def test_reflect_lists_verbs(two_kernels):
 
 async def test_memory_transport_pair_round_trip(two_kernels):
     """The headline test: a forward from kernel A reaches kernel B's
-    core.reflect and the reply tunnels back."""
+    fs_loader.reflect and the reply tunnels back."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
 
-    # forward(target='core', payload={type:'reflect'}) over the bridge
+    # forward(target='fs_loader', payload={type:'reflect'}) over the bridge
     r = await ka.send(
         a_id,
         {
             "type": "forward",
-            "target": "core",
+            "target": "fs_loader",
             "payload": {"type": "reflect"},
         },
     )
     # The reply is what kernel B's root returns for reflect — the
     # uniform identity + tree (transports moved to the readme).
     assert isinstance(r, dict), f"non-dict reply: {r!r}"
-    assert r["id"] == "core", f"reply not B's root reflect: {r}"
-    assert r["tree"]["id"] == "core"
+    assert r["id"] == "fs_loader", f"reply not B's root reflect: {r}"
+    assert r["tree"]["id"] == "fs_loader"
     assert "transports" not in r
 
 
@@ -164,7 +163,7 @@ async def test_forward_before_boot_errors(two_kernels):
     bid = await _make_bridge(ka, peer_id="x", transport="memory")
     r = await ka.send(
         bid,
-        {"type": "forward", "target": "core", "payload": {"type": "reflect"}},
+        {"type": "forward", "target": "fs_loader", "payload": {"type": "reflect"}},
     )
     assert "error" in r and "not connected" in r["error"]
 
@@ -206,12 +205,12 @@ async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
 
 
 async def test_on_delete_via_cascade(two_kernels):
-    """core.delete_agent calls the bundle's on_delete hook depth-first
+    """fs_loader.delete_agent calls the bundle's on_delete hook depth-first
     before removing the record. The bridge must clean up cleanly."""
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
     assert kb._state(a_id).transport is not None
-    r = await ka.send("core", {"type": "delete_agent", "id": a_id})
+    r = await ka.send("fs_loader", {"type": "delete_agent", "id": a_id})
     assert r.get("deleted") is True
     # State left in re-bootable shape.
     assert kb._state(a_id).transport is None
@@ -230,7 +229,7 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
     """
     ka, _ = two_kernels
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -267,7 +266,7 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
     didn't)."""
     ka, _ = two_kernels
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -336,7 +335,7 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
     standing in for web_ws) receives the frame as the next-out item."""
     ka, _ = two_kernels
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -363,7 +362,7 @@ async def test_event_frame_re_emits_on_bridge_inbox(two_kernels):
     local watchers see remote streams via `kernel.watch(<bridge>, ...)`."""
     ka, _ = two_kernels
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",
@@ -397,7 +396,7 @@ async def test_unwatch_remote_sends_unwatch_frame(two_kernels):
     remote stops pushing events for that subscription."""
     ka, _ = two_kernels
     rec_a = await ka.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "kernel_bridge.tools",

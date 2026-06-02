@@ -4,6 +4,11 @@ Each test runs in its own tmp_path with a fresh root Agent — safe to
 run in parallel via pytest-xdist (-n auto). Multiple roots in the
 same Python process get separate Kernel ctx objects (no cross-test
 state leakage).
+
+The root is an `fs_loader` agent (`id="fs_loader"`) built the way the real
+bootstrap builds it (see `_testkit.boot_root`). The loader's flush loop
+is NOT started — logic tests stay pure in-memory; disk-lifecycle tests
+call `_testkit.persist(root)` for deterministic on-disk state.
 """
 
 from __future__ import annotations
@@ -11,7 +16,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Add repo root to sys.path so `from kernel import …` works.
+# Add repo root to sys.path so `from kernel import …` and `import
+# _testkit` work.
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
@@ -19,22 +25,21 @@ if str(_HERE) not in sys.path:
 import pytest
 
 from cli import Cli
-from core import Core
 
-from kernel import Kernel
+from _testkit import boot_root
 
 
 @pytest.fixture
 def kernel(tmp_path, monkeypatch):
     """Fresh root Agent rooted in tmp_path.
 
-    Returns the root Agent (a `Core` instance with argv=[]). It
-    answers the standard Agent surface (send / emit / get / update /
-    create / delete / list / watch / etc.); tests interact via
-    `kernel.send`, `kernel.create`, ... directly.
+    Returns the root Agent — an `fs_loader` at `id="fs_loader"`. It answers
+    the standard Agent surface (send / emit / get / update / create /
+    delete / list / watch / ...); tests interact via `kernel.send`,
+    `kernel.create`, ... directly.
     """
     monkeypatch.chdir(tmp_path)
-    return Core(Kernel(), argv=[], root_path=Path(".fantastic"))
+    return boot_root()
 
 
 @pytest.fixture

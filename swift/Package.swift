@@ -39,14 +39,7 @@ let package = Package(
             "FantasticYamlState",
             "FantasticProxyAgent",
             "FantasticTools",
-            "FantasticHtmlAgent",
-            "FantasticGlAgent",
             "FantasticScheduler",
-            "FantasticCanvasBackend",
-            "FantasticCanvasWebapp",
-            "FantasticAiChatWebapp",
-            "FantasticTerminalWebapp",
-            "FantasticTelemetryPane",
             "FantasticCliBundle",
             "FantasticKernelBridge",
             "FantasticWeb",
@@ -115,38 +108,7 @@ let package = Package(
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
-            name: "FantasticHtmlAgent",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticGlAgent",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
             name: "FantasticScheduler",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticCanvasBackend",
-            dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-        .target(
-            name: "FantasticCanvasWebapp",
-            dependencies: ["FantasticKernel", "FantasticJSON"],
-            resources: [.copy("Resources/canvas.html")]
-        ),
-        .target(
-            name: "FantasticAiChatWebapp",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticTerminalWebapp",
-            dependencies: ["FantasticKernel", "FantasticJSON"],
-            resources: [.copy("Resources/index.html")]
-        ),
-        .target(
-            name: "FantasticTelemetryPane",
             dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
         .target(
@@ -228,10 +190,7 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticHtmlAgent", "FantasticGlAgent", "FantasticScheduler",
-                "FantasticCanvasBackend", "FantasticCanvasWebapp",
-                "FantasticAiChatWebapp", "FantasticTerminalWebapp",
-                "FantasticTelemetryPane", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
@@ -299,10 +258,7 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticHtmlAgent", "FantasticGlAgent", "FantasticScheduler",
-                "FantasticCanvasBackend", "FantasticCanvasWebapp",
-                "FantasticAiChatWebapp", "FantasticTerminalWebapp",
-                "FantasticTelemetryPane", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",

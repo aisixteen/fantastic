@@ -159,6 +159,13 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         return true
     }
 
+    public var readme: String? {
+        """
+        web — HTTP rendering host.
+        Serves /, /<id>/, /<id>/file/<path>, transport.js, vendored /_assets/*; verb surfaces (web_ws / web_rest) are sub-agents mounted via get_routes.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

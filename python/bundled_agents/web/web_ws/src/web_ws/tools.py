@@ -6,10 +6,10 @@ duck-typed `get_routes` verb: a WebSocket endpoint at
 opens to invoke verbs (`call` frames) and stream events (`watch` /
 `state_subscribe` frames).
 
-The actual WS frame protocol lives in `web._proxy.run` — this bundle
-just declares the route and points the endpoint at it. Decoupling
-WS from `web` lets a `web` instance run rendering-only, and lets
-multiple call surfaces (REST too) coexist as siblings.
+The WS frame protocol lives in this bundle's OWN `_proxy.run` — web_ws
+both declares the route AND owns the frame loop (no reach into `web`),
+so a `web` instance can run rendering-only and multiple call surfaces
+(REST too) coexist as siblings.
 
 Verbs:
   reflect       -> identity + endpoint URL pattern
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from fastapi import WebSocket
 
-from web._proxy import run as _proxy_run
+from web_ws._proxy import run as _proxy_run
 
 
 # ─── route endpoint ─────────────────────────────────────────────

@@ -3,7 +3,7 @@
 Each agent represents one project on this machine. Verbs spawn /
 signal a `fantastic` subprocess directly (no SSH, no tunnels). The
 spawned kernel rehydrates its persisted `web` agent at boot, so
-`start` works in two steps: (1) one-shot `core create_agent
+`start` works in two steps: (1) one-shot `fs_loader create_agent
 handler_module=web.tools port=<free>` to write the record to disk,
 then (2) `subprocess.Popen([cmd])` to spawn the long-running kernel.
 
@@ -18,13 +18,13 @@ Record fields (set on create_agent):
   remote_path  — project root (absolute filesystem path)
   remote_cmd   — `fantastic` CLI to invoke (default: "fantastic" from PATH)
   entry_path   — URL suffix appended to the live serve URL for
-                 `get_webapp` (e.g. "<canvas_webapp_id>/" so the
+                 `get_webapp` (e.g. "<canvas_backend_id>/" so the
                  iframe lands directly on the project's canvas)
 
 Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps lifecycle intentional)
-  shutdown  — alias for `stop`; called by core.delete_agent's universal
+  shutdown  — alias for `stop`; called by fs_loader.delete_agent's universal
               lifecycle hook
   start     — pick a free port, pre-create the web record, spawn the
               daemon, poll until lock.json appears and the web record
@@ -90,11 +90,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 async def _ws_health(port: int) -> bool:
-    """Probe the daemon's WS verb channel: connect to /core/ws, send a
+    """Probe the daemon's WS verb channel: connect to /fs_loader/ws, send a
     reflect frame, expect a reply within 2s. WS is the verb channel —
     this proves the kernel is alive AND answering, not just that
     something is bound to the port."""
-    url = f"ws://localhost:{port}/core/ws"
+    url = f"ws://localhost:{port}/fs_loader/ws"
     try:
         async with asyncio.timeout(2):
             async with websockets.connect(url) as ws:
@@ -102,7 +102,7 @@ async def _ws_health(port: int) -> bool:
                     json.dumps(
                         {
                             "type": "call",
-                            "target": "core",
+                            "target": "fs_loader",
                             "payload": {"type": "reflect"},
                             "id": "h",
                         }
@@ -121,9 +121,9 @@ async def _ws_health(port: int) -> bool:
 
 def _discover_web_port(remote_path: str) -> int | None:
     """Scan `<remote_path>/.fantastic/agents/*/agent.json` for the first
-    record with `handler_module == 'web.tools'`; return its `port`.
-    Port lives on the web agent record, not in lock.json (which is
-    PID-only)."""
+    record carrying a `port` field (the serve agent, DUCK-TYPED — not by
+    bundle name, so any HTTP bundle works); return its `port`. Port lives
+    on the serve agent's record, not lock.json (which is PID-only)."""
     agents_dir = Path(remote_path) / ".fantastic" / "agents"
     if not agents_dir.is_dir():
         return None
@@ -135,10 +135,13 @@ def _discover_web_port(remote_path: str) -> int | None:
             rec = json.loads(af.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        if rec.get("handler_module") == "web.tools":
-            p = rec.get("port")
-            if isinstance(p, int) and p > 0:
-                return p
+        # Duck-type the serve agent by its `port` field (ANY HTTP bundle that
+        # carries a port) rather than a hardcoded handler_module — local_runner
+        # reads a spawned project's disk records before it is live, so it cannot
+        # reflect, and it must not assume a specific bundle name owns the port.
+        p = rec.get("port")
+        if isinstance(p, int) and p > 0:
+            return p
     return None
 
 
@@ -158,8 +161,8 @@ def _live_pid_port(remote_path: str) -> tuple[int | None, int | None]:
 
 
 def _has_web_record(proj: Path) -> bool:
-    """True if any agent.json under `<proj>/.fantastic/agents/*/` has
-    handler_module == 'web.tools'."""
+    """True if any agent.json under `<proj>/.fantastic/agents/*/` carries a
+    `port` (a serve agent — duck-typed, not by bundle name)."""
     agents_dir = proj / ".fantastic" / "agents"
     if not agents_dir.is_dir():
         return False
@@ -171,7 +174,7 @@ def _has_web_record(proj: Path) -> bool:
             rec = json.loads(af.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        if rec.get("handler_module") == "web.tools":
+        if isinstance(rec.get("port"), int) and rec["port"] > 0:
             return True
     return False
 
@@ -238,7 +241,7 @@ async def _start(id, payload, kernel):
         subprocess.run(
             [
                 cmd,
-                "core",
+                "fs_loader",
                 "create_agent",
                 "handler_module=web.tools",
                 f"port={port}",
@@ -343,7 +346,7 @@ async def _restart(id, payload, kernel):
 
 async def _status(id, payload, kernel):
     """No args. {running, pid, port, ws_ok}. ws_ok is a 2s probe over
-    the WS verb channel (`ws://localhost:<port>/core/ws`, reflect frame
+    the WS verb channel (`ws://localhost:<port>/fs_loader/ws`, reflect frame
     → reply). Proves the kernel is alive AND answering, not just that
     lock.json exists."""
     rec = kernel.get(id) or {}

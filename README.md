@@ -1,59 +1,91 @@
-# fantastic-canvas
+# Aisixteen Fantastic
 
-A medium that unifies humans and AIs into a single workspace.
+*A medium that unifies humans and AIs into a single workspace.*
+Repo codename: `fantastic-canvas` — the open-core kernels + browser frontend.
+
 Recursive `Agent` nodes, one primitive (`send`), compile-time-linked
 bundles. Every agent answers `{"type":"reflect"}` — the universal
-discovery verb. No client library: the protocol IS the API.
+discovery verb. No client library: the protocol IS the API. The on-disk
+`.fantastic/` workdir format is part of the product.
 
-## Two runtimes, one workdir
+## Four runtimes, one workdir
 
-The kernel ships in two implementations that share the same on-disk
-format (`.fantastic/`) and the same HTTP + WebSocket wire protocol:
+Four kernels share the same `send`/`reflect` protocol and wire format:
+three interchangeable **hosts** (python, swift, rust) plus the browser
+**frontend** (ts). The three hosts share one on-disk `.fantastic/` workdir
+— **one host active per workdir at a time** (the `lock.json` PID guard).
+The ts frontend is the fourth kernel: it runs in the browser, federates to
+whichever host is up over the WS bridge, and any host serves it generically
+(a `file` agent over `ts/dist`) while knowing nothing about it.
 
 ```
 fantastic_canvas/
-├── python/   reference implementation — uvicorn + FastAPI, 510 tests
-└── swift/    production runtime for Apple — Network.framework + URLSession, 122 tests
+├── python/   reference implementation — uvicorn + FastAPI
+├── swift/    production runtime for Apple — Network.framework + URLSession
+├── rust/     server / CLI host runtime — axum + tokio (pure Rust)
+└── ts/       browser frontend kernel — views as agents, served over the bridge
 ```
 
 - **Python** (`python/`) — **the canonical reference**. When
-  implementations disagree, Python is correct. Other runtimes
+  implementations disagree, Python is correct. The other runtimes
   mirror its wire shape, on-disk format, and verb payloads. The
   protocol surface (HTTP routes, WS frames, system verbs, reflect
   contract, on-disk layout) is documented inside Python's
-  [`CLAUDE.md`](python/CLAUDE.md); no separate protocol spec
-  exists. Run with `cd python && uv sync && uv run fantastic`.
-  See [`python/README.md`](python/README.md).
-- **Swift** (`swift/`) — same behavior, fits inside a sandboxed iOS
-  / iPadOS / visionOS app and runs unsandboxed on macOS Pro.
-  Mirrors Python; drift from Python's wire/on-disk/verb shape is
-  a bug. The cross-runtime conformance test at
+  [`CLAUDE.md`](python/CLAUDE.md); no separate protocol spec exists.
+  Run with `cd python && uv sync && uv run fantastic`. See
+  [`python/README.md`](python/README.md).
+- **Swift** (`swift/`) — same behavior, fits inside a sandboxed iOS /
+  iPadOS / visionOS app and runs unsandboxed on macOS Pro. Drift from
+  Python's wire/on-disk/verb shape is a bug; the conformance test at
   [`swift/Tests/FantasticParityTests`](swift/Tests/FantasticParityTests)
-  spawns the Python kernel and byte-diffs replies as the
-  mechanical drift detector. Run with `cd swift && swift run
-  fantastic`. See [`swift/README.md`](swift/README.md).
+  spawns a peer kernel and byte-diffs replies as the mechanical drift
+  detector. Run with `cd swift && swift run fantastic`. See
+  [`swift/README.md`](swift/README.md).
+- **Rust** (`rust/`) — a pure-Rust host kernel for servers and the CLI
+  (the embedded slice has no subprocess deps). It is **not** linked into
+  the Apple app; it's a peer host and the cross-runtime bridge partner.
+  Run with `cd rust && cargo run`. See [`rust/README.md`](rust/README.md).
+- **TS** (`ts/`) — the browser **frontend** kernel: the view layer
+  (canvas, `html_agent`, `gl_agent`, the `ai` + `terminal` views) as
+  agents in their own kernel, federated to a host over the WS bridge and
+  persisted back to the host's disk opaquely. Build with `cd ts && npm run
+  build`; served from `ts/dist`. See [`ts/SERVE.md`](ts/SERVE.md).
 
-**One runtime is active per workdir at a time.** The existing
-`.fantastic/lock.json` PID guard enforces it — there is no concurrent
-mode, no bridge between them. Switching is a reboot: stop one daemon,
-start the other against the same dir.
+### The frontend is decoupled
+
+The host kernels render no UI of their own. The browser frontend lives
+in `ts/` (its own kernel — views are agents: `canvas`, `html_agent`,
+`gl_agent`, the `ai` and `terminal` views) and is served by **any** host
+through a generic `file` agent rooted at the built `ts/dist`. The host
+never imports, names, or knows about the frontend (weak binding); it
+persists frontend records opaquely and weak-loads past them. The same
+recipe serves any view package. See [`ts/SERVE.md`](ts/SERVE.md).
+
+## One runtime active per workdir
+
+**One host runtime is active per workdir at a time.** The
+`.fantastic/lock.json` PID guard enforces it — no concurrent mode for a
+single dir. Switching is a reboot: stop one daemon, start another
+against the same dir. (Distinct kernels *do* talk across the WS
+`kernel_bridge` — that's separate, explicit wiring, not shared-dir
+concurrency.)
 
 **Weak loading** keeps switching safe. If a persisted agent's
-`handler_module` isn't installed in the active runtime, the kernel
-logs one line to stderr and skips that agent on boot — same byte
-shape across both kernels so CI and selftests can grep it:
+`handler_module` isn't installed in the active runtime, the kernel logs
+one line to stderr and skips that agent on boot — same byte shape across
+all kernels so CI and selftests can grep it:
 
     [kernel] skipping agent <id>: bundle <module> not installed in this runtime
 
-The record stays on disk untouched. Reboot under the runtime that
-has the bundle and the agent rehydrates intact. Wipe-and-rebuild
-safe.
+The record stays on disk untouched. Reboot under a runtime that has the
+bundle and the agent rehydrates intact. (This is exactly how a host that
+ships no view bundles still round-trips a `ts/` frontend record on disk.)
 
 ## Apple integration
 
 The Swift app at
 [`Alexadar/fantastic_app`](https://github.com/Alexadar/fantastic_app)
-links the Swift kernel directly as a SwiftPM dependency — no UniFFI,
+links the **Swift** kernel directly as a SwiftPM dependency — no UniFFI,
 no XCFramework, no Rust on the device:
 
 - **FantasticPro** (macOS, unsandboxed) — full bundle set including
@@ -70,50 +102,57 @@ no XCFramework, no Rust on the device:
 The app consumes the Swift kernel through two umbrella SPM products
 (`FantasticKernelEmbedded` / `FantasticKernelFull`) that
 `@_exported import` the kernel modules under a stable name. See
-[`swift/README.md`](swift/README.md) for the consumption story and
-the bundle scoreboard.
+[`swift/README.md`](swift/README.md) for the consumption story and the
+bundle scoreboard.
 
 ## Repo layout
 
 | path | content |
 |---|---|
-| [`python/`](python/) | reference kernel + 21 bundles + 510 tests + selftests |
-| [`swift/`](swift/) | Apple-platform kernel — 20 bundles (16 multi-platform + 4 macOS-Pro), 122 swift tests, iOS-safe embedded slice |
-| [`swift/docs/CROSS_ANALYSIS.md`](swift/docs/CROSS_ANALYSIS.md) | capability matrix vs the historical Rust port |
-| [`swift/docs/MIGRATION.md`](swift/docs/MIGRATION.md) | how the Apple app dropped UniFFI for the native Swift kernel |
-| [`.github/workflows/`](.github/workflows/) | CI — `python-*.yml` (lint, tests), `swift-build.yml` (build), `codeql.yml`, `spellcheck.yml` |
+| [`python/`](python/) | reference host kernel + bundles + tests + selftests |
+| [`swift/`](swift/) | Apple-platform host kernel — multi-platform + macOS-Pro tiers, iOS-safe embedded slice |
+| [`rust/`](rust/) | pure-Rust host kernel — server / CLI, `full` + `embedded` feature tiers |
+| [`ts/`](ts/) | browser frontend kernel (views as agents), served by any host from `ts/dist` |
+| [`integration_tests/`](integration_tests/) | cross-runtime bridge matrix (pytest) + `py_ts/` browser/e2e |
+| [`swift/docs/CROSS_ANALYSIS.md`](swift/docs/CROSS_ANALYSIS.md) | Swift ↔ Rust capability matrix |
+| [`.github/workflows/`](.github/workflows/) | CI — python lint/tests, swift lint, codeql, spellcheck |
 | [`.claude/`](.claude/) | working notes and plans for Claude Code sessions |
-
-A native Rust port of the same kernel lived under `rust/` through
-phase 8 of the Swift port (commits `61baeac` → `3a5bf8d`); the Apple
-app linked it via UniFFI until the Swift kernel reached parity. Both
-the Rust workspace and its UniFFI bindings have been retired from
-this repository — `git log -- rust/` recovers the full history.
 
 ## Status
 
-|                                  | Python                | Swift                                |
-|----------------------------------|-----------------------|--------------------------------------|
-| substrate                        | ✓ 510 tests           | ✓ 122 tests                          |
-| HTTP / WS / REST surfaces        | ✓                     | ✓ (single port, dynamic mount)       |
-| WS binary frames (incl. chunked) | ✓ single-frame        | ✓ single + chunked uploads           |
-| canvas in browser                | ✓                     | ✓                                    |
-| LLM bundles (ollama / NIM)       | ✓                     | ✓                                    |
-| terminal_backend (PTY)           | ✓                     | ✓ (macOS only — `#if os(macOS)`)     |
-| Apple in-process linking         | n/a                   | ✓ SwiftPM, no XCFramework            |
-| Feature gates (Pro / Lite)       | n/a                   | ✓ subprocess bundles excluded from Lite |
-| Cross-runtime workdir loading    | ✓                     | ✓ (round-trip verified)              |
-| Weak-load contract               | ✓                     | ✓ matches Python byte-for-byte       |
+|                                  | Python | Swift | Rust |
+|----------------------------------|--------|-------|------|
+| substrate                        | ✓ | ✓ | ✓ |
+| HTTP / WS / REST surfaces        | ✓ | ✓ | ✓ |
+| WS binary frames (incl. chunked) | ✓ | ✓ | ✓ |
+| LLM backend bundles              | ollama / NIM / Anthropic | ollama / NIM / Apple FM | ollama / NIM |
+| terminal_backend (PTY)           | ✓ | ✓ (macOS only) | ✓ (full tier) |
+| serves the `ts/` frontend        | ✓ | ✓ | ✓ |
+| Apple in-process linking         | n/a | ✓ SwiftPM | n/a |
+| feature gates                    | n/a | Pro / Lite | full / embedded |
+| cross-runtime workdir loading    | ✓ | ✓ | ✓ |
+| weak-load contract               | ✓ | ✓ | ✓ |
 
 ## Contributing
 
-Both runtimes share the wire contract — any change that affects the
+All host runtimes share the wire contract — any change that affects the
 HTTP/WS protocol, the `.fantastic/` on-disk format, or the reflect
-primer needs to land in both. Lint + test commands per runtime are
-in the respective READMEs.
+contract needs to land in every host. Lint + test commands per runtime
+are in the respective READMEs.
 
 Commits and pushes require explicit consent per project convention.
 
-## License
+## License & brand
 
-Apache-2.0. See [`LICENSE`](LICENSE) at the repo root.
+The source in this repository — the kernels (`python/`, `swift/`, `rust/`)
+and the browser frontend (`ts/`) — is the **open core**, licensed
+**Apache-2.0** ([`LICENSE`](LICENSE) at the repo root). Apache-2.0 carries a
+patent grant and, deliberately, grants **no trademark rights**.
+
+**"Aisixteen Fantastic"** and the **AISIXTEEN** word mark (USPTO reg.
+7,238,635) are trademarks. The license covers the code only — it does not
+license these marks, so a fork must ship under a different name. The
+`.fantastic` workdir format is treated as a brand asset of the project.
+
+Any managed cloud / relay / sync layer is a separate offering, separately
+licensed, and is not part of this repository.

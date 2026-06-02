@@ -18,7 +18,7 @@ rm -rf .fantastic
 ### Test 1: schedule without file_agent_id → failfast
 
 ```bash
-SC=$(fantastic call core create_agent handler_module=scheduler.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+SC=$(fantastic call fs_loader create_agent handler_module=scheduler.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic call $SC schedule target=cli payload='{"type":"say","text":"x"}' interval_seconds=5
 ```
 Expected: `{"error":"scheduler: file_agent_id required"}`.
@@ -26,8 +26,8 @@ Expected: `{"error":"scheduler: file_agent_id required"}`.
 ### Test 2: configure with file_agent_id, then schedule persists
 
 ```bash
-FA=$(fantastic call core create_agent handler_module=file.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-fantastic call core update_agent id=$SC file_agent_id=$FA
+FA=$(fantastic call fs_loader create_agent handler_module=file.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+fantastic call fs_loader update_agent id=$SC file_agent_id=$FA
 SCH=$(fantastic call $SC schedule target=cli payload='{"type":"say","text":"hello"}' interval_seconds=60 | python -c "import json,sys;print(json.load(sys.stdin)['schedule_id'])")
 test -f .fantastic/agents/$SC/schedules.json && echo "OK persisted via file agent"
 ```

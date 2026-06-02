@@ -9,7 +9,7 @@ emitting tool_calls — bounded only by SEND_TIMEOUT (hard) and the
 
 AI rehaul backlog (TODO — not in scope for the current port).
 These items will need a coordinated redesign across all LLM
-backends + ai_chat_webapp before the next major bump:
+backends + the TS ai_view before the next major bump:
   1. Cross-backend conversation portability — today history lives
      in <backend>/chat_<client>.json. Switching upstream_id starts
      a fresh conversation. Future: history travels with the chat
@@ -177,6 +177,7 @@ def _invalidate_menu(self_id: str) -> None:
 
 SEND_TIMEOUT = 180.0  # hard ceiling per-generation; releases the lock
 DEFAULT_CLIENT_ID = "cli"  # headless / REPL caller defaults here
+MAX_CALL_DEPTH = 8  # recursion guard: AI→AI→… chains refuse past this depth
 
 
 def _lock_for(self_id: str) -> asyncio.Lock:
@@ -194,14 +195,14 @@ SEND_TOOL = {
         "description": (
             "Send a message to any agent in the Fantastic substrate. "
             "Universal verb on every agent: reflect (returns identity + state). "
-            "Discover agents by sending list_agents to the core agent."
+            "Discover agents by sending list_agents to the fs_loader agent."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "target_id": {
                     "type": "string",
-                    "description": "Agent id to send the payload to (e.g. 'core', 'cli', 'terminal_xxx').",
+                    "description": "Agent id to send the payload to (e.g. 'fs_loader', 'cli', 'terminal_xxx').",
                 },
                 "payload": {
                     "type": "object",
@@ -295,7 +296,7 @@ async def _build_menu(self_id: str, kernel) -> list[dict]:
     one-line sentence + verb names. Used to grow the system prompt
     into a real "menu of capabilities" the model can see at a glance.
     """
-    online = await kernel.send("core", {"type": "list_agents"})
+    online = await kernel.send("fs_loader", {"type": "list_agents"})
     items: list[dict] = []
     for a in online.get("agents", []):
         if a["id"] == self_id:
@@ -321,7 +322,7 @@ async def _build_menu(self_id: str, kernel) -> list[dict]:
 def _render_menu(menu: list[dict]) -> str:
     """Format the menu as bullet lines for the system prompt."""
     if not menu:
-        return "## Available agents\n(none — only `core` and `self`)"
+        return "## Available agents\n(none — only `fs_loader` and `self`)"
     lines = [
         "## Available agents (reflect on any for full verb signatures + arg shapes)"
     ]
@@ -346,30 +347,49 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
 """
 
 
-async def _assemble(self_id: str, user_text: str, kernel, client_id: str) -> list[dict]:
-    # Lean substrate context for the system prompt: an id-index of the
-    # tree + the bundle catalog by name (not the full nested tree).
-    primer = await kernel.send(
-        "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
-    )
-    me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
-
-    # Lazy menu: rebuild only when invalidated (None / missing).
-    if self_id not in _menu_cache:
-        _menu_cache[self_id] = await _build_menu(self_id, kernel)
-    menu = _menu_cache[self_id]
-
-    sys_blocks = [
-        _render_reflect(primer),
-        f"You are `{self_id}`. " + _render_reflect(me),
-        _render_menu(menu),
-        _SEND_HOWTO,
-    ]
+async def _assemble(
+    self_id: str,
+    user_text: str,
+    kernel,
+    client_id: str,
+    system_prompt: str | None = None,
+    messages_override: list[dict] | None = None,
+) -> list[dict]:
+    """Build the message list. A caller-supplied `system_prompt` REPLACES the
+    deterministic substrate prompt — the generic 'caller controls context' door:
+    a state agent or a python routine reads a stored prompt and passes it here, so
+    the AI needs NO yaml-specific code. A caller-supplied `messages` list REPLACES
+    the persisted history (fully stateless — the AI holds no per-call state).
+    Both fall back to the default when absent."""
+    if isinstance(system_prompt, str) and system_prompt.strip():
+        sys_content = system_prompt
+    else:
+        # Lean substrate context for the system prompt: an id-index of the
+        # tree + the bundle catalog by name (not the full nested tree).
+        primer = await kernel.send(
+            "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
+        )
+        me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
+        # Lazy menu: rebuild only when invalidated (None / missing).
+        if self_id not in _menu_cache:
+            _menu_cache[self_id] = await _build_menu(self_id, kernel)
+        menu = _menu_cache[self_id]
+        sys_content = "\n\n".join(
+            [
+                _render_reflect(primer),
+                f"You are `{self_id}`. " + _render_reflect(me),
+                _render_menu(menu),
+                _SEND_HOWTO,
+            ]
+        )
     # System block is rebuilt on EVERY user turn; chat.json holds only
     # the user/assistant turns. Menu + howto are not persisted — they
     # always reflect the latest state at send-time.
-    messages: list[dict] = [{"role": "system", "content": "\n\n".join(sys_blocks)}]
-    messages.extend(await _load_history(self_id, kernel, client_id))
+    messages: list[dict] = [{"role": "system", "content": sys_content}]
+    if isinstance(messages_override, list) and messages_override:
+        messages.extend(messages_override)  # stateless: caller supplies the convo
+    else:
+        messages.extend(await _load_history(self_id, kernel, client_id))
     messages.append({"role": "user", "content": user_text})
     return messages
 
@@ -431,9 +451,21 @@ async def _emit_status(
     )
 
 
-async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
+async def _run(
+    self_id: str,
+    user_text: str,
+    kernel,
+    client_id: str,
+    system_prompt: str | None = None,
+    messages_override: list[dict] | None = None,
+    call_stack: list | None = None,
+) -> dict:
+    call_stack = call_stack or []
+    stateless = isinstance(messages_override, list) and bool(messages_override)
     provider = _get_provider(self_id, kernel)
-    messages = await _assemble(self_id, user_text, kernel, client_id)
+    messages = await _assemble(
+        self_id, user_text, kernel, client_id, system_prompt, messages_override
+    )
     last_text = ""
 
     # Loop until the model stops emitting tool_calls. Bounded only by
@@ -525,7 +557,13 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 kernel, self_id, client_id, "tool_calling", tool=tool_entry
             )
             try:
-                reply = await kernel.send(target, payload)
+                send_payload = payload
+                if isinstance(payload, dict):
+                    # Propagate the call chain so a downstream AI agent can refuse
+                    # cycles / over-depth (recursion guard). Non-AI targets ignore
+                    # the extra key; it is NOT recorded in the persisted args.
+                    send_payload = {**payload, "_call_stack": call_stack + [self_id]}
+                reply = await kernel.send(target, send_payload)
             except Exception as e:
                 reply = {"error": str(e)}
             reply_str = json.dumps(reply, default=str)
@@ -573,7 +611,8 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
     #      auditable on disk after the fact.
     #   2. The model gets full conversation memory on the next turn,
     #      not a lossy summary.
-    await _save_history(self_id, kernel, client_id, messages[1:])
+    if not stateless:
+        await _save_history(self_id, kernel, client_id, messages[1:])
     return {"response": last_text, "final": last_text, "client_id": client_id}
 
 
@@ -607,11 +646,33 @@ async def _reflect(id, payload, kernel):
 
 
 async def _send(id, payload, kernel):
-    """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Returns {response, final, client_id}."""
-    if not _file_agent_id(id, kernel):
+    """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_agent_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}."""
+    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
+    # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
+    # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
+    call_stack = payload.get("_call_stack")
+    if not isinstance(call_stack, list):
+        call_stack = []
+    if id in call_stack:
+        return {
+            "error": "ollama_backend: cycle detected",
+            "response": "",
+            "cycle": call_stack + [id],
+            "client_id": client_id,
+        }
+    if len(call_stack) >= MAX_CALL_DEPTH:
+        return {
+            "error": f"ollama_backend: max call depth {MAX_CALL_DEPTH} reached",
+            "response": "",
+            "client_id": client_id,
+        }
+    system_prompt = payload.get("system_prompt")
+    messages_override = payload.get("messages")
+    stateless = isinstance(messages_override, list) and bool(messages_override)
+    # file_agent_id is only needed for the stateful path (load + persist history).
+    if not stateless and not _file_agent_id(id, kernel):
         return {"error": "ollama_backend: file_agent_id required"}
     text = payload.get("text", "")
-    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
     send_id = _new_send_id()
     entry = {
         "client_id": client_id,
@@ -645,7 +706,17 @@ async def _send(id, payload, kernel):
         _dequeue_send(id, send_id)
         _set_current(id, entry)
         await _emit_status(kernel, id, client_id, "thinking")
-        task = asyncio.create_task(_run(id, text, kernel, client_id))
+        task = asyncio.create_task(
+            _run(
+                id,
+                text,
+                kernel,
+                client_id,
+                system_prompt,
+                messages_override,
+                call_stack,
+            )
+        )
         _tasks[id] = task
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=SEND_TIMEOUT)

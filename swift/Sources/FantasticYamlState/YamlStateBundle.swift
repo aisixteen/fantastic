@@ -203,17 +203,17 @@ public struct YamlStateBundle: AgentBundle {
         + "a decision). Your current facts are already in your context — read them, "
         + "don't re-fetch."
     static let dataSentence =
-        "Your durable scratch-state (UI state, hyperparams, current selection). "
-        + "One value per key, overwrite-in-place; auto-loaded into your context on "
-        + "boot."
+        "Your durable scratch-state (component state, config, run params, current "
+        + "selection). One value per key, overwrite-in-place; auto-loaded into your "
+        + "context on boot."
 
     static let readmeText = """
         # yaml_state — durable state & memory agent
 
         A YAML key-value store that survives the context boundary. One mechanism, many
-        uses: global or local, long- or short-term memory, and component/UI state.
+        uses: global or local, long- or short-term memory, and durable component state.
         The `mode` meta picks the discipline (same verbs either way):
-        - `data` — current scratch-state (UI state, hyperparams, selection); overwrite-in-place.
+        - `data` — current scratch-state (component state, config, run params, selection); overwrite-in-place.
         - `mem` — durable facts to remember (names, preferences, decisions); accrete keyed facts.
 
         **Your agent's contents are auto-loaded into your context on boot — read them, don't re-fetch.**
@@ -233,7 +233,7 @@ public struct YamlStateBundle: AgentBundle {
 
         ## Recipes
         - Remember a fact → `set {key:"user.name", value:"Ada"}`.
-        - Save state → `set {key:"ui.zoom", value:1.5}`.
+        - Save state → `set {key:"view.zoom", value:1.5}`.
         - Reuse keys, don't duplicate → `keys` first; use descriptive namespaced keys
           (`domain.subject.attribute`).
         - Self-contained values (the fact AND its why) →

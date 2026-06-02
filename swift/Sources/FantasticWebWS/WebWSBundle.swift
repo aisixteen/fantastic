@@ -21,6 +21,13 @@ public final class WebWSBundle: AgentBundle, @unchecked Sendable {
     public let name = "web_ws"
     public init() {}
 
+    public var readme: String? {
+        """
+        web_ws — WebSocket verb channel. Child of a web agent; mounts ws://host/<agent_id>/ws.
+        Full duplex: call / emit / watch / state_subscribe frames — the streaming surface.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

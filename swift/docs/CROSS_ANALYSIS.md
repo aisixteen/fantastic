@@ -17,14 +17,14 @@ needs on Apple platforms.
 | file | 466 | ~280 | full verb surface (list/read/write/delete/rename/mkdir) |
 | proxy-agent | 827 | ~210 | full — host registration + reflect merge + cascade `onDelete` |
 | tools | 1,079 | ~340 | full — register/dispatch/list_for_llm/unregister_by_sender/clear |
-| html_agent | 312 | ~70 | full — render_html + set_html |
-| gl_agent | 340 | ~70 | full — set_source + reflect with gl_source/source aliasing |
+| html_agent † | 312 | ~70 | was full (render_html + set_html) — since removed from the host |
+| gl_agent † | 340 | ~70 | was full (set_source + reflect aliasing) — since removed from the host |
 | scheduler | 879 | ~150 | full — DispatchSourceTimer-backed schedule/cancel |
-| canvas-backend | 581 | ~150 | full — members + discover + add/remove |
-| canvas-webapp | 242 | ~80 | full — bundled canvas.html resource + render_html |
-| terminal-webapp | 320 | ~60 | full — bundled index.html resource + render_html |
-| ai-chat-webapp | 412 | ~90 | full — verb forwarding to upstream_id |
-| telemetry-pane | 175 | ~60 | full verb surface |
+| canvas-backend † | 581 | ~150 | was full (members + discover + add/remove) — since removed from the host |
+| canvas-webapp † | 242 | ~80 | was full (render_html) — since removed from the host |
+| terminal-webapp † | 320 | ~60 | was full (render_html) — since removed from the host |
+| ai-chat-webapp † | 412 | ~90 | was full (verb forwarding to upstream_id) — since removed from the host |
+| telemetry-pane † | 175 | ~60 | was full verb surface — since removed from the host |
 | cli-bundle | 161 | ~40 | full — state-event renderer (attach helper) |
 | kernel-bridge | 1,668 | ~110 | **in-memory only** — WS / HTTP transports deferred to a polish PR |
 | **HTTP layer** | | | |
@@ -43,6 +43,13 @@ needs on Apple platforms.
 | **CLI** | | | |
 | fantastic-cli | 262 | ~110 | reflect + one-shot RPC modes; daemon mode + workdir bootstrap deferred |
 | **Totals** | **24,361** | **~5,468** | |
+
+† These 7 view bundles were ported during Phases 1-7 (the LOC above
+reflect that historical port) but have since been **removed from the
+Swift host**. The browser UI now lives in `ts/` and is served
+generically from `ts/dist` via a `file` agent — the host no longer
+names or ships any of them. The rows stay here only as a Rust↔Swift
+LOC record, not as a claim of currently-shipped Swift bundles.
 
 Swift is ~22% the LOC of Rust at feature parity for what's ported.
 Two reasons: (1) Swift's Codable + property syntax cuts a lot of
@@ -81,9 +88,11 @@ don't reflect Rust being "worse," just FFI tax that disappears.
    in the bundles that need subprocess access.
 8. **AsyncStream for inboxes** is a direct fit for the agent inbox
    pattern — no tokio channel ceremony, native async iteration.
-9. **SwiftPM Resources** — bundled assets (canvas.html, three.module
-   .js, etc.) ship as first-class `Bundle.module.url(...)` lookups.
-   No `include_str!` / `include_bytes!` macro indirection.
+9. **SwiftPM Resources** — when a bundle needs vendored assets they
+   ship as first-class `Bundle.module.url(...)` lookups, with no
+   `include_str!` / `include_bytes!` macro indirection. (The view
+   bundles that exercised this most have since moved to `ts/`; the
+   mechanism still applies to any host bundle that vendors assets.)
 10. **Swift `actor` model** for the Kernel is structurally easier
     to reason about than Rust's `Arc<DashMap<...>>` + `tokio::RwLock`
     soup — though we ended up using NSLock-protected classes in
@@ -177,8 +186,8 @@ The brain-kernel app's needs (per the app-claude brief) are:
 | sendJson / sendJsonAs / proxyEmit | ✅ | ✅ (verb-equivalent) |
 | registerProxyAgent / ProxyAgent host | ✅ | ✅ (Swift protocol — no UniFFI callback) |
 | Tools registry (FM-via-proxy_agent) | ✅ | ✅ |
-| Canvas + terminal HTML surfaces | ✅ | ✅ (bundled resources) |
-| `/_assets/*` (Three.js, xterm) | ✅ | ✅ (bundled resources) |
+| Browser UI / HTML surfaces | ✅ | ✅ (served from `ts/dist` via a generic `file` agent — no host bundle) |
+| Frontend assets (Three.js, xterm, etc.) | ✅ | ✅ (shipped by the `ts/` frontend kernel, not host-bundled) |
 | State event subscription | ✅ | ✅ (closure-based, same shape) |
 | HTTP server | ✅ (axum, live) | ⏳ (verb shapes + assets; live listener TBD) |
 | WS server | ✅ | ⏳ |

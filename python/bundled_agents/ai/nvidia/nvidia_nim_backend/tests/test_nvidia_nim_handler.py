@@ -34,7 +34,7 @@ async def _make_nvidia(kernel, file_agent_id=None, with_key: str | None = None):
     meta = {"handler_module": "nvidia_nim_backend.tools"}
     if file_agent_id is not None:
         meta["file_agent_id"] = file_agent_id
-    rec = await kernel.send("core", {"type": "create_agent", **meta})
+    rec = await kernel.send("fs_loader", {"type": "create_agent", **meta})
     nid = rec["id"]
     if with_key and file_agent_id is not None:
         await kernel.send(
@@ -240,7 +240,7 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -305,7 +305,7 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
                     "id": f"call_{i}",
                     "name": "send",
                     "arguments": {
-                        "target_id": "core",
+                        "target_id": "fs_loader",
                         "payload": {"type": "list_agents"},
                     },
                 }
@@ -403,7 +403,7 @@ async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -549,7 +549,7 @@ async def test_assistant_tool_calls_serialize_arguments_to_json_string(
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -573,7 +573,7 @@ async def test_assistant_tool_calls_serialize_arguments_to_json_string(
     args = tcs[0]["function"]["arguments"]
     assert isinstance(args, str), f"OpenAI-shape requires string args, got {type(args)}"
     decoded = json.loads(args)
-    assert decoded == {"target_id": "core", "payload": {"type": "list_agents"}}
+    assert decoded == {"target_id": "fs_loader", "payload": {"type": "list_agents"}}
 
 
 # ─── rate-limit retry ──────────────────────────────────────────
@@ -780,7 +780,7 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }

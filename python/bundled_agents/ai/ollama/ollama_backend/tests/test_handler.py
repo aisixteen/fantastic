@@ -33,7 +33,7 @@ async def _make_ollama(kernel, file_agent_id=None):
     meta = {"handler_module": "ollama_backend.tools"}
     if file_agent_id is not None:
         meta["file_agent_id"] = file_agent_id
-    rec = await kernel.send("core", {"type": "create_agent", **meta})
+    rec = await kernel.send("fs_loader", {"type": "create_agent", **meta})
     return rec["id"]
 
 
@@ -114,8 +114,126 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
+# ─── system_prompt / messages door + recursion guard ────────────
+
+
+class _RecordProvider:
+    """Like _FakeProvider but records the messages list of each chat() call."""
+
+    def __init__(self, scripts: list[list]):
+        self._scripts = list(scripts)
+        self.calls = 0
+        self.last_messages = None
+
+    async def chat(self, messages, tools):
+        self.last_messages = list(messages)  # snapshot — _run mutates the list later
+        items = self._scripts.pop(0) if self._scripts else []
+        self.calls += 1
+        for x in items:
+            yield x
+
+
+async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, file_agent):
+    """A caller-supplied system_prompt REPLACES the auto-built substrate prompt."""
+    oid = await _make_ollama(seeded_kernel, file_agent)
+    rp = _RecordProvider([["ok"]])
+    ot._providers[oid] = rp
+    try:
+        r = await seeded_kernel.send(
+            oid, {"type": "send", "text": "hi", "system_prompt": "ROLE-XYZ"}
+        )
+        assert r["final"] == "ok"
+        assert rp.last_messages[0]["role"] == "system"
+        assert rp.last_messages[0]["content"] == "ROLE-XYZ"
+    finally:
+        ot._providers.pop(oid, None)
+
+
+async def test_stateless_messages_override_needs_no_file_agent(seeded_kernel):
+    """messages + system_prompt in the payload → fully stateless: no file_agent_id
+    required, caller's history used verbatim, the new user turn appended."""
+    oid = await _make_ollama(seeded_kernel)  # NO file_agent_id
+    rp = _RecordProvider([["leaf-answer"]])
+    ot._providers[oid] = rp
+    try:
+        r = await seeded_kernel.send(
+            oid,
+            {
+                "type": "send",
+                "text": "now",
+                "system_prompt": "S",
+                "messages": [
+                    {"role": "user", "content": "earlier"},
+                    {"role": "assistant", "content": "prior"},
+                ],
+            },
+        )
+        assert r["final"] == "leaf-answer"
+        assert rp.last_messages[0]["content"] == "S"
+        assert rp.last_messages[1]["content"] == "earlier"
+        assert rp.last_messages[-1]["content"] == "now"
+    finally:
+        ot._providers.pop(oid, None)
+
+
+async def test_send_refuses_cycle(seeded_kernel, file_agent):
+    """_call_stack containing self → immediate cycle refusal (before the lock)."""
+    oid = await _make_ollama(seeded_kernel, file_agent)
+    r = await seeded_kernel.send(
+        oid, {"type": "send", "text": "hi", "_call_stack": [oid]}
+    )
+    assert "error" in r and "cycle" in r["error"]
+
+
+async def test_send_refuses_over_depth(seeded_kernel, file_agent):
+    """_call_stack at/over MAX_CALL_DEPTH → depth refusal (before the lock)."""
+    oid = await _make_ollama(seeded_kernel, file_agent)
+    deep = [f"x{i}" for i in range(ot.MAX_CALL_DEPTH)]
+    r = await seeded_kernel.send(
+        oid, {"type": "send", "text": "hi", "_call_stack": deep}
+    )
+    assert "error" in r and "depth" in r["error"]
+
+
+async def test_tool_call_to_self_does_not_deadlock(seeded_kernel, file_agent):
+    """The keystone: a tool-call back to the SAME backend must NOT deadlock on its
+    held FIFO lock. _exec_one injects _call_stack=[self] into the outgoing send, so
+    the re-entry is refused as a cycle BEFORE the lock — the run completes fast."""
+    oid = await _make_ollama(seeded_kernel, file_agent)
+    fp = _FakeProvider(
+        [
+            # iter 1: model tool-calls ITSELF
+            [
+                {
+                    "tool_call": {
+                        "id": "c1",
+                        "name": "send",
+                        "arguments": {
+                            "target_id": oid,
+                            "payload": {"type": "send", "text": "again"},
+                        },
+                    }
+                }
+            ],
+            # iter 2: finishes (after seeing the cycle error as the tool reply)
+            ["done"],
+        ]
+    )
+    ot._providers[oid] = fp
+    try:
+        # If the guard were missing, the inner send would block on the held lock
+        # and the outer send would hang to SEND_TIMEOUT (180s); wait_for(15) proves
+        # it returns fast.
+        r = await asyncio.wait_for(
+            seeded_kernel.send(oid, {"type": "send", "text": "go"}), timeout=15
+        )
+        assert r["final"] == "done" and fp.calls == 2
+    finally:
+        ot._providers.pop(oid, None)
+
+
 async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
-    """Model emits a tool_call to core, gets reply, second iteration finishes."""
+    """Model emits a tool_call to fs_loader, gets reply, second iteration finishes."""
     oid = await _make_ollama(seeded_kernel, file_agent)
     fp = _FakeProvider(
         [
@@ -126,7 +244,7 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -181,14 +299,14 @@ async def test_run_persists_full_tool_call_round_trip(
     oid = await _make_ollama(seeded_kernel, file_agent)
     fp = _FakeProvider(
         [
-            # Iter 1: tool_call to core.list_agents
+            # Iter 1: tool_call to fs_loader.list_agents
             [
                 {
                     "tool_call": {
                         "id": "call_X",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -213,7 +331,7 @@ async def test_run_persists_full_tool_call_round_trip(
         assert asst_tcs["tool_calls"], "tool_calls dropped from persistence"
         tc = asst_tcs["tool_calls"][0]
         assert tc["function"]["name"] == "send"
-        assert tc["function"]["arguments"]["target_id"] == "core"
+        assert tc["function"]["arguments"]["target_id"] == "fs_loader"
         # 2. tool reply linked by tool_call_id
         assert data[2]["tool_call_id"] == "call_X"
         assert data[2]["name"] == "send"
@@ -258,7 +376,7 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
                     "id": f"call_{i}",
                     "name": "send",
                     "arguments": {
-                        "target_id": "core",
+                        "target_id": "fs_loader",
                         "payload": {"type": "list_agents"},
                     },
                 }
@@ -386,14 +504,14 @@ async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
     oid = await _make_ollama(seeded_kernel, file_agent)
     fp = _FakeProvider(
         [
-            # iter 1: emit a tool_call to core
+            # iter 1: emit a tool_call to fs_loader
             [
                 {
                     "tool_call": {
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -644,7 +762,7 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "core",
+                            "target_id": "fs_loader",
                             "payload": {"type": "list_agents"},
                         },
                     }

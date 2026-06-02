@@ -6,7 +6,7 @@
 //!
 //! Every LLM backend bundle (this one, `nvidia_nim_backend`, future
 //! `apple_fm_backend`, etc.) MUST implement the same verb + event
-//! shape so any chat UI (`ai_chat_webapp` today, others later) can
+//! shape so any chat UI (the TS frontend's ai_chat view, etc.) can
 //! retarget via a single `update_agent upstream_id=<other>` with no
 //! frontend changes.
 //!
@@ -61,7 +61,7 @@
 //! ## AI rehaul backlog (TODO — not in scope for the current port)
 //!
 //! These items will need a coordinated redesign across all LLM
-//! backends + ai_chat_webapp before the next major bump:
+//! backends before the next major bump:
 //!
 //! 1. Cross-backend conversation portability — today history lives
 //!    in `<backend>/chat_<client>.json`. Switching `upstream_id`

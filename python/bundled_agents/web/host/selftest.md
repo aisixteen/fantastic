@@ -5,10 +5,10 @@
 > out-of-scope: rendering of any specific bundle's HTML (those live in
 > per-webapp selftests). The WS surface itself is tested by
 > `bundled_agents/web/web_ws/selftest.md`; this file covers the
-> rendering-host routes (HTML, file proxy, transport.js, favicon, lock).
+> rendering-host routes (HTML, file proxy, favicon, lock).
 
-HTTP rendering host. Tests static routes, transport.js, binary frame
-plumbing. WS verb-channel tests live in web_ws's selftest.
+HTTP rendering host. Tests static routes and the file proxy. WS
+verb-channel tests live in web_ws's selftest.
 
 ## Pre-flight
 
@@ -17,7 +17,7 @@ cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
-uv run --active fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
 # Spawn web_ws as a child of web so the `call` helper below (which
 # uses WS) works end-to-end. Call create_agent on the web agent
 # itself — the new agent lands under <web_id>/agents/.
@@ -81,7 +81,7 @@ Expected: `PASS`. The page is rendered from
 call kernel '{"type":"reflect"}' | python -c "
 import json, sys
 d = json.loads(sys.stdin.read())
-assert d.get('id') == 'core', f'id={d.get(\"id\")}'
+assert d.get('id') == 'fs_loader', f'id={d.get(\"id\")}'
 assert 'sentence' in d and 'tree' in d, f'keys={list(d)}'
 # Old primer keys must be gone.
 gone = [k for k in ('transports','primitive','envelope','browser_bus',
@@ -94,54 +94,46 @@ def walk_ids(n, out):
         walk_ids(c, out)
 ids = []
 walk_ids(d['tree'], ids)
-assert 'core' in ids
+assert 'fs_loader' in ids
 assert any(i.startswith('web_') for i in ids)
 print('PASS')
 "
 ```
 Expected: `PASS`.
 
-### Test 3: GET /_fantastic/transport.js (must contain bus + binary)
+### Test 3: WS `call` frame to fs_loader/reflect
 
 ```bash
-curl -s http://localhost:$PORT/_fantastic/transport.js | grep -c "BroadcastChannel('fantastic')"
-curl -s http://localhost:$PORT/_fantastic/transport.js | grep -c "binaryType = 'arraybuffer'"
+call fs_loader '{"type":"reflect"}' | python -m json.tool | head -20
 ```
-Expected: each grep returns 1.
-Regression signal: 0 means transport.js lost browser-bus or binary-frame support.
+Expected: JSON for the `fs_loader` root — `"id":"fs_loader"`, a
+`"sentence":…`, and `"verbs":{…}`. Regression signal: `Connection
+refused` / `404` on the WS upgrade means the WS proxy lost its
+`/<id>/ws` route binding.
 
-### Test 4: WS `call` frame to core/reflect
-
-```bash
-call core '{"type":"reflect"}' | python -m json.tool | head -20
-```
-Expected: JSON containing `"sentence":"Core agent…"`, `"verbs":[…]`.
-Regression signal: `Connection refused` / `404` on the WS upgrade
-means the WS proxy lost its `/<id>/ws` route binding.
-
-### Test 5: GET /<missing_id>/ → 404
+### Test 4: GET /<missing_id>/ → 404
 
 ```bash
 curl -s -i http://localhost:$PORT/nonexistent_xxx/ | head -1
 ```
 Expected: `HTTP/1.1 404 Not Found`.
 
-### Test 6: GET /<backend_id>/ (no UI) → 404
+### Test 5: GET /<backend_id>/ (no UI) → 404
 
 ```bash
-TB=$(call core '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+TB=$(call fs_loader '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 curl -s -i "http://localhost:$PORT/$TB/" | head -1
 ```
 Expected: `HTTP/1.1 404 Not Found` (terminal_backend has no webapp/index.html).
 
-### Test 7: WS call → reply round-trip
+### Test 6: WS call → reply round-trip
 
 ```bash
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
-        await ws.send(json.dumps({'type':'call','target':'core','payload':{'type':'reflect'},'id':'1'}))
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
+        await ws.send(json.dumps({'type':'call','target':'fs_loader','payload':{'type':'reflect'},'id':'1'}))
         for _ in range(5):
             msg = json.loads(await ws.recv())
             if msg.get('type')=='reply' and msg.get('id')=='1':
@@ -151,7 +143,7 @@ asyncio.run(main())
 ```
 Expected: prints `OK True`.
 
-### Test 8: PID lock — `.fantastic/lock.json` holds an alive pid
+### Test 7: PID lock — `.fantastic/lock.json` holds an alive pid
 
 ```bash
 # NOTE: $SPID is the `uv run` wrapper pid; the actual kernel pid is one
@@ -169,7 +161,7 @@ print('PASS' if alive(d['pid']) else f'FAIL data={d}')
 Expected: `PASS`. Regression signal: file missing → `acquire_lock`
 not wired into `kernel._modes._default`.
 
-### Test 9: second daemon refuses with "another fantastic owns this dir"
+### Test 8: second daemon refuses with "another fantastic owns this dir"
 
 A second `fantastic` invocation in the same project dir rehydrates
 the same web agent → tries to acquire the same lock → refused.
@@ -182,7 +174,7 @@ Expected: `PASS`. The second invocation must NOT start (its uvicorn
 would have failed to bind anyway, but the lock catches the conflict
 earlier with a clearer error). Original serve still running.
 
-### Test 10: stale lock (dead pid) is overwritten on next serve
+### Test 9: stale lock (dead pid) is overwritten on next serve
 
 ```bash
 # Kill the actual kernel pid (NOT $SPID — that's `uv run` wrapper).
@@ -193,7 +185,7 @@ test -f .fantastic/lock.json && echo "  lock survived SIGKILL: OK"
 
 # Spin up a fresh serve on a different port — should overwrite.
 PORT2=18902
-uv run --active fantastic core create_agent handler_module=web.tools port=$PORT2 >/dev/null
+uv run --active fantastic fs_loader create_agent handler_module=web.tools port=$PORT2 >/dev/null
 uv run --active fantastic > /tmp/serve2.log 2>&1 &
 WRAPPER2=$!
 for i in $(seq 1 30); do grep -q "kernel up" /tmp/serve2.log 2>/dev/null && break; sleep 0.3; done
@@ -213,22 +205,30 @@ rm -f /tmp/serve2.log
 Expected: `PASS` (new serve replaced the stale lock). Regression
 signal: stale lock blocked the relaunch → `_pid_alive` check broken.
 
-### Test 11: render_html duck-type → html_agent's record HTML served
+### Test 10: there is NO server-side render route (`/<id>/` is not served)
+
+The web host renders no agent UI server-side: the `GET /<id>/` →
+`render_html` page route was REMOVED. The host does exactly two things —
+serve STATIC files via the `file` alias (`/<id>/file/<path>`, Test 11)
+and carry `send()` over the WS bus. Frontend panels live in the TS
+kernel (`html_agent.ts` → canvas), not as host pages. So `/<id>/` matches
+no route at all → 404.
 
 ```bash
-HA=$(call core '{"type":"create_agent","handler_module":"html_agent.tools","html_content":"<h1>marker</h1>"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-HTML=$(curl -s "http://localhost:$PORT/$HA/")
-echo "$HTML" | grep -qF "marker" && echo "  record content served: OK" || echo "  FAIL"
-echo "$HTML" | grep -qF "_fantastic/transport.js" && echo "  transport injected: OK; PASS" || echo "  FAIL"
+# no /<id>/ render route exists → any /<id>/ is an unmatched route → 404.
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/fs_loader/")
+[ "$code" = "404" ] && echo "  no /<id>/ render route → 404: OK; PASS" || echo "  FAIL: code=$code"
 ```
-Expected: both checks PASS. Verifies that `agent_index` consults
-`render_html` first and serves whatever `{html:str}` it returns.
+Expected: the check PASSES. Frontend panel rendering is exercised in the
+frontend kernel's selftest (`ts/`), where the `html_agent.ts` record holds
+the body and the canvas renders it; the host only serves the static `dist`
+and relays the bus.
 
-### Test 12: file blob proxy /<file>/file/<path>
+### Test 11: file blob proxy /<file>/file/<path>
 
 ```bash
 mkdir -p /tmp/wfp && echo "hello bytes" > /tmp/wfp/foo.txt
-FA=$(call core '{"type":"create_agent","handler_module":"file.tools","root":"/tmp/wfp"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(call fs_loader '{"type":"create_agent","handler_module":"file.tools","root":"/tmp/wfp"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # text content
 out=$(curl -s -i "http://localhost:$PORT/$FA/file/foo.txt")
 echo "$out" | grep -qF "hello bytes" && echo "  text body: OK" || echo "  FAIL"
@@ -244,25 +244,26 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$PORT/$FA/file/.
 rm -rf /tmp/wfp
 ```
 Expected: every grep + 404 check PASS. Replaces the old
-`content_alias_file` registry — any html_agent can now do
-`<img src="/<fa>/file/imgs/x.png">` without registering anything.
+`content_alias_file` registry — any view (e.g. an `html_agent.ts` in the
+frontend kernel) can now do `<img src="/<fa>/file/imgs/x.png">` without
+registering anything.
 
-### Test 13: WS binary frame round-trip (bytes)
+### Test 12: WS binary frame round-trip (bytes)
 
 ```bash
 uv run --active python -c "
 import asyncio, json, struct, websockets
 async def main():
     body = b'\\x00\\x01\\x02\\x03'
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
         # Send a 'call' frame with bytes — text wrapper is fine for this test
         # because we're checking the SERVER → BROWSER binary path. Trigger
         # the server to emit something with bytes by adding to its inbox via emit.
         # Simpler: drain mode — the watcher receives any agent_created event.
         # Just verify binary frame DECODES correctly by emitting bytes via a
         # synthetic kernel.send — needs a special test agent.
-        # For this selftest we just verify the WS accepted binary mode by checking
-        # that ws.binaryType is set on the JS side (covered by test 3 grep).
+        # For this selftest we just verify the WS accepted binary mode; the
+        # server → browser binary path is covered by pytest test_binary_protocol.
         print('SKIP: needs in-process bytes producer; covered by pytest test_binary_protocol')
 asyncio.run(main())
 "
@@ -271,7 +272,7 @@ Expected: `SKIP …` (the round-trip is covered by pytest unit test
 `test_binary_protocol.py`; this slot is reserved for live binary if a
 binary-emitting agent is registered).
 
-### Test 14: external traffic carries `sender = web_agent_id` in state events
+### Test 13: external traffic carries `sender = web_agent_id` in state events
 
 Browser-originated calls have no agent context (the WS handler runs
 outside any handler dispatch), so without help `_current_sender`
@@ -281,7 +282,7 @@ proxy + HTTP routes set the contextvar to the webapp's own
 webapp sprite.
 
 ```bash
-WEB=$(call core '{"type":"list_agents"}' | python -c "
+WEB=$(call fs_loader '{"type":"list_agents"}' | python -c "
 import json,sys
 agents = json.loads(sys.stdin.read())['agents']
 print(next((a['id'] for a in agents if a['handler_module']=='web.tools'), ''))
@@ -289,16 +290,16 @@ print(next((a['id'] for a in agents if a['handler_module']=='web.tools'), ''))
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect(f'ws://localhost:$PORT/core/ws') as obs:
+    async with websockets.connect(f'ws://localhost:$PORT/fs_loader/ws') as obs:
         await obs.send(json.dumps({'type':'state_subscribe'}))
-        async with websockets.connect(f'ws://localhost:$PORT/core/ws') as caller:
-            await caller.send(json.dumps({'type':'call','target':'core','payload':{'type':'list_agents'},'id':'1'}))
+        async with websockets.connect(f'ws://localhost:$PORT/fs_loader/ws') as caller:
+            await caller.send(json.dumps({'type':'call','target':'fs_loader','payload':{'type':'list_agents'},'id':'1'}))
             sends = []
             try:
                 async with asyncio.timeout(2):
                     while True:
                         msg = json.loads(await obs.recv())
-                        if msg.get('type') == 'state_event' and msg.get('kind') == 'send' and msg.get('agent_id') == 'core':
+                        if msg.get('type') == 'state_event' and msg.get('kind') == 'send' and msg.get('agent_id') == 'fs_loader':
                             sends.append(msg)
             except TimeoutError:
                 pass
@@ -318,15 +319,14 @@ drop because addRay(null, …) finds no source sprite.
 |---|------|------|
 | 1 | GET / serves index HTML | |
 | 2 | WS kernel.reflect round-trip (uniform identity + tree) | |
-| 3 | transport.js has bus + binary | |
-| 4 | WS call frame → core/reflect | |
-| 5 | /<missing>/ → 404 | |
-| 6 | /<backend>/ (no UI) → 404 | |
-| 7 | WS call → reply | |
-| 8 | PID lock written | |
-| 9 | second serve refuses (live lock) | |
-| 10 | stale lock overwritten on relaunch | |
-| 11 | render_html → html_agent record served | |
-| 12 | /<file>/file/<path> blob proxy | |
-| 13 | WS binary (skip; pytest covers) | |
-| 14 | external WS calls tag state events with web_agent_id | |
+| 3 | WS call frame → fs_loader/reflect | |
+| 4 | /<missing>/ → 404 | |
+| 5 | /<backend>/ (no UI) → 404 | |
+| 6 | WS call → reply | |
+| 7 | PID lock written | |
+| 8 | second serve refuses (live lock) | |
+| 9 | stale lock overwritten on relaunch | |
+| 10 | no server-side render route — /<id>/ is unmatched (→ 404) | |
+| 11 | /<file>/file/<path> blob proxy | |
+| 12 | WS binary (skip; pytest covers) | |
+| 13 | external WS calls tag state events with web_agent_id | |

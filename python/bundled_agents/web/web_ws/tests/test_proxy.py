@@ -1,4 +1,4 @@
-"""web_ws — WS frame protocol (exercises web._proxy via the web_ws surface)."""
+"""web_ws — WS frame protocol (exercises web_ws._proxy via the web_ws surface)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from web_ws.tools import _make_endpoint
 def client(seeded_kernel):
     app = make_app("test_web", seeded_kernel)
     # Mount what web_ws.get_routes would publish — lets the proxy
-    # tests use client.websocket_connect("/core/ws") without spinning
+    # tests use client.websocket_connect("/fs_loader/ws") without spinning
     # up a real `web` agent + child registration cycle.
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
@@ -37,28 +37,28 @@ def _read_until_reply(ws, call_id, max_frames=10):
 def test_ws_call_returns_reply(client, seeded_kernel):
     """Send `reflect` to root via WS — the uniform identity + tree comes
     back (no primer keys; transports moved to the readme)."""
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "reflect"},
                     "id": "1",
                 }
             )
         )
         msg = _read_until_reply(ws, "1")
-        assert msg["data"]["id"] == "core"
-        assert msg["data"]["tree"]["id"] == "core"
+        assert msg["data"]["id"] == "fs_loader"
+        assert msg["data"]["tree"]["id"] == "fs_loader"
         assert "transports" not in msg["data"]
 
 
 def test_ws_emit_no_reply(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(
             json.dumps(
-                {"type": "emit", "target": "core", "payload": {"type": "marker"}}
+                {"type": "emit", "target": "fs_loader", "payload": {"type": "marker"}}
             )
         )
         # No reply expected; just verify connection still alive via a follow-up call
@@ -66,7 +66,7 @@ def test_ws_emit_no_reply(client, seeded_kernel):
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "reflect"},
                     "id": "x",
                 }
@@ -77,13 +77,13 @@ def test_ws_emit_no_reply(client, seeded_kernel):
 
 
 def test_ws_watch_routes_events(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
-        ws.send_text(json.dumps({"type": "watch", "src": "core"}))
+    with client.websocket_connect("/fs_loader/ws") as ws:
+        ws.send_text(json.dumps({"type": "watch", "src": "fs_loader"}))
         ws.send_text(
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "reflect"},
                     "id": "1",
                 }
@@ -102,12 +102,12 @@ def test_ws_call_state_event_carries_host_as_sender(client, seeded_kernel):
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        with client.websocket_connect("/core/ws") as ws:
+        with client.websocket_connect("/fs_loader/ws") as ws:
             ws.send_text(
                 json.dumps(
                     {
                         "type": "call",
-                        "target": "core",
+                        "target": "fs_loader",
                         "payload": {"type": "reflect"},
                         "id": "1",
                     }
@@ -117,10 +117,12 @@ def test_ws_call_state_event_carries_host_as_sender(client, seeded_kernel):
     finally:
         unsub()
     sends_to_core = [
-        e for e in events if e.get("kind") == "send" and e.get("agent_id") == "core"
+        e
+        for e in events
+        if e.get("kind") == "send" and e.get("agent_id") == "fs_loader"
     ]
     assert sends_to_core, "no state event observed for the call"
-    # Every external WS-driven send to core must originate from the
+    # Every external WS-driven send to fs_loader must originate from the
     # surface's id ("test_web_ws" in this fixture).
     senders = {e.get("sender") for e in sends_to_core}
     assert senders == {"test_web_ws"}, f"expected sender='test_web_ws', got {senders}"

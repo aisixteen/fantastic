@@ -81,9 +81,12 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
             "detail": {
                 "tool": {
                     "call_id": "c1",
-                    "target": "core",
+                    "target": "fs_loader",
                     "verb": "list_agents",
-                    "args": {"target_id": "core", "payload": {"type": "list_agents"}},
+                    "args": {
+                        "target_id": "fs_loader",
+                        "payload": {"type": "list_agents"},
+                    },
                 },
             },
         },
@@ -97,10 +100,10 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
             "detail": {
                 "tool": {
                     "call_id": "c1",
-                    "target": "core",
+                    "target": "fs_loader",
                     "verb": "list_agents",
                     "args": {},
-                    "reply_preview": '{"agents":[{"id":"core"}]}',
+                    "reply_preview": '{"agents":[{"id":"fs_loader"}]}',
                 },
             },
         },
@@ -111,8 +114,8 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
     assert "queued (2 ahead)" in lines[0]
     assert "thinking" in lines[1]
     assert "rate-limited" in lines[2] and "5s" in lines[2]
-    assert "→ list_agents(core)" in lines[3]
-    assert "← list_agents(core)" in lines[4]
+    assert "→ list_agents(fs_loader)" in lines[3]
+    assert "← list_agents(fs_loader)" in lines[4]
 
 
 async def test_status_streaming_and_done_are_silent(seeded_kernel, capsys):

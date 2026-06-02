@@ -22,11 +22,11 @@ async def test_send_with_bad_handler_module_returns_error(kernel):
 
 async def test_send_system_verb_answered_natively(seeded_kernel):
     """`list_agents` is a system verb every Agent answers natively
-    (used to live on the `core` bundle). Returns flat all-records."""
-    r = await seeded_kernel.send("core", {"type": "list_agents"})
+    (used to live on the `fs_loader` bundle). Returns flat all-records."""
+    r = await seeded_kernel.send("fs_loader", {"type": "list_agents"})
     assert "agents" in r
     ids = {a["id"] for a in r["agents"]}
-    assert "core" in ids
+    assert "fs_loader" in ids
     assert "cli" in ids
 
 
@@ -59,7 +59,7 @@ async def test_unwatch_stops_routing(kernel):
 async def test_send_also_fanouts_to_inbox(seeded_kernel):
     """`send` fans the payload out (drops on inbox) before invoking
     the handler — so watchers / state subscribers see traffic events."""
-    await seeded_kernel.send("core", {"type": "list_agents"})
-    q = seeded_kernel.ctx.inboxes["core"]
+    await seeded_kernel.send("fs_loader", {"type": "list_agents"})
+    q = seeded_kernel.ctx.inboxes["fs_loader"]
     msg = q.get_nowait()
     assert msg["type"] == "list_agents"

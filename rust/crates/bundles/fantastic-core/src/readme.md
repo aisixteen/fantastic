@@ -125,21 +125,13 @@ Agents are recursive — an agent can own children. `create_agent
 handler_module=<bundle>.tools` spawns one (as a child of whatever you
 call it on); `delete_agent` cascades depth-first.
 
-A `canvas_webapp` is a spatial UI; its `canvas_backend` child holds
-members — `add_agent handler_module=X` spawns a member, `list_members`
-lists them, `remove_agent` cascades one out. To drive a project's
-canvas: reflect the canvas_backend with `readme=true`, then
-add/inspect/remove members.
+To orient inside the tree: reflect yourself, then walk `parent_id` up to
+your ancestors or list children to reach what you own. `reflect
+tree=ids` shows every id at once. From any container agent you can spawn
+children next to existing ones, inspect them, or cascade one out.
 
-## If you are a terminal inside a canvas
-
-You may be `claude` running in a `terminal_backend` PTY that is a member
-of some canvas. To find the canvas you live on: reflect yourself, then
-walk `parent_id` up the tree —
-`terminal_backend → terminal_webapp → canvas_backend → canvas_webapp`.
-Once you have the `canvas_backend` id, you can `add_agent` siblings next
-to yourself, `list_members`, or reshape the canvas you're in. (If your
-own agent id isn't obvious, `reflect tree=ids` shows every id — find the
-`terminal_backend` node whose PTY is yours.)
+(No UI/view bundles live in this host — the frontend lives in `ts/` and
+is served generically over the bridge. Reflect a TS frontend kernel from
+`ts/dist` if you need one.)
 
 To learn ANY agent: reflect it with `readme=true`.

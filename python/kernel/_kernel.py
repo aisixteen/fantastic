@@ -27,12 +27,17 @@ concurrent handlers don't trample each other.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import importlib
 import json
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+
+from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
     from kernel._agent import Agent
@@ -45,6 +50,22 @@ if TYPE_CHECKING:
 _current_sender: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_sender", default=None
 )
+
+
+@contextlib.contextmanager
+def sender_context(sender_id: str):
+    """Attribute nested send/emit to `sender_id` for the duration of the
+    block. A web/REST surface — which dispatches browser-originated traffic
+    from OUTSIDE any handler — uses this to tag external calls with its own
+    agent id so telemetry rays originate from its sprite. Mirrors the
+    substrate's per-dispatch tagging in `Agent._dispatch`. This is the
+    PUBLIC, non-underscore entry point bundles bind to; `_current_sender`
+    itself stays a kernel internal."""
+    token = _current_sender.set(sender_id)
+    try:
+        yield
+    finally:
+        _current_sender.reset(token)
 
 
 _SUMMARY_MAX_LEN = 160
@@ -127,9 +148,17 @@ class Kernel:
     # Short-name → agent_id index for named singletons.
     well_known: dict[str, str] = field(default_factory=dict)
 
-    # The tree root — set when the first parent-less, non-ephemeral
-    # Agent registers (typically `Core(self)` in main.py). All
-    # `Kernel.create/list/...` delegations route through it.
+    # The on-disk children-container dir name — `<agent>/<children_dir>/<child>`.
+    # Declared config (not hardcoded): the root record may carry a
+    # `children_dir` meta (e.g. "host_agents"); `load` reads it. Default
+    # "agents". A loader serving a foreign namespace (web_loader) carries its
+    # own `children_dir` on its record. The JS kernel is the same kernel — it
+    # has this field too, though it lays out no disk (its loader does).
+    children_dir: str = field(default="agents")
+
+    # The tree root — set when the first parent-less, non-ephemeral Agent
+    # registers (the root loader in main.py). All `Kernel.create/list/...`
+    # delegations route through it.
     root: "Agent | None" = field(default=None)
 
     # Set once `shutdown()` has walked the tree, so signal handlers
@@ -200,6 +229,91 @@ class Kernel:
         agent = self.agents.get(agent_id)
         return agent.record if agent else None
 
+    # ─── snapshot (medium-agnostic; LOADER agents own the medium) ──
+
+    def save(self) -> dict:
+        """Snapshot the live tree as a flat record list (mirror Rust
+        `Kernel::save`). Ephemeral agents are skipped — per-process
+        composition, never round-tripped. Sorted by id for deterministic
+        output. Pure read, no I/O — a loader agent turns this into bytes."""
+        records = [a.record for a in self.agents.values() if not type(a).ephemeral]
+        records.sort(key=lambda r: r["id"])
+        return {"version": CURRENT_VERSION, "records": records}
+
+    def load(
+        self, snapshot: "list[dict] | dict", *, root_path: Path | None = None
+    ) -> None:
+        """Replace the tree with a flat record list (mirror Rust
+        `Kernel::load`). Accepts a bare list or a {version, records}
+        envelope. Validates (one root / unique ids / resolvable parents),
+        drops the current tree, then DFS-rebuilds from the root.
+
+        Weak-load: a record whose `handler_module` isn't importable in
+        THIS runtime is logged + skipped along with its whole subtree,
+        left untouched in the snapshot/on disk. Builds in-memory only
+        (Agent never touches disk); fires no `boot` — the bootstrap
+        does that after, which is when a loader subscribes + persists."""
+        from kernel._agent import Agent  # local import — Agent imports this module
+
+        if isinstance(snapshot, dict):
+            version = snapshot.get("version", CURRENT_VERSION)
+            records = snapshot.get("records", [])
+        else:
+            version, records = CURRENT_VERSION, snapshot
+        validate_records(records, version=version)
+
+        children: dict[str, list[dict]] = {}
+        root_rec: dict | None = None
+        for r in records:
+            pid = r.get("parent_id")
+            if pid is None:
+                root_rec = r
+            else:
+                children.setdefault(pid, []).append(r)
+
+        # The root record declares this tree's children-dir name (declared
+        # config; default "agents"). Set BEFORE build, since each Agent derives
+        # its address from `ctx.children_dir`.
+        if isinstance(root_rec, dict):
+            cd = root_rec.get("children_dir")
+            self.children_dir = cd if isinstance(cd, str) and cd else "agents"
+
+        # drop the current tree (inboxes close as their queues are dropped)
+        self.agents.clear()
+        self.inboxes.clear()
+        self.root = None
+
+        def build(rec: dict, parent: "Agent | None") -> None:
+            hm = rec.get("handler_module")
+            if hm:
+                try:
+                    importlib.import_module(hm)
+                except Exception:
+                    # canonical log shape — CI + selftests grep it verbatim.
+                    sys.stderr.write(
+                        f"[kernel] skipping agent {rec.get('id')}: "
+                        f"bundle {hm} not installed in this runtime\n"
+                    )
+                    return  # weak-load: skip this record AND its subtree
+            meta = {
+                k: v
+                for k, v in rec.items()
+                if k not in ("id", "handler_module", "parent_id")
+            }
+            agent = Agent(
+                id=rec["id"],
+                root_path=root_path if parent is None else None,
+                ctx=self,
+                parent=parent,
+                handler_module=hm,
+                **meta,
+            )
+            for child in children.get(rec["id"], []):
+                build(child, agent)
+
+        if root_rec is not None:
+            build(root_rec, None)
+
     # ─── state stream ──────────────────────────────────────────
 
     def publish_state(self, event: dict) -> None:
@@ -254,14 +368,25 @@ class Kernel:
         return self.agents.get(agent_id)
 
     def register(self, agent: "Agent") -> None:
-        """Add agent to the flat global index. Idempotent on re-register."""
+        """Add agent to the flat global index. Idempotent on re-register.
+
+        If the agent declares an `alias` meta, wire it into `well_known` so
+        `send` (and the WS surface, which passes the raw target through) can
+        address it by that stable name — like the built-in `kernel`→root
+        alias. This is declared config the substrate makes functional, not
+        autonomous behavior."""
         self.agents[agent.id] = agent
+        alias = agent._meta.get("alias")
+        if isinstance(alias, str) and alias:
+            self.well_known[alias] = agent.id
 
     def unregister(self, agent_id: str) -> None:
-        """Remove agent from the flat global index + drop its inbox.
-        No-op if absent."""
+        """Remove agent from the flat global index + drop its inbox + any
+        alias pointing at it. No-op if absent."""
         self.agents.pop(agent_id, None)
         self.inboxes.pop(agent_id, None)
+        for name in [n for n, t in self.well_known.items() if t == agent_id]:
+            del self.well_known[name]
 
     def ensure_inbox(self, id: str) -> asyncio.Queue:
         """Lazy-create an inbox queue for `id`. Used by agents at

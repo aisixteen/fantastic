@@ -11,14 +11,9 @@
 //   // ... use kernel
 //   kernel.shutdown()
 
-import FantasticAiChatWebapp
-import FantasticCanvasBackend
-import FantasticCanvasWebapp
 import FantasticCliBundle
 import FantasticFile
 import FantasticFoundationModelsBackend
-import FantasticGlAgent
-import FantasticHtmlAgent
 import FantasticJSON
 import FantasticKernel
 import FantasticKernelBridge
@@ -26,8 +21,6 @@ import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
 import FantasticProxyAgent
 import FantasticScheduler
-import FantasticTelemetryPane
-import FantasticTerminalWebapp
 import FantasticTools
 import FantasticWeb
 import FantasticWebRest
@@ -51,14 +44,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("yaml_state.tools", YamlStateBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
-    r.register("html_agent.tools", HtmlAgentBundle())
-    r.register("gl_agent.tools", GlAgentBundle())
     r.register("scheduler.tools", SchedulerBundle())
-    r.register("canvas_backend.tools", CanvasBackendBundle())
-    r.register("canvas_webapp.tools", CanvasWebappBundle())
-    r.register("ai_chat_webapp.tools", AiChatWebappBundle())
-    r.register("terminal_webapp.tools", TerminalWebappBundle())
-    r.register("telemetry_pane.tools", TelemetryPaneBundle())
     r.register("kernel_bridge.tools", KernelBridgeBundle())
     r.register("web.tools", WebBundle())
     r.register("web_ws.tools", WebWSBundle())

@@ -20,6 +20,13 @@
         private let lock = NSLock()
         private var processes: [String: Process] = [:]
 
+        public var readme: String? {
+            """
+            local_runner — subprocess lifecycle for local projects.
+            Verbs: reflect / boot / shutdown / start / stop / list.
+            """
+        }
+
         public func handle(
             agentId: AgentId,
             payload: JSON,

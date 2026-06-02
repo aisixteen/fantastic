@@ -25,6 +25,13 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     private let cancelLock = NSLock()
     private var cancelled: Set<String> = []
 
+    public var readme: String? {
+        """
+        ollama_backend — local LLM agent.
+        Per-client chat threads, FIFO lock, native tool-calls; verbs: send, history, interrupt, backend_state.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

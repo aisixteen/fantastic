@@ -22,6 +22,13 @@
         private let lock = NSLock()
         private var sessions: [AgentId: SshSession] = [:]
 
+        public var readme: String? {
+            """
+            ssh_runner — remote `fantastic` lifecycle over SSH. Each agent is one project on one remote host.
+            Verbs: start | stop | status — spawn an `ssh -L` subprocess tunnel and poll the remote lock for liveness.
+            """
+        }
+
         public func handle(
             agentId: AgentId,
             payload: JSON,

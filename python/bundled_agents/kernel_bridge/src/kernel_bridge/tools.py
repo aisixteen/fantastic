@@ -39,7 +39,7 @@ Lifecycle:
               the read loop, emit `bridge_up`.
   shutdown  — cancel read loop, close transport, kill tunnel pid,
               reject pending Futures. Called automatically by
-              core.delete_agent's universal `shutdown` hook.
+              fs_loader.delete_agent's universal `shutdown` hook.
   reconnect — explicit shutdown + boot. No auto-reconnect (keeps
               real failures visible in the substrate).
 
@@ -292,7 +292,7 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """No args. Reads `transport` (memory|ws|ssh+ws), `peer_id` (WS path segment on the remote — typically the id of a web_ws-served agent like `core`), plus transport-specific fields off the agent record. Builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."""
+    """No args. Reads `transport` (memory|ws|ssh+ws), `peer_id` (WS path segment on the remote — typically the id of a web_ws-served agent like `fs_loader`), plus transport-specific fields off the agent record. Builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."""
     rec = kernel.get(id) or {}
     st = _state(id)
     if st.transport is not None and not st.transport.closed:

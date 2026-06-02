@@ -30,7 +30,7 @@ go through that daemon's web surface instead (a `web` agent's
 
 There is no `--port` flag. Persist a web agent first, then boot:
 
-    fantastic core create_agent handler_module=web.tools port=8888
+    fantastic fs_loader create_agent handler_module=web.tools port=8888
     fantastic <web_id> create_agent handler_module=web_ws.tools
     fantastic <web_id> create_agent handler_module=web_rest.tools
     fantastic                          # rehydrates + serves

@@ -22,84 +22,10 @@ def test_root_returns_html(client):
     assert "<html>" in r.text.lower() or "<!doctype" in r.text.lower()
 
 
-def test_transport_js_served(client):
-    c, _ = client
-    r = c.get("/_fantastic/transport.js")
-    assert r.status_code == 200
-    assert "fantastic_transport" in r.text
-    # Universal page-reload listener — drift guard. ANY agent that
-    # emits {type:'reload_html'} on its inbox triggers location.reload()
-    # in every served page (html_agent.set_html, canvas reload button,
-    # future bundles that opt in).
-    assert "reload_html" in r.text
-    assert "location.reload" in r.text
-
-
-def test_agent_index_404_for_missing(client):
-    c, _ = client
-    r = c.get("/nonexistent_xxx/")
-    assert r.status_code == 404
-
-
-async def test_agent_index_serves_webapp_html(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "core",
-        {
-            "type": "create_agent",
-            "handler_module": "ai_chat_webapp.tools",
-            "upstream_id": "x",
-        },
-    )
-    app = make_app("test_web", seeded_kernel)
-    with TestClient(app) as c:
-        r = c.get(f"/{rec['id']}/")
-        assert r.status_code == 200
-        # Bundle's index.html includes fantastic_transport reference.
-        assert "fantastic_transport" in r.text
-
-
-async def test_agent_index_404_for_backend_with_no_webapp(seeded_kernel, file_agent):
-    """A backend bundle (file) ships no webapp — must 404."""
-    app = make_app("test_web", seeded_kernel)
-    with TestClient(app) as c:
-        r = c.get(f"/{file_agent}/")
-        assert r.status_code == 404
-
-
-# ─── render_html duck-type: any agent that returns {html:str} from
-#     `render_html` gets its content served at /<id>/ with transport
-#     auto-injected. html_agent is the canonical implementer.
-
-
-async def test_html_agent_index_serves_record_html(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "core",
-        {
-            "type": "create_agent",
-            "handler_module": "html_agent.tools",
-            "html_content": "<h1>marker</h1>",
-        },
-    )
-    app = make_app("test_web", seeded_kernel)
-    with TestClient(app) as c:
-        r = c.get(f"/{rec['id']}/")
-        assert r.status_code == 200
-        assert "marker" in r.text
-        # transport auto-injected so in-iframe JS can call any agent.
-        assert "_fantastic/transport.js" in r.text
-
-
-async def test_html_agent_index_placeholder_when_unset(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "core",
-        {"type": "create_agent", "handler_module": "html_agent.tools"},
-    )
-    app = make_app("test_web", seeded_kernel)
-    with TestClient(app) as c:
-        r = c.get(f"/{rec['id']}/")
-        assert r.status_code == 200
-        assert rec["id"] in r.text
-        assert "set_html" in r.text
+# ─── The web host renders no agent UI server-side — there is no `GET /<id>/`
+#     render route. Frontend panels (html_agent/gl views) are JS view-agents in
+#     the TS kernel; the host only serves STATIC files (the `file` alias below)
+#     and carries the bus. So there's nothing render-side to exercise here.
 
 
 # ─── /<file_agent>/file/<path> blob proxy: replaces content_alias_file

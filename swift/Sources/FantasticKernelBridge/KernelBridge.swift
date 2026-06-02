@@ -205,6 +205,17 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         return bridges[agentId]
     }
 
+    public var readme: String? {
+        """
+        kernel_bridge — cross-kernel comms (WS-only, asymmetric).
+        Opens a WS to the remote's `web_ws` and ships raw call frames; \
+        the remote dispatches `kernel.send` natively, no peer bridge. \
+        Verbs: forward (await reply), watch_remote/unwatch_remote (stream \
+        remote emits onto this bridge's inbox). Weak binding — remote is \
+        addressed by URL + path only, no shared types.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

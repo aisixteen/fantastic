@@ -123,11 +123,11 @@ pub(crate) async fn create_from_payload(
 
     let rec_value = serde_json::to_value(new_agent.record()).unwrap_or(Value::Null);
     // Fire the new agent's `boot` hook (Python does the same — bundles
-    // like terminal_webapp auto-spawn paired backends here). Failures
+    // may auto-spawn paired agents here). Failures
     // are logged but don't abort the create — matches Python.
     //
     // Wrap in Box::pin because boot may call create_agent recursively
-    // (terminal_webapp.boot creates a terminal_backend); the resulting
+    // (a boot hook may create a child agent); the resulting
     // async future is recursive and Rust requires explicit indirection.
     let new_id = new_agent.id.clone();
     let kernel_for_boot = Arc::clone(kernel);

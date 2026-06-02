@@ -31,29 +31,7 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
-    reg.register("html_agent.tools", fantastic_html_agent::HtmlAgentBundle);
-    reg.register(
-        "canvas_backend.tools",
-        fantastic_canvas_backend::CanvasBackendBundle,
-    );
-    reg.register(
-        "canvas_webapp.tools",
-        fantastic_canvas_webapp::CanvasWebappBundle,
-    );
     reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
-    reg.register("gl_agent.tools", fantastic_gl_agent::GlAgentBundle);
-    reg.register(
-        "telemetry_pane.tools",
-        fantastic_telemetry_pane::TelemetryPaneBundle,
-    );
-    reg.register(
-        "ai_chat_webapp.tools",
-        fantastic_ai_chat_webapp::AiChatWebappBundle,
-    );
-    reg.register(
-        "terminal_webapp.tools",
-        fantastic_terminal_webapp::TerminalWebappBundle,
-    );
     reg.register(
         "ollama_backend.tools",
         fantastic_ollama_backend::OllamaBackendBundle,

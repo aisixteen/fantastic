@@ -1,7 +1,7 @@
 """nvidia_nim_backend — reflect-driven LLM agent against NVIDIA NIM (OpenAI-compatible).
 
 Same surface as ollama_backend (send/history/interrupt/refresh_menu/reflect)
-so the chat UI (`ai_chat_webapp`) and any other caller can swap providers
+so the chat UI (`ai_view`, in the TS frontend `ts/`) and any other caller can swap providers
 by changing `upstream_id` only. Differences from ollama_backend:
 
 - API key required. Stored OUT-OF-BAND in `.fantastic/agents/<id>/api_key`
@@ -21,7 +21,7 @@ bounded only by SEND_TIMEOUT (hard) and the `interrupt` verb.
 
 AI rehaul backlog (TODO — not in scope for the current port).
 These items will need a coordinated redesign across all LLM
-backends + ai_chat_webapp before the next major bump:
+backends + the TS ai_view before the next major bump:
   1. Cross-backend conversation portability — today history lives
      in <backend>/chat_<client>.json. Switching upstream_id starts
      a fresh conversation. Future: history travels with the chat
@@ -162,6 +162,7 @@ def _invalidate_menu(self_id: str) -> None:
 
 SEND_TIMEOUT = 180.0
 DEFAULT_CLIENT_ID = "cli"
+MAX_CALL_DEPTH = 8  # recursion guard: AI→AI→… chains refuse past this depth
 
 # Free tier of NIM rate-limits at ~40 RPM/model. On 429 we retry ONCE
 # (per provider.chat call) after honoring `Retry-After`, capped so a
@@ -197,14 +198,14 @@ SEND_TOOL = {
         "description": (
             "Send a message to any agent in the Fantastic substrate. "
             "Universal verb on every agent: reflect (returns identity + state). "
-            "Discover agents by sending list_agents to the core agent."
+            "Discover agents by sending list_agents to the fs_loader agent."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "target_id": {
                     "type": "string",
-                    "description": "Agent id to send the payload to (e.g. 'core', 'cli', 'terminal_xxx').",
+                    "description": "Agent id to send the payload to (e.g. 'fs_loader', 'cli', 'terminal_xxx').",
                 },
                 "payload": {
                     "type": "object",
@@ -317,7 +318,7 @@ def _render_reflect(d: dict) -> str:
 
 
 async def _build_menu(self_id: str, kernel) -> list[dict]:
-    online = await kernel.send("core", {"type": "list_agents"})
+    online = await kernel.send("fs_loader", {"type": "list_agents"})
     items: list[dict] = []
     for a in online.get("agents", []):
         if a["id"] == self_id:
@@ -342,7 +343,7 @@ async def _build_menu(self_id: str, kernel) -> list[dict]:
 
 def _render_menu(menu: list[dict]) -> str:
     if not menu:
-        return "## Available agents\n(none — only `core` and `self`)"
+        return "## Available agents\n(none — only `fs_loader` and `self`)"
     lines = [
         "## Available agents (reflect on any for full verb signatures + arg shapes)"
     ]
@@ -367,26 +368,45 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
 """
 
 
-async def _assemble(self_id: str, user_text: str, kernel, client_id: str) -> list[dict]:
-    # Lean substrate context for the system prompt: an id-index of the
-    # tree + the bundle catalog by name (not the full nested tree).
-    primer = await kernel.send(
-        "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
-    )
-    me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
-
-    if self_id not in _menu_cache:
-        _menu_cache[self_id] = await _build_menu(self_id, kernel)
-    menu = _menu_cache[self_id]
-
-    sys_blocks = [
-        _render_reflect(primer),
-        f"You are `{self_id}`. " + _render_reflect(me),
-        _render_menu(menu),
-        _SEND_HOWTO,
-    ]
-    messages: list[dict] = [{"role": "system", "content": "\n\n".join(sys_blocks)}]
-    messages.extend(await _load_history(self_id, kernel, client_id))
+async def _assemble(
+    self_id: str,
+    user_text: str,
+    kernel,
+    client_id: str,
+    system_prompt: str | None = None,
+    messages_override: list[dict] | None = None,
+) -> list[dict]:
+    """Build the message list. A caller-supplied `system_prompt` REPLACES the
+    deterministic substrate prompt — the generic 'caller controls context' door:
+    a state agent or a python routine reads a stored prompt and passes it here, so
+    the AI needs NO yaml-specific code. A caller-supplied `messages` list REPLACES
+    the persisted history (fully stateless — the AI holds no per-call state).
+    Both fall back to the default when absent."""
+    if isinstance(system_prompt, str) and system_prompt.strip():
+        sys_content = system_prompt
+    else:
+        # Lean substrate context for the system prompt: an id-index of the
+        # tree + the bundle catalog by name (not the full nested tree).
+        primer = await kernel.send(
+            "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
+        )
+        me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
+        if self_id not in _menu_cache:
+            _menu_cache[self_id] = await _build_menu(self_id, kernel)
+        menu = _menu_cache[self_id]
+        sys_content = "\n\n".join(
+            [
+                _render_reflect(primer),
+                f"You are `{self_id}`. " + _render_reflect(me),
+                _render_menu(menu),
+                _SEND_HOWTO,
+            ]
+        )
+    messages: list[dict] = [{"role": "system", "content": sys_content}]
+    if isinstance(messages_override, list) and messages_override:
+        messages.extend(messages_override)  # stateless: caller supplies the convo
+    else:
+        messages.extend(await _load_history(self_id, kernel, client_id))
     messages.append({"role": "user", "content": user_text})
     return messages
 
@@ -476,12 +496,24 @@ async def _stream_with_rate_limit_retry(
             await asyncio.sleep(wait)
 
 
-async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
+async def _run(
+    self_id: str,
+    user_text: str,
+    kernel,
+    client_id: str,
+    system_prompt: str | None = None,
+    messages_override: list[dict] | None = None,
+    call_stack: list | None = None,
+) -> dict:
+    call_stack = call_stack or []
+    stateless = isinstance(messages_override, list) and bool(messages_override)
     provider = await _get_provider(self_id, kernel)
     # Caller (`_send`) pre-checks api_key; this branch is defensive.
     if provider is None:
         return {"error": "nvidia_nim_backend: api_key not set"}
-    messages = await _assemble(self_id, user_text, kernel, client_id)
+    messages = await _assemble(
+        self_id, user_text, kernel, client_id, system_prompt, messages_override
+    )
     last_text = ""
 
     iteration = 0
@@ -558,7 +590,13 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
                 kernel, self_id, client_id, "tool_calling", tool=tool_entry
             )
             try:
-                reply = await kernel.send(target, payload)
+                send_payload = payload
+                if isinstance(payload, dict):
+                    # Propagate the call chain so a downstream AI agent can refuse
+                    # cycles / over-depth (recursion guard). Non-AI targets ignore
+                    # the extra key; it is NOT recorded in the persisted args.
+                    send_payload = {**payload, "_call_stack": call_stack + [self_id]}
+                reply = await kernel.send(target, send_payload)
             except Exception as e:
                 reply = {"error": str(e)}
             reply_str = json.dumps(reply, default=str)
@@ -593,10 +631,11 @@ async def _run(self_id: str, user_text: str, kernel, client_id: str) -> dict:
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
     await _to_caller(kernel, self_id, client_id, {"type": "done", "source": self_id})
 
-    history = await _load_history(self_id, kernel, client_id)
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": last_text})
-    await _save_history(self_id, kernel, client_id, history)
+    if not stateless:
+        history = await _load_history(self_id, kernel, client_id)
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": last_text})
+        await _save_history(self_id, kernel, client_id, history)
     return {"response": last_text, "final": last_text, "client_id": client_id}
 
 
@@ -631,14 +670,36 @@ async def _reflect(id, payload, kernel):
 
 
 async def _send(id, payload, kernel):
-    """args: text:str (req), client_id:str? (default 'cli'). Same surface as ollama_backend.send. Failfast if file_agent_id unset OR api_key not set (call set_api_key first). Streams tokens to ONLY the caller. Persists per-client chat.json. Per-backend FIFO lock. Emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) when contended; first `token`/`status(thinking)` for the same client_id implicitly unqueues."""
-    if not _file_agent_id(id, kernel):
+    """args: text:str (req), client_id:str? (default 'cli'). Same surface as ollama_backend.send. Failfast if file_agent_id unset OR api_key not set (call set_api_key first). Streams tokens to ONLY the caller. Persists per-client chat.json. Per-backend FIFO lock. Emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) when contended; first `token`/`status(thinking)` for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context, no yaml coupling); optional messages:list REPLACES persisted history (stateless). _call_stack is reserved for the recursion guard (cycle/depth refusal before the lock)."""
+    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
+    # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
+    # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
+    call_stack = payload.get("_call_stack")
+    if not isinstance(call_stack, list):
+        call_stack = []
+    if id in call_stack:
+        return {
+            "error": "nvidia_nim_backend: cycle detected",
+            "response": "",
+            "cycle": call_stack + [id],
+            "client_id": client_id,
+        }
+    if len(call_stack) >= MAX_CALL_DEPTH:
+        return {
+            "error": f"nvidia_nim_backend: max call depth {MAX_CALL_DEPTH} reached",
+            "response": "",
+            "client_id": client_id,
+        }
+    system_prompt = payload.get("system_prompt")
+    messages_override = payload.get("messages")
+    stateless = isinstance(messages_override, list) and bool(messages_override)
+    # file_agent_id is only needed for the stateful path (load + persist history).
+    if not stateless and not _file_agent_id(id, kernel):
         return {"error": "nvidia_nim_backend: file_agent_id required"}
     provider = await _get_provider(id, kernel)
     if provider is None:
         return {"error": "nvidia_nim_backend: api_key not set; call set_api_key first"}
     text = payload.get("text", "")
-    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
     send_id = _new_send_id()
     entry = {
         "client_id": client_id,
@@ -665,7 +726,17 @@ async def _send(id, payload, kernel):
         _dequeue_send(id, send_id)
         _set_current(id, entry)
         await _emit_status(kernel, id, client_id, "thinking")
-        task = asyncio.create_task(_run(id, text, kernel, client_id))
+        task = asyncio.create_task(
+            _run(
+                id,
+                text,
+                kernel,
+                client_id,
+                system_prompt,
+                messages_override,
+                call_stack,
+            )
+        )
         _tasks[id] = task
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=SEND_TIMEOUT)

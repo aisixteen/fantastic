@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import types
 
+from _testkit import persist
+
 
 def _stub_bundle(
     seeded_kernel,
@@ -44,8 +46,8 @@ def _stub_bundle(
 
 async def test_shutdown_walks_depth_first(seeded_kernel):
     """Parent's hook fires AFTER all descendants' hooks — same order
-    contract as `_cascade_delete`. Lets PTYs die before terminal_webapp
-    drops, serve-web before vscode_fantastic, etc."""
+    contract as `_cascade_delete`. Lets PTYs die before the canvas member
+    (e.g. terminal_backend) drops, serve-web before vscode_fantastic, etc."""
     order: list[str] = []
 
     async def make_hook(tag: str):
@@ -86,6 +88,8 @@ async def test_shutdown_does_not_touch_records_or_tree(seeded_kernel, tmp_path):
     seeded_kernel.create("test_shutdown_keep", id="K")
     k = seeded_kernel.ctx.agents["K"]
     k.create("test_shutdown_keep", id="K_child")
+    # Materialize on-disk records so we can prove shutdown leaves them.
+    persist(seeded_kernel)
 
     root = seeded_kernel.ctx.root
     assert "K" in seeded_kernel.ctx.agents

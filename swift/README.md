@@ -22,12 +22,14 @@ env var; skipped cleanly when unset.
   variant so on-disk JSON matches Python's `dict` key order
 - 1 bootstrap target (`FantasticKernelStartup`) — `startKernel(...)`
   / `startKernelInMemory(...)` entry points
-- 20 bundle targets (16 multi-platform + 4 macOS-Pro) — see
-  scoreboard below
+- 17 bundle targets (13 multi-platform + 4 macOS-Pro) — see
+  scoreboard below. The browser frontend is no longer a native
+  bundle: it is served generically from `ts/dist` via a `file`
+  agent (weak binding — the host never names the frontend)
 - 2 umbrella targets (`FantasticKernelEmbedded`,
   `FantasticKernelFull`) — Apple-app entry points
 - 1 CLI executable (`fantastic`)
-- 122 tests across substrate, bundles, parity harness, public-API
+- 152 tests across substrate, bundles, parity harness, public-API
   shim
 
 ## Tiers
@@ -61,21 +63,18 @@ kernel modules.
 | bundle | target | tier | role |
 |---|---|---|---|
 | file | `FantasticFile` | both | sandboxed file storage |
+| yaml_state | `FantasticYamlState` | both | durable YAML key-value memory agent (`state.yaml`, disk-is-truth; `mem`/`data` modes) |
 | proxy_agent | `FantasticProxyAgent` | both | host-implemented agents (LanguageModel, etc.) |
 | tools | `FantasticTools` | both | LLM tool registry |
-| html_agent | `FantasticHtmlAgent` | both | HTML surface agent |
-| gl_agent | `FantasticGlAgent` | both | WebGL surface agent |
 | scheduler | `FantasticScheduler` | both | cron / interval triggers |
-| canvas_backend | `FantasticCanvasBackend` | both | spatial workspace state |
-| canvas_webapp | `FantasticCanvasWebapp` | both | canvas frontend at `/<id>/` |
-| ai_chat_webapp | `FantasticAiChatWebapp` | both | chat UI, provider-agnostic |
-| terminal_webapp | `FantasticTerminalWebapp` | both | xterm.js frontend |
-| telemetry_pane | `FantasticTelemetryPane` | both | event firehose UI |
 | cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
 | kernel_bridge | `FantasticKernelBridge` | both | in-memory + WS transports (asymmetric; WS targets remote `web_ws`) |
 | web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
+| web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
+| web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE |
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry |
+| foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`) |
 | local_runner | `FantasticLocalRunner` | Pro | macOS-only — Process subprocess |
 | python_runtime | `FantasticPythonRuntime` | Pro | macOS-only — embedded Python |
 | ssh_runner | `FantasticSshRunner` | Pro | macOS-only — `ssh -L` tunnel |
@@ -98,7 +97,7 @@ cd swift
 swift build
 swift test                              # full suite
 swift test --filter FantasticKernel     # substrate only
-RUST_KERNEL_BIN=<path> swift test \
+PYTHON_KERNEL_BIN=<path> swift test \
     --filter FantasticParityTests       # cross-runtime parity (optional)
 ```
 
@@ -117,9 +116,7 @@ swift/
     FantasticWeb/                      HTTP + WS server (Network.framework)
     FantasticOllamaBackend/            local LLM SSE
     FantasticNvidiaNimBackend/         hosted LLM SSE
-    Fantastic{Canvas,AiChat,Terminal,Telemetry}{Backend,Webapp,Pane}/
-                                       UI + state bundles
-    Fantastic{File,ProxyAgent,Tools,HtmlAgent,GlAgent,Scheduler,
+    Fantastic{File,ProxyAgent,Tools,Scheduler,
               CliBundle,KernelBridge}/
                                        supporting bundles
     Fantastic{Terminal,Local,Python,Ssh}{Backend,Runner,Runtime}/
@@ -149,14 +146,16 @@ breaking change to:
 - `Kernel.registerTool` / `unregisterToolsBySender` / `listToolsForLlm`
 - `ProxyAgent` protocol (`handle`, `onBoot`, `onDelete`)
 - HTTP routes (`/<agent_id>/`, `/<agent_id>/ws`, `/_assets/*`,
-  `/transport.js`)
-- Bundle names: `proxy_agent.tools`, `tools.tools`,
-  `canvas_webapp.tools`, `canvas_backend.tools`, `web.tools`, etc.
+  `/_fantastic/transport.js`)
+- Bundle names: `proxy_agent.tools`, `tools.tools`, `file.tools`,
+  `web.tools`, etc.
 
 ## Third-party dependencies
 
 - [swift-collections](https://github.com/apple/swift-collections) 1.1+
   — `OrderedDictionary` for `JSON.object` key-order preservation
+- [Yams](https://github.com/jpsim/Yams) 5.1+
+  — YAML serialization for the `yaml_state` durable-memory agent
 
 That's it — no Hummingbird, no Vapor, no NIO directly. HTTP + WS run
 on `Network.framework`; LLM backends run on `URLSession.AsyncBytes`.
@@ -164,3 +163,7 @@ on `Network.framework`; LLM backends run on `URLSession.AsyncBytes`.
 ## License
 
 Apache-2.0, same as the rest of the project. See `../LICENSE`.
+
+---
+
+*Part of **Aisixteen Fantastic** — open core, licensed **Apache-2.0** ([`../LICENSE`](../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../README.md#license--brand).*

@@ -11,7 +11,7 @@ Production runtime — full parity with the Python reference kernel.
 
 |                                              | value                                   |
 |----------------------------------------------|-----------------------------------------|
-| Python bundles ported                        | **21 / 21**                             |
+| Bundles                                      | **17** (13 iOS-safe + 4 full-tier subprocess) |
 | Cargo tests passing                          | **203** (workspace, default features)   |
 | `./scripts/quality.sh`                       | 8 / 8 PASS (compile, fmt, clippy, test, deny, audit, machete, tree) |
 | Feature gates                                | `full` (default) / `embedded` (no-subprocess) |
@@ -39,18 +39,27 @@ no foreign-language bindings.
        ┌─────────────────┼─────────────────────────────┐
        ▼                 ▼                             ▼
    ┌────────┐      ┌────────────┐              ┌────────────────┐
-   │ core   │      │ web        │              │ canvas / ai /  │
-   │ cli    │      │ (axum)     │              │ terminal /     │
-   │ file   │      │ HTTP+WS+   │              │ scheduler /    │
-   │ ...    │      │ REST       │              │ runners / ...  │
+   │ core   │      │ web        │              │ scheduler /    │
+   │ cli    │      │ (axum)     │              │ runners /      │
+   │ file   │      │ HTTP+WS+   │              │ backends /     │
+   │ ...    │      │ REST       │              │ ...            │
    └────────┘      └─────┬──────┘              └────────────────┘
                          │
                          ▼ HTTP + WS frames (text + binary, chunked supported)
    ┌─────────────────────────────────────────────────────────────────────┐
-   │                       BROWSER / WKWebView                           │
-   │  iframe ↔ iframe bus, transport.js auto-injected on every page.     │
+   │           ts/ FRONTEND (weak-bound 4th kernel, served generically)  │
+   │  No native view bundles here — the host serves ts/dist via a file   │
+   │  agent and never names the frontend.                                │
    └─────────────────────────────────────────────────────────────────────┘
 ```
+
+Host kernels render no UI and ship no view bundles. The frontend is the
+weak-bound `ts/` 4th kernel, served generically from `ts/dist` via a
+`file` agent — the host never names it. A static `readme-contract` lint
+(`integration_tests/decoupling/test_readme_contract.py`) scans every host
+bundle's readme/sentence across python/rust/swift and fails on any
+client-intent word (iframe, transport.js, browser, …), so the host stays
+client-agnostic by construction.
 
 ## Run
 
@@ -60,8 +69,9 @@ cargo build --release --bin fantastic
 BIN=$(pwd)/target/release/fantastic
 
 # One-shot RPCs:
-$BIN reflect                                  # reflect on root (id="core")
-$BIN reflect kernel                           # discovery primer (URLs, bundles, agents)
+$BIN reflect                                  # substrate identity + tree of root (id="core")
+$BIN reflect core bundles=all                 # add the registered-bundle catalog
+$BIN reflect core readme=true                 # attach the agent's readme (transport/wire docs)
 $BIN core list_agents                         # every agent in this workdir
 $BIN core create_agent handler_module=web.tools id=w port=8888
 
@@ -69,6 +79,12 @@ $BIN core create_agent handler_module=web.tools id=w port=8888
 $BIN
 # → "fantastic: daemon up. N agent(s) loaded. Ctrl-C to stop."
 ```
+
+`reflect` is the param-driven discovery verb: with no flags it returns
+the addressed agent's substrate identity + nested `tree`; `bundles=all|ids`
+adds the registered-bundle catalog and `readme=true` attaches the agent's
+readme. There is no separate "primer" — transport and wire-protocol docs
+live in the root readme (reachable via `reflect readme=true`).
 
 Composition rule: `fantastic` blocks only when the workdir has a
 `web` agent persisted (HTTP daemon) or `stdin` is a tty (REPL).
@@ -90,7 +106,7 @@ and the SSH transport in `kernel_bridge` are gated to this feature.
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
-slice excludes anything that touches them at compile time. 17 of 21
+slice excludes anything that touches them at compile time. 13 of 17
 bundles ship under embedded — the iOS-safe ceiling.
 
 Switch with `--no-default-features --features embedded`:
@@ -102,7 +118,10 @@ cargo check  -p fantastic-cli    --no-default-features --features embedded
 Passes clean — that's the contract the sandboxed/no-subprocess tier
 ships against.
 
-## Bundle map (21 of 21)
+## Bundle map (17 — 13 iOS-safe + 4 full-tier)
+
+The frontend ships no native view bundles — it is served generically
+from `ts/dist` via a `file` agent (the host never names the frontend).
 
 iOS-safe bundles (compile under either tier):
 
@@ -111,20 +130,16 @@ iOS-safe bundles (compile under either tier):
 | `fantastic-core`            | root orchestrator (id="core")                                 |
 | `fantastic-cli-bundle`      | stdout renderer (ephemeral, tty-only)                         |
 | `fantastic-file`            | filesystem-as-agent                                           |
+| `fantastic-yaml-state`      | durable YAML key-value memory agent (`state.yaml`; mem/data modes) |
 | `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
 | `fantastic-web-ws`          | WS verb-channel routes (mounted onto parent web)              |
 | `fantastic-web-rest`        | REST verb-channel routes (mounted onto parent web)            |
-| `fantastic-html-agent`      | UI-as-record; html_content stored on agent.json               |
-| `fantastic-canvas-backend`  | spatial UI host (DOM iframes + GL layers)                     |
-| `fantastic-canvas-webapp`   | the canvas page itself, with transport.js + canvas.js         |
 | `fantastic-scheduler`       | tokio-tick recurring tasks via file_agent_id persistence      |
-| `fantastic-gl-agent`        | GLSL-on-a-record with set/get + get_gl_view                   |
-| `fantastic-telemetry-pane`  | embedded GL view of the kernel state stream                   |
-| `fantastic-ai-chat-webapp`  | provider-agnostic chat UI (works against any LLM backend)     |
-| `fantastic-terminal-webapp` | xterm-based terminal UI iframe (dormant without backend)      |
 | `fantastic-ollama-backend`  | local LLM via ollama; LLM contract reference impl             |
 | `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible, api_key sidecar, 429 retry) |
 | `fantastic-kernel-bridge`   | cross-kernel comms over memory / WS (asymmetric, WS-only)      |
+| `fantastic-tools`           | registrable tool-calling layer for LLM agents (send IS the tool call) |
+| `fantastic-proxy-agent`     | host-implemented agents (embedding-app features as first-class agents) |
 
 Full-tier-only bundles (subprocess; excluded from embedded slice):
 
@@ -149,20 +164,16 @@ rust/
 │       ├── fantastic-core/                root orchestrator
 │       ├── fantastic-cli-bundle/          stdout renderer
 │       ├── fantastic-file/                fs-as-agent
+│       ├── fantastic-yaml-state/          durable YAML memory
 │       ├── fantastic-web/                 axum host + WS/REST router
 │       ├── fantastic-web-ws/              WS verb channel
 │       ├── fantastic-web-rest/            REST verb channel
-│       ├── fantastic-html-agent/          html-as-record
-│       ├── fantastic-canvas-backend/      canvas host
-│       ├── fantastic-canvas-webapp/       canvas page
 │       ├── fantastic-scheduler/           recurring tasks
-│       ├── fantastic-gl-agent/            GLSL-on-record
-│       ├── fantastic-telemetry-pane/      live kernel-state GL view
-│       ├── fantastic-ai-chat-webapp/      provider-agnostic chat UI
-│       ├── fantastic-terminal-webapp/     xterm UI
 │       ├── fantastic-ollama-backend/      local LLM
 │       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM
 │       ├── fantastic-kernel-bridge/       cross-kernel comms
+│       ├── fantastic-tools/               tool-calling layer for LLMs
+│       ├── fantastic-proxy-agent/         host-implemented agents
 │       ├── fantastic-terminal-backend/    PTY  (full-tier only)
 │       ├── fantastic-python-runtime/      python -c (full-tier only)
 │       ├── fantastic-local-runner/        supervises child fantastic (full-tier)
@@ -333,6 +344,9 @@ CI runs the workspace tests on Linux + macOS via
 are driven by `.github/workflows/release-rust.yml` — see
 [`RELEASING.md`](RELEASING.md) for how to cut a release.
 
-## License
+## License & brand
 
-MIT.
+Open core, licensed **Apache-2.0** ([`../LICENSE`](../LICENSE)). "Aisixteen
+Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen;
+the license covers the code only, not the marks — forks must rename. See the
+[root README](../README.md#license--brand).

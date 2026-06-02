@@ -1,7 +1,9 @@
 """The Agent class — recursive node in the kernel tree.
 
 Every entity in the system is an Agent. Agents have:
-  - A persistent record on disk (`<root_path>/agent.json`).
+  - An in-memory `record` (id + handler_module + parent_id + meta). A
+    loader agent persists it to `<root_path>/agent.json` — Agent itself
+    never touches disk; `_root_path` is just its address in the tree.
   - A `_children: dict[str, Agent]` (empty for leaves).
   - An asyncio inbox for incoming payloads.
   - A handler_module that answers domain verbs (when the verb isn't
@@ -11,17 +13,14 @@ Routing:
   All cross-agent communication goes through the kernel — `agent.send
   (target_id, payload)` resolves `target_id` in the flat global
   `ctx.agents` dict and dispatches its handler. Bundles never call
-  each other's handler functions directly. The browser bus
-  (BroadcastChannel) is a separate, parallel channel for browser-side
-  iframe-to-iframe traffic that bypasses the server.
+  each other's handler functions directly.
 
 Lifecycle:
   - `create_agent` (system verb) — substrate persists a new record on
     disk under the parent, registers in `ctx.agents`, sends `boot`.
   - `_boot` (per-bundle hook) — hydrates process-memory state. May
-    idempotently spawn children (terminal_webapp creates terminal_-
-    backend on first boot; subsequent boots find the child already
-    present and skip).
+    idempotently spawn children — `_boot` is idempotent, so a reboot
+    finds existing children already present and skips re-creation.
   - `_shutdown` (per-bundle hook) — tears down process-memory state
     only. Records are NOT touched here.
   - `delete_agent` (system verb) — the only thing that removes
@@ -41,8 +40,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import importlib.resources
-import json
 import secrets
 import sys
 from importlib.metadata import entry_points
@@ -77,15 +74,16 @@ class Agent:
 
     Public attributes — read freely; mutate only through the methods.
 
-    Class-level `ephemeral`: when True, the agent never persists to
-    disk (no agent.json, no agents/ dir). Use for per-process
-    composables that have no meaningful state — e.g. the stdout
-    renderer (`Cli`). Defaults to False; subclasses override.
+    Class-level `ephemeral`: when True, a loader skips this agent
+    entirely — `save()` omits it and no agent.json is ever written.
+    Use for per-process composables that have no meaningful state —
+    e.g. the stdout renderer (`Cli`). Defaults to False; subclasses
+    override.
     """
 
-    # Subclass-level opt-out: ephemeral agents skip _persist() + dir
-    # creation. They live in memory only; reboot loses them; mode
-    # composition (in main.py / core) decides when to recreate them.
+    # Subclass-level opt-out: ephemeral agents are skipped by `save()`
+    # and never persisted by a loader. They live in memory only; reboot
+    # loses them; the bootstrap re-composes them per-process.
     ephemeral: bool = False
 
     # ─── construction ──────────────────────────────────────────
@@ -106,10 +104,11 @@ class Agent:
         registers in `parent._children`, and `root_path` defaults to
         `parent._children_dir() / id` (i.e. `<parent>/agents/<id>/`).
 
-        `root_path` is THIS agent's directory. The agent's record file
-        is `<root_path>/agent.json`. Children live at
-        `<root_path>/agents/<child_id>/`. Required when `parent` is
-        None and not `ephemeral`; optional otherwise.
+        `root_path` is a DERIVED ADDRESS ONLY — the loader agent owns
+        all disk I/O; an Agent never reads or writes it. Sidecar bundles
+        (file / yaml_state / readme) compute their paths under it, and
+        the loader maps `<root_path>/agent.json` ←→ this record. Children
+        address at `<root_path>/agents/<child_id>/`.
         """
         if not isinstance(ctx, Kernel):
             raise TypeError(
@@ -120,18 +119,13 @@ class Agent:
         self.handler_module = handler_module
         self.parent = parent
         is_ephemeral = type(self).ephemeral
+        # `_root_path` is the agent's address under the tree — never
+        # touched by Agent itself (the loader persists/hydrates it).
         if root_path is None:
-            if parent is None and not is_ephemeral:
-                raise ValueError(
-                    "Agent: root_path required when parent is None (non-ephemeral)"
-                )
-            # Ephemeral root-less agent: no disk path needed.
-            # Ephemeral child: still pick a path under parent for
-            # consistency (even though we won't write to it).
             if parent is not None:
                 root_path = parent._children_dir() / id
             else:
-                root_path = Path("/tmp/_ephemeral_root")  # never used
+                root_path = Path(".fantastic")  # root address; loader owns disk
         self._root_path = root_path
         self._children: dict[str, Agent] = {}
         # Watcher ids — set of ids whose inbox mirrors THIS agent's traffic
@@ -145,13 +139,12 @@ class Agent:
         # share, so the webapp proxy's _ensure_inbox(client_id) and
         # routing fanout both look up here.
         self._inbox: asyncio.Queue = self.ctx.ensure_inbox(self.id)
-        if not is_ephemeral:
-            self._root_path.mkdir(parents=True, exist_ok=True)
-            self._persist()
-            self._seed_readme()
+        # No disk I/O here — the agent is pure in-memory. A loader agent
+        # subscribes to the `added` event below and persists this record;
+        # `Kernel.load()` rehydrates from records the loader read back.
         # Wire into parent's children dict + publish lifecycle event.
         # `parent.create(...)` is the indirect path; this one supports
-        # direct construction (`Cli(kernel, parent=core)`).
+        # direct construction (`Cli(kernel, parent=fs_loader)`).
         if self.parent is not None:
             self.parent._children[self.id] = self
             self.ctx.publish_state(
@@ -166,55 +159,18 @@ class Agent:
             # First parent-less Agent in this Kernel ctx becomes the root.
             if self.ctx.root is None and not is_ephemeral:
                 self.ctx.root = self
-        if not is_ephemeral:
-            self._load_children()
 
-    # ─── persistence ───────────────────────────────────────────
-
-    def _agent_file(self) -> Path:
-        return self._root_path / "agent.json"
+    # ─── address (the loader maps this to bytes; Agent never does) ──
 
     def _children_dir(self) -> Path:
-        return self._root_path / "agents"
-
-    def _persist(self) -> None:
-        if type(self).ephemeral:
-            return
-        self._agent_file().write_text(json.dumps(self.record, indent=2))
-
-    def _seed_readme(self) -> None:
-        """Copy the bundle's shipped `readme.md` into this agent's dir
-        on first creation. Copy-if-missing — operator edits and the
-        GitHub-canonical version are never clobbered. The substrate
-        stays bundle-agnostic: it derives the package from
-        `handler_module` and asks `importlib.resources` whether that
-        package ships a `readme.md`. Bundles without one → no readme;
-        `reflect(return_readme=true)` then returns `readme: null`."""
-        if not self.handler_module:
-            return
-        dest = self._root_path / "readme.md"
-        if dest.exists():
-            return
-        pkg = self.handler_module.split(".")[0]
-        try:
-            src = importlib.resources.files(pkg) / "readme.md"
-            if src.is_file():
-                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        except (
-            ModuleNotFoundError,
-            FileNotFoundError,
-            OSError,
-            TypeError,
-            AttributeError,
-        ):
-            # AttributeError covers handler modules that aren't proper
-            # packages (no __spec__.submodule_search_locations) —
-            # single-file modules, synthetic test stubs. No readme to
-            # seed; not a real error.
-            pass
+        # The container dir name is declared config on the kernel (default
+        # "agents"); not hardcoded — see `Kernel.children_dir`.
+        return self._root_path / self.ctx.children_dir
 
     def _read_readme(self) -> str | None:
-        """The agent's own `readme.md` content, or None if it has none."""
+        """The agent's own `readme.md` content, or None if it has none.
+        Read-only — the loader seeds the file (copy-if-missing) when it
+        persists the record; Agent just reads it back for `reflect`."""
         p = self._root_path / "readme.md"
         if p.exists():
             try:
@@ -222,53 +178,6 @@ class Agent:
             except OSError:
                 return None
         return None
-
-    def _load_children(self) -> None:
-        """Recursively hydrate children from `<self>/agents/`.
-
-        Weak loading: if a child's `handler_module` doesn't import in
-        this runtime (bundle isn't installed), log one line to stderr
-        and skip the agent + its subtree. The record stays on disk
-        untouched — install the bundle and the agent rehydrates intact
-        on the next boot. Wipe-and-rebuild safe.
-        """
-        cdir = self._children_dir()
-        if not cdir.exists():
-            return
-        for entry in sorted(cdir.iterdir()):
-            af = entry / "agent.json"
-            if not af.exists():
-                continue
-            try:
-                rec = json.loads(af.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            handler_module = rec.get("handler_module")
-            if handler_module:
-                try:
-                    importlib.import_module(handler_module)
-                except Exception:
-                    # Identical log shape required across runtimes
-                    # (grep-able from CI + selftest).
-                    sys.stderr.write(
-                        f"[kernel] skipping agent {rec.get('id')}: "
-                        f"bundle {handler_module} not installed in this runtime\n"
-                    )
-                    continue
-            child_meta = {
-                k: v
-                for k, v in rec.items()
-                if k not in ("id", "handler_module", "parent_id")
-            }
-            child = Agent(
-                id=rec["id"],
-                root_path=entry,
-                ctx=self.ctx,
-                parent=self,
-                handler_module=handler_module,
-                **child_meta,
-            )
-            self._children[child.id] = child
 
     # ─── record ────────────────────────────────────────────────
 
@@ -317,7 +226,9 @@ class Agent:
                     target, payload, target._reflect_identity()
                 )
         else:
-            target = self.ctx.agents.get(target_id)
+            # Resolve a well-known alias (declared via an `alias` meta, e.g.
+            # `web_loader`) to its agent id; a literal id resolves to itself.
+            target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
         if target is None:
             return {"error": f"no agent {target_id!r}"}
         reply = await target._dispatch(payload)
@@ -392,6 +303,11 @@ class Agent:
         for c in self._children.values():
             out.extend(c._descendant_ids())
         return out
+
+    def child_ids(self) -> list[str]:
+        """Public: ids of this agent's DIRECT children (insertion order). Lets a
+        bundle enumerate children without reaching into the private `_children`."""
+        return list(self._children.keys())
 
     @staticmethod
     def _available_bundles() -> list[dict]:
@@ -484,7 +400,7 @@ class Agent:
         if target is None:
             return None
         target._meta.update(meta)
-        target._persist()
+        # No disk write — the `updated` event drives a loader to re-persist.
         self.ctx.publish_state(
             {"agent_id": agent_id, "kind": "updated", "changed": list(meta.keys())}
         )
@@ -577,6 +493,13 @@ class Agent:
         try:
             if verb in _SYSTEM_VERBS:
                 return await self._handle_system_verb(verb, payload)
+            # The tree root answers `reflect` with the substrate identity
+            # even when it carries a handler_module (the root loader): its
+            # persistence verbs (load_tree / persist_record / boot) still
+            # route to the bundle below, but `reflect <root>` is the
+            # kernel's own identity + tree, matching the `kernel` alias.
+            if verb == "reflect" and self.parent is None:
+                return self._reflect_identity()
             if not self.handler_module:
                 # Bare agents (root) handle a few universal verbs natively:
                 # - boot/shutdown: no-op (no process state to manage)
@@ -780,17 +703,17 @@ class Agent:
 
     async def on_delete(self) -> None:
         """Cascade hook — invoked once per agent during cascade-delete,
-        depth-first (children first). Two responsibilities:
-          1. Tear down bundle-specific process-memory state.
-          2. Clean up own disk artifact (rmtree this agent's root_path).
+        depth-first (children first). Tears down bundle-specific
+        process-memory state only.
 
         Default: if `handler_module` exposes `async def on_delete(agent)`,
-        call it for (1); then rmtree `self._root_path` for (2) unless
-        this is an ephemeral agent.
+        call it. Disk cleanup is NOT here — the `removed` state event
+        (published right after this in `_cascade_delete`) drives a loader
+        agent to rmtree the record's directory.
 
         Bundles port their teardown logic into a module-level
         `on_delete(agent)` function in their tools.py — substrate looks
-        it up and invokes it before disk removal."""
+        it up and invokes it."""
         if self.handler_module:
             try:
                 mod = importlib.import_module(self.handler_module)
@@ -799,8 +722,6 @@ class Agent:
                     await fn(self)
             except Exception as e:
                 print(f"  [cascade] {self.id} bundle on_delete raised: {e}")
-        if not type(self).ephemeral and self._root_path.exists():
-            self._rmtree(self._root_path)
 
     async def shutdown(self) -> None:
         """Graceful process-shutdown walk. Depth-first like
@@ -846,23 +767,6 @@ class Agent:
                 f"  [shutdown] {self.id} hook raised: {e}",
                 file=sys.stderr,
             )
-
-    @staticmethod
-    def _rmtree(path: Path) -> None:
-        if not path.exists():
-            return
-        for sub in path.iterdir():
-            if sub.is_dir():
-                Agent._rmtree(sub)
-            else:
-                try:
-                    sub.unlink()
-                except OSError:
-                    pass
-        try:
-            path.rmdir()
-        except OSError:
-            pass
 
     # ─── reflection ────────────────────────────────────────────
 

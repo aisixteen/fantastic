@@ -16,7 +16,7 @@ Both expose:
     @property
     closed: bool
 
-Wire shape matches the existing web/_proxy.py protocol — raw
+Wire shape matches the existing web_ws/_proxy.py protocol — raw
 `{type:'call', target, payload, id}` for requests,
 `{type:'reply', id, data}` for replies, `{type:'watch', src}` for
 stream subscriptions, `{type:'event', payload}` for stream
@@ -115,7 +115,7 @@ class MemoryTransport(_BaseTransport):
 
 class WSTransport(_BaseTransport):
     """websockets client connection wrapper. Frames serialize as
-    JSON text (matches web/_proxy.py default mode — binary path
+    JSON text (matches web_ws/_proxy.py default mode — binary path
     is reserved for byte-heavy payloads via the kernel's
     binary_protocol; bridges don't currently mint binary)."""
 

@@ -4,8 +4,9 @@ The substrate's promise: `agent.delete(child_id)` runs `on_delete` on
 every descendant (deepest first) BEFORE removing records. Any
 `delete_lock` anywhere in the subtree blocks the entire cascade with
 `{locked, blocked_by, error}` and zero state mutations. By the time
-delete returns, every descendant is gone from `ctx.agents`, parent's
-`_children`, and disk.
+delete returns, every descendant is gone from `ctx.agents` and the
+parent's `_children`. Disk cleanup (rmtree) is the loader's job, driven
+by the `removed` state event — covered in the fs_loader tests.
 """
 
 from __future__ import annotations
@@ -25,12 +26,10 @@ async def test_cascade_walks_deepest_first(seeded_kernel):
 
     r = await seeded_kernel.delete("P")
     assert r == {"deleted": True, "id": "P"}
-    # All three (P + GC1 + GC2) gone from ctx.
+    # All three (P + GC1 + GC2) gone from ctx and from parent _children.
     for gone in ("P", "GC1", "GC2"):
         assert gone not in seeded_kernel.ctx.agents
-    # GC1, GC2 directories gone too (under P/agents/...).
-    p_dir = p_agent._root_path
-    assert not p_dir.exists()
+    assert "P" not in seeded_kernel._children
 
 
 async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
@@ -85,22 +84,25 @@ async def test_cascade_emits_agent_deleted(seeded_kernel):
     assert deleted_emits[0]["id"] == "X"
 
 
-async def test_cascade_through_terminal_webapp_kills_backend(seeded_kernel):
-    """Real domain case: terminal_webapp owns terminal_backend. Delete
-    the webapp → cascade reaches terminal_backend's on_delete FIRST
+async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
+    """Real domain case: a terminal_backend nested under a parent agent.
+    Delete the parent → cascade reaches terminal_backend's on_delete FIRST
     (kills PTY in real life), then both records vanish."""
-    rec = await seeded_kernel.send(
+    parent = await seeded_kernel.send(
         seeded_kernel.id,
-        {"type": "create_agent", "handler_module": "terminal_webapp.tools"},
+        {"type": "create_agent", "handler_module": "file.tools"},
     )
-    webapp_id = rec["id"]
-    web_agent = seeded_kernel.ctx.agents[webapp_id]
-    backend_id = next(iter(web_agent._children.keys()))
+    parent_id = parent["id"]
+    backend = await seeded_kernel.send(
+        parent_id,
+        {"type": "create_agent", "handler_module": "terminal_backend.tools"},
+    )
+    backend_id = backend["id"]
     assert backend_id in seeded_kernel.ctx.agents
 
     r = await seeded_kernel.send(
-        seeded_kernel.id, {"type": "delete_agent", "id": webapp_id}
+        seeded_kernel.id, {"type": "delete_agent", "id": parent_id}
     )
     assert r["deleted"] is True
-    assert webapp_id not in seeded_kernel.ctx.agents
+    assert parent_id not in seeded_kernel.ctx.agents
     assert backend_id not in seeded_kernel.ctx.agents

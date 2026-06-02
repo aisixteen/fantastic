@@ -124,8 +124,8 @@ struct PtyState {
     /// every `write` / `paste_image` since `take_writer` errors on
     /// second call).
     writer: Mutex<Box<dyn std::io::Write + Send>>,
-    /// Scrollback ring — the xterm UI calls `output` on connect to
-    /// fetch what was emitted before the WS opened. Ring-trimmed to
+    /// Scrollback ring — a client calls `output` on connect to
+    /// fetch what was emitted before it attached. Ring-trimmed to
     /// `MAX_SCROLLBACK_BYTES` to bound memory.
     scrollback: StdMutex<VecDeque<String>>,
     /// Sum of UTF-8-encoded byte counts of all chunks in `scrollback`.
@@ -346,7 +346,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "stop": "SIGKILL the child; close master; remove from TERMINALS map.",
     }));
     obj.insert("emits".to_string(), json!({
-        "output": "{type:'output', data:str} — every decoded read chunk emitted to this agent's OWN inbox; xterm UI watches it",
+        "output": "{type:'output', data:str} — every decoded read chunk emitted to this agent's OWN inbox; a client watches it",
         "closed": "{type:'closed'} — child process exited (EOF on PTY)",
         "exited": "{type:'exited', exit_code:i32} — child died (EOF on the PTY master)",
         "error": "{type:'error', error:str} — read or write failure",
@@ -626,8 +626,8 @@ fn signal_reply(agent_id: &AgentId, sig: i32) -> Value {
 }
 
 /// `output` verb — returns the rolling scrollback buffer's tail as a
-/// single string. The xterm UI calls this on connect so a late client
-/// sees what was written before it opened the WS. Optional `max_bytes`
+/// single string. A client calls this on connect so a late client
+/// sees what was written before it attached. Optional `max_bytes`
 /// argument trims the returned tail (default = full ring).
 fn output_reply(agent_id: &AgentId, payload: &Value) -> Value {
     let max_bytes = payload
@@ -652,12 +652,12 @@ fn output_reply(agent_id: &AgentId, payload: &Value) -> Value {
     } else {
         full
     };
-    // Reset flow-control state. Frontends call `output` on connect to
-    // populate their xterm buffer from scrollback — the act of fetching
+    // Reset flow-control state. A client calls `output` on connect to
+    // populate its buffer from scrollback — the act of fetching
     // it IS an implicit ack of every prior byte. Without this reset,
-    // a closed browser tab leaves the backend's `unacked` counter near
-    // the 100K cap, the reader stays paused, and the next browser
-    // session can't get echoes (terminal appears hung). Discovered
+    // a dropped client leaves the backend's `unacked` counter near
+    // the 100K cap, the reader stays paused, and the next attached
+    // client can't get echoes (terminal appears hung). Discovered
     // empirically: type 3 chars, term hangs; manual ack drains and
     // unsticks. This makes the unstick automatic.
     {
@@ -830,9 +830,9 @@ async fn reader_loop(
     state: Arc<PtyState>,
     mut reader: Box<dyn std::io::Read + Send>,
 ) {
-    // Events emit to SELF (the terminal_backend's own inbox). The
-    // xterm UI calls `t.watch(upstream)` where upstream = this agent's
-    // id, so watchers see the events. Mirrors Python's design.
+    // Events emit to SELF (the terminal_backend's own inbox). A
+    // client watches this agent's id, so watchers see the events.
+    // Mirrors Python's design.
     let emit_target = agent_id.clone();
     loop {
         // Flow control: if we're past the threshold, wait for a resume.
@@ -897,7 +897,7 @@ async fn reader_loop(
         if !out.is_empty() {
             let nbytes = out.len();
             // Append to scrollback ring + trim past MAX_SCROLLBACK_BYTES.
-            // The xterm UI calls `output` on connect to fetch this so
+            // A client calls `output` on connect to fetch this so
             // late-arriving clients see context, not just live tail.
             {
                 let mut sb = state.scrollback.lock().expect("scrollback poisoned");
@@ -956,8 +956,7 @@ async fn cleanup_on_exit(
     state.exited.store(true, Ordering::Relaxed);
     // `parent` here is actually the emit_target (= self, the
     // terminal_backend's own id). Mirrors Python's `{type:"closed"}`
-    // on the agent's own inbox; the xterm UI's `t.on('closed', ...)`
-    // listener catches it.
+    // on the agent's own inbox; a client's `closed` listener catches it.
     kernel.emit(parent, json!({"type": "closed"})).await;
     let _ = code;
 }

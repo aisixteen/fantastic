@@ -28,8 +28,8 @@ The headline correctness suite. Covered by the unit tests at
 
   - `test_memory_transport_pair_round_trip` — two `Kernel()` instances,
     two paired `MemoryTransport`s, a
-    `forward(target='core', payload={type:'reflect'})` from kernel A
-    returns kernel B's `core.reflect` body.
+    `forward(target='fs_loader', payload={type:'reflect'})` from kernel A
+    returns kernel B's `fs_loader.reflect` body.
   - `test_watch_remote_sends_watch_frame` — `watch_remote` ships the
     `{type:'watch', src:...}` frame.
   - `test_event_frame_re_emits_on_bridge_inbox` — inbound `event`
@@ -39,12 +39,12 @@ The headline correctness suite. Covered by the unit tests at
 ```bash
 uv run pytest bundled_agents/kernel_bridge/tests/ -v
 ```
-Expected: all 13 tests pass.
+Expected: all 14 tests pass.
 
 ## Test 2 — WS transport against a live `fantastic` (manual)
 
 Boots two kernels on the same machine on different ports. A's bridge
-connects to B's `/<core>/ws` directly — B does NOT need a bridge agent
+connects to B's `/<fs_loader>/ws` directly — B does NOT need a bridge agent
 because B's `web_ws` handles inbound call frames natively.
 
 ```bash
@@ -54,14 +54,14 @@ pkill -9 -f "fantastic" 2>/dev/null
 mkdir -p /tmp/kb_test_a /tmp/kb_test_b
 
 (cd /tmp/kb_test_a && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
-  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic core create_agent handler_module=web.tools port=$PORT_A) >/dev/null
+  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic fs_loader create_agent handler_module=web.tools port=$PORT_A) >/dev/null
 (cd /tmp/kb_test_a && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
   python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic) \
   > /tmp/kb_a.log 2>&1 &
 SPID_A=$!
 
 (cd /tmp/kb_test_b && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
-  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic core create_agent handler_module=web.tools port=$PORT_B) >/dev/null
+  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic fs_loader create_agent handler_module=web.tools port=$PORT_B) >/dev/null
 (cd /tmp/kb_test_b && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
   python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic) \
   > /tmp/kb_b.log 2>&1 &
@@ -97,27 +97,27 @@ PY
 # is mounted under. The web_ws agent's id is the path key (mounted at
 # /<web_ws_id>/ws). For a default web with a web_ws child, that id is
 # typically `web_ws_<hash>` — read it out of B's list_agents.
-B_WS_ID=$(call_at $PORT_B core '{"type":"list_agents"}' \
+B_WS_ID=$(call_at $PORT_B fs_loader '{"type":"list_agents"}' \
   | python3 -c "import json,sys; ags=json.load(sys.stdin)['agents']; print(next(a['id'] for a in ags if a['handler_module']=='web_ws.tools'))")
 
-A_BRIDGE_ID=$(call_at $PORT_A core "{\"type\":\"create_agent\",\"handler_module\":\"kernel_bridge.tools\",\"transport\":\"ws\",\"peer_id\":\"$B_WS_ID\",\"host\":\"127.0.0.1\",\"local_port\":$PORT_B}" \
+A_BRIDGE_ID=$(call_at $PORT_A fs_loader "{\"type\":\"create_agent\",\"handler_module\":\"kernel_bridge.tools\",\"transport\":\"ws\",\"peer_id\":\"$B_WS_ID\",\"host\":\"127.0.0.1\",\"local_port\":$PORT_B}" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
 # Boot A's bridge — opens WS to B's web_ws.
 call_at $PORT_A $A_BRIDGE_ID '{"type":"boot"}' | python3 -m json.tool
 
-# Forward a reflect to B's core through A's bridge.
-call_at $PORT_A $A_BRIDGE_ID '{"type":"forward","target":"core","payload":{"type":"reflect"}}' \
+# Forward a reflect to B's fs_loader through A's bridge.
+call_at $PORT_A $A_BRIDGE_ID '{"type":"forward","target":"fs_loader","payload":{"type":"reflect"}}' \
   | python3 -m json.tool | head -20
 
 # Cleanup — cascade-delete fires the on_delete hook which cancels
 # the read loop, closes the transport, rejects pending Futures.
-call_at $PORT_A core "{\"type\":\"delete_agent\",\"id\":\"$A_BRIDGE_ID\"}" >/dev/null
+call_at $PORT_A fs_loader "{\"type\":\"delete_agent\",\"id\":\"$A_BRIDGE_ID\"}" >/dev/null
 kill -9 $SPID_A $SPID_B
 rm -rf /tmp/kb_test_a /tmp/kb_test_b /tmp/kb_a.log /tmp/kb_b.log
 ```
-Expected: the forward returns kernel B's `core.reflect` body —
-`{id:'core', sentence:'Core agent...', verbs:{...}, tree:..., ...}`.
+Expected: the forward returns kernel B's `fs_loader.reflect` body —
+`{id:'fs_loader', sentence:'Core agent...', verbs:{...}, tree:..., ...}`.
 Regression signal: `error: not connected` after boot → ws connect
 failed (check kernel B's log + that `peer_id` matches B's web_ws
 agent's id); hang on forward → corr_id mismatch in the read_loop
@@ -143,8 +143,8 @@ B_WS_ID=$(ssh $HOST "REMOTE_PORT=$REMOTE_PORT python3 - <<'PY'
 import asyncio, json, os, websockets
 port = os.environ['REMOTE_PORT']
 async def main():
-    async with websockets.connect(f'ws://localhost:{port}/core/ws') as ws:
-        await ws.send(json.dumps({'type':'call','target':'core','payload':{'type':'list_agents'},'id':'1'}))
+    async with websockets.connect(f'ws://localhost:{port}/fs_loader/ws') as ws:
+        await ws.send(json.dumps({'type':'call','target':'fs_loader','payload':{'type':'list_agents'},'id':'1'}))
         while True:
             m = json.loads(await ws.recv())
             if m.get('id')=='1' and m.get('type') in ('reply','error'):
@@ -156,7 +156,7 @@ echo "remote web_ws: $B_WS_ID"
 
 # 3. LOCAL: create a bridge with transport=ssh+ws, host, local_port,
 #    remote_port, peer_id=$B_WS_ID
-A_ID=$(call_at $PORT_LOCAL core "{\"type\":\"create_agent\",\"handler_module\":\"kernel_bridge.tools\",\"transport\":\"ssh+ws\",\"host\":\"$HOST\",\"local_port\":$LOCAL_PORT,\"remote_port\":$REMOTE_PORT,\"peer_id\":\"$B_WS_ID\"}" \
+A_ID=$(call_at $PORT_LOCAL fs_loader "{\"type\":\"create_agent\",\"handler_module\":\"kernel_bridge.tools\",\"transport\":\"ssh+ws\",\"host\":\"$HOST\",\"local_port\":$LOCAL_PORT,\"remote_port\":$REMOTE_PORT,\"peer_id\":\"$B_WS_ID\"}" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 
 # 4. Boot — opens SSH tunnel + WS over it
@@ -164,29 +164,29 @@ call_at $PORT_LOCAL $A_ID '{"type":"boot"}' | python3 -m json.tool
 # Expect: {"booted":true, "transport":"ssh+ws", "tunnel_pid":<int>}
 
 # 5. Forward a reflect
-call_at $PORT_LOCAL $A_ID '{"type":"forward","target":"core","payload":{"type":"reflect"}}' | python3 -m json.tool
-# Expect: remote core.reflect body
+call_at $PORT_LOCAL $A_ID '{"type":"forward","target":"fs_loader","payload":{"type":"reflect"}}' | python3 -m json.tool
+# Expect: remote fs_loader.reflect body
 ```
 Expected: `tunnel_pid` non-null in boot reply; forward returns the
-remote core's reflect.
+remote fs_loader's reflect.
 Regression signal: `tunnel failed: …` → SSH key or host lookup
 problem (try `ssh $HOST 'echo ok'` first); `tunnel_pid: null` after
 boot → ServerAliveCountMax tripped early (network flaky); reply
-contains the remote web_ws's reflect instead of core's → peer_id
+contains the remote web_ws's reflect instead of fs_loader's → peer_id
 was used as a target id, not just a WS path (that's a bug — file).
 
 ## Test 4 — WS streaming (watch_remote) against a live `fantastic` (manual)
 
 Same setup as Test 2. After A's bridge is booted, subscribe to B's
-core inbox via `watch_remote`. Then trigger an event on B and verify
+fs_loader inbox via `watch_remote`. Then trigger an event on B and verify
 A's bridge re-emits it.
 
 ```bash
 # Assumes the Test 2 setup is still up + A_BRIDGE_ID is exported.
 
-# Subscribe to B.core's emits via A's bridge.
-call_at $PORT_A $A_BRIDGE_ID '{"type":"watch_remote","target":"core"}'
-# Expect: {"ok": true, "watching": "core"}
+# Subscribe to B.fs_loader's emits via A's bridge.
+call_at $PORT_A $A_BRIDGE_ID '{"type":"watch_remote","target":"fs_loader"}'
+# Expect: {"ok": true, "watching": "fs_loader"}
 
 # In a second terminal: tail A's bridge inbox.
 # (A separate WS that subscribes to the bridge's inbox.)
@@ -204,17 +204,17 @@ TAIL_PID=$!
 sleep 1
 
 # Trigger something on B that emits — call any verb that emits state.
-# Easiest: emit directly via core on B (substrate exposes it).
-call_at $PORT_B core '{"type":"reflect"}' >/dev/null
-# Or any verb that fans out a state event on B's core.
+# Easiest: emit directly via fs_loader on B (substrate exposes it).
+call_at $PORT_B fs_loader '{"type":"reflect"}' >/dev/null
+# Or any verb that fans out a state event on B's fs_loader.
 
 # Expect: A's bridge tail shows {"type":"event","payload":{...}} frames
-# whose payload mirrors B.core's emits.
+# whose payload mirrors B.fs_loader's emits.
 
 kill $TAIL_PID
 ```
 Expected: A's bridge fan-out includes events that originated on B's
-core. Regression signal: no events → check that B's web_ws received
+fs_loader. Regression signal: no events → check that B's web_ws received
 the `{type:'watch'}` (look in B's log); A's read loop never re-emits
 → check that A's read_loop processes `event` frame type.
 
@@ -222,7 +222,7 @@ the `{type:'watch'}` (look in B's log); A's read loop never re-emits
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | MemoryTransport + streaming unit suite (13 tests, in-process) | |
+| 1 | MemoryTransport + streaming unit suite (14 tests, in-process) | |
 | 2 (manual) | WS transport — A.bridge → B.web_ws round-trip | |
 | 3 (manual) | SSH+WS transport against a real remote | |
 | 4 (manual) | WS streaming — watch_remote re-emit | |

@@ -21,6 +21,36 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+_ROOT_ID_CACHE: dict[str, str] = {}
+
+
+def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
+    """Discover the runtime's ROOT agent id via a one-shot `reflect`.
+
+    Python's root is `fs_loader`; rust/swift use `core`. The harness must
+    not hardcode either — seeds (and WS paths / reflect targets) that
+    attach to the root resolve it here. Cached per (binary, workdir).
+    """
+    key = f"{binary}|{workdir}"
+    if key not in _ROOT_ID_CACHE:
+        proc = subprocess.run(
+            [str(binary), "reflect"],
+            cwd=str(workdir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        out = proc.stdout
+        rid = "core"
+        brace = out.find("{")
+        if brace != -1:
+            try:
+                rid = json.loads(out[brace:]).get("id") or "core"
+            except (json.JSONDecodeError, ValueError):
+                pass
+        _ROOT_ID_CACHE[key] = rid
+    return _ROOT_ID_CACHE[key]
+
 
 def seed_create(
     binary: Path,
@@ -28,7 +58,7 @@ def seed_create(
     *,
     handler_module: str,
     agent_id: str | None = None,
-    parent_id: str = "core",
+    parent_id: str | None = None,
     timeout: float = 15.0,
     **meta: Any,
 ) -> dict[str, Any]:
@@ -40,6 +70,8 @@ def seed_create(
     `.fantastic/agents/web/agents/web_ws/agent.json` (nested), we
     must call `fantastic web create_agent ...`.
     """
+    if parent_id is None:
+        parent_id = root_id(binary, workdir, timeout=timeout)
     args: list[str] = [
         parent_id, "create_agent",
         f"handler_module={handler_module}",

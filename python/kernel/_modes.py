@@ -15,7 +15,7 @@
 Web composition is **explicit** — there's no `--port` flag. To run a
 daemon, first persist a web agent record:
 
-    fantastic core create_agent handler_module=web.tools port=8888
+    fantastic fs_loader create_agent handler_module=web.tools port=8888
 
 Then `fantastic` rehydrates it and blocks (because uvicorn is alive).
 The kernel exits when nothing's keeping it alive:
@@ -107,8 +107,16 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         )
         sys.exit(1)
     with FantasticLock():
+        # Boot the root loader so this call's mutations (create/update/
+        # delete) subscribe + persist. The debounce task won't tick
+        # before we exit, so drain it synchronously after the call.
+        if kernel.root is not None:
+            await kernel.send(kernel.root.id, {"type": "boot"})
         reply = await kernel.send(target, body)
         print(json.dumps(reply, indent=2, default=str))
+        loop = getattr(kernel.root, "_fs_flush_loop", None)
+        if loop is not None:
+            loop.flush()
     return None
 
 
@@ -183,6 +191,10 @@ def install(rest: list[str]) -> None:
         print(r.stdout.strip() or "  packages installed", file=sys.stderr)
 
     agents_dir = proj / ".fantastic" / "agents"
+    # Bundles whose persisted records get a project-venv pin (default: the python
+    # runner). A documented list in ONE place rather than an inline bundle-string
+    # branch — extend it if another bundle needs the project venv.
+    venv_pin_bundles = ("python_runtime.tools",)
     updated = 0
     if agents_dir.is_dir():
         for entry in sorted(agents_dir.iterdir()):
@@ -193,7 +205,7 @@ def install(rest: list[str]) -> None:
                 rec = json.loads(agent_json.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
-            if rec.get("handler_module") != "python_runtime.tools":
+            if rec.get("handler_module") not in venv_pin_bundles:
                 continue
             if rec.get("venv") == ".venv":
                 continue

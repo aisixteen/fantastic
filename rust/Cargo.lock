@@ -306,54 +306,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "fantastic-ai-chat-webapp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "fantastic-bundle"
 version = "0.1.0"
-
-[[package]]
-name = "fantastic-canvas-backend"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fantastic-canvas-webapp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
 
 [[package]]
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
- "fantastic-ai-chat-webapp",
- "fantastic-canvas-backend",
- "fantastic-canvas-webapp",
  "fantastic-cli-bundle",
  "fantastic-core",
  "fantastic-file",
- "fantastic-gl-agent",
- "fantastic-html-agent",
  "fantastic-kernel",
  "fantastic-kernel-bridge",
  "fantastic-local-runner",
@@ -363,9 +325,7 @@ dependencies = [
  "fantastic-python-runtime",
  "fantastic-scheduler",
  "fantastic-ssh-runner",
- "fantastic-telemetry-pane",
  "fantastic-terminal-backend",
- "fantastic-terminal-webapp",
  "fantastic-tools",
  "fantastic-web",
  "fantastic-web-rest",
@@ -404,28 +364,6 @@ dependencies = [
  "fantastic-kernel",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "fantastic-gl-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fantastic-html-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -559,17 +497,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fantastic-telemetry-pane"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "fantastic-terminal-backend"
 version = "0.1.0"
 dependencies = [
@@ -583,17 +510,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "fantastic-terminal-webapp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

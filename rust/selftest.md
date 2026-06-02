@@ -84,10 +84,12 @@ cat bundled_agents/web/host/selftest.md
 ```
 
 Specs that work cross-runtime without modification: file, web, web_ws,
-web_rest, html_agent, canvas_backend, canvas_webapp, gl_agent,
-telemetry_pane, ai_chat_webapp, ollama_backend (needs running ollama),
-nvidia_nim_backend (needs api_key), terminal_webapp, scheduler,
+web_rest, ollama_backend (needs running ollama),
+nvidia_nim_backend (needs api_key), scheduler,
 kernel_bridge (WS-only, asymmetric; memory + WS + SSH+WS transports), local_runner, ssh_runner.
+
+View/webapp specs now live in the decoupled frontend kernel — see
+[`../ts/`](../ts/); this host serves it generically via a `file` agent.
 
 Specs with Rust-specific deltas worth noting (verbs match; only the
 binary path + a few env vars differ): python_runtime

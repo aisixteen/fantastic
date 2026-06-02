@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-anthropic-backend"
+version = "0.1.0"
+description = "Fantastic anthropic backend — reflect-driven LLM agent (Claude) with native tool calls."
+requires-python = ">=3.11"
+dependencies = ["httpx"]
+
+[project.entry-points."fantastic.bundles"]
+anthropic_backend = "anthropic_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anthropic_backend"]

@@ -5,20 +5,13 @@
 // per-bundle test targets in subsequent commits; this target proves
 // every bundle compiles, registers, and answers its primary verb.
 
-import FantasticAiChatWebapp
-import FantasticCanvasBackend
-import FantasticCanvasWebapp
 import FantasticCliBundle
 import FantasticFile
-import FantasticGlAgent
-import FantasticHtmlAgent
 import FantasticJSON
 import FantasticKernel
 import FantasticKernelBridge
 import FantasticProxyAgent
 import FantasticScheduler
-import FantasticTelemetryPane
-import FantasticTerminalWebapp
 import FantasticTools
 import FantasticWebRest
 import FantasticWebWS
@@ -30,14 +23,7 @@ func makeKernelWithAll() -> Kernel {
     registry.register("file.tools", FileBundle())
     registry.register("proxy_agent.tools", ProxyAgentBundle())
     registry.register("tools.tools", ToolsBundle())
-    registry.register("html_agent.tools", HtmlAgentBundle())
-    registry.register("gl_agent.tools", GlAgentBundle())
     registry.register("scheduler.tools", SchedulerBundle())
-    registry.register("canvas_backend.tools", CanvasBackendBundle())
-    registry.register("canvas_webapp.tools", CanvasWebappBundle())
-    registry.register("ai_chat_webapp.tools", AiChatWebappBundle())
-    registry.register("terminal_webapp.tools", TerminalWebappBundle())
-    registry.register("telemetry_pane.tools", TelemetryPaneBundle())
     registry.register("kernel_bridge.tools", KernelBridgeBundle())
     registry.register("web_ws.tools", WebWSBundle())
     registry.register("web_rest.tools", WebRestBundle())
@@ -121,92 +107,6 @@ struct BundleSmokeTests {
             "tools",
             ["type": "dispatch", "name": "nope", "arguments": [:] as JSON])
         #expect(r["reason"].asString == "tool_not_found")
-    }
-
-    @Test func htmlAgentSetAndRender() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "html_agent.tools", "id": "h1"])
-        _ = await kernel.send(
-            "h1", ["type": "set_html", "html": "<h1>Hello</h1>"])
-        let r = await kernel.send("h1", ["type": "render_html"])
-        #expect(r["html"].asString == "<h1>Hello</h1>")
-    }
-
-    @Test func glAgentSourceRoundTrip() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "gl_agent.tools", "id": "gl1"])
-        _ = await kernel.send(
-            "gl1", ["type": "set_source", "gl_source": "void main(){}"])
-        let r = await kernel.send("gl1", ["type": "reflect"])
-        #expect(r["gl_source"].asString == "void main(){}")
-    }
-
-    @Test func canvasBackendAddAndDiscover() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "canvas_backend.tools", "id": "canvas"])
-        // add_agent requires a handler_module (canonical contract) and
-        // the member must answer a render verb. html_agent answers
-        // get_webapp, so it survives the render-probe. Geometry lives
-        // on width/height keys (matches Python canvas_backend).
-        let add = await kernel.send(
-            "canvas",
-            [
-                "type": "add_agent",
-                "handler_module": "html_agent.tools",
-                "x": 10, "y": 10, "width": 100, "height": 100,
-            ])
-        #expect(add["ok"].asBool == true, "add_agent failed: \(add)")
-
-        // Canonical discover returns {agents:[{id,x,y,width,height}]}.
-        let r = await kernel.send(
-            "canvas",
-            ["type": "discover", "x": 0, "y": 0, "w": 50, "h": 50])
-        let agents = r["agents"].asArray ?? []
-        #expect(agents.count == 1, "discover returned: \(r)")
-    }
-
-    @Test func canvasWebappServesHtml() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "canvas_webapp.tools", "id": "cv"])
-        let r = await kernel.send("cv", ["type": "render_html"])
-        let html = r["html"].asString ?? ""
-        #expect(html.contains("<") && html.count > 50)
-    }
-
-    @Test func terminalWebappServesHtml() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "terminal_webapp.tools", "id": "tw"])
-        let r = await kernel.send("tw", ["type": "render_html"])
-        let html = r["html"].asString ?? ""
-        #expect(html.contains("<") && html.count > 50)
-    }
-
-    @Test func aiChatWebappReflect() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "ai_chat_webapp.tools", "id": "chat"])
-        let r = await kernel.send("chat", ["type": "reflect"])
-        #expect(r["kind"].asString == "ai_chat_webapp")
-    }
-
-    @Test func telemetryPaneReflect() async {
-        let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "telemetry_pane.tools", "id": "tp"])
-        let r = await kernel.send("tp", ["type": "reflect"])
-        #expect(r["kind"].asString == "telemetry_pane")
     }
 
     @Test func schedulerCanScheduleAndCancel() async {

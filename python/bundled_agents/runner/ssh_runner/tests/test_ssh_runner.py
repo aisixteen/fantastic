@@ -26,13 +26,13 @@ def runner_record():
         "remote_cmd": "/home/me/.venv/bin/fantastic",
         "remote_port": 8888,
         "local_port": 49001,
-        "entry_path": "canvas_webapp_abc/",
+        "entry_path": "html_agent_abc/",
     }
 
 
 async def _make(kernel, **fields):
     rec = await kernel.send(
-        "core",
+        "fs_loader",
         {"type": "create_agent", "handler_module": "ssh_runner.tools", **fields},
     )
     return rec["id"]
@@ -71,7 +71,7 @@ async def test_reflect_surfaces_record_fields(seeded_kernel, runner_record):
     assert r["remote_cmd"] == "/home/me/.venv/bin/fantastic"
     assert r["remote_port"] == 8888
     assert r["local_port"] == 49001
-    assert r["entry_path"] == "canvas_webapp_abc/"
+    assert r["entry_path"] == "html_agent_abc/"
     assert r["tunnel_alive"] is False  # nothing booted
 
 
@@ -80,7 +80,7 @@ async def test_get_webapp_url_composes_local_tunnel_plus_entry(
 ):
     rid = await _make(seeded_kernel, **runner_record)
     r = await seeded_kernel.send(rid, {"type": "get_webapp"})
-    assert r["url"] == "http://localhost:49001/canvas_webapp_abc/"
+    assert r["url"] == "http://localhost:49001/html_agent_abc/"
     assert r["title"] == "test-box"
     assert r["default_width"] == 800
 
@@ -101,7 +101,7 @@ async def test_start_requires_all_four_fields(seeded_kernel):
 async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
     """Verifies the SSH command we build: a two-step compound shell
     command — first persists the web agent record via
-    `fantastic core create_agent handler_module=web.tools port=N`,
+    `fantastic fs_loader create_agent handler_module=web.tools port=N`,
     then nohup-spawns the daemon. Plus the lock-poll + tunnel."""
     calls = []
 
@@ -145,7 +145,7 @@ async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
     assert "mkdir -p .fantastic" in boot_cmd
     assert "/home/me/.venv/bin/fantastic" in boot_cmd
     # Step 1: create web record at the chosen port.
-    assert "core create_agent handler_module=web.tools port=8888" in boot_cmd
+    assert "fs_loader create_agent handler_module=web.tools port=8888" in boot_cmd
     # Step 2: nohup the daemon (no flags — boots from disk).
     assert "nohup" in boot_cmd
     assert "> .fantastic/serve.log 2>&1 &" in boot_cmd
@@ -251,7 +251,7 @@ async def test_status_when_nothing_running(seeded_kernel, runner_record, monkeyp
 
 
 async def test_on_delete_via_cascade(seeded_kernel, runner_record, monkeypatch):
-    """core.delete_agent's cascade calls ssh_runner.on_delete (== stop).
+    """fs_loader.delete_agent's cascade calls ssh_runner.on_delete (== stop).
     The runner should clean up silently — no exception even if nothing
     is running."""
     calls = []
@@ -263,7 +263,7 @@ async def test_on_delete_via_cascade(seeded_kernel, runner_record, monkeypatch):
     monkeypatch.setattr(sr, "_ssh_exec", fake_ssh_exec)
 
     rid = await _make(seeded_kernel, **runner_record)
-    r = await seeded_kernel.send("core", {"type": "delete_agent", "id": rid})
+    r = await seeded_kernel.send("fs_loader", {"type": "delete_agent", "id": rid})
     assert r.get("deleted") is True
     # The on_delete hook fired: at least one ssh_exec call to read lock.
     assert any("lock.json" in c for c in calls)

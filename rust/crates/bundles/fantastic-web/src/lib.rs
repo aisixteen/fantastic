@@ -1179,7 +1179,7 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
             "state_subscribe" => {
                 // Python parity (web/_proxy.py:231-256): first emit a
                 // `state_snapshot` frame carrying every agent's identity
-                // so the consumer (telemetry_pane) can bootstrap before
+                // so the consumer (a state-watching view) can bootstrap before
                 // the first event arrives, THEN register a callback
                 // pumping subsequent `state_event` frames.
                 let snapshot_frame = serde_json::json!({

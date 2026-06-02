@@ -2,9 +2,9 @@
 
 A YAML key-value store that survives the context boundary — a first-class agent
 you mount EVERYWHERE: global (under the root) or local (under any agent), long-
-or short-term memory, or component/UI state. The `mode` meta picks the
+or short-term memory, or durable component state. The `mode` meta picks the
 discipline (same verbs either way):
-- `data` — current state (UI, hyperparams, selection); overwrite-in-place.
+- `data` — current state (component state, config, run params, selection); overwrite-in-place.
 - `mem` — durable facts to remember (names, preferences, decisions); accrete keyed facts.
 
 **Your memory is auto-loaded into your context on boot — read it, don't re-fetch.**
@@ -24,7 +24,7 @@ discipline (same verbs either way):
 
 ## Recipes
 - Remember a fact → `set {key:"user.name", value:"Ada"}`.
-- Save state → `set {key:"ui.zoom", value:1.5}`.
+- Save state → `set {key:"view.zoom", value:1.5}`.
 - Reuse keys, don't duplicate → `keys` first; use descriptive namespaced keys
   (`domain.subject.attribute`).
 - Self-contained values (the fact AND its why) →

@@ -69,9 +69,10 @@ Verify the kernel sees the GPU once it's up:
 podman exec "$NAME" nvidia-smi
 ```
 
-Everything else — install-bundle, canvas, persistence, graceful stop —
-behaves identically to the slim variant. See `../base/README.md` for
-the full operator flow; only the build image + run flag differ.
+Everything else — the seeded host stack (`web` + `web_ws` + `web_rest`),
+install-bundle, persistence, graceful stop, and serving the TS frontend
+weakly — behaves identically to the slim variant. See `../base/README.md`
+for the full operator flow; only the build image + run flag differ.
 
 ## Why a separate variant
 
@@ -83,9 +84,11 @@ self-contained image without manual layering.
 ## Status
 
 **Validated 2026-05-19** on NVIDIA RTX 3090 / Ubuntu 24.04 / driver
-580.126.20 / podman 4.9.3 / nvidia-container-toolkit 1.19.0. All 11
-selftest probes (gpu-host + 1–10) PASS. See `selftest.md` for the
-results table.
+580.126.20 / podman 4.9.3 / nvidia-container-toolkit 1.19.0. All
+selftest probes (gpu-host + 1–9) PASS. See `selftest.md` for the
+results table — note that run predates the host-only refactor that
+dropped the canvas/view bundles; the table there is mapped onto the
+current pure-host probe set.
 
 ## Known gaps
 

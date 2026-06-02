@@ -1,7 +1,7 @@
 // fantastic_transport — minimal client for the kernel's HTTP+WS surface.
 // Injected automatically on every served HTML page. Same API shape any
-// frontend (the canvas webapp, ai_chat_webapp, browser dev consoles)
-// consumes. Pure JS, no build step.
+// frontend view (the served frontend, browser dev consoles) consumes.
+// Pure JS, no build step.
 //
 // 1:1 port of python/bundled_agents/web/host/src/web/_transport_js.py.
 // Two on-wire formats for kernel traffic, auto-selected by payload
@@ -340,7 +340,7 @@
 
     // Universal reload signal. ANY agent can emit `{type:'reload_html'}`
     // on its own inbox and every page connected to it reloads. Used by
-    // html_agent.set_html and the canvas frame reload button. The WS
+    // an agent's set_html and the frontend's view reload control. The WS
     // proxy auto-watches the host agent on connect, so events on this
     // agent's inbox arrive without an explicit watch.
     on('reload_html', function () {
@@ -366,9 +366,9 @@
 
   // Load-time bootstrap: every page that has transport.js injected
   // gets a live WS + the universal `reload_html` listener, WITHOUT
-  // having to call fantastic_transport() itself. Plain html_agent
-  // panes (just operator HTML, no JS opt-in) reload on set_html / the
-  // canvas ⟳ button because of this. Pages that DO call the factory
-  // share the same singleton (memoized above).
+  // having to call fantastic_transport() itself. Plain HTML panes
+  // (just operator HTML, no JS opt-in) reload on set_html / the
+  // frontend's view reload control because of this. Pages that DO call
+  // the factory share the same singleton (memoized above).
   try { window.fantastic_transport(); } catch (e) {}
 })();

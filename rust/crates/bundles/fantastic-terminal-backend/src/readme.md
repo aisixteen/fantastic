@@ -22,17 +22,18 @@ looped and per-agent serialized so large pastes land whole and a
 bracketed-paste sequence can't interleave with another write.
 
 `paste_image` overrides `Bundle::handle_binary` for direct byte access:
-a browser-clipboard image arrives as a binary WS frame and skips the
-base64 round-trip; the bytes are written to a per-agent scratch file in
-the OS tempdir and the absolute path is typed into the PTY with a
-trailing space (mimics a drag-drop, doesn't submit).
+a clipboard image arrives as a binary frame and skips the base64
+round-trip; the bytes are written to a per-agent scratch file in the OS
+tempdir and the absolute path is typed into the PTY with a trailing
+space (mimics a drag-drop, doesn't submit). The backend can't reach a
+client's clipboard, so path injection bridges the paste.
 
 PTY output is decoded with a per-session incremental UTF-8 decoder
 (`encoding_rs::Decoder`), so a multi-byte char split across a read
 boundary is reassembled — no replacement-char (`<?>`) litter or column-
 shift line breaks on resize. Mirrors what node-pty does for VSCode.
 
-Events emitted to the **parent**'s inbox (the terminal_webapp UI watches it):
+Events emitted to this agent's **OWN** inbox (a client watches it):
 
 - `{type:"data", text:str}` — decoded output (per read chunk)
 - `{type:"exited", exit_code:i32}` — child died

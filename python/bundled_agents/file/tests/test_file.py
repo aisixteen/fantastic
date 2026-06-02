@@ -129,7 +129,7 @@ async def test_path_safety_rejects_escape(seeded_kernel, file_agent):
 
 async def test_readonly_refuses_write(seeded_kernel, file_agent):
     await seeded_kernel.send(
-        "core",
+        "fs_loader",
         {"type": "update_agent", "id": file_agent, "readonly": True},
     )
     r = await seeded_kernel.send(

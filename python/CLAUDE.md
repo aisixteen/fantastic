@@ -21,24 +21,27 @@ answers `{type:"reflect"}` — the universal discovery verb.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │         SUBSTRATE  (kernel/_agent.py + kernel/_kernel.py)                │
 │   Agent  — recursive node; .send / .emit / .create / .delete             │
-│   Kernel — tree-wide ctx (flat agents index, state subs, bundle cache)   │
+│   Kernel — tree-wide ctx (flat agents index, state stream, save/load)    │
 │   System verbs (create/delete/update/list_agents) baked into Agent.      │
+│   Persistence DECOUPLED — a loader agent owns the medium, not Agent.      │
 └────────────────────────┬─────────────────────────────────────────────────┘
                          │  agent ⇌ agent ⇌ agent (agent.send)
        ┌─────────────────┼─────────────────────────────┐
        ▼                 ▼                             ▼
-   ┌────────┐      ┌────────────┐              ┌────────────────┐
-   │ core   │      │ web        │              │ html_agent /   │
-   │ cli    │      │ (uvicorn)  │              │ python_runtime │
-   │ file   │      │ HTTP + WS  │              │ canvas / ...   │
-   │ ...    │      │ transport  │              │  (UI bundles)  │
-   └────────┘      └─────┬──────┘              └────────────────┘
+   ┌──────────┐    ┌────────────┐              ┌────────────────┐
+   │ fs_loader│    │ web        │              │ python_runtime │
+   │  (ROOT)  │    │ (uvicorn)  │              │ terminal · ai  │
+   │ cli·file │    │ HTTP + WS  │              │ runners · ...  │
+   └──────────┘    └─────┬──────┘              └────────────────┘
                          │
                          ▼ HTTP + WS frames (text + binary)
    ┌─────────────────────────────────────────────────────────────────────┐
-   │                            BROWSER                                  │
-   │  iframe ↔ iframe (BroadcastChannel "fantastic" — kernel-bypass)     │
-   │  fantastic_transport() injected on every served HTML                │
+   │                    BROWSER — FRONTEND KERNEL                         │
+   │  A pure peer (top-level `ts/`, `*.ts` bundles) that federates to the │
+   │  host over the SAME WS wire (web_ws). The VIEW + content agents live │
+   │  HERE (canvas compositor + its `*.ts` view/content bundles). Their   │
+   │  records persist back to host disk under                             │
+   │  `.fantastic/web/<session>/` via the frontend's `proxy_loader`.     │
    └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -47,6 +50,68 @@ LLM CLI) bootstraps from `.fantastic/readme.md` on disk, or from a single
 WS `kernel.reflect` round-trip (open `ws://host/<any-agent>/ws`, send a
 `call` frame with `target:"kernel", payload:{type:"reflect", readme:true}`).
 
+## Composition principle — NO architectural automation
+
+The system is built by **conscious operator decisions** (the LLM/human composing
+it). NO bundle auto-spawns children; NO agent acts autonomously. The **only
+autoagent is the loader** (persistence/hydration): the root `fs_loader` on disk +
+its peers (a host `web/fs_loader` for the frontend, the JS `proxy_loader`)
+mechanically save what the operator built and restore it. Everything else —
+composition, membership, wiring — is an explicit `create_agent` / `update_agent` /
+`delete_agent`. This is *why* binding is weak (agents reference peers by id, never
+couple), why setup is documented procedure (create a `web` agent, then create its
+`web_ws` / `web_rest` / `fs_loader` children), and why the host knows nothing of
+the frontend. Declared-config metas the substrate wires (not behavior): `alias`
+(reach an agent by a stable name), `root` (a loader serves a sub-namespace),
+`watch` (a loader only answers verbs), `children_dir` (the on-disk container dir
+name — default `agents`; set `host_agents` / `web_agents` for a self-describing
+layout). The JS kernel is the SAME kernel — same fields, same flexibility (its
+loader lays out the disk). When you reach for "X should automatically do Y,"
+stop: the operator does Y, consciously.
+
+## The substrate as a workflow medium (meta)
+
+What this system *is*, beyond "a tree of agents": a medium where **compute,
+inference, and memory are interchangeable units, addressed by id, wired from
+anywhere — across kernels.** Read it on the two-kernel example (host Python +
+browser JS, peers over one WS):
+
+- **Three unit kinds, one calling convention.** `python_runtime` (a background
+  compute job), an AI backend (one inference turn), and `yaml_state` (durable
+  memory) are all reached the same way: `send(<id>, {type, ...})`. A workflow step
+  written as code and the same step written as an LLM call are **substitutable** —
+  swap a `python_runtime.start` for an `ai.send` and the wiring is unchanged. This
+  is the point: anywhere you'd hand-write a classifier / decision / transform, you
+  can drop in an LLM call, and vice-versa.
+
+- **Routines orchestrate the whole substrate, from either kernel.** Out-of-process
+  code gets a kernel-mirroring **connector** that talks ONLY to its spawner, which
+  holds the live kernel and relays (child → spawner → kernel; never a direct host
+  dial — the no-bypass rule). A host `python_runtime` job's spawned code gets a
+  `kernel` object (send/emit/reflect/watch/on_message over a socketpair); a browser
+  view-agent's JS gets `fantastic` (the same surface over postMessage). Different
+  wire, one protocol — exactly like `web_ws` and the pipe are two transports of the
+  one envelope. So from EITHER side a routine reads memory anywhere, calls an AI,
+  spawns a job, pushes to a panel — by id, regardless of which kernel owns the
+  target. In-process `.tools` agents already hold the real `kernel`; the connector
+  exists only to give *out-of-process* code the same reach.
+
+- **Routing is emergent, not plumbed.** An AI worker is a streaming unit: it
+  receives a call, thinks (calling agents as tools), and streams `token`/`done` on
+  its own id. How its result reaches its addressee is the *model's* decision — the
+  per-call prompt names who listens (possibly many), the system prompt carries the
+  `send` signature, and a capable model routes its own output. No `reply_to`
+  primitive; 1:N falls out for free. A recursion guard (`_call_stack`, refused
+  before the lock) keeps AI→AI chains from deadlocking or running away.
+
+- **Weak binding everywhere.** Backends and views are weak peers by id — an AI
+  worker (or a PTY) runs headless with no view; a view attaches/detaches without
+  touching the backend. Bind by id + duck-typed verbs, never by concrete type.
+
+- **Capability emerges from self-description.** None of the above is special-cased:
+  it falls out of `send`/`reflect` + each agent's readme. An LLM given only the
+  readmes can weave the wiring itself — that's the test bar, not bespoke glue.
+
 ## Run
 
 ```bash
@@ -54,11 +119,14 @@ uv sync                                              # install workspace + bundl
 fantastic                                            # boot all + REPL (tty) + daemon (if web is persisted)
 fantastic <id> <verb> [k=v ...]                      # one-shot RPC
 fantastic reflect [<id>]                             # shorthand: <id> reflect (default: kernel)
-fantastic core create_agent handler_module=web.tools port=8888    # persist web record (first time)
+fantastic fs_loader create_agent handler_module=web.tools port=8888    # persist web record (first time)
 ```
 
-`main.py` composes the substrate: `Kernel() → Core(kernel, argv) →
-core.run()`. CLI dispatch lives in `kernel/_modes.py`:
+`main.py` bootstraps the substrate: `Kernel()` → `fs_loader.read_tree`
+reads `.fantastic` → `kernel.load(records)`. The ROOT agent IS an
+`fs_loader` (`id="fs_loader"`) — the persistence/hydration root that owns
+`.fantastic/`; a fresh dir seeds it. Then argv goes to `dispatch_argv`
+(`kernel/_modes.py`):
   - one-shot: `<id> <verb> [k=v]` / `reflect [<id>]` / `install` /
     `install-bundle`
   - long-running default: boots every persisted agent. If a `web`
@@ -70,39 +138,50 @@ Web composition is **explicit** — no `--port` flag. To make `fantastic`
 serve HTTP, persist a web agent first (one-shot create_agent or
 REPL `add web port=N`). Next invocation boots it as a daemon.
 
-`Core` decides whether to wire the stdout renderer (Cli) — ephemeral,
-never persisted.
+The bootstrap wires the stdout renderer (Cli) when stdin is a tty —
+ephemeral, never persisted.
 
 REPL example:
 
 ```
 fantastic> add file
-fantastic> add canvas_backend
-fantastic> add canvas_webapp upstream_id=<canvas_backend_id>
-fantastic> @core list_agents
+fantastic> add python_runtime
+fantastic> @fs_loader list_agents
 ```
+
+The view layer (canvas compositor, terminal/chat views, gl/html content
+agents) is the TS FRONTEND kernel in the repo's top-level `ts/` package —
+a federated peer over the WS bridge, NOT host agents (`*.ts` bundles, see
+`ts/SERVE.md`). The host knows nothing of the `ts/` bundles; frontend
+records persist back to host disk under `.fantastic/web/<session>/` via
+the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 
 ## Bundles (current set)
 
 | bundle | role |
 |---|---|
-| `core` | userland orchestrator agent at the root (`id="core"`); no handler_module (substrate handles dispatch). Composes the stdout renderer (Cli) when `stdin.isatty()`. System verbs (list_agents, create/update/delete_agent) are native to Agent class. |
+| `fs_loader` | the ROOT agent (`id="fs_loader"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). System verbs are native to Agent; the bootstrap wires Cli when `stdin.isatty()`. |
 | `cli` | singleton child of root; renders token/done/say/error events to stdout |
-| `web` | uvicorn HTTP host. Serves rendering only — `/` (root index from `templates/index.html`), `/<id>/` (agent's `render_html`), `/<id>/file/<path>` (read-verb file proxy), `transport.js`, favicon. Call surfaces (WS, REST) live in sibling sub-agents and mount via the duck-typed `get_routes` verb. |
+| `web` | uvicorn HTTP host. Serves rendering only — `/` (root index from `templates/index.html`), `/<id>/` (agent's `render_html`), `/<id>/file/<path>` (read-verb file proxy), favicon. Call surfaces (WS, REST) live in sibling sub-agents and mount via the duck-typed `get_routes` verb. The TS frontend kernel brings its own typed WS bridge (`ts/`) — no transport script is injected here. |
 | `web_ws` | WebSocket verb-invocation surface. Child of a `web` agent. Mounts `/<host_id>/ws` on its parent web's FastAPI app. Opt-in: `create_agent handler_module=web_ws.tools parent_id=<web>`. |
 | `web_rest` | REST diagnostic surface. Child of a `web` agent. Mounts `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON reply. Multiple instances coexist with different ids. Opt-in. |
 | `file` | filesystem-as-agent (`read`, `write`, `list`, `delete`, `rename`, `mkdir`) |
 | `scheduler` | recurring tasks; persistence routed through `file_agent_id` |
-| `python_runtime` | subprocess Python exec (`python -c <code>`); per-agent interrupt/stop |
-| `html_agent` | UI-as-record; `html_content` stored on agent.json, served at `/<id>/` |
-| `terminal/{terminal_backend, terminal_webapp}` | PTY shell + xterm UI. VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). |
+| `python_runtime` | async Python JOB spawner — `start` runs `python -u -c <code>` in the background (many in parallel), returns a `job_id` at once + streams `progress`/`job_done` events; `status`/`stop`/`interrupt`/`clear` by job_id over a RAM job table (`on_delete` kills the owner's jobs). No blocking run-and-wait. |
+| `yaml_state` | durable YAML key-value memory agent; mount anywhere (`mode=mem|data`); write-through sidecar (`state.yaml`) it owns directly |
+| `terminal_backend` | PTY shell backend (at `bundled_agents/terminal/`). VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). The xterm view (`terminal_view`) lives in the TS frontend kernel (`ts/`). |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache |
 | `ai/nvidia/nvidia_nim_backend` | NVIDIA NIM LLM agent (OpenAI-compatible); api_key sidecar via `file_agent_id`; rate-limit retry; same surface as ollama_backend |
-| `ai/ai_chat_webapp` | provider-agnostic chat UI; fronts any backend that answers `send`/`history`/`interrupt` |
-| `canvas/{canvas_backend, canvas_webapp}` | spatial UI host; Liquid-Glass-styled DOM iframes (`get_webapp`) layered with GL views (`get_gl_view`); explicit `add_agent` membership; pure-streaming lifecycle (no polling). Each GL view runs in its own `THREE.Group` container — live `set_gl_source` reload in place (`gl_source_changed`), no canvas refresh. Wheel zoom is horizon-anchored (pulls toward screen center, 2D + GL locked in sync) and smoothed (rAF-lerped toward a `targetZ`). |
-| `canvas/telemetry_pane` | live agent-vis GL view — water-floating sprites + sender→receiver neon wires + traveling pulses + last-10 messages pane; runs inside any canvas's WebGL scene |
+| `ai/anthropic/anthropic_backend` (`anthropic_backend.tools`) | Claude LLM agent — Anthropic Messages API (default model `claude-opus-4-8`); key from `ANTHROPIC_KEY`/`ANTHROPIC_API_KEY` (env / `.env`); per-client chat threads, FIFO lock, native tool-calls, menu cache; same surface as ollama_backend |
 | `kernel_bridge` | cross-kernel comms — **WS-only, asymmetric**. A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. |
+| `local_runner` (`local_runner.tools`) | local sub-`fantastic` lifecycle — `start`/`stop`/`restart`/`status`/`get_webapp` for one project dir; truth read from the project's `.fantastic/lock.json` (PID) + its web agent record (port) |
 | `ssh_runner` | remote `fantastic` lifecycle over SSH — start/stop/restart/status + local SSH tunnel for canvas iframing. Pure subprocess ssh; composes with `kernel_bridge` for messaging |
+
+**View bundles live in the FRONTEND kernel (`ts/`), not here.** The
+canvas compositor and its view/content agents are `*.ts` bundles that
+run in the browser and persist back via `proxy_loader` (see "Two
+kernels" in the root readme). The host holds only data/compute/transport
+bundles.
 
 Each bundle is a real Python package with its own `pyproject.toml`,
 declaring `[project.entry-points."fantastic.bundles"]`. `fantastic`
@@ -136,50 +215,46 @@ scanned at process start.
   readme.md; legacy `return_readme` honored). Verb signatures live in
   docstrings; `reflect` derives them. Discovery is one round-trip;
   transport/wire docs live in the root readme (`reflect readme=true`).
-- **`render_html`** — duck-typed presentation. Any agent that returns
-  `{html:str}` from `render_html` gets that body served at `/<id>/`
-  with `transport.js` auto-injected. html_agent stores its body on
-  the record; bundled webapps read from package resources fresh
-  per-request (edit-and-refresh dev loop).
-- **`get_webapp`** — duck-typed UI discovery. The canvas iframes any
-  agent that answers `get_webapp` with `{url, default_width,
-  default_height, title}`.
-- **`reload_html`** — universal page reload. transport.js subscribes
-  to it on every served page; any agent that emits `{type:"reload_html"}`
-  on its own inbox triggers `location.reload()` in connected tabs.
-  `set_html` and the canvas frame ⟳ button both go through it.
+- **`render_html`** — duck-typed presentation. Any agent returning
+  `{html:str}` from `render_html` can be rendered by a view. This is now
+  a FRONTEND pattern (a `*.ts` content agent holds the body in its
+  record); the host web still exposes a generic `/<id>/` route but ships no host
+  implementer. Bodies reach the kernel via the frontend's own typed WS
+  bridge (`ts/`) — no transport script injected.
+- **`get_webapp`** — duck-typed UI discovery. The TS canvas compositor
+  iframes any agent that answers `get_webapp` with `{url,
+  default_width, default_height, title}`.
+- **`reload_html`** — universal page reload. The TS frontend kernel
+  subscribes to it; any agent that emits `{type:"reload_html"}` on its
+  own inbox triggers a reload of the connected view. `set_html` and the
+  canvas frame ⟳ button both go through it.
 - **`file_agent_id`** — bundles that need persistence (ollama_backend,
   scheduler) carry an `file_agent_id` on
   their record. Failfast if unset (no implicit fallback).
-- **`delete_lock: true`** on a record refuses delete. core's
+- **`delete_lock: true`** on a record refuses delete. The root's
   `delete_agent` returns `{error, locked:true, id}` so LLM callers
   can detect it programmatically. Clear via `update_agent`.
 - **`on_delete` cascade hook** — substrate calls `await
   agent.on_delete()` depth-first during cascade-delete BEFORE
   detaching the record from `kernel.agents` and the parent's
-  `_children`. Default implementation: if the agent's `handler_module`
-  exposes `async def on_delete(agent)`, invoke it; then rmtree the
-  agent's directory (unless `ephemeral=True`). Bundles port their
-  teardown logic into this function — `terminal_backend.on_delete`
-  closes the PTY, `web.on_delete` drains uvicorn,
-  `kernel_bridge.on_delete` cancels the read loop + tunnel, runner
-  bundles call their own `_stop`.
+  `_children`. It tears down PROCESS state only: if the agent's
+  `handler_module` exposes `async def on_delete(agent)`, invoke it.
+  DISK cleanup is NOT here — the `removed` state event drives a loader
+  to rmtree the dir. Bundles port teardown into this function —
+  `terminal_backend.on_delete` closes the PTY, `web.on_delete` drains
+  uvicorn, `kernel_bridge.on_delete` cancels the read loop + tunnel,
+  runner bundles call their own `_stop`.
 - **`ephemeral` class flag** — `class Cli(Agent): ephemeral = True`
-  means the agent never persists to disk (no agent.json, no agents/
-  dir). Composition is per-process; reboots compose afresh based on
-  mode. Use for stateless renderers / debuggers / dispatchers.
+  means a loader skips it entirely (never written to disk; `save()`
+  omits it). Composition is per-process; reboots compose afresh based
+  on mode. Use for stateless renderers / debuggers / dispatchers.
 - **State-event `sender` + `summary`** — every `send`/`emit` state
   event carries `sender` (the dispatching agent's id, set via a
-  task-local contextvar around handler dispatch; webapp's HTTP/WS
-  proxy tags external traffic with the webapp's own id) and
+  task-local contextvar around handler dispatch; the host's WS/REST
+  surface tags external traffic with the surface agent's own id) and
   `summary` (a JSON-stringified, bytes-stripped, max-160-char view
-  of the payload). The telemetry pane uses both to draw
+  of the payload). A frontend telemetry view uses both to draw
   sender→receiver wires + a last-N message log.
-- **Browser bus** — `fantastic_transport().bus` is a
-  `BroadcastChannel("fantastic")` wrapper available on every served
-  page. Same envelope as kernel send, but **bypasses the kernel
-  entirely**. Use for high-frequency intra-iframe traffic (cursor,
-  drag, audio frames) where round-tripping the server adds nothing.
 - **Iframe URLs — never hardcode a host** — agents that return a URL
   from `get_webapp` use a path-relative form (`/<agent_id>/`) so the
   iframe inherits the canvas's `host:port` automatically. Wrappers
@@ -207,9 +282,10 @@ Open `ws://host/<any-agent>/ws` and send
 The reply carries:
 
 - `readme` — the root readme: every transport (in_process / in_prompt /
-  cli / ws / rest / binary-frame / browser-bus), the reflect surface,
-  the `kernel` alias, and the `.fantastic/lock.json` daemon rule. This
-  is where transport/wire docs live now (they left the reflect JSON).
+  cli / ws / rest / binary-frame), the reflect surface, the `kernel`
+  alias, the two-kernel (host + frontend) model, and the
+  `.fantastic/lock.json` daemon rule. This is where transport/wire docs
+  live now (they left the reflect JSON).
 - `tree` — the live agent tree (default `all`; `tree:"ids"` for a cheap
   id index).
 - `bundles` — with `bundles:"all"`, every installable bundle (what you
@@ -222,10 +298,11 @@ regression — it belongs in the root readme."
 
 ## Tests
 
-- **Unit** — `pytest -n auto` (`pytest-xdist`). 480+ tests, parallel,
+- **Unit** — `pytest -n auto` (`pytest-xdist`). 420+ tests, parallel,
   in-process. Each bundle's tests live in `bundled_agents/<bundle>/tests/`;
   kernel-level tests live in `tests/`. `conftest.py` at root exposes
-  `kernel`, `seeded_kernel`, `file_agent` fixtures.
+  `kernel`, `seeded_kernel`, `file_agent` fixtures (the root is an
+  `fs_loader`); `_testkit.py` adds `boot_root` / `persist` for disk tests.
 - **Selftests** — scope-tagged markdown specs. AI agents read them,
   drive the system at the user-facing surface (CLI, HTTP, WS, PTY,
   browser), and fill summary tables. Index + protocol at root
@@ -260,7 +337,7 @@ review, force-push surprise, polluted history) is high.
 - All async (`asyncio` throughout). `pytest-asyncio` with
   `asyncio_mode = "auto"`.
 - Agent IDs: `{bundle}_{hex6}` (e.g. `ollama_backend_b04b35`).
-  Singletons use the bundle name (`core`, `cli`).
+  Singletons use the bundle name (`fs_loader`, `cli`).
 - Every bundle's `tools.py` defines:
   - per-verb `async def _<name>(id, payload, kernel)` with a
     one-line docstring (auto-fed into reflect's `verbs` dict).
@@ -280,7 +357,7 @@ review, force-push surprise, polluted history) is high.
   schedules.json, history.jsonl), `lock.json`, `readme.md`.
   Wipe-and-rebuild safe.
 - Use the `file` agent (rooted at any path) for HTTP-served content:
-  `<img src="/<file_id>/file/imgs/foo.png">` works in any html_agent.
+  `<img src="/<file_id>/file/imgs/foo.png">` works in any html view.
 
 ## Path conventions
 
@@ -293,10 +370,18 @@ review, force-push surprise, polluted history) is high.
 
 ## What's NOT here (yet)
 
-These existed in an older codebase iteration; deferred or replaced:
+These existed in an older codebase iteration; deferred, replaced, or moved:
 
-- openai / anthropic / integrated AI bundles (only `ollama` ships).
-  Pattern: mirror `ollama_backend`. Recoverable from git history.
+- `core` — cut. The root IS the `fs_loader` agent now; there's no
+  separate userland-orchestrator class.
+- `canvas_backend` / `html_agent` / `gl_agent` — the spatial UI + view/
+  content agents are no longer HOST bundles; they moved to the FRONTEND
+  kernel (`ts/`, `*.ts`). See "Two kernels".
+- `telemetry_pane` — discarded entirely (a throwaway test agent; gone
+  from every runtime, not moved).
+- `openai` AI bundle — not shipped (`ollama` / `anthropic` /
+  `nvidia_nim` backends ship). Pattern: mirror `ollama_backend`.
+  Recoverable from git history.
 - `register_template` / `list_templates` — replaced by per-agent
   reflect (single source of truth).
 - `content_alias_file` registry — replaced by the URL convention

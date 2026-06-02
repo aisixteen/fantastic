@@ -15,3 +15,5 @@ tmp/
 
 # Claude Code harness state (scheduled tasks, etc.)
 .claude/
+
+.env

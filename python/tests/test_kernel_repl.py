@@ -60,7 +60,7 @@ def test_parse_at_free_text_send():
 def test_find_bundle_module_resolves_via_entry_points():
     assert _find_bundle_module("cli") == "cli.tools"
     assert _find_bundle_module("terminal_backend") == "terminal_backend.tools"
-    assert _find_bundle_module("ai_chat_webapp") == "ai_chat_webapp.tools"
+    assert _find_bundle_module("yaml_state") == "yaml_state.tools"
 
 
 def test_find_bundle_module_returns_none_for_missing():

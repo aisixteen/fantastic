@@ -115,13 +115,13 @@ async def test_subscriber_receives_emit_events(seeded_kernel):
 async def test_subscriber_sees_real_agent_watcher_fanout(seeded_kernel):
     """A real agent that watches B: when send hits B, tap fires for
     B AND for A's mirrored put. Both are real agents."""
-    seeded_kernel.watch("cli", "core")  # core watches cli
+    seeded_kernel.watch("cli", "fs_loader")  # fs_loader watches cli
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     await seeded_kernel.send("cli", {"type": "noop"})
     targets = {e["agent_id"] for e in events if e["kind"] == "send"}
     assert "cli" in targets
-    assert "core" in targets, (
+    assert "fs_loader" in targets, (
         f"real-agent watcher's mirrored fanout should produce its own event; got {events}"
     )
 
@@ -181,7 +181,7 @@ async def test_callback_exception_does_not_break_fanout(seeded_kernel):
 async def test_state_snapshot_returns_all_agents(seeded_kernel):
     snap = seeded_kernel.state_snapshot()
     ids = {a["agent_id"] for a in snap}
-    assert "cli" in ids and "core" in ids
+    assert "cli" in ids and "fs_loader" in ids
     for a in snap:
         assert "name" in a and "backlog" in a
         assert isinstance(a["backlog"], int)

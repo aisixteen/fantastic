@@ -100,15 +100,25 @@ struct HTTPServerTests {
         #expect(http.statusCode == 404)
     }
 
-    @Test func servesAgentRenderHtml() async throws {
+    @Test func servesFileAgentContent() async throws {
+        // Post-decoupling the host renders no HTML itself; UI is served
+        // statically from a `file` agent (the same recipe that serves the
+        // TS frontend's dist/). Prove the generic /<id>/file/<path> route
+        // returns a file agent's bytes.
         let kernel = try await startKernelInMemory(portHint: 0)
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "fantastic-serve-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try "<h1>Hello</h1>".write(
+            to: tmp.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
         _ = await kernel.send(
             AgentId("core"),
             .object([
                 "type": .string("create_agent"),
-                "handler_module": .string("html_agent.tools"),
-                "id": .string("hi"),
-                "html": .string("<h1>Hello</h1>"),
+                "handler_module": .string("file.tools"),
+                "id": .string("assets"),
+                "root": .string(tmp.path),
             ]))
         _ = await kernel.send(
             AgentId("web"), .object(["type": .string("boot")]))
@@ -119,14 +129,12 @@ struct HTTPServerTests {
             }
         }
         let port = kernel.httpPort()
-        let url = URL(string: "http://127.0.0.1:\(port)/hi/")!
+        let url = URL(string: "http://127.0.0.1:\(port)/assets/file/index.html")!
         let (data, response) = try await URLSession.shared.data(from: url)
         let http = try #require(response as? HTTPURLResponse)
         #expect(http.statusCode == 200)
         let body = String(data: data, encoding: .utf8) ?? ""
         #expect(body.contains("<h1>Hello</h1>"))
-        // transport.js auto-injected at the Python-matching URL.
-        #expect(body.contains("/_fantastic/transport.js"))
     }
 
     @Test func webRestPostDispatchesBodyVerb() async throws {

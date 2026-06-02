@@ -13,7 +13,7 @@ cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
-uv run --active fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
 echo "WEB_ID=$WEB_ID"
 # Spawn web_ws as a child of web. Call create_agent on the web agent
@@ -32,20 +32,20 @@ rm -rf .fantastic /tmp/serve.log
 
 ## Tests
 
-### Test 1: WS handshake to /core/ws succeeds
+### Test 1: WS handshake to /fs_loader/ws succeeds
 
 ```bash
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
-        await ws.send(json.dumps({'type':'call','target':'core','payload':{'type':'reflect'},'id':'1'}))
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
+        await ws.send(json.dumps({'type':'call','target':'fs_loader','payload':{'type':'reflect'},'id':'1'}))
         for _ in range(5):
             m = json.loads(await ws.recv())
             if m.get('id')=='1' and m.get('type')=='reply':
                 d = m['data']
                 # Uniform reflect: identity + tree, no legacy primer keys.
-                ok = d.get('id') == 'core' and 'tree' in d and 'transports' not in d
+                ok = d.get('id') == 'fs_loader' and 'tree' in d and 'transports' not in d
                 print('PASS' if ok else f'FAIL keys={list(d)}'); return
 asyncio.run(main())
 "
@@ -59,7 +59,7 @@ mounted; check `fantastic <WEB_ID> reflect` for `surfaces` listing.
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
         await ws.send(json.dumps({'type':'call','target':'$WEB_ID','payload':{'type':'reflect'},'id':'1'}))
         while True:
             m = json.loads(await ws.recv())
@@ -79,7 +79,7 @@ WSID=$(ls .fantastic/agents/$WEB_ID/agents 2>/dev/null | grep '^web_ws_' | head 
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
         await ws.send(json.dumps({'type':'call','target':'$WSID','payload':{'type':'reflect'},'id':'1'}))
         while True:
             m = json.loads(await ws.recv())
@@ -91,15 +91,15 @@ asyncio.run(main())
 "
 ```
 
-### Test 4: delete web_ws → /core/ws stops handshaking
+### Test 4: delete web_ws → /fs_loader/ws stops handshaking
 
 ```bash
 WSID=$(ls .fantastic/agents/$WEB_ID/agents 2>/dev/null | grep '^web_ws_' | head -1)
 uv run --active python -c "
 import asyncio, json, websockets
 async def main():
-    async with websockets.connect('ws://localhost:$PORT/core/ws') as ws:
-        await ws.send(json.dumps({'type':'call','target':'core','payload':{'type':'delete_agent','id':'$WSID'},'id':'1'}))
+    async with websockets.connect('ws://localhost:$PORT/fs_loader/ws') as ws:
+        await ws.send(json.dumps({'type':'call','target':'fs_loader','payload':{'type':'delete_agent','id':'$WSID'},'id':'1'}))
         while True:
             m = json.loads(await ws.recv())
             if m.get('id')=='1' and m.get('type')=='reply': break
@@ -110,7 +110,7 @@ uv run --active python -c "
 import asyncio, websockets
 async def main():
     try:
-        await websockets.connect('ws://localhost:$PORT/core/ws')
+        await websockets.connect('ws://localhost:$PORT/fs_loader/ws')
         print('FAIL: WS still open after web_ws delete')
     except Exception:
         print('PASS')

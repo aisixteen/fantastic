@@ -33,7 +33,7 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18911
 pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
-uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active python fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
 uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
 uv run --active python fantastic > /tmp/s.log 2>&1 &
@@ -68,7 +68,7 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 ### Test 1: send without file_agent_id → failfast
 
 ```bash
-OB=$(call core '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OB=$(call fs_loader '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $OB '{"type":"send","text":"hi"}'
 ```
 Expected: `{"error":"ollama_backend: file_agent_id required"}`.
@@ -76,8 +76,8 @@ Expected: `{"error":"ollama_backend: file_agent_id required"}`.
 ### Test 2: configure file_agent_id, reflect shows it
 
 ```bash
-FA=$(call core '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call core "{\"type\":\"update_agent\",\"id\":\"$OB\",\"file_agent_id\":\"$FA\"}"
+FA=$(call fs_loader '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+call fs_loader "{\"type\":\"update_agent\",\"id\":\"$OB\",\"file_agent_id\":\"$FA\"}"
 call $OB '{"type":"reflect"}' | python -m json.tool | grep -F "\"file_agent_id\": \"$FA\""
 ```
 Expected: matches.
@@ -103,7 +103,7 @@ Expected: messages ≥ 2; last message contains "ok" (case-insensitive).
 ```bash
 call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
 ```
-Expected: model emits a tool_call to `core` with `list_agents`, reads
+Expected: model emits a tool_call to `fs_loader` with `list_agents`, reads
 the reply, summarizes. Final answer mentions a number.
 Regression signal: model just says "I cannot check" without emitting
 tool_calls → either model lacks tool support or SEND_TOOL definition broke.
@@ -175,7 +175,7 @@ async def main():
         await ws.send(json.dumps({'type':'watch','src':'$OB'}))
         await ws.send(json.dumps({
             'type':'call','target':'$OB',
-            'payload':{'type':'send','text':'use the send tool to call list_agents on core, then summarize in one sentence','client_id':'alice'},
+            'payload':{'type':'send','text':'use the send tool to call list_agents on fs_loader, then summarize in one sentence','client_id':'alice'},
             'id':'1',
         }))
         phases = []

@@ -22,7 +22,7 @@ _PRIMER_KEYS_GONE = (
 async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
     """Root reflect is the uniform identity — no special primer shape."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert r["id"] == "core"
+    assert r["id"] == "fs_loader"
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["parent_id"] is None
     for k in _PRIMER_KEYS_GONE:
@@ -30,9 +30,9 @@ async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
 
 
 async def test_kernel_alias_equals_core(seeded_kernel):
-    """`kernel` is an alias for the root; reflecting it == reflecting core."""
+    """`kernel` is an alias for the root; reflecting it == reflecting fs_loader."""
     via_alias = await seeded_kernel.send("kernel", {"type": "reflect"})
-    via_id = await seeded_kernel.send("core", {"type": "reflect"})
+    via_id = await seeded_kernel.send("fs_loader", {"type": "reflect"})
     assert via_alias == via_id
 
 
@@ -43,7 +43,7 @@ async def test_reflect_tree_all_default(seeded_kernel):
     """Default tree=all: nested distilled subtree rooted at the agent."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
     tree = r["tree"]
-    assert tree["id"] == "core"
+    assert tree["id"] == "fs_loader"
     child_ids = {c["id"] for c in tree.get("children", [])}
     assert "cli" in child_ids
 
@@ -52,7 +52,7 @@ async def test_reflect_tree_ids(seeded_kernel):
     """tree=ids: a flat descendant-id list (self first)."""
     r = await seeded_kernel.send("kernel", {"type": "reflect", "tree": "ids"})
     assert isinstance(r["tree"], list)
-    assert r["tree"][0] == "core"
+    assert r["tree"][0] == "fs_loader"
     assert "cli" in r["tree"]
 
 
@@ -116,7 +116,7 @@ async def test_reflect_description_surfaces_top_and_tree(seeded_kernel):
     """description set at create surfaces both at top-level reflect of the
     agent AND in its node inside a tree=all walk of the parent."""
     rec = await seeded_kernel.send(
-        "core",
+        "fs_loader",
         {
             "type": "create_agent",
             "handler_module": "file.tools",

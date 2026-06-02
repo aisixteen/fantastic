@@ -65,7 +65,7 @@ PY
 }
 
 # Provision the runner
-RID=$(call core "{
+RID=$(call fs_loader "{
   \"type\":\"create_agent\",
   \"handler_module\":\"ssh_runner.tools\",
   \"display_name\":\"$HOST\",
@@ -93,7 +93,7 @@ uv run --active python - "$LOCAL_PORT" <<'PY'
 import asyncio, json, sys, websockets
 port = sys.argv[1]
 async def main():
-  async with websockets.connect(f"ws://localhost:{port}/core/ws") as ws:
+  async with websockets.connect(f"ws://localhost:{port}/fs_loader/ws") as ws:
     await ws.send(json.dumps({"type":"call","target":"kernel","payload":{"type":"reflect"},"id":"1"}))
     while True:
       m = json.loads(await ws.recv())
@@ -114,7 +114,7 @@ call $RID '{"type":"stop"}' | python3 -m json.tool
 
 # Cleanup — cascade-delete fires the on_delete hook which stops the
 # tunnel + remote serve.
-call core "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"
+call fs_loader "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"
 kill -9 $SPID
 rm -rf /tmp/sr_test /tmp/sr.log
 ```
@@ -122,7 +122,7 @@ Expected:
 - `start`: `{started: true, remote_pid: <int>, tunnel_pid: <int>}`
 - `status` after start: all four flags true (`tunnel_alive`,
   `remote_alive`, `ws_ok`, `remote_pid`)
-- WS round-trip to `localhost:$LOCAL_PORT/core/ws` returns the
+- WS round-trip to `localhost:$LOCAL_PORT/fs_loader/ws` returns the
   remote kernel's reflect (id + tree)
 - `stop`: tunnel + remote process gone (`status` flags all false)
 

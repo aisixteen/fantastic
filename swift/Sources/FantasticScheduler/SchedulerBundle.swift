@@ -19,6 +19,13 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     private let lock = NSLock()
     private var timers: [String: DispatchSourceTimer] = [:]
 
+    public var readme: String? {
+        """
+        scheduler — recurring tasks as an agent.
+        Verbs: schedule, cancel, list. Each fires `kernel.send(target, payload)` on its interval.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

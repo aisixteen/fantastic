@@ -4,7 +4,13 @@
 > requires: `uv sync`; system Python on PATH
 > out-of-scope: long-running REPL state, sandboxing
 
-Subprocess Python exec — `python -c <code>`, stateless per-call.
+Async Python JOB spawner — `start` runs `python -u -c <code>` in the background,
+returns a `job_id` at once, streams `progress`/`job_done` events; `status`/`stop`/
+`interrupt` by job id. NOTE: a job lives only as long as the kernel process — a
+one-shot `fantastic call` exits right after returning, so the CLI can only check
+the verb SURFACE + error handling here. The full async lifecycle (start →
+progress events → done/stop, parallel jobs) needs a LIVE kernel and is covered by
+the in-process pytest suite (`tests/test_python_runtime.py`).
 
 ## Pre-flight
 
@@ -15,76 +21,40 @@ rm -rf .fantastic
 
 ## Tests
 
-### Test 1: reflect lists verbs + 0 in_flight
+### Test 1: reflect lists the job verbs + 0 running
 
 ```bash
-PR=$(uv run --active fantastic call core create_agent handler_module=python_runtime.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+PR=$(uv run --active fantastic call fs_loader create_agent handler_module=python_runtime.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 echo "PR=$PR"
 uv run --active fantastic call $PR reflect | python -c "
 import json, sys
 d = json.loads(sys.stdin.read(), strict=False)
-ok = d['in_flight'] == 0 and 'exec' in d['verbs'] and 'interrupt' in d['verbs']
+need = {'start','status','stop','interrupt','clear','reflect','boot'}
+ok = d['running'] == 0 and need <= set(d['verbs']) and 'job_done' in d['emits']
 print('PASS' if ok else f'FAIL d={d}')
 "
 ```
 
-### Test 2: exec print
+### Test 2: start returns a job_id (non-blocking)
 
 ```bash
-uv run --active fantastic call $PR exec code='print(2*21)' | python -c "
+uv run --active fantastic call $PR start code='print(2*21)' | python -c "
 import json, sys
 d = json.loads(sys.stdin.read(), strict=False)
-ok = '42' in d['stdout'] and d['exit_code'] == 0 and not d['timed_out']
+ok = d.get('status') == 'running' and bool(d.get('job_id'))
 print('PASS' if ok else f'FAIL d={d}')
 "
 ```
+(The job's result + progress stream on a LIVE kernel — see pytest. A one-shot
+exits before the pump runs.)
 
-### Test 3: exec captures stderr + non-zero exit
-
-```bash
-uv run --active fantastic call $PR exec code='import sys;sys.stderr.write("oops");sys.exit(7)' | python -c "
-import json, sys
-d = json.loads(sys.stdin.read(), strict=False)
-ok = 'oops' in d['stderr'] and d['exit_code'] == 7
-print('PASS' if ok else f'FAIL d={d}')
-"
-```
-
-### Test 4: exec timeout fires fast
+### Test 3: start rejects empty code
 
 ```bash
-START=$(python -c "import time;print(time.time())")
-uv run --active fantastic call $PR exec code='import time;time.sleep(60)' timeout=0.4 | python -c "
-import json, sys
-d = json.loads(sys.stdin.read(), strict=False)
-print('PASS' if d['timed_out'] and d['exit_code'] != 0 else f'FAIL d={d}')
-"
-END=$(python -c "import time;print(time.time())")
-ELAPSED=$(python -c "print(f'{$END-$START:.2f}')")
-echo "  elapsed: ${ELAPSED}s"
-```
-Expected: `PASS` and elapsed < 3s.
-
-### Test 5: exec respects cwd from agent record
-
-```bash
-mkdir -p /tmp/pr_cwd
-uv run --active fantastic call core update_agent id=$PR cwd=/tmp/pr_cwd >/dev/null
-uv run --active fantastic call $PR exec code='import os;print(os.getcwd())' | python -c "
-import json, sys
-d = json.loads(sys.stdin.read(), strict=False)
-print('PASS' if '/tmp/pr_cwd' in d['stdout'] else f'FAIL stdout={d.get(\"stdout\")!r}')
-"
-rmdir /tmp/pr_cwd
+uv run --active fantastic call $PR start code='' | grep -qF "code (str) required" && echo "PASS" || echo "FAIL"
 ```
 
-### Test 6: exec rejects empty code
-
-```bash
-uv run --active fantastic call $PR exec code='' | grep -qF "code (str) required" && echo "PASS" || echo "FAIL"
-```
-
-### Test 7: unknown verb errors
+### Test 4: unknown verb errors
 
 ```bash
 uv run --active fantastic call $PR garbage | grep -qF "unknown type" && echo "PASS" || echo "FAIL"
@@ -100,10 +70,8 @@ rm -rf .fantastic
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | reflect lists verbs + in_flight=0 | |
-| 2 | exec print → stdout 42 | |
-| 3 | exec captures stderr + exit_code | |
-| 4 | exec timeout fires <3s | |
-| 5 | exec respects record cwd | |
-| 6 | exec rejects empty code | |
-| 7 | unknown verb errors | |
+| 1 | reflect lists start/status/stop/… + running=0 | |
+| 2 | start returns a job_id (non-blocking) | |
+| 3 | start rejects empty code | |
+| 4 | unknown verb errors | |
+| — | full async lifecycle (start→progress→done/stop, parallel) | pytest |

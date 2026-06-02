@@ -50,12 +50,12 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
         methods=["POST"],
     )
     with TestClient(app) as c:
-        r = c.post("/rest_xyz/core", json={"type": "reflect"})
+        r = c.post("/rest_xyz/fs_loader", json={"type": "reflect"})
         assert r.status_code == 200
         body = r.json()
         # Root's uniform reflect comes back — id + tree (default all).
-        assert body["id"] == "core"
-        assert body["tree"]["id"] == "core"
+        assert body["id"] == "fs_loader"
+        assert body["tree"]["id"] == "fs_loader"
 
 
 def test_post_endpoint_rejects_non_object_body(seeded_kernel):
@@ -66,7 +66,7 @@ def test_post_endpoint_rejects_non_object_body(seeded_kernel):
         methods=["POST"],
     )
     with TestClient(app) as c:
-        r = c.post("/rest_xyz/core", json=[1, 2, 3])
+        r = c.post("/rest_xyz/fs_loader", json=[1, 2, 3])
         assert r.status_code == 400
         assert "JSON object" in r.json()["error"]
 
@@ -80,7 +80,7 @@ def test_post_endpoint_rejects_bad_json(seeded_kernel):
     )
     with TestClient(app) as c:
         r = c.post(
-            "/rest_xyz/core",
+            "/rest_xyz/fs_loader",
             content=b"not json {{{",
             headers={"content-type": "application/json"},
         )
@@ -103,8 +103,8 @@ def test_get_reflect_root_returns_tree(seeded_kernel):
         r = c.get("/rest_xyz/_reflect")
         assert r.status_code == 200
         body = r.json()
-        assert body["id"] == "core"
-        assert body["tree"]["id"] == "core"
+        assert body["id"] == "fs_loader"
+        assert body["tree"]["id"] == "fs_loader"
         assert "transports" not in body
         # opt-in catalog via the bundles tier
         cat = c.get("/rest_xyz/_reflect?bundles=all").json()
@@ -120,11 +120,11 @@ def test_get_reflect_target_returns_agent_reflect(seeded_kernel):
         methods=["GET"],
     )
     with TestClient(app) as c:
-        r = c.get("/rest_xyz/_reflect/core")
+        r = c.get("/rest_xyz/_reflect/fs_loader")
         assert r.status_code == 200
         body = r.json()
-        assert body["id"] == "core"
-        assert body["tree"]["id"] == "core"
+        assert body["id"] == "fs_loader"
+        assert body["tree"]["id"] == "fs_loader"
 
 
 def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):
@@ -155,10 +155,10 @@ def test_get_reflect_readme_query_flag(seeded_kernel):
     )
     with TestClient(app) as c:
         # Without the flag: no readme key.
-        plain = c.get("/rest_xyz/_reflect/core").json()
+        plain = c.get("/rest_xyz/_reflect/fs_loader").json()
         assert "readme" not in plain
-        # With ?readme=1: readme key present (core has a seeded readme).
-        withr = c.get("/rest_xyz/_reflect/core?readme=1").json()
+        # With ?readme=1: readme key present (fs_loader has a seeded readme).
+        withr = c.get("/rest_xyz/_reflect/fs_loader?readme=1").json()
         assert "readme" in withr
         assert isinstance(withr["readme"], str)
         assert "Fantastic kernel" in withr["readme"]

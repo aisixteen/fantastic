@@ -2,8 +2,8 @@
 
 Each agent represents one project on one remote host. Verbs exec
 `ssh` as a subprocess to control the remote kernel and maintain a
-local SSH tunnel so the browser / canvas iframe can reach the remote
-webapp at `http://localhost:<local_port>/`.
+local SSH tunnel that exposes the remote daemon's HTTP port on a
+local address, reachable at `http://localhost:<local_port>/`.
 
 Pure subprocess SSH (no paramiko / russh). Authentication is whatever
 `ssh <host>` works as in the user's shell — keys, ssh-agent, and

@@ -50,4 +50,8 @@ extend-exclude = [
     # `LOD`, xterm minified two-letter symbols). The Swift copy is already
     # excluded above; the Rust kernel restoration brought the same files in.
     "rust/crates/bundles/fantastic-web/src/assets/",
+    # The TS frontend kernel's own copies of those vendored bundles
+    # (Three.js `LOD`, xterm's minified `diposable`/`Sur`, …) — the
+    # originals the swift/rust copies above mirror.
+    "ts/src/vendor/",
 ]

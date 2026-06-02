@@ -21,7 +21,7 @@ rm -rf /tmp/ys_test && mkdir -p /tmp/ys_test && cd /tmp/ys_test
 ### Test 1: set + read round-trip
 
 ```bash
-YS=$(fantastic core create_agent handler_module=yaml_state.tools mode=mem | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+YS=$(fantastic fs_loader create_agent handler_module=yaml_state.tools mode=mem | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $YS set key=user.name value=Ada
 fantastic $YS read key=user.name | python -m json.tool | grep -F '"value": "Ada"'
 ```
@@ -76,7 +76,7 @@ Expected: store replaced. `replace doc={}` clears it.
 
 ```bash
 fantastic $YS reflect | python -c "import json,sys;d=json.load(sys.stdin);print(d['mode'], 'durable memory' in d['sentence'])" | grep -F 'mem True'
-DS=$(fantastic core create_agent handler_module=yaml_state.tools mode=data | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+DS=$(fantastic fs_loader create_agent handler_module=yaml_state.tools mode=data | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $DS reflect | python -c "import json,sys;d=json.load(sys.stdin);print(d['mode'], 'scratch-state' in d['sentence'])" | grep -F 'data True'
 ```
 Expected: `mem` agent says "durable memory"; `data` agent says "scratch-state".
@@ -84,7 +84,7 @@ Expected: `mem` agent says "durable memory"; `data` agent says "scratch-state".
 ### Test 9: cascade-delete removes the agent AND its YAML file
 
 ```bash
-fantastic core delete_agent id=$YS
+fantastic fs_loader delete_agent id=$YS
 test ! -d /tmp/ys_test/.fantastic/agents/$YS && echo OK
 ```
 Expected: `OK` — the substrate cascade removed the agent dir (and `state.yaml`).

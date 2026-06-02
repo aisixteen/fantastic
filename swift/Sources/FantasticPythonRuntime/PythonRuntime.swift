@@ -17,6 +17,14 @@
         public let name = "python_runtime"
         public init() {}
 
+        public var readme: String? {
+            """
+            python_runtime — subprocess Python exec. Each `exec` is its own \
+            process (`python3 -c <code>`), stateless across calls.
+            Verbs: reflect, exec (code), interrupt, stop, boot.
+            """
+        }
+
         public func handle(
             agentId: AgentId,
             payload: JSON,

@@ -30,6 +30,17 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
+          # Scope analysis to first-party source: skip vendored third-party
+          # bundles (Three.js / xterm), the legacy transport.js copies, and
+          # the browser-driving integration test harness (it constructs eval
+          # strings by design). Mirrors the typos.toml vendored-asset excludes.
+          config: |
+            paths-ignore:
+              - '**/vendor/**'
+              - '**/transport.js'
+              - swift/Sources/FantasticWeb/Resources
+              - rust/crates/bundles/fantastic-web/src/assets
+              - integration_tests
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3

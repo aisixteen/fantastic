@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 
-from core import Core
-from kernel import INBOX_BOUND, Kernel
+from _testkit import boot_root, persist
+from kernel import INBOX_BOUND
 
 
 def test_create_assigns_id_with_bundle_prefix(kernel):
@@ -21,6 +21,9 @@ def test_create_assigns_id_with_bundle_prefix(kernel):
 
 def test_create_persists_to_disk(kernel, tmp_path):
     rec = kernel.create("file.tools", model="gemma4")
+    # Agent itself never writes; the loader does. persist() is a
+    # synchronous full flush (mirrors the live debounced flush).
+    persist(kernel)
     f = tmp_path / ".fantastic" / "agents" / rec["id"] / "agent.json"
     assert f.exists()
     on_disk = json.loads(f.read_text())
@@ -59,12 +62,15 @@ def test_update_returns_none_for_missing(kernel):
     assert kernel.update("missing", x=1) is None
 
 
-async def test_delete_removes(kernel, tmp_path):
+async def test_delete_removes(kernel):
+    """Cascade-delete detaches the record from the live tree. Disk
+    cleanup (rmtree) is the loader's job via the `removed` event —
+    covered in the fs_loader tests."""
     kernel.create("file.tools", id="del_me")
     r = await kernel.delete("del_me")
     assert r["deleted"] is True
     assert kernel.get("del_me") is None
-    assert not (tmp_path / ".fantastic" / "agents" / "del_me").exists()
+    assert "del_me" not in kernel.ctx.agents
 
 
 async def test_delete_refuses_locked(kernel):
@@ -82,21 +88,22 @@ def test_list_returns_all_records(kernel):
     kernel.create("file.tools", id="a")
     kernel.create("file.tools", id="b")
     ids = {a["id"] for a in kernel.list()}
-    # Root is id "core" — included in flat list along with its children.
+    # Root is id "fs_loader" — included in flat list along with its children.
     assert {"a", "b"}.issubset(ids)
-    assert "core" in ids
+    assert "fs_loader" in ids
 
 
 def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
-    """Reboot: bootstrap a fresh root in the same dir; agents that
-    were persisted from the previous root rehydrate via _load_children
-    recursively. Same ids, same parent-child links."""
+    """Reboot: bootstrap a fresh root in the same dir; agents the loader
+    persisted from the previous root rehydrate via `read_tree` +
+    `kernel.load` recursively. Same ids, same parent-child links."""
     monkeypatch.chdir(tmp_path)
-    k1 = Core(Kernel(), argv=[])
+    k1 = boot_root()
     k1.create("file.tools", id="persisted", x=42)
+    persist(k1)
     # Simulate restart — drop k1, bootstrap again from same dir.
     del k1
-    k2 = Core(Kernel(), argv=[])
+    k2 = boot_root()
     rec = k2.get("persisted")
     assert rec is not None
     assert rec["x"] == 42
@@ -104,13 +111,18 @@ def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
 
 def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # Corrupted file under root's agents/ dir.
+    # Seed a real tree first, then corrupt a sibling under agents/.
+    k1 = boot_root()
+    k1.create("file.tools", id="good")
+    persist(k1)
+    del k1
     bad_dir = tmp_path / ".fantastic" / "agents" / "broken"
     bad_dir.mkdir(parents=True)
     (bad_dir / "agent.json").write_text("{NOT_JSON")
-    # Should not raise.
-    k = Core(Kernel(), argv=[])
+    # Should not raise; the corrupt sibling is skipped, the rest loads.
+    k = boot_root()
     assert k.get("broken") is None
+    assert k.get("good") is not None
 
 
 def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsys):
@@ -126,7 +138,12 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
         [kernel] skipping agent <id>: bundle <module> not installed in this runtime
     """
     monkeypatch.chdir(tmp_path)
-    # Plant a ghost agent: handler_module points at a bundle not installed here.
+    # Seed a real agent + persist, then plant a ghost: a handler_module
+    # pointing at a bundle not installed here.
+    k = boot_root()
+    k.create("file.tools", id="real_agent", x=42)
+    persist(k)
+    del k
     ghost = tmp_path / ".fantastic" / "agents" / "ghost_42"
     ghost.mkdir(parents=True)
     (ghost / "agent.json").write_text(
@@ -134,18 +151,13 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
             {
                 "id": "ghost_42",
                 "handler_module": "ghost_bundle_that_does_not_exist.tools",
-                "parent_id": "core",
+                "parent_id": "fs_loader",
             }
         )
     )
-    # Also plant a real agent alongside so we verify the rest of the
-    # tree still loads.
-    k = Core(Kernel(), argv=[])
-    k.create("file.tools", id="real_agent", x=42)
 
-    # Drop and restart from the same dir.
-    del k
-    k2 = Core(Kernel(), argv=[])
+    # Restart from the same dir.
+    k2 = boot_root()
 
     # Ghost was skipped — not in the agent map.
     assert k2.get("ghost_42") is None
@@ -163,16 +175,16 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
 
 async def test_reflect_kernel_returns_uniform_identity(seeded_kernel):
     """`send("kernel", {reflect})` returns the root's uniform identity +
-    tree (default all). The alias "kernel" and the real id "core" give
+    tree (default all). The alias "kernel" and the real id "fs_loader" give
     the same reply. Old primer keys (transports etc.) are gone — they
     live in the root readme now."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert r["id"] == "core"
+    assert r["id"] == "fs_loader"
     assert r["sentence"].startswith("Fantastic kernel")
-    assert r["tree"]["id"] == "core"
+    assert r["tree"]["id"] == "fs_loader"
     assert "transports" not in r
     assert "available_bundles" not in r
-    assert r == await seeded_kernel.send("core", {"type": "reflect"})
+    assert r == await seeded_kernel.send("fs_loader", {"type": "reflect"})
 
 
 async def test_inbox_bounded_drops_oldest(kernel):

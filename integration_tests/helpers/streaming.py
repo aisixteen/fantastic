@@ -23,24 +23,33 @@ from .ws import ws_emit, ws_session
 
 
 async def assert_watch_remote_streams(
-    port_a: int, port_b: int, *, bridge_id: str = "bridge", timeout: float = 8.0
+    port_a: int,
+    port_b: int,
+    *,
+    bridge_id: str = "bridge",
+    server_root: str = "core",
+    timeout: float = 8.0,
 ) -> None:
     """Drive + assert a full watch_remote round-trip. Raises
-    AssertionError (or asyncio.TimeoutError) on failure."""
+    AssertionError (or asyncio.TimeoutError) on failure.
+
+    `server_root` is B's LITERAL root agent id — `watch`/`emit` do a
+    literal id lookup (no `kernel` alias), so this must be the real
+    root (`fs_loader` for python, `core` for rust/swift)."""
     nonce = uuid.uuid4().hex[:12]
 
     async with ws_session(port_a, bridge_id) as sess:
-        # Subscribe to B.core via the bridge.
-        corr = await sess.send_call("watch_remote", target="core")
+        # Subscribe to B's root via the bridge.
+        corr = await sess.send_call("watch_remote", target=server_root)
         reply = await sess.await_reply(corr)
         assert reply.get("ok") is True, f"watch_remote failed: {reply}"
-        assert reply.get("watching") == "core"
+        assert reply.get("watching") == server_root
 
         # Let B register the watch before emitting.
         await asyncio.sleep(0.4)
 
-        # Trigger an emit on B's core carrying our nonce.
-        await ws_emit(port_b, "core", type="stream_probe", nonce=nonce)
+        # Trigger an emit on B's root carrying our nonce.
+        await ws_emit(port_b, server_root, type="stream_probe", nonce=nonce)
 
         async def _await_probe():
             async for evt in sess.events():

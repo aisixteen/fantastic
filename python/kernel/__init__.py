@@ -2,16 +2,17 @@
 
 The substrate has two types:
   - `Agent` — recursive node in the kernel tree. Every entity is an
-    Agent (or an Agent subclass like `Core` / `Cli`). Some have
-    children (populated), some don't (leaves).
+    Agent (or an Agent subclass like `Cli`). Some have children
+    (populated), some don't (leaves).
   - `Kernel` — tree-wide shared context (flat agents index, state
     subscribers, bundle resolver cache). NOT an agent.
 
-Composition is explicit and lives in `main.py`:
+Composition is explicit and lives in `main.py`: the ROOT is an
+`fs_loader` agent (`id="fs_loader"`) that owns `.fantastic/`:
 
     kernel = Kernel()
-    core = Core(kernel)              # root agent
-    cli = Cli(kernel, parent=core)   # stdout renderer (child of core)
+    kernel.load(read_tree(".fantastic"))   # root = fs_loader at id="fs_loader"
+    Cli(kernel, parent=kernel.root)         # stdout renderer (only if tty)
 
 The substrate (`kernel/`) knows nothing about specific bundles. Any
 class with a `handler(id, payload, agent)` callable in its declared
@@ -31,7 +32,9 @@ from kernel._kernel import (
     Kernel,
     _current_sender,
     _summarize_payload,
+    sender_context,
 )
+from kernel._state import CURRENT_VERSION
 from kernel._lock import (
     LOCK_FILE,
     FantasticLock,
@@ -48,6 +51,8 @@ __all__ = [
     # Constants
     "INBOX_BOUND",
     "BUNDLE_ENTRY_GROUP",
+    "CURRENT_VERSION",
+    "sender_context",
     "_current_sender",
     "_summarize_payload",
     # Lock

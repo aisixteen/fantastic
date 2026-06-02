@@ -1,0 +1,85 @@
+{
+  "_doc": "CROSS-LANGUAGE reflect contract. The ts kernel (tests/reflect.test.ts) and the python kernel must BOTH reproduce every case's `expect` from `tree`+`bundles`. Edit here once; both runtimes re-verify. This is what keeps a second kernel from drifting.",
+  "bundles": ["terminal_view.js", "canvas.js"],
+  "tree": [
+    { "id": "fs_loader", "parentId": null, "root": true },
+    {
+      "id": "term1",
+      "parentId": "fs_loader",
+      "handlerModule": "terminal_view.js",
+      "sentence": "xterm.js terminal view.",
+      "verbs": { "write": "write bytes to the PTY", "resize": "resize the grid" },
+      "meta": { "display_name": "Terminal", "description": "A PTY view." }
+    }
+  ],
+  "cases": [
+    {
+      "name": "root, default flags (tree=all, bundles=none, readme=false)",
+      "target": "kernel",
+      "payload": { "type": "reflect" },
+      "expect": {
+        "id": "fs_loader",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "fs_loader",
+        "tree": {
+          "id": "fs_loader",
+          "parent_id": null,
+          "handler_module": null,
+          "display_name": "fs_loader",
+          "children": [
+            {
+              "id": "term1",
+              "parent_id": "fs_loader",
+              "handler_module": "terminal_view.js",
+              "display_name": "Terminal",
+              "description": "A PTY view.",
+              "children": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "root via real id, tree=ids",
+      "target": "fs_loader",
+      "payload": { "type": "reflect", "tree": "ids" },
+      "expect": {
+        "id": "fs_loader",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "fs_loader",
+        "tree": ["fs_loader", "term1"]
+      }
+    },
+    {
+      "name": "root, tree=none + bundles=ids (atomic, context-light)",
+      "target": "fs_loader",
+      "payload": { "type": "reflect", "tree": "none", "bundles": "ids" },
+      "expect": {
+        "id": "fs_loader",
+        "sentence": "Fantastic kernel. Everything is reachable by sending messages to agents.",
+        "parent_id": null,
+        "handler_module": null,
+        "display_name": "fs_loader",
+        "bundles": ["canvas", "terminal_view"]
+      }
+    },
+    {
+      "name": "leaf view-agent, declares sentence/verbs/description, tree=none",
+      "target": "term1",
+      "payload": { "type": "reflect", "tree": "none" },
+      "expect": {
+        "id": "term1",
+        "sentence": "xterm.js terminal view.",
+        "parent_id": "fs_loader",
+        "handler_module": "terminal_view.js",
+        "display_name": "Terminal",
+        "description": "A PTY view.",
+        "verbs": { "write": "write bytes to the PTY", "resize": "resize the grid" }
+      }
+    }
+  ]
+}

@@ -7,7 +7,7 @@ import pathlib
 
 async def _mk(kernel, mode="data"):
     rec = await kernel.send(
-        "core",
+        "fs_loader",
         {"type": "create_agent", "handler_module": "yaml_state.tools", "mode": mode},
     )
     return rec["id"]
@@ -85,6 +85,9 @@ async def test_disk_is_truth_and_cascade_delete(kernel):
     assert yaml_file.exists()
     # the on-disk YAML is the truth — readable + contains the value
     assert "v" in yaml_file.read_text()
-    # cascade-delete removes the agent dir (and its state.yaml) for free
-    await kernel.send("core", {"type": "delete_agent", "id": cid})
-    assert not yaml_file.exists()
+    # cascade-delete detaches the agent from the live tree; the agent dir
+    # (and its state.yaml sidecar) is rmtree'd by the loader on the
+    # `removed` event — covered in the fs_loader tests.
+    await kernel.send("fs_loader", {"type": "delete_agent", "id": cid})
+    assert kernel.get(cid) is None
+    assert cid not in kernel.ctx.agents

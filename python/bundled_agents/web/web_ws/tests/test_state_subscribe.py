@@ -38,18 +38,18 @@ def _drain_until(ws, predicate, max_frames=30):
 
 
 def test_state_subscribe_frame_sends_snapshot(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         snap = _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         assert "agents" in snap
         ids = {a["agent_id"] for a in snap["agents"]}
-        assert "core" in ids and "cli" in ids
+        assert "fs_loader" in ids and "cli" in ids
         for a in snap["agents"]:
             assert "name" in a and "backlog" in a
 
 
 def test_state_event_frames_after_subscribe(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         # Trigger traffic via a regular call frame.
@@ -57,7 +57,7 @@ def test_state_event_frames_after_subscribe(client, seeded_kernel):
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "reflect"},
                     "id": "trigger1",
                 }
@@ -68,7 +68,7 @@ def test_state_event_frames_after_subscribe(client, seeded_kernel):
             lambda m: (
                 m.get("type") == "state_event"
                 and m.get("kind") == "send"
-                and m.get("agent_id") == "core"
+                and m.get("agent_id") == "fs_loader"
             ),
         )
         assert "backlog" in evt
@@ -76,15 +76,15 @@ def test_state_event_frames_after_subscribe(client, seeded_kernel):
 
 
 def test_state_event_lifecycle_added(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
-        # Spawn a new agent via core.create_agent.
+        # Spawn a new agent via fs_loader.create_agent.
         ws.send_text(
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {
                         "type": "create_agent",
                         "handler_module": "file.tools",
@@ -102,7 +102,7 @@ def test_state_event_lifecycle_added(client, seeded_kernel):
 
 
 def test_state_event_lifecycle_removed(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         # Create then delete in sequence; expect 'added' then 'removed'.
@@ -110,7 +110,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {
                         "type": "create_agent",
                         "handler_module": "file.tools",
@@ -128,7 +128,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "delete_agent", "id": new_id},
                     "id": "d",
                 }
@@ -146,7 +146,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
 
 
 def test_state_unsubscribe_stops_frames(client, seeded_kernel):
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         ws.send_text(json.dumps({"type": "state_unsubscribe"}))
@@ -157,7 +157,7 @@ def test_state_unsubscribe_stops_frames(client, seeded_kernel):
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {"type": "reflect"},
                     "id": "1",
                 }
@@ -187,7 +187,7 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
     )
     pre = len(seeded_kernel.ctx.state_subscribers)
     with TestClient(app) as c:
-        with c.websocket_connect("/core/ws") as ws:
+        with c.websocket_connect("/fs_loader/ws") as ws:
             ws.send_text(json.dumps({"type": "state_subscribe"}))
             _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
             assert len(seeded_kernel.ctx.state_subscribers) == pre + 1
@@ -197,14 +197,14 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
 
 def test_state_event_carries_display_name_when_present(client, seeded_kernel):
     """Lifecycle 'added' carries the agent's display_name; falls back to id."""
-    with client.websocket_connect("/core/ws") as ws:
+    with client.websocket_connect("/fs_loader/ws") as ws:
         ws.send_text(json.dumps({"type": "state_subscribe"}))
         _drain_until(ws, lambda m: m.get("type") == "state_snapshot")
         ws.send_text(
             json.dumps(
                 {
                     "type": "call",
-                    "target": "core",
+                    "target": "fs_loader",
                     "payload": {
                         "type": "create_agent",
                         "handler_module": "file.tools",

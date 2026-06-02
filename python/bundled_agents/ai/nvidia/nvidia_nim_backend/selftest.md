@@ -5,7 +5,7 @@
 > Pre-flight: an `NVAPI_KEY` env var with an `nvapi-...` key from
 > https://build.nvidia.com (free signup, ~40 RPM/model rate limit).
 > If `NVAPI_KEY` is absent, AI tests are skipped (the rest still run).
-> out-of-scope: covered by ai_chat_webapp/selftest.md (chat UI flow)
+> out-of-scope: chat UI flow (now the TS `ai_view` in `ts/`)
 
 Rate-limit handling: on HTTP 429 BEFORE any chunk has been streamed,
 the backend honors `Retry-After` (clamped to 60s), emits a `say`
@@ -26,7 +26,7 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18904
 pkill -9 -f "fantastic" 2>/dev/null
-uv run --active python fantastic core create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active python fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
 uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
 uv run --active python fantastic > /tmp/n.log 2>&1 &
@@ -50,8 +50,8 @@ asyncio.run(main())
 PY
 }
 
-FA=$(call core '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-NB=$(call core "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_agent_id\":\"$FA\"}" \
+FA=$(call fs_loader '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+NB=$(call fs_loader "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_agent_id\":\"$FA\"}" \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 ```
 
@@ -65,7 +65,7 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/n.log
 ### Test 1: `_send` failfast when `file_agent_id` unset
 
 ```bash
-NB2=$(call core '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+NB2=$(call fs_loader '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $NB2 '{"type":"send","text":"hi"}' | python -m json.tool
 ```
 Expected: `{"error":"nvidia_nim_backend: file_agent_id required"}`.
@@ -191,25 +191,26 @@ selftest is informational — if you hit a real 429 in normal use, the
 chat UI will pulse a "rate-limited; waiting Ns" hint in the status
 footer. See `bundled_agents/ai/nvidia/nvidia_nim_backend/tests/test_nvidia_nim_handler.py::test_status_thinking_during_429_wait`.
 
-### Test 11: chat UI integration via ai_chat_webapp
+### Test 11: chat UI integration via the TS frontend (ai_view)
 
 Skip if `NVAPI_KEY` is unset. Manual / browser-based.
 
+The chat UI is now `ai_view` — a TS view-agent in `ts/` that renders
+INLINE in the canvas, fronting any backend answering
+send/history/interrupt/status. The backend surface is covered by Tests
+5-10; this is the end-to-end browser check.
+
 ```bash
-# Spin up a chat webapp with provider=nvidia_nim. _boot spawns its own
-# NIM backend child as a peer of $NB (each ai_chat_webapp owns one).
-CW=$(call core '{"type":"create_agent","handler_module":"ai_chat_webapp.tools","provider":"nvidia_nim"}' \
+# A NIM backend on the host; the TS ai_view (frontend) fronts it by id
+# over the bridge and renders the chat inline.
+NB2=$(call fs_loader '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools","provider":"nvidia_nim"}' \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-sleep 0.3
-# Discover its auto-spawned NIM backend and configure file_agent_id + api_key.
-NB2=$(call $CW '{"type":"reflect"}' | python -c "import json,sys;print(json.load(sys.stdin)['upstream_id'])")
-call core "{\"type\":\"update_agent\",\"id\":\"$NB2\",\"file_agent_id\":\"$FA\"}"
+call fs_loader "{\"type\":\"update_agent\",\"id\":\"$NB2\",\"file_agent_id\":\"$FA\"}"
 call $NB2 "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}"
-echo "open http://localhost:$PORT/$CW/ in browser"
+echo "open the TS canvas in a browser, point ai_view at $NB2 — see ts/SERVE.md"
 ```
-Expected: chat UI loads, typing a message streams tokens, stop button
-interrupts mid-stream. Same UI as the ollama_backend selftest — the
-chat webapp is provider-agnostic.
+Expected: the inline chat view loads, typing streams tokens, stop button
+or ESC interrupts mid-stream. ai_view is provider-agnostic.
 
 ## Summary
 
@@ -225,4 +226,4 @@ chat webapp is provider-agnostic.
 | 8 | status verb idle snapshot + reflect lists status | |
 | 9 (AI) | status events fire across phase transitions | |
 | 10 (unit-only) | rate-limit retry → status(thinking, waiting_on='rate_limit') | |
-| 11 (manual) | ai_chat_webapp drives nvidia_nim_backend | |
+| 11 (manual) | TS ai_view drives nvidia_nim_backend | |

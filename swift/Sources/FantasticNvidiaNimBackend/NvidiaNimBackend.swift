@@ -27,6 +27,13 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     private let cancelLock = NSLock()
     private var cancelled: Set<String> = []
 
+    public var readme: String? {
+        """
+        nvidia_nim_backend — NVIDIA NIM LLM agent (OpenAI-compatible).
+        verbs: send, history, interrupt, backend_state; api_key stored out-of-band via file_agent sidecar; 429 rate-limit retry.
+        """
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,

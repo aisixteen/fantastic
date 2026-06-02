@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fantastic-python-runtime"
 version = "0.1.0"
-description = "Fantastic python_runtime — exec Python in a subprocess. Stateless per-call (python -c <code>)."
+description = "Fantastic python_runtime — async Python JOB spawner; start/status/stop parallel background jobs (python -u -c <code>) + an injected kernel connector."
 requires-python = ">=3.11"
 dependencies = []
 

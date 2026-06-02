@@ -1,0 +1,13 @@
+{
+  // Purity by ENFORCEMENT: the pure kernel core compiles with NO `DOM`
+  // lib — so a stray `document`/`window`/Element reference is a compile
+  // error, not a comment. `npm run check:pure`. The boundary (kernel/ may
+  // not import bundles/ or vendor/) is checked by tests/boundary.test.ts.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["./**/*.ts"]
+}

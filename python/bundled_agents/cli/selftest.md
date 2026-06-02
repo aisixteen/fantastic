@@ -7,9 +7,9 @@
 Renderer agent. Verifies token/done/say/error/status print correctly.
 
 Cli is **ephemeral** — never persists to disk, composed per-process.
-The pipe-stdin pattern (`echo "..." | fantastic`) is non-tty so Core
-doesn't auto-compose Cli; tests drive it via direct Python composition
-instead.
+The pipe-stdin pattern (`echo "..." | fantastic`) is non-tty so the
+bootstrap doesn't auto-compose Cli; tests drive it via direct Python
+composition instead.
 
 ## Pre-flight
 
@@ -25,12 +25,12 @@ rm -rf .fantastic
 ```bash
 uv run python -c "
 import asyncio
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     await k.send('cli', {'type':'say','text':'hello','source':'agent_x'})
 asyncio.run(main())
 " 2>&1 | grep -F "[agent_x] hello"
@@ -42,12 +42,12 @@ Expected: line containing `[agent_x] hello`.
 ```bash
 uv run python -c "
 import asyncio
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     await k.send('cli', {'type':'token','text':'ABCDEF'})
 asyncio.run(main())
 " 2>&1 | grep -F "ABCDEF"
@@ -59,12 +59,12 @@ Expected: ABCDEF appears in output (no trailing newline from token alone).
 ```bash
 uv run python -c "
 import asyncio
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     await k.send('cli', {'type':'token','text':'part1'})
     await k.send('cli', {'type':'done'})
 asyncio.run(main())
@@ -77,12 +77,12 @@ Expected: `part1` followed by a newline in output.
 ```bash
 uv run python -c "
 import asyncio
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     await k.send('cli', {'type':'error','text':'boom'})
 asyncio.run(main())
 " 2>&1 | grep -F "ERROR: boom"
@@ -94,17 +94,17 @@ Expected: line with `ERROR: boom`.
 ```bash
 uv run python -c "
 import asyncio
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'queued','detail':{'ahead':2,'send_id':'a'}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'thinking','detail':{}})
     await k.send('cli', {'type':'status','source':'nv_x','phase':'thinking','detail':{'waiting_on':'rate_limit','wait_s':5}})
-    await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'core','verb':'list_agents','args':{}}}})
-    await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'core','verb':'list_agents','args':{},'reply_preview':'{ok:1}'}}})
+    await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'fs_loader','verb':'list_agents','args':{}}}})
+    await k.send('cli', {'type':'status','source':'ollama_x','phase':'tool_calling','detail':{'tool':{'call_id':'c1','target':'fs_loader','verb':'list_agents','args':{},'reply_preview':'{ok:1}'}}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'streaming','detail':{}})
     await k.send('cli', {'type':'status','source':'ollama_x','phase':'done','detail':{'reason':'ok'}})
 asyncio.run(main())
@@ -115,8 +115,8 @@ Expected stdout:
   [ollama_x] queued (2 ahead)
   [ollama_x] thinking…
   [nv_x] rate-limited; waiting 5s
-  [ollama_x] → list_agents(core)  {}
-  [ollama_x] ← list_agents(core)  {ok:1}
+  [ollama_x] → list_agents(fs_loader)  {}
+  [ollama_x] ← list_agents(fs_loader)  {ok:1}
 ```
 Five lines exactly. `streaming` and `done` produce no output (token
 and done verbs cover them).
@@ -126,12 +126,12 @@ and done verbs cover them).
 ```bash
 uv run python -c "
 import asyncio, json
-from kernel import Kernel
-from core import Core
+from kernel import Kernel, Agent
 from cli import Cli
 async def main():
-    k = Core(Kernel(), argv=[])
-    Cli(k.ctx, parent=k)
+    k = Kernel()
+    root = Agent("fs_loader", ctx=k)
+    Cli(k, parent=root)
     r = await k.send('cli', {'type':'reflect'})
     print(json.dumps(r, indent=2))
 asyncio.run(main())

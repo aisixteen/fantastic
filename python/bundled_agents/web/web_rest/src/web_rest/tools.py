@@ -33,7 +33,7 @@ import json
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
-from kernel import _current_sender
+from kernel import sender_context
 
 
 # ─── route endpoints ────────────────────────────────────────────
@@ -58,11 +58,8 @@ def _make_post_endpoint(self_id: str, kernel):
         # Tag the dispatch with this surface's id so telemetry rays
         # originate visually from this sprite. Without this an external
         # HTTP caller has no agent context and rays drop.
-        token = _current_sender.set(self_id)
-        try:
+        with sender_context(self_id):
             reply = await kernel.send(target_id, payload)
-        finally:
-            _current_sender.reset(token)
         if reply is None:
             return Response(status_code=204)
         return JSONResponse(reply)
@@ -89,11 +86,8 @@ def _reflect_payload(request: Request) -> dict:
 
 def _make_reflect_get(self_id: str, kernel):
     async def _reflect_target(request: Request, target_id: str):
-        token = _current_sender.set(self_id)
-        try:
+        with sender_context(self_id):
             reply = await kernel.send(target_id, _reflect_payload(request))
-        finally:
-            _current_sender.reset(token)
         if reply is None:
             return Response(status_code=404)
         return JSONResponse(reply)
@@ -103,11 +97,8 @@ def _make_reflect_get(self_id: str, kernel):
 
 def _make_reflect_root(self_id: str, kernel):
     async def _reflect_kernel(request: Request):
-        token = _current_sender.set(self_id)
-        try:
+        with sender_context(self_id):
             reply = await kernel.send("kernel", _reflect_payload(request))
-        finally:
-            _current_sender.reset(token)
         if reply is None:
             return Response(status_code=404)
         return JSONResponse(reply)

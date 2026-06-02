@@ -1,0 +1,14 @@
+{
+  "name": "fantastic-ts",
+  "private": true,
+  "type": "module",
+  "description": "Fantastic frontend kernel — view logic as typed agents, federated to the host over the bridge. Zero runtime deps; vendored (no CDN). The python `web` bundle serves dist/.",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/vendor && cp src/vendor/three.module.js src/vendor/xterm.js src/vendor/xterm.css src/vendor/addon-fit.js dist/vendor/",
+    "check:pure": "tsc --noEmit -p src/kernel/tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

@@ -4,14 +4,10 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
-    "fantastic-ai-chat-webapp",
-    "fantastic-canvas-backend",
-    "fantastic-canvas-webapp",
+    "fantastic-anthropic-backend",
     "fantastic-cli",
-    "fantastic-core",
     "fantastic-file",
-    "fantastic-gl-agent",
-    "fantastic-html-agent",
+    "fantastic-fs-loader",
     "fantastic-kernel",
     "fantastic-kernel-bridge",
     "fantastic-local-runner",
@@ -20,9 +16,7 @@ members = [
     "fantastic-python-runtime",
     "fantastic-scheduler",
     "fantastic-ssh-runner",
-    "fantastic-telemetry-pane",
     "fantastic-terminal-backend",
-    "fantastic-terminal-webapp",
     "fantastic-web",
     "fantastic-web-rest",
     "fantastic-web-ws",
@@ -204,19 +198,15 @@ wheels = [
 ]
 
 [[package]]
-name = "fantastic-ai-chat-webapp"
+name = "fantastic-anthropic-backend"
 version = "0.1.0"
-source = { editable = "bundled_agents/ai/ai_chat_webapp" }
+source = { editable = "bundled_agents/ai/anthropic/anthropic_backend" }
+dependencies = [
+    { name = "httpx" },
+]
 
-[[package]]
-name = "fantastic-canvas-backend"
-version = "0.1.0"
-source = { editable = "bundled_agents/canvas/canvas_backend" }
-
-[[package]]
-name = "fantastic-canvas-webapp"
-version = "0.1.0"
-source = { editable = "bundled_agents/canvas/canvas_webapp" }
+[package.metadata]
+requires-dist = [{ name = "httpx" }]
 
 [[package]]
 name = "fantastic-cli"
@@ -224,38 +214,24 @@ version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
 
 [[package]]
-name = "fantastic-core"
-version = "0.1.0"
-source = { editable = "bundled_agents/core" }
-
-[[package]]
 name = "fantastic-file"
 version = "0.1.0"
 source = { editable = "bundled_agents/file" }
 
 [[package]]
-name = "fantastic-gl-agent"
+name = "fantastic-fs-loader"
 version = "0.1.0"
-source = { editable = "bundled_agents/canvas/gl_agent" }
-
-[[package]]
-name = "fantastic-html-agent"
-version = "0.1.0"
-source = { editable = "bundled_agents/canvas/html_agent" }
+source = { editable = "bundled_agents/loader/fs_loader" }
 
 [[package]]
 name = "fantastic-kernel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fantastic-ai-chat-webapp" },
-    { name = "fantastic-canvas-backend" },
-    { name = "fantastic-canvas-webapp" },
+    { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
-    { name = "fantastic-core" },
     { name = "fantastic-file" },
-    { name = "fantastic-gl-agent" },
-    { name = "fantastic-html-agent" },
+    { name = "fantastic-fs-loader" },
     { name = "fantastic-kernel-bridge" },
     { name = "fantastic-local-runner" },
     { name = "fantastic-nvidia-nim-backend" },
@@ -263,9 +239,7 @@ dependencies = [
     { name = "fantastic-python-runtime" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-ssh-runner" },
-    { name = "fantastic-telemetry-pane" },
     { name = "fantastic-terminal-backend" },
-    { name = "fantastic-terminal-webapp" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
@@ -283,14 +257,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fantastic-ai-chat-webapp", editable = "bundled_agents/ai/ai_chat_webapp" },
-    { name = "fantastic-canvas-backend", editable = "bundled_agents/canvas/canvas_backend" },
-    { name = "fantastic-canvas-webapp", editable = "bundled_agents/canvas/canvas_webapp" },
+    { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
-    { name = "fantastic-core", editable = "bundled_agents/core" },
     { name = "fantastic-file", editable = "bundled_agents/file" },
-    { name = "fantastic-gl-agent", editable = "bundled_agents/canvas/gl_agent" },
-    { name = "fantastic-html-agent", editable = "bundled_agents/canvas/html_agent" },
+    { name = "fantastic-fs-loader", editable = "bundled_agents/loader/fs_loader" },
     { name = "fantastic-kernel-bridge", editable = "bundled_agents/kernel_bridge" },
     { name = "fantastic-local-runner", editable = "bundled_agents/runner/local_runner" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
@@ -298,9 +268,7 @@ requires-dist = [
     { name = "fantastic-python-runtime", editable = "bundled_agents/python_runtime" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-ssh-runner", editable = "bundled_agents/runner/ssh_runner" },
-    { name = "fantastic-telemetry-pane", editable = "bundled_agents/canvas/telemetry_pane" },
-    { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal/terminal_backend" },
-    { name = "fantastic-terminal-webapp", editable = "bundled_agents/terminal/terminal_webapp" },
+    { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/web/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/web/web_ws" },
@@ -370,19 +338,9 @@ version = "0.1.0"
 source = { editable = "bundled_agents/runner/ssh_runner" }
 
 [[package]]
-name = "fantastic-telemetry-pane"
-version = "0.1.0"
-source = { editable = "bundled_agents/canvas/telemetry_pane" }
-
-[[package]]
 name = "fantastic-terminal-backend"
 version = "0.1.0"
-source = { editable = "bundled_agents/terminal/terminal_backend" }
-
-[[package]]
-name = "fantastic-terminal-webapp"
-version = "0.1.0"
-source = { editable = "bundled_agents/terminal/terminal_webapp" }
+source = { editable = "bundled_agents/terminal" }
 
 [[package]]
 name = "fantastic-web"

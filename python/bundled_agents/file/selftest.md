@@ -23,7 +23,7 @@ cd /tmp/fa_test
 ### Test 1: write + read round-trip
 
 ```bash
-FA=$(fantastic call core create_agent handler_module=file.tools root=/tmp/fa_root | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(fantastic call fs_loader create_agent handler_module=file.tools root=/tmp/fa_root | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic call $FA write path=hello.txt content="hi there"
 fantastic call $FA read path=hello.txt | python -m json.tool | grep -F '"content": "hi there"'
 ```
@@ -90,7 +90,7 @@ Expected: `OK`.
 ### Test 9: readonly refuses write
 
 ```bash
-fantastic call core update_agent id=$FA readonly=true
+fantastic call fs_loader update_agent id=$FA readonly=true
 fantastic call $FA write path=x.txt content=x
 ```
 Expected: `{"error":"…readonly…"}`.
@@ -98,7 +98,7 @@ Expected: `{"error":"…readonly…"}`.
 ### Test 10: cascade delete cleans up the file agent record
 
 ```bash
-fantastic call core delete_agent id=$FA
+fantastic call fs_loader delete_agent id=$FA
 test ! -d /tmp/fa_test/.fantastic/agents/$FA && echo OK
 ```
 Expected: `OK` (substrate's cascade removed the on-disk record).
