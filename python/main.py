@@ -20,6 +20,7 @@ import atexit
 import sys
 from pathlib import Path
 
+from cli import Cli
 from fs_loader.tools import read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, dispatch_argv
@@ -41,8 +42,6 @@ def _bootstrap(kernel: Kernel) -> None:
     if seeded:
         write_record(kernel.root._root_path, kernel.root.record)
     if sys.stdin.isatty():
-        from cli import Cli
-
         Cli(kernel, parent=kernel.root)  # ephemeral stdout renderer
 
 

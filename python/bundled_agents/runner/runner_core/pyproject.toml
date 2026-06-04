@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-runner-core"
+version = "0.1.0"
+description = "Fantastic runner_core — shared lifecycle (reflect/boot/start/stop/restart/status/get_webapp), WS health probe, and Transport seam for the local/ssh `fantastic` runner bundles. A library, not a bundle (no fantastic.bundles entry point)."
+requires-python = ">=3.11"
+dependencies = ["websockets"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/runner_core"]

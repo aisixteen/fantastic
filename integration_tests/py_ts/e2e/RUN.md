@@ -8,6 +8,8 @@
 
 - `ls python/.venv/bin/fantastic` exists (`uv sync` if not).
 - `ls ts/dist/main.js` exists (`cd ts && npm run build` if not).
+- `ls ts/dist/js_kernel.zip` exists (`cd ts && sh scripts/pack.sh` if not) —
+  required for zip-revive checks; `revive_verify.ts` skips cleanly when absent.
 - `chromeAvailable()` (system Chrome) — else Phase 1/2c skip.
 - `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in repo `.env` — else Phase 1 (B–E) and
   Phase 2 skip (the deterministic Phase-1 A still runs).
@@ -91,6 +93,16 @@ node integration_tests/py_ts/e2e/verify_panel.ts 8930
 Opens `CANVAS_URL`, waits for the panels to hydrate, and dumps what each shows.
 Acceptance: at least one panel displays the live workflow output (e.g. matches
 `/apples|bananas/i` or a computed number), no uncaught page errors.
+
+For **zip-revive** checks (when the builder assembled the system from the zip
+readme and is serving `bundle.min.js` rather than the dev `main.js`), use
+`revive_verify.ts` instead — it checks the same liveness criteria PLUS that
+the inlined xterm.css was injected and the single-bundle revive left a
+`terminal_backend` on disk:
+
+```bash
+node integration_tests/py_ts/e2e/revive_verify.ts <CANVAS_URL> <WORKDIR>
+```
 
 ### 2d. Capture the final tree + tear down
 

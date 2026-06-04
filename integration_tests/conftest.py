@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import socket
 import sys
-import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
@@ -30,7 +29,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from helpers.kernel_proc import KernelProc, spawn
+from helpers.kernel_proc import KernelProc, spawn  # noqa: E402
 
 # Repo root (one level up from integration_tests/).
 _REPO_ROOT = _HERE.parent
@@ -135,6 +134,7 @@ def parity_tmp(request) -> Callable[[str], Path]:
     if keep:
         return
     import shutil
+
     for d in created:
         shutil.rmtree(d, ignore_errors=True)
 

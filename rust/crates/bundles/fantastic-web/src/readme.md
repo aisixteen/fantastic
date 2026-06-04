@@ -22,7 +22,7 @@ All third-party assets are served with `Cache-Control: public, max-age=31536000,
 
 ### Policy
 
-**Rendering surfaces inside this kernel** (canvas, terminal) **and external apps embedding the kernel** should LOAD shared static deps from these URLs rather than vendoring their own copies. The kernel is the single source of truth for shared static deps; that's what enables offline operation + version coherence across surfaces.
+**Clients and embedding apps** consuming these assets should LOAD them from these kernel-served URLs rather than vendoring their own copies. The kernel is the single source of truth for shared static deps; that's what enables offline operation + version coherence across clients.
 
 To add a new shared static asset:
 

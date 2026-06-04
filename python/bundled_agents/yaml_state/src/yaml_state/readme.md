@@ -7,7 +7,10 @@ discipline (same verbs either way):
 - `data` — current state (component state, config, run params, selection); overwrite-in-place.
 - `mem` — durable facts to remember (names, preferences, decisions); accrete keyed facts.
 
-**Your memory is auto-loaded into your context on boot — read it, don't re-fetch.**
+**Reach it by id with one `send`, and manage it with JUDGMENT** — save salient
+facts, recall them later (even from a fresh context), update, and prune; don't
+store trivia. Where your backend injects memory on boot it's already in your
+context (read it, don't re-fetch); otherwise `read` / `keys` it on demand.
 
 ## When to use
 - The moment the user tells you something worth keeping → `set` it on a `mem` agent.

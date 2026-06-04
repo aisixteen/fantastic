@@ -4,6 +4,7 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
+    "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cli",
     "fantastic-file",
@@ -14,6 +15,7 @@ members = [
     "fantastic-nvidia-nim-backend",
     "fantastic-ollama-backend",
     "fantastic-python-runtime",
+    "fantastic-runner-core",
     "fantastic-scheduler",
     "fantastic-ssh-runner",
     "fantastic-terminal-backend",
@@ -198,15 +200,24 @@ wheels = [
 ]
 
 [[package]]
+name = "fantastic-ai-core"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/ai_core" }
+
+[[package]]
 name = "fantastic-anthropic-backend"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/anthropic/anthropic_backend" }
 dependencies = [
+    { name = "fantastic-ai-core" },
     { name = "httpx" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx" }]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
+]
 
 [[package]]
 name = "fantastic-cli"
@@ -228,6 +239,7 @@ name = "fantastic-kernel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
     { name = "fantastic-file" },
@@ -237,6 +249,7 @@ dependencies = [
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
     { name = "fantastic-python-runtime" },
+    { name = "fantastic-runner-core" },
     { name = "fantastic-scheduler" },
     { name = "fantastic-ssh-runner" },
     { name = "fantastic-terminal-backend" },
@@ -257,6 +270,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
     { name = "fantastic-file", editable = "bundled_agents/file" },
@@ -266,6 +280,7 @@ requires-dist = [
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
     { name = "fantastic-python-runtime", editable = "bundled_agents/python_runtime" },
+    { name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-ssh-runner", editable = "bundled_agents/runner/ssh_runner" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
@@ -299,33 +314,58 @@ requires-dist = [{ name = "websockets", specifier = ">=12,<17" }]
 name = "fantastic-local-runner"
 version = "0.1.0"
 source = { editable = "bundled_agents/runner/local_runner" }
+dependencies = [
+    { name = "fantastic-runner-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" }]
 
 [[package]]
 name = "fantastic-nvidia-nim-backend"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" }
 dependencies = [
+    { name = "fantastic-ai-core" },
     { name = "httpx" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx" }]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
+]
 
 [[package]]
 name = "fantastic-ollama-backend"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/ollama/ollama_backend" }
 dependencies = [
+    { name = "fantastic-ai-core" },
     { name = "ollama" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ollama" }]
+requires-dist = [
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "ollama" },
+]
 
 [[package]]
 name = "fantastic-python-runtime"
 version = "0.1.0"
 source = { editable = "bundled_agents/python_runtime" }
+
+[[package]]
+name = "fantastic-runner-core"
+version = "0.1.0"
+source = { editable = "bundled_agents/runner/runner_core" }
+dependencies = [
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "websockets" }]
 
 [[package]]
 name = "fantastic-scheduler"
@@ -336,6 +376,12 @@ source = { editable = "bundled_agents/scheduler" }
 name = "fantastic-ssh-runner"
 version = "0.1.0"
 source = { editable = "bundled_agents/runner/ssh_runner" }
+dependencies = [
+    { name = "fantastic-runner-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" }]
 
 [[package]]
 name = "fantastic-terminal-backend"

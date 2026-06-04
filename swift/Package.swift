@@ -147,26 +147,45 @@ let package = Package(
         ),
 
         // ── LLM backends (Phase 5 / 8D) ──────────────────────────
+        // Shared reflect-driven agent machinery behind an `AIProvider`
+        // seam — the three backends below supply only their provider +
+        // an `AIBackendConfig`. MUST NOT import any provider SDK (no
+        // FoundationModels); all FM gating lives in the FM target.
+        .target(
+            name: "FantasticAICore",
+            dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
         .target(
             name: "FantasticOllamaBackend",
-            dependencies: ["FantasticKernel", "FantasticJSON",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
             name: "FantasticNvidiaNimBackend",
-            dependencies: ["FantasticKernel", "FantasticJSON",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
             name: "FantasticFoundationModelsBackend",
-            dependencies: ["FantasticKernel", "FantasticJSON",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
+        ),
+
+        // ── Shared runner lifecycle (mirrors FantasticAICore) ────
+        // Cross-platform dispatch skeleton (reflect/boot/shutdown/
+        // start/stop) behind a `RunnerTransport` seam. The local + ssh
+        // runner bundles supply only their transport conformance. NO
+        // `#if os(macOS)` here — the macOS gating lives on the runners.
+        .target(
+            name: "FantasticRunnerCore",
+            dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
 
         // ── Pro-tier subprocess bundles (macOS only) ─────────────
         .target(
             name: "FantasticLocalRunner",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            dependencies: ["FantasticRunnerCore", "FantasticKernel", "FantasticJSON"]
         ),
         .target(
             name: "FantasticPythonRuntime",
@@ -174,7 +193,7 @@ let package = Package(
         ),
         .target(
             name: "FantasticSshRunner",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            dependencies: ["FantasticRunnerCore", "FantasticKernel", "FantasticJSON"]
         ),
         .target(
             name: "FantasticTerminalBackend",
@@ -207,9 +226,9 @@ let package = Package(
             ]
         ),
         // ── Cross-runtime parity (Phase 8J) ──────────────────────
-        // Spawns the Rust `fantastic` binary as a subprocess +
+        // Spawns the Python kernel binary as a subprocess +
         // fires identical verb payloads at both kernels; diffs the
-        // JSON replies. Skips when RUST_KERNEL_BIN env var is unset.
+        // JSON replies. Skips when PYTHON_KERNEL_BIN env var is unset.
         .testTarget(
             name: "FantasticParityTests",
             dependencies: ["FantasticKernel", "FantasticJSON", "FantasticKernelStartup"]
@@ -251,6 +270,20 @@ let package = Package(
         .testTarget(
             name: "FantasticCLITests",
             dependencies: ["Fantastic", "FantasticJSON", "FantasticKernel"]
+        ),
+
+        .testTarget(
+            name: "FantasticAICoreTests",
+            dependencies: [
+                "FantasticAICore", "FantasticKernel", "FantasticJSON",
+            ]
+        ),
+
+        .testTarget(
+            name: "FantasticRunnerCoreTests",
+            dependencies: [
+                "FantasticRunnerCore", "FantasticKernel", "FantasticJSON",
+            ]
         ),
 
         .testTarget(

@@ -9,6 +9,11 @@
 //! whatever `ssh <host>` works as in the user's shell — keys,
 //! `ssh-agent`, and `~/.ssh/config` all apply transparently.
 //!
+//! The lifecycle dispatch (verb routing, boot=null, restart=stop+start,
+//! unknown-verb error) lives in `fantastic-runner-core`; this crate
+//! supplies the [`SshTransport`] (ssh exec + `ssh -L` tunnel) and a
+//! thin [`SshRunnerBundle`].
+//!
 //! ## Record fields
 //!
 //! | key           | purpose                                                  |
@@ -30,10 +35,10 @@ use async_trait::async_trait;
 use fantastic_bundle as _;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel};
+use fantastic_runner_core::{meta_str, meta_u16, snapshot_meta, RunnerCore, RunnerMap, Transport};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// `handler_module` key under which this bundle registers.
@@ -56,7 +61,7 @@ pub const SSH_EXEC_TIMEOUT_SECS: f64 = 15.0;
 
 // ── per-agent state ─────────────────────────────────────────────────
 
-static RUNNERS: OnceLockRunnerMap = OnceLockRunnerMap::new();
+static RUNNERS: RunnerMap<RunnerState> = RunnerMap::new();
 
 /// Per-agent runner state — process-memory only.
 ///
@@ -64,49 +69,13 @@ static RUNNERS: OnceLockRunnerMap = OnceLockRunnerMap::new();
 /// port-forward used by `get_webapp` so the canvas can iframe the
 /// remote). Fields are intentionally `pub(crate)` — outside callers
 /// drive everything through the bundle's verbs.
+#[derive(Default)]
 pub struct RunnerState {
     /// The live `ssh -L` child process (None when no tunnel is open).
     pub(crate) tunnel_proc: tokio::sync::Mutex<Option<tokio::process::Child>>,
-    /// Cached pid of the tunnel child for [`reflect_reply`] /
+    /// Cached pid of the tunnel child for [`SshTransport::reflect`] /
     /// `status` introspection.
     pub(crate) tunnel_pid: tokio::sync::Mutex<Option<u32>>,
-}
-
-impl RunnerState {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            tunnel_proc: tokio::sync::Mutex::new(None),
-            tunnel_pid: tokio::sync::Mutex::new(None),
-        })
-    }
-}
-
-struct OnceLockRunnerMap(OnceLock<Mutex<HashMap<AgentId, Arc<RunnerState>>>>);
-impl OnceLockRunnerMap {
-    const fn new() -> Self {
-        Self(OnceLock::new())
-    }
-    fn get_or_init_for(&self, id: &AgentId) -> Arc<RunnerState> {
-        let mut map = self
-            .0
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("RUNNERS outer mutex poisoned");
-        if let Some(existing) = map.get(id) {
-            return Arc::clone(existing);
-        }
-        let arc = RunnerState::new();
-        map.insert(id.clone(), Arc::clone(&arc));
-        arc
-    }
-    fn remove(&self, id: &AgentId) {
-        let mut map = self
-            .0
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("RUNNERS outer mutex poisoned");
-        map.remove(id);
-    }
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────
@@ -131,47 +100,298 @@ impl Bundle for SshRunnerBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        let reply = match verb {
-            "reflect" => reflect_reply(agent_id, kernel).await,
-            "boot" => Value::Null,
-            "start" => start_reply(agent_id, kernel).await,
-            "stop" | "shutdown" => stop_reply(agent_id, kernel).await,
-            "restart" => {
-                let _ = stop_reply(agent_id, kernel).await;
-                start_reply(agent_id, kernel).await
-            }
-            "status" => status_reply(agent_id, kernel).await,
-            "get_webapp" => get_webapp_reply(agent_id, kernel),
-            other => json!({"error": format!("ssh_runner: unknown type {other:?}")}),
-        };
+        let transport = SshTransport::build(agent_id, kernel);
+        let reply = RunnerCore::handle_via(&transport, "ssh_runner", verb).await;
         Ok(Some(reply))
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        let _ = stop_reply(agent_id, kernel).await;
+        let transport = SshTransport::build(agent_id, kernel);
+        let _ = transport.stop().await;
         RUNNERS.remove(agent_id);
         Ok(())
     }
 }
 
-// ── meta helpers ────────────────────────────────────────────────────
+// ── transport ───────────────────────────────────────────────────────
 
-fn snapshot_meta(agent_id: &AgentId, kernel: &Kernel) -> Map<String, Value> {
-    match kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
-        Some(a) => a.meta.read().expect("meta poisoned").clone(),
-        None => Map::new(),
+/// SSH transport — built per call from the agent record. Carries the
+/// snapshotted `meta` plus a handle to the per-agent tunnel state.
+pub struct SshTransport {
+    agent_id: AgentId,
+    meta: Map<String, Value>,
+    runner: Arc<RunnerState>,
+}
+
+impl SshTransport {
+    fn build(agent_id: &AgentId, kernel: &Kernel) -> Self {
+        Self {
+            agent_id: agent_id.clone(),
+            meta: snapshot_meta(agent_id, kernel),
+            runner: RUNNERS.get_or_init_for(agent_id),
+        }
     }
 }
 
-fn meta_str<'a>(meta: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    meta.get(key).and_then(Value::as_str)
-}
+#[async_trait]
+impl Transport for SshTransport {
+    async fn reflect(&self) -> Value {
+        let (tunnel_alive, tunnel_pid) = {
+            let mut slot = self.runner.tunnel_proc.lock().await;
+            let alive = match slot.as_mut() {
+                Some(c) => matches!(c.try_wait(), Ok(None)),
+                None => false,
+            };
+            let pid = *self.runner.tunnel_pid.lock().await;
+            (alive, pid)
+        };
+        json!({
+            "id": self.agent_id.as_str(),
+            "sentence": "Remote `fantastic --port N` lifecycle over SSH.",
+            "host": self.meta.get("host").cloned().unwrap_or(Value::Null),
+            "remote_path": self.meta.get("remote_path").cloned().unwrap_or(Value::Null),
+            "remote_cmd": self.meta.get("remote_cmd").cloned().unwrap_or(Value::Null),
+            "remote_port": self.meta.get("remote_port").cloned().unwrap_or(Value::Null),
+            "local_port": self.meta.get("local_port").cloned().unwrap_or(Value::Null),
+            "entry_path": meta_str(&self.meta, "entry_path").unwrap_or(""),
+            "tunnel_pid": tunnel_pid,
+            "tunnel_alive": tunnel_alive,
+            "running": tunnel_alive,
+            "verbs": {
+                "reflect": "Identity + every record field + live status. No args.",
+                "boot": "No-op. ssh_runner does NOT auto-start the remote — `start` is explicit.",
+                "start": "No args. SSHs to <host>, runs `cd <remote_path> && nohup <remote_cmd> ...` then opens the local SSH tunnel.",
+                "stop": "No args. Kills the local SSH tunnel, then SSHs and SIGTERMs the remote pid recorded in `.fantastic/lock.json`. Idempotent.",
+                "restart": "No args. stop + start.",
+                "status": "No args. {tunnel_alive, remote_alive, remote_pid}.",
+                "get_webapp": "No args. Canvas-facing UI descriptor {url, default_width, default_height, title}.",
+            },
+        })
+    }
 
-fn meta_u16(meta: &Map<String, Value>, key: &str) -> Option<u16> {
-    meta.get(key)
-        .and_then(Value::as_u64)
-        .filter(|p| *p > 0 && *p <= u16::MAX as u64)
-        .map(|p| p as u16)
+    async fn start(&self) -> Value {
+        let Some(host) = meta_str(&self.meta, "host") else {
+            return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
+        };
+        let Some(rp) = meta_str(&self.meta, "remote_path") else {
+            return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
+        };
+        let Some(rcmd) = meta_str(&self.meta, "remote_cmd") else {
+            return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
+        };
+        let Some(rport) = meta_u16(&self.meta, "remote_port") else {
+            return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
+        };
+        let Some(lport) = meta_u16(&self.meta, "local_port") else {
+            return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
+        };
+
+        // Two-step bootstrap on the remote:
+        //   1. one-shot `fantastic core create_agent handler_module=web.tools port=N`
+        //      persists the web record (uvicorn task dies with the process,
+        //      but the record stays on disk).
+        //   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
+        //      the persisted web, acquires lock, blocks forever.
+        let rp_q = shquote(rp);
+        let cmd_q = shquote(rcmd);
+        let remote = format!(
+            "cd {rp_q} && mkdir -p .fantastic && {cmd_q} core create_agent handler_module=web.tools port={rport} >/dev/null 2>&1 && nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
+        );
+        let (rc, out, err) = ssh_exec(
+            host,
+            &remote,
+            Duration::from_secs_f64(SSH_EXEC_TIMEOUT_SECS),
+        )
+        .await;
+        if rc != 0 {
+            let detail = if err.trim().is_empty() {
+                out.trim().to_string()
+            } else {
+                err.trim().to_string()
+            };
+            return json!({"error": format!("ssh_runner.start: ssh failed (rc={rc}): {detail}")});
+        }
+
+        // Poll the remote lock.json to confirm the serve actually came up.
+        let lock_path = format!("{rp_q}/.fantastic/lock.json");
+        let deadline = Instant::now() + Duration::from_secs_f64(REMOTE_LOCK_POLL_TIMEOUT_SECS);
+        let mut remote_pid: Option<i64> = None;
+        while Instant::now() < deadline {
+            let (rc2, out2, _) = ssh_exec(
+                host,
+                &format!("cat {lock_path} 2>/dev/null"),
+                Duration::from_secs(5),
+            )
+            .await;
+            if rc2 == 0 && !out2.trim().is_empty() {
+                if let Ok(lock) = serde_json::from_str::<Value>(&out2) {
+                    if let Some(p) = lock.get("pid").and_then(Value::as_i64) {
+                        remote_pid = Some(p);
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(REMOTE_LOCK_POLL_INTERVAL_MS)).await;
+        }
+        let Some(remote_pid) = remote_pid else {
+            return json!({"error": "ssh_runner.start: remote serve did not write lock.json in time"});
+        };
+
+        // Open local tunnel.
+        {
+            let mut slot = self.runner.tunnel_proc.lock().await;
+            if let Some(c) = slot.as_mut() {
+                if matches!(c.try_wait(), Ok(None)) {
+                    let pid = *self.runner.tunnel_pid.lock().await;
+                    return json!({
+                        "started": true,
+                        "remote_pid": remote_pid,
+                        "tunnel_pid": pid,
+                        "already_tunneled": true,
+                    });
+                }
+            }
+        }
+        let tunnel = match open_tunnel(host, lport, rport).await {
+            Ok(c) => c,
+            Err(e) => {
+                return json!({
+                    "error": format!("ssh_runner.start: tunnel failed: {e}"),
+                    "remote_pid": remote_pid,
+                })
+            }
+        };
+        let pid = tunnel.id();
+        {
+            let mut slot = self.runner.tunnel_proc.lock().await;
+            *slot = Some(tunnel);
+            let mut pidslot = self.runner.tunnel_pid.lock().await;
+            *pidslot = pid;
+        }
+        json!({
+            "started": true,
+            "remote_pid": remote_pid,
+            "tunnel_pid": pid,
+        })
+    }
+
+    async fn stop(&self) -> Value {
+        let host = meta_str(&self.meta, "host");
+        let rp = meta_str(&self.meta, "remote_path");
+        if host.is_none() || rp.is_none() {
+            return json!({"error": "ssh_runner.stop: host + remote_path required"});
+        }
+        let host = host.unwrap();
+        let rp = rp.unwrap();
+
+        // Kill the local tunnel (best effort, idempotent).
+        {
+            let mut slot = self.runner.tunnel_proc.lock().await;
+            if let Some(mut child) = slot.take() {
+                kill_tunnel(&mut child).await;
+            }
+            let mut pidslot = self.runner.tunnel_pid.lock().await;
+            *pidslot = None;
+        }
+
+        // Read remote pid + kill it.
+        let rp_q = shquote(rp);
+        let (rc, out, _) = ssh_exec(
+            host,
+            &format!("cat {rp_q}/.fantastic/lock.json 2>/dev/null"),
+            Duration::from_secs(5),
+        )
+        .await;
+        let mut remote_pid: Option<i64> = None;
+        if rc == 0 && !out.trim().is_empty() {
+            if let Ok(lock) = serde_json::from_str::<Value>(&out) {
+                remote_pid = lock.get("pid").and_then(Value::as_i64);
+            }
+        }
+        if let Some(pid) = remote_pid {
+            let _ = ssh_exec(
+                host,
+                &format!("kill {pid} 2>/dev/null || true"),
+                Duration::from_secs(5),
+            )
+            .await;
+        }
+        json!({"stopped": true, "remote_pid": remote_pid})
+    }
+
+    async fn status(&self) -> Value {
+        let tunnel_alive = {
+            let mut slot = self.runner.tunnel_proc.lock().await;
+            match slot.as_mut() {
+                Some(c) => matches!(c.try_wait(), Ok(None)),
+                None => false,
+            }
+        };
+
+        let mut remote_alive = false;
+        let mut remote_pid: Option<i64> = None;
+        if let (Some(host), Some(rp)) = (
+            meta_str(&self.meta, "host"),
+            meta_str(&self.meta, "remote_path"),
+        ) {
+            let rp_q = shquote(rp);
+            let (rc, out, _) = ssh_exec(
+                host,
+                &format!("cat {rp_q}/.fantastic/lock.json 2>/dev/null"),
+                Duration::from_secs(5),
+            )
+            .await;
+            if rc == 0 && !out.trim().is_empty() {
+                if let Ok(lock) = serde_json::from_str::<Value>(&out) {
+                    if let Some(p) = lock.get("pid").and_then(Value::as_i64) {
+                        remote_pid = Some(p);
+                        let (rc2, _, _) = ssh_exec(
+                            host,
+                            &format!("kill -0 {p} 2>/dev/null && echo ok"),
+                            Duration::from_secs(5),
+                        )
+                        .await;
+                        remote_alive = rc2 == 0;
+                    }
+                }
+            }
+        }
+        json!({
+            "tunnel_alive": tunnel_alive,
+            "remote_alive": remote_alive,
+            "remote_pid": remote_pid,
+        })
+    }
+
+    async fn get_webapp(&self) -> Value {
+        let Some(lport) = meta_u16(&self.meta, "local_port") else {
+            return json!({"error": "ssh_runner.get_webapp: local_port required"});
+        };
+        let entry = meta_str(&self.meta, "entry_path").unwrap_or("");
+        let host = meta_str(&self.meta, "host").unwrap_or("remote");
+        let width = self
+            .meta
+            .get("width")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0 && *v <= u32::MAX as u64)
+            .unwrap_or(800);
+        let height = self
+            .meta
+            .get("height")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0 && *v <= u32::MAX as u64)
+            .unwrap_or(600);
+        let title = meta_str(&self.meta, "display_name")
+            .map(str::to_string)
+            .unwrap_or_else(|| host.to_string());
+        let _ = &self.agent_id;
+        json!({
+            "url": format!("http://localhost:{lport}/{entry}"),
+            "default_width": width,
+            "default_height": height,
+            "title": title,
+        })
+    }
 }
 
 // ── ssh helpers ─────────────────────────────────────────────────────
@@ -321,270 +541,6 @@ fn shquote(s: &str) -> String {
     }
     let escaped = s.replace('\'', "'\\''");
     format!("'{escaped}'")
-}
-
-// ── verb implementations ────────────────────────────────────────────
-
-async fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    let runner = RUNNERS.get_or_init_for(agent_id);
-    let (tunnel_alive, tunnel_pid) = {
-        let mut slot = runner.tunnel_proc.lock().await;
-        let alive = match slot.as_mut() {
-            Some(c) => matches!(c.try_wait(), Ok(None)),
-            None => false,
-        };
-        let pid = *runner.tunnel_pid.lock().await;
-        (alive, pid)
-    };
-    json!({
-        "id": agent_id.as_str(),
-        "sentence": "Remote `fantastic --port N` lifecycle over SSH.",
-        "host": meta.get("host").cloned().unwrap_or(Value::Null),
-        "remote_path": meta.get("remote_path").cloned().unwrap_or(Value::Null),
-        "remote_cmd": meta.get("remote_cmd").cloned().unwrap_or(Value::Null),
-        "remote_port": meta.get("remote_port").cloned().unwrap_or(Value::Null),
-        "local_port": meta.get("local_port").cloned().unwrap_or(Value::Null),
-        "entry_path": meta_str(&meta, "entry_path").unwrap_or(""),
-        "tunnel_pid": tunnel_pid,
-        "tunnel_alive": tunnel_alive,
-        "running": tunnel_alive,
-        "verbs": {
-            "reflect": "Identity + every record field + live status. No args.",
-            "boot": "No-op. ssh_runner does NOT auto-start the remote — `start` is explicit.",
-            "start": "No args. SSHs to <host>, runs `cd <remote_path> && nohup <remote_cmd> ...` then opens the local SSH tunnel.",
-            "stop": "No args. Kills the local SSH tunnel, then SSHs and SIGTERMs the remote pid recorded in `.fantastic/lock.json`. Idempotent.",
-            "restart": "No args. stop + start.",
-            "status": "No args. {tunnel_alive, remote_alive, remote_pid}.",
-            "get_webapp": "No args. Canvas-facing UI descriptor {url, default_width, default_height, title}.",
-        },
-    })
-}
-
-async fn start_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    let Some(host) = meta_str(&meta, "host") else {
-        return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
-    };
-    let Some(rp) = meta_str(&meta, "remote_path") else {
-        return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
-    };
-    let Some(rcmd) = meta_str(&meta, "remote_cmd") else {
-        return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
-    };
-    let Some(rport) = meta_u16(&meta, "remote_port") else {
-        return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
-    };
-    let Some(lport) = meta_u16(&meta, "local_port") else {
-        return json!({"error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"});
-    };
-
-    // Two-step bootstrap on the remote:
-    //   1. one-shot `fantastic core create_agent handler_module=web.tools port=N`
-    //      persists the web record (uvicorn task dies with the process,
-    //      but the record stays on disk).
-    //   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
-    //      the persisted web, acquires lock, blocks forever.
-    let rp_q = shquote(rp);
-    let cmd_q = shquote(rcmd);
-    let remote = format!(
-        "cd {rp_q} && mkdir -p .fantastic && {cmd_q} core create_agent handler_module=web.tools port={rport} >/dev/null 2>&1 && nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
-    );
-    let (rc, out, err) = ssh_exec(
-        host,
-        &remote,
-        Duration::from_secs_f64(SSH_EXEC_TIMEOUT_SECS),
-    )
-    .await;
-    if rc != 0 {
-        let detail = if err.trim().is_empty() {
-            out.trim().to_string()
-        } else {
-            err.trim().to_string()
-        };
-        return json!({"error": format!("ssh_runner.start: ssh failed (rc={rc}): {detail}")});
-    }
-
-    // Poll the remote lock.json to confirm the serve actually came up.
-    let lock_path = format!("{rp_q}/.fantastic/lock.json");
-    let deadline = Instant::now() + Duration::from_secs_f64(REMOTE_LOCK_POLL_TIMEOUT_SECS);
-    let mut remote_pid: Option<i64> = None;
-    while Instant::now() < deadline {
-        let (rc2, out2, _) = ssh_exec(
-            host,
-            &format!("cat {lock_path} 2>/dev/null"),
-            Duration::from_secs(5),
-        )
-        .await;
-        if rc2 == 0 && !out2.trim().is_empty() {
-            if let Ok(lock) = serde_json::from_str::<Value>(&out2) {
-                if let Some(p) = lock.get("pid").and_then(Value::as_i64) {
-                    remote_pid = Some(p);
-                    break;
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(REMOTE_LOCK_POLL_INTERVAL_MS)).await;
-    }
-    let Some(remote_pid) = remote_pid else {
-        return json!({"error": "ssh_runner.start: remote serve did not write lock.json in time"});
-    };
-
-    // Open local tunnel.
-    let runner = RUNNERS.get_or_init_for(agent_id);
-    {
-        let mut slot = runner.tunnel_proc.lock().await;
-        if let Some(c) = slot.as_mut() {
-            if matches!(c.try_wait(), Ok(None)) {
-                let pid = *runner.tunnel_pid.lock().await;
-                return json!({
-                    "started": true,
-                    "remote_pid": remote_pid,
-                    "tunnel_pid": pid,
-                    "already_tunneled": true,
-                });
-            }
-        }
-    }
-    let tunnel = match open_tunnel(host, lport, rport).await {
-        Ok(c) => c,
-        Err(e) => {
-            return json!({
-                "error": format!("ssh_runner.start: tunnel failed: {e}"),
-                "remote_pid": remote_pid,
-            })
-        }
-    };
-    let pid = tunnel.id();
-    {
-        let mut slot = runner.tunnel_proc.lock().await;
-        *slot = Some(tunnel);
-        let mut pidslot = runner.tunnel_pid.lock().await;
-        *pidslot = pid;
-    }
-    json!({
-        "started": true,
-        "remote_pid": remote_pid,
-        "tunnel_pid": pid,
-    })
-}
-
-async fn stop_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    let host = meta_str(&meta, "host");
-    let rp = meta_str(&meta, "remote_path");
-    if host.is_none() || rp.is_none() {
-        return json!({"error": "ssh_runner.stop: host + remote_path required"});
-    }
-    let host = host.unwrap();
-    let rp = rp.unwrap();
-
-    // Kill the local tunnel (best effort, idempotent).
-    let runner = RUNNERS.get_or_init_for(agent_id);
-    {
-        let mut slot = runner.tunnel_proc.lock().await;
-        if let Some(mut child) = slot.take() {
-            kill_tunnel(&mut child).await;
-        }
-        let mut pidslot = runner.tunnel_pid.lock().await;
-        *pidslot = None;
-    }
-
-    // Read remote pid + kill it.
-    let rp_q = shquote(rp);
-    let (rc, out, _) = ssh_exec(
-        host,
-        &format!("cat {rp_q}/.fantastic/lock.json 2>/dev/null"),
-        Duration::from_secs(5),
-    )
-    .await;
-    let mut remote_pid: Option<i64> = None;
-    if rc == 0 && !out.trim().is_empty() {
-        if let Ok(lock) = serde_json::from_str::<Value>(&out) {
-            remote_pid = lock.get("pid").and_then(Value::as_i64);
-        }
-    }
-    if let Some(pid) = remote_pid {
-        let _ = ssh_exec(
-            host,
-            &format!("kill {pid} 2>/dev/null || true"),
-            Duration::from_secs(5),
-        )
-        .await;
-    }
-    json!({"stopped": true, "remote_pid": remote_pid})
-}
-
-async fn status_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    let runner = RUNNERS.get_or_init_for(agent_id);
-    let tunnel_alive = {
-        let mut slot = runner.tunnel_proc.lock().await;
-        match slot.as_mut() {
-            Some(c) => matches!(c.try_wait(), Ok(None)),
-            None => false,
-        }
-    };
-
-    let mut remote_alive = false;
-    let mut remote_pid: Option<i64> = None;
-    if let (Some(host), Some(rp)) = (meta_str(&meta, "host"), meta_str(&meta, "remote_path")) {
-        let rp_q = shquote(rp);
-        let (rc, out, _) = ssh_exec(
-            host,
-            &format!("cat {rp_q}/.fantastic/lock.json 2>/dev/null"),
-            Duration::from_secs(5),
-        )
-        .await;
-        if rc == 0 && !out.trim().is_empty() {
-            if let Ok(lock) = serde_json::from_str::<Value>(&out) {
-                if let Some(p) = lock.get("pid").and_then(Value::as_i64) {
-                    remote_pid = Some(p);
-                    let (rc2, _, _) = ssh_exec(
-                        host,
-                        &format!("kill -0 {p} 2>/dev/null && echo ok"),
-                        Duration::from_secs(5),
-                    )
-                    .await;
-                    remote_alive = rc2 == 0;
-                }
-            }
-        }
-    }
-    json!({
-        "tunnel_alive": tunnel_alive,
-        "remote_alive": remote_alive,
-        "remote_pid": remote_pid,
-    })
-}
-
-fn get_webapp_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    let Some(lport) = meta_u16(&meta, "local_port") else {
-        return json!({"error": "ssh_runner.get_webapp: local_port required"});
-    };
-    let entry = meta_str(&meta, "entry_path").unwrap_or("");
-    let host = meta_str(&meta, "host").unwrap_or("remote");
-    let width = meta
-        .get("width")
-        .and_then(Value::as_u64)
-        .filter(|v| *v > 0 && *v <= u32::MAX as u64)
-        .unwrap_or(800);
-    let height = meta
-        .get("height")
-        .and_then(Value::as_u64)
-        .filter(|v| *v > 0 && *v <= u32::MAX as u64)
-        .unwrap_or(600);
-    let title = meta_str(&meta, "display_name")
-        .map(str::to_string)
-        .unwrap_or_else(|| host.to_string());
-    let _ = agent_id;
-    json!({
-        "url": format!("http://localhost:{lport}/{entry}"),
-        "default_width": width,
-        "default_height": height,
-        "title": title,
-    })
 }
 
 #[cfg(test)]

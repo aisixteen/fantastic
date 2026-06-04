@@ -33,7 +33,7 @@
         public var readme: String? {
             """
             terminal_backend — PTY shell session as an agent. One PTY per agent; process-memory state only.
-            Verbs: reflect, boot, input/write, ack, resize, paste_image, shutdown/stop. Output streams to this agent's own inbox as {type:"output", chunk} (a client watches it).
+            Verbs: reflect, boot, input, ack, resize, paste_image, shutdown. Output streams to this agent's own inbox as {type:"output", chunk} (a client watches it).
             """
         }
 

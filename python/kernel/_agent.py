@@ -737,7 +737,7 @@ class Agent:
         walker calls it. If absent, it falls back to the bundle's
         `on_delete(agent)` (most bundles just kill subprocesses there,
         which is exactly what shutdown wants). Run on SIGTERM /
-        SIGINT / SIGHUP (see kernel._modes._default) and as an
+        SIGINT / SIGHUP (see kernel.modes._default) and as an
         atexit safety net from main.py."""
         for cid in list(self._children.keys()):
             child = self._children.get(cid)

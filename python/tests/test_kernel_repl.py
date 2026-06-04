@@ -1,12 +1,12 @@
 """REPL utilities — _parse_at, _coerce, _find_bundle_module.
 
-These helpers live in `kernel/_modes.py` as module-private helpers
+These helpers live in `kernel/modes/parse.py` as module-private helpers
 used by the REPL and argv parser. Tests reach in directly."""
 
 from __future__ import annotations
 
 
-from kernel._modes import _coerce, _parse_at
+from kernel.modes.parse import _coerce, _parse_at
 
 from kernel import _find_bundle_module
 

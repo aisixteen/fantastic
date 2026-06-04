@@ -1,26 +1,69 @@
 // SSH-based remote kernel runner (macOS only).
 //
 // Mirrors Rust's `fantastic-ssh-runner` shape. Spawns `ssh -L
-// <local>:127.0.0.1:<remote> user@host` to tunnel a remote
-// `fantastic` daemon's HTTP port to localhost. Polls the remote's
-// lock.json over `ssh user@host cat …` to confirm liveness.
+// <local>:127.0.0.1:<remote> user@host` to tunnel a remote `fantastic`
+// daemon's HTTP port to localhost. Probes the tunnel's local port to
+// confirm liveness.
 //
 // iOS sandbox forbids subprocess; macOS-only by `#if`.
+//
+// The shared lifecycle dispatch (reflect/boot/shutdown/start/stop +
+// unknown-verb) lives in `FantasticRunnerCore`; this target supplies
+// only the ssh `RunnerTransport` conformance (ssh exec + `ssh -L` tunnel
+// + Darwin socket probe + per-agent session state) + a thin bundle that
+// routes through `RunnerCore`.
 
 #if os(macOS)
 
     import FantasticJSON
     import FantasticKernel
+    import FantasticRunnerCore
     import Foundation
 
     public let HANDLER_MODULE = "ssh_runner.tools"
+
+    /// Per-agent ssh tunnel sessions, guarded by a lock. Shared between
+    /// the bundle and its per-call transports.
+    final class SshRunnerState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sessions: [AgentId: SshSession] = [:]
+
+        /// Install a new session, returning the previous one (if any) so
+        /// the caller can stop it without holding the lock across stop().
+        func install(_ session: SshSession, for agentId: AgentId) -> SshSession? {
+            lock.lock()
+            let previous = sessions[agentId]
+            sessions[agentId] = session
+            lock.unlock()
+            return previous
+        }
+
+        func remove(_ agentId: AgentId) -> SshSession? {
+            lock.lock()
+            defer { lock.unlock() }
+            return sessions.removeValue(forKey: agentId)
+        }
+
+        func get(_ agentId: AgentId) -> SshSession? {
+            lock.lock()
+            defer { lock.unlock() }
+            return sessions[agentId]
+        }
+
+        func stopAll() {
+            lock.lock()
+            let snapshot = sessions
+            sessions.removeAll()
+            lock.unlock()
+            for (_, s) in snapshot { s.stop() }
+        }
+    }
 
     public final class SshRunnerBundle: AgentBundle, @unchecked Sendable {
         public let name = "ssh_runner"
         public init() {}
 
-        private let lock = NSLock()
-        private var sessions: [AgentId: SshSession] = [:]
+        private let state = SshRunnerState()
 
         public var readme: String? {
             """
@@ -34,47 +77,45 @@
             payload: JSON,
             kernel: Kernel
         ) async throws -> JSON? {
-            let verb = payload["type"].asString ?? ""
+            // Preserve the pre-refactor guard: every verb requires the
+            // agent to exist (the reply uses the live agent's id).
             guard let agent = kernel.agent(agentId) else {
                 return .object(["error": .string("no agent")])
             }
-            switch verb {
-            case "reflect":
-                return [
-                    "id": .string(agent.id.value),
-                    "kind": .string("ssh_runner"),
-                    "sentence": .string(
-                        "SSH-tunneled remote kernel. Spawns ssh -L to forward a remote HTTP port + polls remote lock.json."
-                    ),
-                    "verbs": [
-                        "start": "args: user, host, local_port?, remote_port?. Spawns ssh tunnel + waits for ready.",
-                        "stop": "Kills the tunnel.",
-                        "status": "Reports tunnel state + remote lock pid (if alive).",
-                    ] as JSON,
-                ] as JSON
-            case "boot":
-                return .object(["ok": .bool(true)])
-            case "shutdown":
-                stopAll()
-                return .object(["ok": .bool(true)])
-            case "start":
-                return await startVerb(agentId: agent.id, payload: payload)
-            case "stop":
-                return stopVerb(agentId: agent.id)
-            case "status":
-                return statusVerb(agentId: agent.id)
-            default:
-                return .object(["error": .string("unknown verb \(verb)")])
-            }
+            let verb = payload["type"].asString ?? ""
+            let transport = SshTransport(agentId: agent.id, payload: payload, state: state)
+            return await RunnerCore.handle(verb: verb, transport: transport)
         }
 
         public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
-            stopAll()
+            state.stopAll()
+        }
+    }
+
+    /// SSH transport — owns each verb's concrete reply body + the ssh
+    /// exec / tunnel-probe machinery. Built per `handle` call over the
+    /// bundle's shared session state.
+    struct SshTransport: RunnerTransport {
+        let agentId: AgentId
+        let payload: JSON
+        let state: SshRunnerState
+
+        func reflect() async -> JSON {
+            [
+                "id": .string(agentId.value),
+                "kind": .string("ssh_runner"),
+                "sentence": .string(
+                    "SSH-tunneled remote kernel. Spawns ssh -L to forward a remote HTTP port + polls remote lock.json."
+                ),
+                "verbs": [
+                    "start": "args: user, host, local_port?, remote_port?. Spawns ssh tunnel + waits for ready.",
+                    "stop": "Kills the tunnel.",
+                    "status": "Reports tunnel state + remote lock pid (if alive).",
+                ] as JSON,
+            ] as JSON
         }
 
-        // MARK: - Verbs
-
-        private func startVerb(agentId: AgentId, payload: JSON) async -> JSON {
+        func start() async -> JSON {
             guard let user = payload["user"].asString,
                 let host = payload["host"].asString
             else {
@@ -111,7 +152,8 @@
                 ])
             }
 
-            installSession(session, for: agentId)
+            let previous = state.install(session, for: agentId)
+            previous?.stop()
             return .object([
                 "ok": .bool(true),
                 "local_port": .integer(Int64(actualLocalPort)),
@@ -119,20 +161,8 @@
             ])
         }
 
-        /// Sync helper that swaps the session out of the lock-protected
-        /// dict without holding the lock across any await.
-        private func installSession(_ session: SshSession, for agentId: AgentId) {
-            lock.lock()
-            let previous = sessions[agentId]
-            sessions[agentId] = session
-            lock.unlock()
-            previous?.stop()
-        }
-
-        private func stopVerb(agentId: AgentId) -> JSON {
-            lock.lock()
-            let session = sessions.removeValue(forKey: agentId)
-            lock.unlock()
+        func stop() async -> JSON {
+            let session = state.remove(agentId)
             session?.stop()
             return .object([
                 "ok": .bool(true),
@@ -140,11 +170,13 @@
             ])
         }
 
-        private func statusVerb(agentId: AgentId) -> JSON {
-            lock.lock()
-            let session = sessions[agentId]
-            lock.unlock()
-            guard let session = session else {
+        func shutdownAll() async {
+            state.stopAll()
+        }
+
+        func handleVerb(_ verb: String) async -> JSON? {
+            guard verb == "status" else { return nil }
+            guard let session = state.get(agentId) else {
                 return .object(["running": .bool(false)])
             }
             return .object([
@@ -155,13 +187,7 @@
             ])
         }
 
-        private func stopAll() {
-            lock.lock()
-            let snapshot = sessions
-            sessions.removeAll()
-            lock.unlock()
-            for (_, s) in snapshot { s.stop() }
-        }
+        // MARK: - Port / probe helpers
 
         private func findFreePort() -> UInt16 {
             // Bind a TCP socket to :0, read back the assigned port, close.

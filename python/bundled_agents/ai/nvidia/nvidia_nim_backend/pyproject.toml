@@ -7,7 +7,7 @@ name = "fantastic-nvidia-nim-backend"
 version = "0.1.0"
 description = "Fantastic nvidia_nim_backend — NVIDIA NIM (OpenAI-compatible) LLM agent with native tool calls."
 requires-python = ">=3.11"
-dependencies = ["httpx"]
+dependencies = ["httpx", "fantastic-ai-core"]
 
 [project.entry-points."fantastic.bundles"]
 nvidia_nim_backend = "nvidia_nim_backend.tools"

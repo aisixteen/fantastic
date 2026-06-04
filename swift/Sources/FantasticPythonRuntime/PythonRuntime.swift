@@ -21,7 +21,9 @@
             """
             python_runtime — subprocess Python exec. Each `exec` is its own \
             process (`python3 -c <code>`), stateless across calls.
-            Verbs: reflect, exec (code), interrupt, stop, boot.
+            Verbs: reflect, exec (code), boot, shutdown.
+            Note: this Swift impl is synchronous — exec blocks until the process exits \
+            (no job_id / progress streaming). The Python canonical is async.
             """
         }
 

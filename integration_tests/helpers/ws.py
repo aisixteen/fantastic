@@ -105,9 +105,7 @@ class ws_session:
                 ...
     """
 
-    def __init__(
-        self, port: int, target: str, *, host: str = "127.0.0.1", timeout: float = 10.0
-    ):
+    def __init__(self, port: int, target: str, *, host: str = "127.0.0.1", timeout: float = 10.0):
         self._target = target
         self._url = f"ws://{host}:{port}/{target}/ws"
         self._timeout = timeout

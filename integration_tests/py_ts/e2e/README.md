@@ -37,6 +37,8 @@ both gaps:
 
 - `cd python && uv sync` (the `fantastic` venv).
 - `cd ts && npm run build` (the `ts/dist` frontend the browser loads).
+- `cd ts && sh scripts/pack.sh` (→ `ts/dist/js_kernel.zip`) — required
+  for zip-revive checks (`revive_verify.ts`).
 - System **Chrome** (headless) — see `../_chrome.ts`.
 - **`ANTHROPIC_KEY`** (or `ANTHROPIC_API_KEY`) in the repo `.env`.
 
@@ -64,6 +66,12 @@ spawns the builder agent with the prompt in `RUN.md`, verifies the result with
 - `pairing_verify.ts` — the Phase 2.5 pinnacle assertion: checks the builder *derived*
   the pairing cardinality (terminal_view/ai_view each 1:1 via `backend_id`; html_agent
   panels 1:N with no binding) from readmes alone.
+- `revive_verify.ts` — headless-Chrome verifier that, against an ALREADY-RUNNING
+  daemon, checks a readme-revived system is live: canvas mounts, inlined
+  xterm.css injected, a terminal renders, a `terminal_backend` appears on the
+  host's `<WORKDIR>/.fantastic` disk, no page errors. Usage:
+  `node e2e/revive_verify.ts <CANVAS_URL> <WORKDIR>`. Requires
+  `sh scripts/pack.sh` (→ `ts/dist/js_kernel.zip`) before the builder runs.
 - `dawee_verify.ts` — headless-Chrome check of the dawee port: panels render and the
   `dawee-mixer` BroadcastChannel bus crosses sandboxed iframes through the host
   `mixerbus` agent.

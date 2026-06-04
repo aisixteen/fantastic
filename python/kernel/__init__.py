@@ -25,7 +25,7 @@ from __future__ import annotations
 from kernel._agent import Agent
 from kernel._bundles import _find_bundle_module
 from kernel._env import _load_dotenv
-from kernel._modes import dispatch_argv
+from kernel.modes import dispatch_argv
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
     INBOX_BOUND,

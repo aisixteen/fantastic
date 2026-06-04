@@ -306,6 +306,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-ai-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-file",
+ "fantastic-kernel",
+ "futures-util",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-bundle"
 version = "0.1.0"
 
@@ -406,6 +419,7 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "fantastic-runner-core",
  "nix 0.29.0",
  "serde_json",
  "tempfile",
@@ -418,6 +432,7 @@ name = "fantastic-nvidia-nim-backend"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-file",
  "fantastic-kernel",
@@ -434,6 +449,7 @@ name = "fantastic-ollama-backend"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-ai-core",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
@@ -470,6 +486,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-runner-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-scheduler"
 version = "0.1.0"
 dependencies = [
@@ -489,6 +516,7 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "fantastic-runner-core",
  "nix 0.29.0",
  "serde_json",
  "tempfile",

@@ -7,6 +7,7 @@ license.workspace = true
 description = "NVIDIA NIM (OpenAI-compatible) LLM bundle — same surface as ollama_backend, different transport."
 
 [dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core" }
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }

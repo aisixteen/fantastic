@@ -1,8 +1,8 @@
 """Bundle discovery via entry points.
 
 `fantastic.bundles` — every installed bundle (name → handler module).
-Used by REPL `add <name>` and HTTP `install-bundle` flows to resolve a
-human-typed bundle name to its dotted module path. Substrate doesn't
+Used by the REPL `add <name>` flow to resolve a human-typed bundle name
+to its dotted module path. Substrate doesn't
 care which bundles exist; this is purely for the lookup convenience.
 
 A bundle is anything with a `handler(id, payload, agent)` callable in

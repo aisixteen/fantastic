@@ -74,9 +74,12 @@
     /// Run `fantastic reflect [<id>]` against the Python kernel's
     /// dedicated shorthand mode.
     private func pythonReflect(
-        binary: URL, workdir: URL, agentId: String = "core",
+        binary: URL, workdir: URL, agentId: String = "fs_loader",
         args: [String: String] = [:]
     ) throws -> JSON {
+        // Python's root id is `fs_loader` (Swift/Rust use `core`) — the
+        // root-id asymmetry is BY DESIGN, so the default targets python's
+        // actual root rather than a hardcoded `core`.
         let proc = Process()
         proc.executableURL = binary
         proc.currentDirectoryURL = workdir
@@ -153,14 +156,11 @@
             let swReply = await kernel.send(
                 AgentId("core"), .object(["type": .string("reflect")]))
 
-            // Both must answer with an `id` field — the most basic
-            // reflect contract.
-            #expect(pyReply["id"].asString != nil, "python reflect lacks 'id'")
-            #expect(swReply["id"].asString != nil, "swift reflect lacks 'id'")
-            #expect(
-                pyReply["id"].asString == swReply["id"].asString,
-                "root id mismatch: python=\(pyReply["id"].asString ?? "nil") swift=\(swReply["id"].asString ?? "nil")"
-            )
+            // Both must answer with an `id` field. Root ids differ BY
+            // DESIGN (python=fs_loader, swift=core), so assert each runtime's
+            // own root id rather than cross-runtime equality.
+            #expect(pyReply["id"].asString == "fs_loader", "python root id != fs_loader")
+            #expect(swReply["id"].asString == "core", "swift root id != core")
         }
 
         @Test func listAgentsShape() async throws {
@@ -171,7 +171,7 @@
             // Python side.
             let pyReply = try pythonOneShot(
                 binary: binary, workdir: tmp,
-                agentId: "core", verb: "list_agents")
+                agentId: "fs_loader", verb: "list_agents")
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
@@ -211,10 +211,10 @@
                 "binary_protocol", "browser_bus", "well_known",
                 "agent_count", "available_bundles",
             ]
-            for (label, r) in [("python", pyReply), ("swift", swReply)] {
-                #expect(r["id"].asString == "core", "\(label) reflect id != core")
+            for (label, r, root) in [("python", pyReply, "fs_loader"), ("swift", swReply, "core")] {
+                #expect(r["id"].asString == root, "\(label) reflect id != \(root)")
                 #expect(r["sentence"].asString != nil, "\(label) reflect lacks sentence")
-                #expect(r["tree"]["id"].asString == "core", "\(label) reflect tree.id != core")
+                #expect(r["tree"]["id"].asString == root, "\(label) reflect tree.id != \(root)")
                 #expect(r["bundles"].asArray == nil, "\(label) reflect has bundles by default")
                 for k in gone {
                     #expect(r[k] == nil || r[k] == .null, "\(label) reflect still has primer key \(k)")
@@ -236,10 +236,10 @@
             let swIds = await kernel.send(
                 AgentId("core"),
                 .object(["type": .string("reflect"), "tree": .string("ids")]))
-            for (label, r) in [("python", pyIds), ("swift", swIds)] {
+            for (label, r, root) in [("python", pyIds, "fs_loader"), ("swift", swIds, "core")] {
                 let arr = r["tree"].asArray
                 #expect(arr != nil, "\(label) tree=ids not an array")
-                #expect(arr?.first?.asString == "core", "\(label) tree=ids root not first")
+                #expect(arr?.first?.asString == root, "\(label) tree=ids root not first")
             }
 
             let pyB = try pythonReflect(

@@ -30,6 +30,10 @@ integration_tests/
     kernel_proc.py    subprocess wrapper for fantastic kernels
     seeding.py        one-shot CLI seeding (web / web_ws / web_rest /
                       bridge_ws) + root_id() (resolve a kernel's literal root)
+                      + zip helpers: frontend_zip(), pull_member_from_zip(),
+                      read_member_text(), expected_bundle_sha() (used by
+                      decoupling/test_serve_frontend.py to direct-pull the
+                      frontend artifact without a full unzip)
     streaming.py      assert_watch_remote_streams — the shared watch_remote driver
     ws.py             minimal WS client: ws_call, ws_emit, ws_session
   bridge/             cross-runtime kernel_bridge tests (WS-only) — the
@@ -110,8 +114,8 @@ state + `lock.json` to see what the kernel had).
 1. Drop a `test_*.py` in the matching subfolder (`bridge/`, `decoupling/`,
    `web/`, or a new topical one). The root `conftest.py` + `helpers/`
    resolve from any depth (conftest puts `integration_tests/` on `sys.path`).
-2. Use the `python_kernel` / `swift_kernel` fixtures to spawn instances
-   (spawn the **server** first — the client bridge connects eagerly).
+2. Use the `python_kernel` / `swift_kernel` / `rust_kernel` fixtures to spawn
+   instances (spawn the **server** first — the client bridge connects eagerly).
 3. Seed with `helpers.seeding`: `seed_web` + `seed_web_ws` (Python
    server) and `seed_bridge_ws(..., peer_id=<root>, peer_port=<server>)`
    on the client. Don't hardcode `peer_id` — root ids differ by runtime

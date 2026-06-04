@@ -148,8 +148,15 @@ Full-tier-only bundles (subprocess; excluded from embedded slice):
 | `fantastic-terminal-backend`| PTY shell + flow control + UTF-8 + image-paste over binary WS |
 | `fantastic-python-runtime`  | subprocess `python -c <code>` with interpreter resolution ladder |
 | `fantastic-local-runner`    | supervises a child `fantastic` in another workdir             |
-| `fantastic-ssh-runner`      | remote `fantastic` lifecycle + canvas-iframing tunnel         |
+| `fantastic-ssh-runner`      | remote `fantastic` lifecycle + SSH port-forward (ssh -L) tunnel |
 | `fantastic-kernel-bridge` (SSH transport) | `ssh -L` tunnel chained over WsTransport          |
+
+Internal shared crates (not standalone kernel bundles — linked into the backends/runners above):
+
+| crate                       | role                                                          |
+|-----------------------------|---------------------------------------------------------------|
+| `fantastic-ai-core`         | shared LLM machinery (FIFO lock, chat threads, menu cache, history, prompt assembly, agentic loop) behind a `Provider` seam; AI backends bind to this |
+| `fantastic-runner-core`     | shared `fantastic` lifecycle dispatch (verb routing, boot=null, restart=stop+start) behind a `Transport` seam; runner bundles bind to this |
 
 ## Workspace layout
 
@@ -169,15 +176,17 @@ rust/
 │       ├── fantastic-web-ws/              WS verb channel
 │       ├── fantastic-web-rest/            REST verb channel
 │       ├── fantastic-scheduler/           recurring tasks
-│       ├── fantastic-ollama-backend/      local LLM
-│       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM
+│       ├── fantastic-ai-core/             shared LLM machinery (Provider seam; internal)
+│       ├── fantastic-ollama-backend/      local LLM (thin binding over ai-core)
+│       ├── fantastic-nvidia-nim-backend/  NVIDIA NIM LLM (thin binding over ai-core)
 │       ├── fantastic-kernel-bridge/       cross-kernel comms
 │       ├── fantastic-tools/               tool-calling layer for LLMs
 │       ├── fantastic-proxy-agent/         host-implemented agents
+│       ├── fantastic-runner-core/         shared runner lifecycle (Transport seam; internal)
 │       ├── fantastic-terminal-backend/    PTY  (full-tier only)
 │       ├── fantastic-python-runtime/      python -c (full-tier only)
-│       ├── fantastic-local-runner/        supervises child fantastic (full-tier)
-│       └── fantastic-ssh-runner/          remote fantastic via SSH (full-tier)
+│       ├── fantastic-local-runner/        supervises child fantastic (thin binding over runner-core; full-tier)
+│       └── fantastic-ssh-runner/          remote fantastic via SSH (thin binding over runner-core; full-tier)
 ├── scripts/
 │   ├── build-cli.sh                       cargo build --release --bin fantastic
 │   ├── bench-coldstart.sh                 3-metric boot benchmark

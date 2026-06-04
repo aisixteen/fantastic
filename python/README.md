@@ -14,35 +14,6 @@ then actuate with no model in the loop. Capabilities and topologies are emergent
 compositions read out of the substrate's own self-account — not features engineered
 into it; the running artifact is a function of its *descriptance*, not its code.
 
-## Quickstart (container)
-
-The fastest path to a running canvas — no local Python, no workspace
-install. Needs `podman` on `$PATH`:
-
-```bash
-# pick the tag matching your host arch
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-podman pull ghcr.io/alexadar/fantastic-canvas/base:dev-$ARCH
-podman run -d --name fantastic -v "$PWD:/workdir" -p 8080:8080 \
-  ghcr.io/alexadar/fantastic-canvas/base:dev-$ARCH
-# open http://localhost:8080/ in your browser
-```
-
-Two separate per-arch images (no combined manifest yet) — `:dev-amd64`
-for x86_64 Linux servers, `:dev-arm64` for Apple Silicon / aarch64.
-
-Ships with the full transport stack pre-seeded (`web` + `web_ws` +
-`web_rest`) and the standard bundles installed
-in the image's venv. The TypeScript frontend kernel (the browser
-view-agents) is served weakly through generic agents — see
-[`ts/SERVE.md`](ts/SERVE.md). Workdir state lives in `./.fantastic/` and is
-portable to a local `fantastic` run in the same directory. Full
-operator guide: [`containerfiles/base/README.md`](containerfiles/base/README.md).
-
-_Prefer running from source?_ `uv sync && uv run fantastic` — same
-`.fantastic/` schema, fully portable between modes (not concurrently —
-the kernel's lock file prevents that).
-
 ## Concept
 
 - **Agent** — recursive node, the universal type. Every entity in the
@@ -129,11 +100,8 @@ the kernel's lock file prevents that).
   kernel in the repo's top-level `ts/` package. It runs as a pure
   peer and federates to the host over the SAME WS bridge wire
   (`web_ws`) — bringing its own typed WS bridge, not a server-injected
-  script. View logic lives there as typed, reflectable **view-agents**:
-  a `canvas` compositor (DOM frames + a WebGL/three GL host),
-  `terminal_view` (inline xterm), `ai_view` (inline chat), and a
-  GL host that runs `gl_agent`'s `get_gl_view` source. xterm/three are
-  vendored hermetically (no CDN). Python knows
+  script. It is a canvas compositor + view-agents for terminal/chat/GL
+  content, vendored hermetically (no CDN). Python knows
   nothing of the `ts/` package — it's served weakly through a `file`
   agent rooted at the built `ts/dist`, which serves both the bundle and
   a static `index.html` mount page over the web host's
@@ -240,26 +208,10 @@ discovers bundles uniformly via `importlib.metadata.entry_points` —
 works for in-tree workspace members AND `pip install` third-party
 plugins.
 
-Install a third-party bundle from anywhere `uv pip install` accepts:
-
-```bash
-# Into the kernel's own venv (sys.executable); discovered on next start.
-fantastic install-bundle git+https://github.com/user/fantastic-something
-fantastic install-bundle git+https://github.com/user/repo@v0.2.1      # tag
-fantastic install-bundle git+https://github.com/user/repo@feat-branch # branch
-fantastic install-bundle git+https://github.com/user/repo@a3f2b1c     # commit
-fantastic install-bundle git+ssh://git@github.com/user/private-bundle
-fantastic install-bundle some-pypi-package
-fantastic install-bundle ./local/path/to/bundle
-
-# Into a specific project's .venv (must already exist via `fantastic install <proj>`):
-fantastic install-bundle git+https://... --into /path/to/project
-```
-
-After install, restart any running `fantastic`. The new bundle
-shows up in `kernel.reflect → available_bundles`, and you can
-`create_agent handler_module=<bundle>.tools` from any agent
-(creates as a child of that agent).
+Add a bundle by dropping its package under `bundled_agents/` (or
+`installed_agents/`) and running `uv sync` — its entry point registers on
+the next start, and you can `create_agent handler_module=<bundle>.tools`
+from any agent (creates as a child of that agent).
 
 ## Tests
 
@@ -298,7 +250,7 @@ uv run pytest -n auto
 │   ├── __init__.py                          # public API re-exports
 │   ├── _agent.py                            # Agent (recursive) + ephemeral flag + on_delete hook
 │   ├── _kernel.py                           # Kernel ctx + tree-mgmt API (create/delete/update/list/send)
-│   ├── _modes.py                            # dispatch_argv + one-shots (install/reflect/call) + default (web@port + REPL)
+│   ├── modes/                               # dispatch_argv + one-shots (reflect/call) + default (boot + REPL)
 │   ├── _bundles.py                          # entry-point discovery (`fantastic.bundles`)
 │   ├── _lock.py                             # serve lock (.fantastic/lock.json)
 │   └── _env.py                              # .env autoloader
@@ -314,10 +266,12 @@ uv run pytest -n auto
     ├── python_runtime/                       # exec Python in subprocess
     ├── yaml_state/                           # durable YAML key-value memory (yaml_state.tools)
     ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
-    ├── ai/ollama/ollama_backend              # local LLM (ollama)
-    ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible)
-    ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools)
+    ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
+    ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
+    ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core + NIM-specific key/retry verbs
+    ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
     ├── kernel_bridge/                        # cross-kernel WS bridge (asymmetric)
+    ├── runner/runner_core/                   # shared runner lifecycle + Transport seam; local_runner and ssh_runner bind to it
     └── runner/{local_runner, ssh_runner}     # spawn local / remote `fantastic`
 ```
 

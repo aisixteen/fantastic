@@ -1,12 +1,26 @@
 # nvidia_nim_backend — NVIDIA NIM LLM agent
-OpenAI-compatible LLM backend. api_key stored out-of-band via `file_agent_id` sidecar; rate-limit retry. Same surface as ollama_backend: a per-`client_id` SHARED-compute inference unit reached by id — callers `send` by id and any watcher consumes the stream (verbs `send`/`history`/`interrupt`/`status`/`reflect`).
+OpenAI-compatible LLM backend. Thin Provider + Bundle over
+`fantastic-ai-core`: this crate supplies only the NIM `Provider`
+(HTTPS + Bearer auth + SSE + per-index tool-call argument aggregation
++ 429 rate-limit retry) and a thin `Bundle` that dispatches every verb
+through `fantastic-ai-core`. The FIFO lock, menu cache, prompt
+assembly, agentic loop, and history persistence all live in
+`fantastic-ai-core`.
 
-This crate implements the **LLM backend contract** documented in
-`fantastic-ollama-backend`. The provider connection differs (HTTPS +
-Bearer auth + SSE + per-index tool-call argument aggregation + 429
-rate-limit retry) but verbs and emitted events are byte-for-byte
-identical, so any client can swap providers by changing one
-`handler_module` field on the agent's record — no client-side change.
+This crate implements the **LLM backend contract** defined in
+`fantastic-ai-core`'s module header. The provider connection differs
+(HTTPS + Bearer auth + SSE) but verbs and emitted events are
+byte-for-byte identical, so any client can swap providers by changing
+one `handler_module` field on the agent's record — no client-side
+change.
+
+**Streaming routing**: this backend uses per-client-inbox routing
+(`CallerRoute::PerClientInbox`). Every stream event is emitted on the
+CALLER's own `client_id` inbox — NOT the backend agent's own inbox.
+A watcher of the backend agent's id does NOT see these events.
+
+Verbs: `send` · `history` · `interrupt` · `status` · `refresh_menu` ·
+`boot` · `shutdown` · `reflect` · `set_api_key` · `clear_api_key`.
 
 Extras beyond the contract:
 
@@ -19,6 +33,5 @@ Extras beyond the contract:
 On HTTP 429 BEFORE any chunk has been yielded, the bundle retries
 once after sleeping `min(60s, max(1s, Retry-After || 5s))`. A `say`
 event + `status(thinking, waiting_on=rate_limit)` event surface the
-wait on this agent's own inbox so any watcher can reflect "waiting on
-provider". Mid-stream 429 (rare — quota usually checked up front)
-propagates as an error.
+wait via the caller's inbox. Mid-stream 429 (rare — quota usually
+checked up front) propagates as an error.

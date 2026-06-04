@@ -17,11 +17,69 @@ use direct file writes — but then check the layout matches
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import Any
 
 _ROOT_ID_CACHE: dict[str, str] = {}
+
+# Repo root: integration_tests/helpers -> integration_tests -> repo.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Sovereign frontend artifact built by `cd ts && sh scripts/pack.sh`. Holds
+# exactly three entries: readme.md, bundle.min.js, bundle.min.js.map.
+FRONTEND_ZIP = _REPO_ROOT / "ts" / "dist" / "js_kernel.zip"
+# Pinned line in the zip's readme.md carrying the bundle's integrity digest,
+# e.g. `# expected: 3881c729...`. pack.sh substitutes the real sha at build.
+_SHA_LINE = re.compile(r"^#\s*expected:\s*([0-9a-f]{64})\s*$", re.MULTILINE)
+
+
+def frontend_zip() -> Path:
+    """Path to the sovereign frontend artifact `ts/dist/js_kernel.zip`.
+
+    Build artifact (like the kernel binaries) — callers should
+    `pytest.skip` cleanly when it's absent; use `frontend_zip().exists()`
+    or the convenience message below.
+    """
+    return FRONTEND_ZIP
+
+
+def pull_member_from_zip(zip_path: Path, member: str, dest: Path) -> bytes:
+    """Stream ONE member out of `zip_path` to `dest` WITHOUT a full unzip.
+
+    Direct-pull model: open the central directory, read just `member`,
+    write its raw bytes to `dest` (parents created). Never extracts the
+    whole archive, never builds an unpacked tree. Returns the member's
+    bytes so the caller can hash/inspect them without re-reading disk.
+    """
+    with zipfile.ZipFile(zip_path) as zf:
+        data = zf.read(member)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return data
+
+
+def read_member_text(zip_path: Path, member: str) -> str:
+    """Read one text member out of `zip_path` (no extraction). Used to
+    pull `readme.md` and scrape its integrity line."""
+    with zipfile.ZipFile(zip_path) as zf:
+        return zf.read(member).decode("utf-8", errors="replace")
+
+
+def expected_bundle_sha(zip_path: Path) -> str:
+    """Scrape the `# expected: <sha256>` integrity line out of the zip's
+    own readme.md (pulled, not extracted). Raises if the line is absent —
+    a malformed/unpacked-by-hand artifact should fail loudly, not skip."""
+    text = read_member_text(zip_path, "readme.md")
+    m = _SHA_LINE.search(text)
+    if not m:
+        raise RuntimeError(
+            f"no `# expected: <sha256>` integrity line in {zip_path}!readme.md "
+            f"(rebuild: cd ts && sh scripts/pack.sh)"
+        )
+    return m.group(1)
 
 
 def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
@@ -73,7 +131,8 @@ def seed_create(
     if parent_id is None:
         parent_id = root_id(binary, workdir, timeout=timeout)
     args: list[str] = [
-        parent_id, "create_agent",
+        parent_id,
+        "create_agent",
         f"handler_module={handler_module}",
     ]
     if agent_id is not None:
@@ -109,9 +168,7 @@ def seed_create(
         try:
             return json.loads(candidate)
         except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(
-                f"seed_create returned non-JSON: {out!r} ({e})"
-            ) from e
+            raise RuntimeError(f"seed_create returned non-JSON: {out!r} ({e})") from e
 
 
 def _render(v: Any) -> str:
@@ -131,7 +188,8 @@ def seed_web(binary: Path, workdir: Path, port: int) -> None:
     otherwise call only once per workdir.
     """
     reply = seed_create(
-        binary, workdir,
+        binary,
+        workdir,
         handler_module="web.tools",
         agent_id="web",
         port=port,
@@ -145,7 +203,8 @@ def seed_web_ws(binary: Path, workdir: Path) -> None:
     kernels for WS — the host serves `/<id>/ws` only when a `web_ws`
     child contributes the route (WS is opt-in, parity with Python)."""
     reply = seed_create(
-        binary, workdir,
+        binary,
+        workdir,
         handler_module="web_ws.tools",
         agent_id="web_ws",
         parent_id="web",
@@ -160,7 +219,8 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
     routes the host mounts at boot. Returns the agent id. Works on
     both kernels (web_rest.tools is registered in each)."""
     reply = seed_create(
-        binary, workdir,
+        binary,
+        workdir,
         handler_module="web_rest.tools",
         agent_id=agent_id,
         parent_id="web",
@@ -201,7 +261,8 @@ def seed_bridge_ws(
     `peer_port`.
     """
     reply = seed_create(
-        binary, workdir,
+        binary,
+        workdir,
         handler_module="kernel_bridge.tools",
         agent_id=agent_id,
         transport="ws",

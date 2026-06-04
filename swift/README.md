@@ -22,6 +22,9 @@ env var; skipped cleanly when unset.
   variant so on-disk JSON matches Python's `dict` key order
 - 1 bootstrap target (`FantasticKernelStartup`) — `startKernel(...)`
   / `startKernelInMemory(...)` entry points
+- 2 shared core targets — `FantasticAICore` (shared LLM machinery:
+  history, epoch cancellation, verb dispatch) and `FantasticRunnerCore`
+  (shared runner lifecycle: reflect/boot/start/stop dispatch)
 - 17 bundle targets (13 multi-platform + 4 macOS-Pro) — see
   scoreboard below. The browser frontend is no longer a native
   bundle: it is served generically from `ts/dist` via a `file`
@@ -29,7 +32,7 @@ env var; skipped cleanly when unset.
 - 2 umbrella targets (`FantasticKernelEmbedded`,
   `FantasticKernelFull`) — Apple-app entry points
 - 1 CLI executable (`fantastic`)
-- 152 tests across substrate, bundles, parity harness, public-API
+- 170+ tests across substrate, bundles, parity harness, public-API
   shim
 
 ## Tiers
@@ -72,12 +75,12 @@ kernel modules.
 | web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
-| ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE |
-| nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry |
-| foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`) |
-| local_runner | `FantasticLocalRunner` | Pro | macOS-only — Process subprocess |
+| ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE (thin over `FantasticAICore`) |
+| nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry (thin over `FantasticAICore`) |
+| foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`; thin over `FantasticAICore`) |
+| local_runner | `FantasticLocalRunner` | Pro | macOS-only — Process subprocess (thin over `FantasticRunnerCore`) |
 | python_runtime | `FantasticPythonRuntime` | Pro | macOS-only — embedded Python |
-| ssh_runner | `FantasticSshRunner` | Pro | macOS-only — `ssh -L` tunnel |
+| ssh_runner | `FantasticSshRunner` | Pro | macOS-only — `ssh -L` tunnel (thin over `FantasticRunnerCore`) |
 | terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
 
 ## Wire compatibility
@@ -114,8 +117,13 @@ swift/
                                        BundleRegistry, persistence, lock, system verbs
     FantasticKernelStartup/            startKernel / startKernelInMemory
     FantasticWeb/                      HTTP + WS server (Network.framework)
+    FantasticAICore/                   shared LLM machinery (history, cancellation,
+                                       verb dispatch); AI backends are thin over this
     FantasticOllamaBackend/            local LLM SSE
     FantasticNvidiaNimBackend/         hosted LLM SSE
+    FantasticFoundationModelsBackend/  Apple on-device LLM
+    FantasticRunnerCore/               shared runner lifecycle (reflect/boot/start/stop);
+                                       runner bundles are thin over this
     Fantastic{File,ProxyAgent,Tools,Scheduler,
               CliBundle,KernelBridge}/
                                        supporting bundles

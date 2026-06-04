@@ -21,6 +21,11 @@ Record fields (set on create_agent):
                  `get_webapp` (e.g. "<canvas_backend_id>/" so the
                  iframe lands directly on the project's canvas)
 
+This bundle is a thin transport over `runner_core`: `LocalTransport`
+implements the filesystem/subprocess seam; the shared lifecycle bodies
+live in `runner_core.core`. Each verb handler builds a `LocalTransport`
+from the agent record per-call and delegates to core.
+
 Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps lifecycle intentional)
@@ -48,7 +53,9 @@ import socket
 import subprocess
 from pathlib import Path
 
-import websockets
+from runner_core import core
+from runner_core.health import _ws_health
+from runner_core.transport import Transport
 
 LOCK_POLL_TIMEOUT = 30.0
 LOCK_POLL_INTERVAL = 0.5
@@ -86,36 +93,6 @@ def _pid_alive(pid: int) -> bool:
         os.kill(pid, 0)
         return True
     except (OSError, ProcessLookupError):
-        return False
-
-
-async def _ws_health(port: int) -> bool:
-    """Probe the daemon's WS verb channel: connect to /fs_loader/ws, send a
-    reflect frame, expect a reply within 2s. WS is the verb channel —
-    this proves the kernel is alive AND answering, not just that
-    something is bound to the port."""
-    url = f"ws://localhost:{port}/fs_loader/ws"
-    try:
-        async with asyncio.timeout(2):
-            async with websockets.connect(url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "call",
-                            "target": "fs_loader",
-                            "payload": {"type": "reflect"},
-                            "id": "h",
-                        }
-                    )
-                )
-                while True:
-                    msg = json.loads(await ws.recv())
-                    if msg.get("id") == "h" and msg.get("type") in (
-                        "reply",
-                        "error",
-                    ):
-                        return msg.get("type") == "reply"
-    except (TimeoutError, OSError, websockets.WebSocketException):
         return False
 
 
@@ -179,31 +156,230 @@ def _has_web_record(proj: Path) -> bool:
     return False
 
 
+# ─── transport ──────────────────────────────────────────────────
+
+
+class LocalTransport(Transport):
+    """Filesystem + `fantastic` subprocess seam. Built per-call from the
+    agent record so multiple local projects (and the ssh backend) coexist
+    in one kernel with no shared module state."""
+
+    @property
+    def remote_path(self) -> str:
+        return self.rec.get("remote_path", "")
+
+    @property
+    def remote_cmd(self) -> str:
+        return self.rec.get("remote_cmd", "fantastic")
+
+    # poll-loop constants — read the module-level names so tests that
+    # monkeypatch `local_runner.tools.LOCK_POLL_*` are honoured by core.
+    @property
+    def lock_poll_timeout(self) -> float:
+        return LOCK_POLL_TIMEOUT
+
+    @property
+    def lock_poll_interval(self) -> float:
+        return LOCK_POLL_INTERVAL
+
+    @property
+    def sentence(self) -> str:
+        return "Local `fantastic --port N` lifecycle (subprocess + lock.json)."
+
+    def reflect_fields(self) -> dict:
+        pid, port = _live_pid_port(self.remote_path)
+        return {
+            "remote_path": self.rec.get("remote_path"),
+            "remote_cmd": self.rec.get("remote_cmd", "fantastic"),
+            "entry_path": self.rec.get("entry_path", ""),
+            "running": pid is not None,
+            "pid": pid,
+            "port": port,
+        }
+
+    # ─── live state ──────────────────────────────────────────────
+
+    async def read_lock(self) -> dict | None:
+        return _read_lock(self.remote_path)
+
+    async def pid_alive(self, pid: int) -> bool:
+        return _pid_alive(pid)
+
+    async def web_port(self) -> int | None:
+        return _discover_web_port(self.remote_path)
+
+    @property
+    def ws_port(self) -> int | None:
+        return _discover_web_port(self.remote_path)
+
+    # ─── start ───────────────────────────────────────────────────
+
+    def validate_start(self) -> dict | None:
+        rp = self.rec.get("remote_path")
+        if not rp:
+            return {"error": "local_runner.start: remote_path required"}
+        if not Path(rp).is_dir():
+            return {"error": f"local_runner.start: not a directory: {rp}"}
+        return None
+
+    async def already_running(self) -> dict | None:
+        pid, port = _live_pid_port(self.remote_path)
+        if pid is not None:
+            return {
+                "started": True,
+                "pid": pid,
+                "port": port,
+                "already_running": True,
+            }
+        return None
+
+    async def bring_up(self) -> dict | None:
+        proj = Path(self.remote_path)
+        cmd = self.remote_cmd
+        port = _free_port()
+        self._requested_port = port
+        fant_dir = proj / ".fantastic"
+        fant_dir.mkdir(parents=True, exist_ok=True)
+        log_path = fant_dir / "serve.log"
+
+        # Step 1: pre-create the web agent record at the chosen port
+        # unless one already exists. One-shot subprocess; web's _boot
+        # spawns uvicorn and the process exits before binding, but the
+        # record persists for the daemon to rehydrate.
+        if not _has_web_record(proj):
+            subprocess.run(
+                [
+                    cmd,
+                    "fs_loader",
+                    "create_agent",
+                    "handler_module=web.tools",
+                    f"port={port}",
+                ],
+                cwd=str(proj),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+        # Step 2: spawn the daemon. `_default` rehydrates the web agent
+        # from disk, acquires the lock, blocks while uvicorn serves.
+        log = log_path.open("ab", buffering=0)
+        try:
+            subprocess.Popen(
+                [cmd],
+                cwd=str(proj),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            log.close()
+        return None
+
+    async def finish_start(self, pid: int) -> dict:
+        port = _discover_web_port(self.remote_path)
+        return {"started": True, "pid": pid, "port": port}
+
+    def start_timeout_error(self) -> dict:
+        return {
+            "error": "local_runner.start: lock.json never appeared",
+            "requested_port": getattr(self, "_requested_port", None),
+        }
+
+    # ─── stop ────────────────────────────────────────────────────
+
+    async def stop(self) -> dict:
+        rp = self.rec.get("remote_path")
+        if not rp:
+            return {"error": "local_runner.stop: remote_path required"}
+        lock = _read_lock(rp)
+        lock_path = Path(rp) / ".fantastic" / "lock.json"
+        if not lock or not isinstance(lock.get("pid"), int):
+            # Nothing to stop, ensure stale file gone.
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+            return {"stopped": True, "pid": None}
+        pid = lock["pid"]
+        try:
+            os.kill(pid, signal_mod.SIGTERM)
+        except OSError:
+            # Already gone.
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+            return {"stopped": True, "pid": pid, "already_gone": True}
+        # Wait for actual death.
+        deadline = asyncio.get_event_loop().time() + STOP_POLL_TIMEOUT
+        died = False
+        while asyncio.get_event_loop().time() < deadline:
+            if not _pid_alive(pid):
+                died = True
+                break
+            await asyncio.sleep(STOP_POLL_INTERVAL)
+        if not died:
+            try:
+                os.kill(pid, signal_mod.SIGKILL)
+            except OSError:
+                pass
+            await asyncio.sleep(0.2)
+        # Sweep stale lock file.
+        if lock_path.exists():
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        return {"stopped": True, "pid": pid, "died_cleanly": died}
+
+    # ─── status / get_webapp ─────────────────────────────────────
+
+    async def status(self) -> dict:
+        rp = self.rec.get("remote_path", "")
+        pid, port = _live_pid_port(rp)
+        return {
+            "running": pid is not None,
+            "pid": pid,
+            "port": port,
+            "ws_ok": bool(port) and await _ws_health(port),
+        }
+
+    async def get_webapp(self, id: str) -> dict:
+        rp = self.rec.get("remote_path", "")
+        pid, port = _live_pid_port(rp)
+        if pid is None:
+            return {"error": "local_runner.get_webapp: not running"}
+        entry = self.rec.get("entry_path", "")
+        title = self.rec.get("display_name") or Path(rp).name or id
+        return {
+            "url": f"http://localhost:{port}/{entry}",
+            "default_width": 800,
+            "default_height": 600,
+            "title": title,
+        }
+
+
+def _transport(id, kernel) -> LocalTransport:
+    return LocalTransport(kernel.get(id) or {})
+
+
 # ─── verbs ──────────────────────────────────────────────────────
 
 
 async def _reflect(id, payload, kernel):
     """Identity + every record field + live status. No args."""
-    rec = kernel.get(id) or {}
-    pid, port = _live_pid_port(rec.get("remote_path", ""))
-    return {
-        "id": id,
-        "sentence": "Local `fantastic --port N` lifecycle (subprocess + lock.json).",
-        "remote_path": rec.get("remote_path"),
-        "remote_cmd": rec.get("remote_cmd", "fantastic"),
-        "entry_path": rec.get("entry_path", ""),
-        "running": pid is not None,
-        "pid": pid,
-        "port": port,
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
-    }
+    return await core.reflect(id, _transport(id, kernel), kernel, VERBS)
 
 
 async def _boot(id, payload, kernel):
     """No-op. local_runner does NOT auto-start the project — `start` is explicit so a kernel restart doesn't unintentionally boot every registered project."""
-    return None
+    return await core.boot(id, _transport(id, kernel), kernel)
 
 
 async def _start(id, payload, kernel):
@@ -214,75 +390,7 @@ async def _start(id, payload, kernel):
     Returns {started:bool, pid, port} on success, {error,
     requested_port} on failure (serve.log tail at
     `<remote_path>/.fantastic/serve.log`)."""
-    rec = kernel.get(id) or {}
-    rp = rec.get("remote_path")
-    cmd = rec.get("remote_cmd", "fantastic")
-    if not rp:
-        return {"error": "local_runner.start: remote_path required"}
-    proj = Path(rp)
-    if not proj.is_dir():
-        return {"error": f"local_runner.start: not a directory: {rp}"}
-
-    # Already running?
-    pid, port = _live_pid_port(rp)
-    if pid is not None:
-        return {"started": True, "pid": pid, "port": port, "already_running": True}
-
-    port = _free_port()
-    fant_dir = proj / ".fantastic"
-    fant_dir.mkdir(parents=True, exist_ok=True)
-    log_path = fant_dir / "serve.log"
-
-    # Step 1: pre-create the web agent record at the chosen port
-    # unless one already exists. One-shot subprocess; web's _boot
-    # spawns uvicorn and the process exits before binding, but the
-    # record persists for the daemon to rehydrate.
-    if not _has_web_record(proj):
-        subprocess.run(
-            [
-                cmd,
-                "fs_loader",
-                "create_agent",
-                "handler_module=web.tools",
-                f"port={port}",
-            ],
-            cwd=str(proj),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-
-    # Step 2: spawn the daemon. `_default` rehydrates the web agent
-    # from disk, acquires the lock, blocks while uvicorn serves.
-    log = log_path.open("ab", buffering=0)
-    try:
-        subprocess.Popen(
-            [cmd],
-            cwd=str(proj),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-    finally:
-        log.close()
-
-    # Poll lock.json until the spawned kernel writes it. The lock is
-    # PID-only — port lives on the web agent record we just persisted.
-    deadline = asyncio.get_event_loop().time() + LOCK_POLL_TIMEOUT
-    while asyncio.get_event_loop().time() < deadline:
-        info = _read_lock(rp)
-        if info and isinstance(info.get("pid"), int):
-            web_port = _discover_web_port(rp)
-            if web_port is not None:
-                return {"started": True, "pid": info["pid"], "port": web_port}
-        await asyncio.sleep(LOCK_POLL_INTERVAL)
-    return {
-        "error": "local_runner.start: lock.json never appeared",
-        "requested_port": port,
-    }
+    return await core.start(id, _transport(id, kernel), kernel)
 
 
 async def _stop(id, payload, kernel):
@@ -290,52 +398,7 @@ async def _stop(id, payload, kernel):
     `os.kill(pid, 0)` until the process is gone (max 6s; escalates to
     SIGKILL if still alive), then removes the stale lock file. Idempotent —
     missing lock or already-dead pid returns ok."""
-    rec = kernel.get(id) or {}
-    rp = rec.get("remote_path")
-    if not rp:
-        return {"error": "local_runner.stop: remote_path required"}
-    lock = _read_lock(rp)
-    lock_path = Path(rp) / ".fantastic" / "lock.json"
-    if not lock or not isinstance(lock.get("pid"), int):
-        # Nothing to stop, ensure stale file gone.
-        if lock_path.exists():
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
-        return {"stopped": True, "pid": None}
-    pid = lock["pid"]
-    try:
-        os.kill(pid, signal_mod.SIGTERM)
-    except OSError:
-        # Already gone.
-        if lock_path.exists():
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
-        return {"stopped": True, "pid": pid, "already_gone": True}
-    # Wait for actual death.
-    deadline = asyncio.get_event_loop().time() + STOP_POLL_TIMEOUT
-    died = False
-    while asyncio.get_event_loop().time() < deadline:
-        if not _pid_alive(pid):
-            died = True
-            break
-        await asyncio.sleep(STOP_POLL_INTERVAL)
-    if not died:
-        try:
-            os.kill(pid, signal_mod.SIGKILL)
-        except OSError:
-            pass
-        await asyncio.sleep(0.2)
-    # Sweep stale lock file.
-    if lock_path.exists():
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
-    return {"stopped": True, "pid": pid, "died_cleanly": died}
+    return await core.stop(id, _transport(id, kernel), kernel)
 
 
 async def _restart(id, payload, kernel):
@@ -349,15 +412,7 @@ async def _status(id, payload, kernel):
     the WS verb channel (`ws://localhost:<port>/fs_loader/ws`, reflect frame
     → reply). Proves the kernel is alive AND answering, not just that
     lock.json exists."""
-    rec = kernel.get(id) or {}
-    rp = rec.get("remote_path", "")
-    pid, port = _live_pid_port(rp)
-    return {
-        "running": pid is not None,
-        "pid": pid,
-        "port": port,
-        "ws_ok": bool(port) and await _ws_health(port),
-    }
+    return await core.status(id, _transport(id, kernel), kernel)
 
 
 async def on_delete(agent):
@@ -372,19 +427,7 @@ async def _get_webapp(id, payload, kernel):
     (`http://localhost:<port>/<entry_path>`). When the project isn't
     running, returns {error} so the canvas skips the frame instead
     of rendering a broken iframe."""
-    rec = kernel.get(id) or {}
-    rp = rec.get("remote_path", "")
-    pid, port = _live_pid_port(rp)
-    if pid is None:
-        return {"error": "local_runner.get_webapp: not running"}
-    entry = rec.get("entry_path", "")
-    title = rec.get("display_name") or Path(rp).name or id
-    return {
-        "url": f"http://localhost:{port}/{entry}",
-        "default_width": 800,
-        "default_height": 600,
-        "title": title,
-    }
+    return await core.get_webapp(id, _transport(id, kernel), kernel)
 
 
 # ─── dispatch ───────────────────────────────────────────────────

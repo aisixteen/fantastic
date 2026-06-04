@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "fantastic-ai-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared reflect-driven LLM-agent machinery (state, verbs, agentic loop, prompt assembly, events, history) behind a Provider seam. Backends supply only their Provider + a thin Bundle."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = "0.3"
+
+[dev-dependencies]
+fantastic-file = { path = "../fantastic-file" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,31 +1,45 @@
-"""Bridge integration test — Swift ↔ Python over WS (asymmetric).
+"""Bridge integration test — Swift A (client) → Python B (server) over WS.
 
-Swift A is the client: its `kernel_bridge` opens a WS to Python B's
-`web_ws` and ships raw `{type:"call", target, payload}` frames. B's
-`web_ws._on_call` dispatches `kernel.send(target, payload)` and
-replies over the same socket. No B-side bridge.
+Proves that Swift's ``WebSocketTransport`` wire shape is byte-compatible with
+Python's canonical ``web_ws`` server:
 
-When this passes: Swift's `WebSocketTransport` wire shape is
-byte-compatible with Python's canonical `web_ws` server. Wire drift
-breaks this test loudly.
+- Swift A seeds a ``kernel_bridge`` (transport=ws) that dials B's ``web_ws``
+  endpoint on boot.
+- Python B runs ``web_ws``, which dispatches incoming ``{type:"call", target,
+  payload}`` frames via ``kernel.send(target, payload)`` and replies over the
+  same socket.  No bridge agent on B — it is a pure server.
+- A's bridge ``forward`` verb relays the payload to B, which dispatches it to
+  B's ``kernel`` alias (→ B's actual root, ``fs_loader`` on Python).
+- The test verifies that the reflect reply carries the uniform reflect fields
+  (``id``, ``sentence``, ``tree``), confirming end-to-end dispatch.
+
+Wire drift — mismatched frame shapes between runtimes — breaks this test
+loudly.  Both-binary skip ensures the test is always a no-op when either
+binary is absent (never a failure).
 """
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
+
 
 from helpers.seeding import seed_bridge_ws, seed_web, seed_web_ws
 
 
-@pytest.mark.asyncio
 async def test_swift_python_ws_forward_reflect(
-    python_binary,
-    swift_binary,
+    python_binary: Path,
+    swift_binary: Path,
     python_kernel,
     swift_kernel,
     parity_tmp,
     free_port,
-):
+) -> None:
+    """Swift A forwards a ``reflect`` call through its WS bridge to Python B.
+
+    B's root id is ``fs_loader`` (Python runtime); both ``peer_id`` and
+    ``target`` use the ``kernel`` alias so the test is runtime-agnostic and
+    would survive a future root-id rename.
+    """
     base = parity_tmp("sw_py_ws_reflect")
     workdir_a = base / "A_swift"
     workdir_b = base / "B_python"
@@ -35,37 +49,60 @@ async def test_swift_python_ws_forward_reflect(
     port_a = free_port()
     port_b = free_port()
 
-    # Swift A: web (native WS, no web_ws child needed) + bridge.
+    # Swift A: web + web_ws (WS is opt-in; the host exposes /<id>/ws only when
+    # a web_ws child is present) + a bridge agent that dials B on boot.
     seed_web(swift_binary, workdir_a, port_a)
-    seed_web_ws(swift_binary, workdir_a)  # WS is opt-in: host needs a web_ws child
+    seed_web_ws(swift_binary, workdir_a)
     seed_bridge_ws(
-        swift_binary, workdir_a,
+        swift_binary,
+        workdir_a,
         agent_id="bridge",
+        # "kernel" is the runtime-neutral alias for the root agent on any kernel
+        # (Python root=fs_loader, Swift/Rust root=core).  Using the alias here
+        # means the WS path the bridge dials — /<peer_id>/ws — resolves
+        # correctly on both runtimes without hardcoding a runtime-specific id.
         peer_id="kernel",
         peer_port=port_b,
     )
 
-    # Python B: web + web_ws (serves /<id>/ws).
+    # Python B: web + web_ws (serves /<id>/ws that the bridge connects to).
+    # No bridge on B — it is purely a server.
     seed_web(python_binary, workdir_b, port_b)
     seed_web_ws(python_binary, workdir_b)
 
-    # B (server) up first, then A (client). A's daemon boots the
-    # bridge → connects to B.
+    # Spawn B first so its web_ws is accepting connections before A's bridge
+    # daemon attempts to dial.
     kernel_b = await python_kernel(workdir_b, port_b)
     kernel_a = await swift_kernel(workdir_a, port_a)
 
-    # Idempotent connect guard.
+    # Explicit boot call is idempotent; ensures the bridge connection is
+    # established before we exercise the forward path.
     await kernel_a.call("bridge", "boot")
 
+    # Forward a reflect call through the bridge to B's kernel alias.
+    # B dispatches it to its root (fs_loader), which returns the uniform
+    # reflect payload.
     reply = await kernel_a.call(
-        "bridge", "forward",
+        "bridge",
+        "forward",
         target="kernel",
         payload={"type": "reflect"},
     )
 
     assert isinstance(reply, dict), f"expected dict, got {type(reply)}: {reply}"
     assert "error" not in reply, f"forward returned error: {reply}"
-    # Uniform reflect carries id + sentence + tree (default tree=all).
-    assert "id" in reply and "tree" in reply, (
-        f"reply lacks uniform reflect fields: {list(reply.keys())}"
+
+    # Uniform reflect always carries: id (root agent id), sentence (one-line
+    # description), tree (agent tree, default=all).
+    missing = [f for f in ("id", "sentence", "tree") if f not in reply]
+    assert not missing, f"reflect reply missing fields {missing}; got keys: {list(reply.keys())}"
+
+    # Sanity: B's root id is "fs_loader" on Python (not "core").
+    # Validate only that we got a non-empty string — the alias resolved correctly.
+    assert isinstance(reply["id"], str) and reply["id"], (
+        f"reflect 'id' should be a non-empty string, got: {reply['id']!r}"
     )
+
+    # Suppress unused-variable warning: kernel_b is held to keep the process
+    # alive for the duration of the test (the fixture terminates it on teardown).
+    assert kernel_b is not None

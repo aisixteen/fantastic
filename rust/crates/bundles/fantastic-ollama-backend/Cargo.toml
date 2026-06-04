@@ -7,6 +7,7 @@ license.workspace = true
 description = "Local LLM (ollama) bundle — streaming tokens + tool-calls, LLM contract reference impl."
 
 [dependencies]
+fantastic-ai-core = { path = "../fantastic-ai-core" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

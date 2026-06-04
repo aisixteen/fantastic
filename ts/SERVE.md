@@ -15,10 +15,31 @@ One duck-typed alias in `python/bundled_agents/web/host/src/web/app.py` does all
 |---|---|---|
 | `read{path}` | `GET /{id}/file/{path}` | a `file` agent → static file server rooted at a dir |
 
-## Recipe (this TS kernel)
+## Distribution — the sovereign artifact
+
+The canonical production artifact is **`ts/dist/js_kernel.zip`** — a single
+self-describing zip that contains the full kernel in ONE inlined bundle
+(`bundle.min.js` + its `.map`) and the `readme.md` that describes how to revive
+it. Build it with:
 
 ```bash
-# 0. build the ESM bundle (one pinned dep: typescript; tests need none)
+cd ts && sh scripts/pack.sh      # → ts/dist/js_kernel.zip
+```
+
+The zip's only pinned dependency is the **vendored esbuild Go binary** (checked
+into `ts/src/vendor/` — see `ts/readme.md` and `ts/tools/esbuild/README.md`).
+There is **no npm step** and no import map, because every vendor (`three`,
+`@xterm/*`, `xterm.css`) is inlined by esbuild into `bundle.min.js`. Operators
+pull the zip on demand and serve `bundle.min.js` through a generic `file` agent
+— the mount page is a single `<script type="module">` tag, no import map, no
+`<link rel="stylesheet">` (the xterm CSS is injected at runtime by a shim inside
+the bundle). See [`ts/readme.md`](readme.md) for the full revive recipe and
+integrity-check instructions.
+
+## Dev path (scattered ESM modules)
+
+```bash
+# 0. build the scattered ESM modules (one pinned dep for this path: typescript)
 cd ts && npm install && npm run build        # → ts/dist/*.js  (ES modules)
 
 # 1. a GENERIC file agent rooted at the build output.

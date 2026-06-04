@@ -54,10 +54,7 @@ async def assert_watch_remote_streams(
         async def _await_probe():
             async for evt in sess.events():
                 payload = evt.get("payload") or {}
-                if (
-                    payload.get("type") == "stream_probe"
-                    and payload.get("nonce") == nonce
-                ):
+                if payload.get("type") == "stream_probe" and payload.get("nonce") == nonce:
                     return payload
             return None
 

@@ -12,8 +12,9 @@
 //   fantastic reflect [<id>]        reflect shorthand — no lock
 //                                   — defaults target to `kernel`
 //
-// Out of scope for Apple (Python-only): `install`, `install-bundle`.
-// Bundles in Swift are compile-time linked; no pip equivalent.
+// There is no `install` / `install-bundle` command in any kernel:
+// bundles are compile-time linked across all kernels (Swift, Rust,
+// Python alike), so there is nothing to install at runtime.
 
 import FantasticJSON
 import FantasticKernel

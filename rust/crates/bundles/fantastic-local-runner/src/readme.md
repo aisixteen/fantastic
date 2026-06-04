@@ -1,5 +1,11 @@
 # local_runner — `fantastic` lifecycle for local projects
 
+Thin Transport + Bundle over `fantastic-runner-core`: this crate
+supplies only the `LocalTransport` (subprocess + filesystem lock +
+OS signals) and a thin `LocalRunnerBundle`. The lifecycle verb
+dispatch (boot=null, restart=stop+start, unknown-verb error) lives
+in `fantastic-runner-core`.
+
 Each agent represents one project on this machine. Verbs spawn /
 signal a `fantastic` subprocess directly (no SSH, no tunnels).
 Live status is read from two sibling files in the project's

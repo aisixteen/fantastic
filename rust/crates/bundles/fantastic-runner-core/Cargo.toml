@@ -1,0 +1,17 @@
+[package]
+publish = false
+name = "fantastic-runner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared `fantastic` lifecycle machinery (reflect/boot/start/stop/restart/status/get_webapp dispatch) behind a Transport seam. The local + ssh runner bundles supply only their Transport impl + a thin Bundle."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-bundle = { path = "../../fantastic-bundle" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

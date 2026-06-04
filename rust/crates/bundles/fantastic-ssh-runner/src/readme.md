@@ -1,5 +1,11 @@
 # ssh_runner — remote `fantastic` lifecycle over SSH
 
+Thin Transport + Bundle over `fantastic-runner-core`: this crate
+supplies only the `SshTransport` (ssh exec + `ssh -L` tunnel) and
+a thin `SshRunnerBundle`. The lifecycle verb dispatch (boot=null,
+restart=stop+start, unknown-verb error) lives in
+`fantastic-runner-core`.
+
 Each agent represents one project on one remote host. Verbs exec
 `ssh` as a subprocess to control the remote kernel and maintain a
 local SSH tunnel that exposes the remote daemon's HTTP port on a

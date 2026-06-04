@@ -27,8 +27,9 @@ weight. To wire it:
    `/ts_dist/file/<mount>.html` in Chrome, assert the canvas mounts.
 4. Copy `py_ts/package.json` (`"type":"module"`).
 
-Prereqs to run: `cd rust && cargo build`, `cd ts && npm run build`, system
-Chrome. Skips (never fails) when any is absent.
+Prereqs to run: `cd rust && cargo build`, `cd ts && npm run build`,
+`cd ts && sh scripts/pack.sh` (→ `ts/dist/js_kernel.zip`), system Chrome.
+Skips (never fails) when any is absent.
 
 ---
 

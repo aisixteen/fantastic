@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -41,11 +40,19 @@ class KernelProc:
     stdout: str = field(default="", init=False)
     stderr: str = field(default="", init=False)
 
-    async def wait_ready(self, timeout: float = 15.0) -> None:
+    async def wait_ready(self, timeout: float = 60.0) -> None:
         """Poll HTTP `/` until the kernel's web server is bound.
 
         Raises `RuntimeError` if the kernel exits before becoming
         ready, or if the timeout elapses.
+
+        The ceiling is generous because the Swift DEBUG binary cold-starts
+        slowly (~20s measured; dyld + unoptimized boot), and the suite spawns
+        several kernels under CPU contention — a tighter bound flakes on the
+        first cold Swift spawn of a run. A Swift RELEASE build cold-starts in
+        well under a second; prefer it for CI to keep this fast. The poll
+        returns the instant the port binds, so this ceiling only caps the
+        worst case, it doesn't slow the common path.
         """
         url = f"http://127.0.0.1:{self.port}/"
         deadline = time.monotonic() + timeout

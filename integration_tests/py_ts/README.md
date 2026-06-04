@@ -36,9 +36,11 @@ node --test --test-force-exit --test-name-pattern="^A:" \
 
 Prereqs: `cd ../../python && uv sync` (the `fantastic` venv), `cd ../../ts &&
 npm run build` (the `dist/` the browser loads), and system Chrome for the
-`*.browser.itest.ts`. A test **skips** (never fails) when its prerequisite — the
-venv, a built `dist/`, Chrome, or `ANTHROPIC_KEY` for the live-LLM cases — is
-missing; nothing hangs or silently "passes".
+`*.browser.itest.ts`. `bundle_revive.browser.itest.ts` additionally needs the
+sovereign artifact: `cd ../../ts && sh scripts/pack.sh` (→
+`ts/dist/js_kernel.zip`). A test **skips** (never fails) when its prerequisite
+— the venv, a built `dist/`, the zip, Chrome, or `ANTHROPIC_KEY` for the
+live-LLM cases — is missing; nothing hangs or silently "passes".
 
 ## What's covered
 
@@ -58,6 +60,11 @@ missing; nothing hangs or silently "passes".
   (scheduler ⇄ python ⇄ AI ⇄ JS panels); `A` + `G` are deterministic, `B–J` need
   `ANTHROPIC_KEY`.
 - `llm_e2e.browser.itest.ts` — a live-LLM browser round-trip.
+- `bundle_revive.browser.itest.ts` — revives the sovereign artifact
+  (`ts/dist/js_kernel.zip`) in a real browser: serves the single
+  `bundle.min.js` through a `file` agent (no import map, no external
+  stylesheet) and proves `three` + xterm + xterm.css are inlined, and
+  that bridge + terminal pairing work through the rolled-up bundle.
 
 ---
 

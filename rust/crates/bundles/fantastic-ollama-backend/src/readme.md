@@ -1,19 +1,32 @@
 # ollama_backend — local LLM agent
-Talks to a local ollama. Per-client chat threads, FIFO lock, native tool-calls, menu cache. Persistence via `file_agent_id`.
+Thin Provider + Bundle over `fantastic-ai-core`: this crate supplies
+only the `OllamaProvider` (NDJSON transport to a local ollama process)
+and a thin `Bundle`. The per-client chat threads, FIFO lock, menu
+cache, history, prompt assembly, and agentic loop all live in
+`fantastic-ai-core`.
 
-Canonical reference for the **LLM backend contract** every backend
-(nvidia_nim, apple_fm, …) speaks, so any caller retargets by changing one
-record field — no caller-side change.
+Reference implementation for the **LLM backend contract** defined in
+`fantastic-ai-core`'s module header. Every backend (nvidia_nim,
+apple_fm, …) speaks the same contract, so any caller retargets by
+changing one record field — no caller-side change.
 
 ## Calling this agent as a workflow unit
 `send {type:"send", text, client_id?}` runs ONE inference turn (per-backend FIFO
-lock) and streams `token`/`status`/`done` on this agent's OWN inbox, returning
-`{response, final}`. It is SHARED COMPUTE reached by id: a scheduler, a host job, a
-peer kernel, another AI, or a view all `send` to it by id — threads are kept
-per-`client_id`, and any caller that `watch`es this id consumes the same stream.
-Optional `system_prompt`/`messages` override the auto-built prompt/history
-(stateless mode). Verbs: `send` · `history` · `interrupt` · `status` ·
-`refresh_menu` · `reflect` · `boot`.
+lock). It is SHARED COMPUTE reached by id: a scheduler, a host job, a
+peer kernel, or another AI all `send` to it by id — threads are kept
+per-`client_id`. Optional `system_prompt`/`messages` override the
+auto-built prompt/history (stateless mode).
+
+Verbs: `send` · `history` · `interrupt` · `status` ·
+`refresh_menu` · `reflect` · `boot` · `shutdown`.
+
+## Streaming routing
+This backend uses `CallerRoute::CliRoundTrip`: when `client_id` is
+`"cli"`, stream events are sent to the `cli` agent directly
+(`kernel.send("cli", ev)`). For all other `client_id` values, events
+are emitted on the backend agent's own inbox (`kernel.emit(self_id,
+ev)`) tagged with `client_id` — only a watcher of the backend id who
+supplies that `client_id` sees them.
 
 ## Routing is the model's decision
 HOW a completion reaches its addressee is the model's: the per-call prompt names

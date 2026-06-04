@@ -1,13 +1,13 @@
 """Readme-contract guard — HOST bundle readmes describe CAPABILITY only.
 
 Part-3 decoupling rule: a host bundle's readme (and its reflect `sentence`)
-must NOT name any frontend/client tech. The host is client-agnostic — it
-describes what it DOES + its verb/event surface; the FRONTEND bundle is the
-one that declares what host capability it fronts. An LLM weaves the pairing
+must NOT name any frontend/client tech.  The host is client-agnostic — it
+describes what it DOES and its verb/event surface; the FRONTEND bundle is the
+one that declares which host capability it fronts.  An LLM weaves the pairing
 from those two self-descriptions.
 
-This is a pure STATIC scan across python/rust/swift (no kernel binary) — it
-always runs and fails on a client-intent word. Run:
+This is a pure STATIC scan across python/rust/swift sources (no kernel binary
+needed) — it always runs and fails on a client-intent word.  Run:
     cd integration_tests && uv run pytest decoupling/test_readme_contract.py
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[2]  # integration_tests/decoupling -> repo root
+_REPO = Path(__file__).resolve().parents[2]  # file → decoupling/ → integration_tests/ → repo root
 
 # Client-intent tokens a HOST readme/sentence must not contain (case-insensitive).
 DENY = [
@@ -67,8 +67,12 @@ def _is_web(path: Path) -> bool:
 
 
 def _readme_sources() -> list[tuple[Path, str]]:
-    """(path, text) for every host readme: py/rust readme.md files + swift
-    inline `var readme` literals."""
+    """Return (path, text) for every host readme.
+
+    Covers python and rust `readme.md` files under their bundle trees, and
+    swift inline `var readme: String? { ... }` literal blocks extracted from
+    `Fantastic*/**/*.swift` sources.
+    """
     out: list[tuple[Path, str]] = []
     for base in [
         _REPO / "python" / "bundled_agents",
@@ -84,8 +88,13 @@ def _readme_sources() -> list[tuple[Path, str]]:
 
 
 def _sentence_lines() -> list[tuple[Path, int, str]]:
-    """Reflect one-line `sentence` literals across the runtimes (the text an
-    LLM sees from `reflect` without readme=true)."""
+    """Return (path, lineno, line) for every source line that sets a `sentence`
+    literal across python/rust/swift runtimes.
+
+    These are the one-liners an LLM sees from a `reflect` call (without
+    readme=true), so they must be equally client-agnostic.  Test fixtures and
+    example files are excluded — they are not part of the bundle contract.
+    """
     out: list[tuple[Path, int, str]] = []
     globs = [
         (_REPO / "python" / "bundled_agents", "**/tools.py"),

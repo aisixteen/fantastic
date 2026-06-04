@@ -1,4 +1,4 @@
-"""Decoupling guard — the rust + swift hosts no longer register the
+"""Decoupling guard — the rust + swift + python hosts no longer register the
 view/webapp bundles that moved to the `ts/` frontend.
 
 After "part 1 — big decoupling" every host kernel is pure: UI lives in
@@ -7,14 +7,16 @@ reflects the live bundle catalog (`reflect bundles=all`) over WS on each
 host binary and asserts none of the 7 removed view modules are still
 registered.
 
-GENERATED scaffold — needs the built rust/swift binaries; skips cleanly
-without them (the `*_binary` fixtures `pytest.skip`). NOT run by the
-unit-test gate. Run explicitly:
+Requires the built binaries; skips cleanly without them (the `*_binary`
+fixtures call `pytest.skip`). NOT run by the unit-test gate. Run explicitly:
 
-    cd integration_tests && uv run pytest test_decoupling_bundle_catalog.py
+    uv run pytest decoupling/test_decoupling_bundle_catalog.py
 """
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
@@ -33,12 +35,18 @@ REMOVED = {
 }
 
 
-async def _catalog_has_no_views(binary, spawn, parity_tmp, free_port, tag):
+async def _catalog_has_no_views(
+    binary: Path,
+    spawn: Callable[..., Any],
+    parity_tmp: Callable[[str], Path],
+    free_port: Callable[[], int],
+    tag: str,
+) -> None:
     workdir = parity_tmp(tag) / "host"
     workdir.mkdir(parents=True)
     port = free_port()
     seed_web(binary, workdir, port)
-    seed_web_ws(binary, workdir)  # WS route so `reflect` reaches /core/ws
+    seed_web_ws(binary, workdir)  # WS route so `reflect` reaches /<root>/ws
     await spawn(workdir, port)
 
     reflect = await ws_call(port, "kernel", "reflect", bundles="all")
@@ -63,6 +71,10 @@ async def test_swift_catalog_drops_views(swift_binary, swift_kernel, parity_tmp,
 
 @pytest.mark.asyncio
 async def test_python_catalog_drops_views(python_binary, python_kernel, parity_tmp, free_port):
-    # Canonical reference runtime is guarded too — python's root id is also
-    # `core` over WS, matching the `_catalog_has_no_views` helper.
-    await _catalog_has_no_views(python_binary, python_kernel, parity_tmp, free_port, "python_decouple")
+    # The 'kernel' alias passed to ws_call resolves to the root agent on every
+    # runtime regardless of its literal id — python's root is `fs_loader`,
+    # rust/swift use `core`. The same helper covers all three runtimes because
+    # dispatch goes through the alias, never a hardcoded literal id.
+    await _catalog_has_no_views(
+        python_binary, python_kernel, parity_tmp, free_port, "python_decouple"
+    )

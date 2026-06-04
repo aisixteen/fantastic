@@ -17,6 +17,11 @@ Record fields (set on create_agent):
                  `get_webapp` (e.g. "<html_agent_id>/" so the
                  iframe lands directly on the remote canvas)
 
+This bundle is a thin transport over `runner_core`: `SSHTransport`
+implements the ssh/tunnel seam; the shared lifecycle bodies live in
+`runner_core.core`. Each verb handler builds an `SSHTransport` from the
+agent record per-call and delegates to core.
+
 Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps remote
@@ -49,7 +54,9 @@ import signal as signal_mod
 import subprocess
 from dataclasses import dataclass
 
-import websockets
+from runner_core import core
+from runner_core.health import _ws_health
+from runner_core.transport import Transport
 
 REMOTE_LOCK_POLL_TIMEOUT = 30.0
 REMOTE_LOCK_POLL_INTERVAL = 0.5
@@ -170,34 +177,269 @@ def _kill_tunnel(proc: subprocess.Popen | None) -> None:
                 pass
 
 
-async def _ws_health(local_port: int) -> bool:
-    """End-to-end liveness probe: connect to the local tunnel's
-    `ws://localhost:<local_port>/fs_loader/ws`, send a reflect frame, expect
-    a reply within 2s. Proves the tunnel is forwarding AND the remote
-    kernel is alive AND answering."""
-    url = f"ws://localhost:{local_port}/fs_loader/ws"
-    try:
-        async with asyncio.timeout(2):
-            async with websockets.connect(url) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "call",
-                            "target": "fs_loader",
-                            "payload": {"type": "reflect"},
-                            "id": "h",
-                        }
+# ─── transport ──────────────────────────────────────────────────
+
+
+class SSHTransport(Transport):
+    """ssh + `ssh -L` tunnel seam. Built per-call from the agent record;
+    process-memory tunnel state lives in the module-level `_runners` table
+    keyed by agent id."""
+
+    def __init__(self, id: str, record: dict | None):
+        super().__init__(record)
+        self.id = id
+
+    @property
+    def host(self):
+        return self.rec.get("host")
+
+    @property
+    def remote_path(self):
+        return self.rec.get("remote_path")
+
+    @property
+    def remote_cmd(self):
+        return self.rec.get("remote_cmd")
+
+    # poll-loop constants — core reads these; remote ssh polling is slower
+    # than local, hence the dedicated REMOTE_* names this proxies.
+    @property
+    def lock_poll_timeout(self) -> float:
+        return REMOTE_LOCK_POLL_TIMEOUT
+
+    @property
+    def lock_poll_interval(self) -> float:
+        return REMOTE_LOCK_POLL_INTERVAL
+
+    @property
+    def sentence(self) -> str:
+        return "Remote `fantastic --port N` lifecycle over SSH."
+
+    def reflect_fields(self) -> dict:
+        st = _state(self.id)
+        return {
+            "host": self.rec.get("host"),
+            "remote_path": self.rec.get("remote_path"),
+            "remote_cmd": self.rec.get("remote_cmd"),
+            "remote_port": self.rec.get("remote_port"),
+            "local_port": self.rec.get("local_port"),
+            "entry_path": self.rec.get("entry_path", ""),
+            "tunnel_pid": st.tunnel_pid,
+            "tunnel_alive": (
+                st.tunnel_proc is not None and st.tunnel_proc.poll() is None
+            ),
+        }
+
+    # ─── live state ──────────────────────────────────────────────
+
+    async def read_lock(self) -> dict | None:
+        host = self.rec.get("host")
+        rp = self.rec.get("remote_path")
+        if not (host and rp):
+            return None
+        rp_q = shlex.quote(rp)
+        rc, out, _ = await _ssh_exec(
+            host, f"cat {rp_q}/.fantastic/lock.json 2>/dev/null", timeout=5.0
+        )
+        if rc == 0 and out.strip():
+            try:
+                return json.loads(out)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    async def pid_alive(self, pid: int) -> bool:
+        host = self.rec.get("host")
+        if not host:
+            return False
+        rc, _, _ = await _ssh_exec(
+            host, f"kill -0 {pid} 2>/dev/null && echo ok", timeout=5.0
+        )
+        return rc == 0
+
+    async def web_port(self) -> int | None:
+        # The remote daemon binds the configured remote_port; no disk
+        # discovery — it's fixed config on the record.
+        rport = self.rec.get("remote_port")
+        try:
+            return int(rport) if rport else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def ws_port(self) -> int | None:
+        lport = self.rec.get("local_port")
+        try:
+            return int(lport) if lport else None
+        except (TypeError, ValueError):
+            return None
+
+    # ─── start ───────────────────────────────────────────────────
+
+    def validate_start(self) -> dict | None:
+        rec = self.rec
+        if not (
+            rec.get("host")
+            and rec.get("remote_path")
+            and rec.get("remote_cmd")
+            and rec.get("local_port")
+            and rec.get("remote_port")
+        ):
+            return {
+                "error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"
+            }
+        return None
+
+    async def already_running(self) -> dict | None:
+        # ssh_runner short-circuits on the tunnel inside finish_start (it
+        # must first confirm the remote came up); no pre-bringup shortcut.
+        return None
+
+    async def bring_up(self) -> dict | None:
+        rec = self.rec
+        host = rec.get("host")
+        rp = rec.get("remote_path")
+        cmd = rec.get("remote_cmd")
+        rport = int(rec.get("remote_port"))
+        # Which HTTP bundle to bootstrap on the remote — overridable on the
+        # record (default the standard web bundle), so it's explicit config,
+        # not baked in.
+        web_module = rec.get("web_module", "web.tools")
+
+        # Two-step bootstrap on the remote:
+        #   1. one-shot `fantastic fs_loader create_agent handler_module=web.tools port=N`
+        #      persists the web record (uvicorn task dies with the process,
+        #      but the record stays on disk).
+        #   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
+        #      the persisted web, acquires lock, blocks forever.
+        rp_q = shlex.quote(rp)
+        cmd_q = shlex.quote(cmd)
+        remote = (
+            f"cd {rp_q} && mkdir -p .fantastic && "
+            f"{cmd_q} fs_loader create_agent handler_module={shlex.quote(web_module)} port={rport} "
+            f">/dev/null 2>&1 && "
+            f"nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
+        )
+        rc, out, err = await _ssh_exec(host, remote, timeout=15.0)
+        if rc != 0:
+            return {
+                "error": f"ssh_runner.start: ssh failed (rc={rc}): {err.strip() or out.strip()}"
+            }
+        return None
+
+    async def finish_start(self, pid: int) -> dict:
+        rec = self.rec
+        host = rec.get("host")
+        lport = int(rec.get("local_port"))
+        rport = int(rec.get("remote_port"))
+        st = _state(self.id)
+        if st.tunnel_proc is not None and st.tunnel_proc.poll() is None:
+            # Idempotent — already tunneling.
+            return {
+                "started": True,
+                "remote_pid": pid,
+                "tunnel_pid": st.tunnel_pid,
+                "already_tunneled": True,
+            }
+        try:
+            tunnel = await _open_tunnel(host, lport, rport)
+        except Exception as e:
+            return {
+                "error": f"ssh_runner.start: tunnel failed: {e}",
+                "remote_pid": pid,
+            }
+        st.tunnel_proc = tunnel
+        st.tunnel_pid = tunnel.pid
+        return {"started": True, "remote_pid": pid, "tunnel_pid": tunnel.pid}
+
+    def start_timeout_error(self) -> dict:
+        return {
+            "error": "ssh_runner.start: remote serve did not write lock.json in time"
+        }
+
+    # ─── stop ────────────────────────────────────────────────────
+
+    async def stop(self) -> dict:
+        rec = self.rec
+        host = rec.get("host")
+        rp = rec.get("remote_path")
+        if not (host and rp):
+            return {"error": "ssh_runner.stop: host + remote_path required"}
+
+        st = _state(self.id)
+        _kill_tunnel(st.tunnel_proc)
+        st.tunnel_proc = None
+        st.tunnel_pid = None
+
+        # Read remote pid + kill
+        rp_q = shlex.quote(rp)
+        rc, out, _ = await _ssh_exec(
+            host, f"cat {rp_q}/.fantastic/lock.json 2>/dev/null", timeout=5.0
+        )
+        remote_pid: int | None = None
+        if rc == 0 and out.strip():
+            try:
+                remote_pid = int(json.loads(out).get("pid"))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                remote_pid = None
+        if remote_pid:
+            await _ssh_exec(host, f"kill {remote_pid} 2>/dev/null || true", timeout=5.0)
+        return {"stopped": True, "remote_pid": remote_pid}
+
+    # ─── status / get_webapp ─────────────────────────────────────
+
+    async def status(self) -> dict:
+        rec = self.rec
+        host = rec.get("host")
+        rp = rec.get("remote_path")
+        lport = rec.get("local_port")
+        st = _state(self.id)
+
+        tunnel_alive = st.tunnel_proc is not None and st.tunnel_proc.poll() is None
+        remote_alive = False
+        remote_pid: int | None = None
+        if host and rp:
+            rp_q = shlex.quote(rp)
+            rc, out, _ = await _ssh_exec(
+                host, f"cat {rp_q}/.fantastic/lock.json 2>/dev/null", timeout=5.0
+            )
+            if rc == 0 and out.strip():
+                try:
+                    lock = json.loads(out)
+                    remote_pid = int(lock.get("pid"))
+                    rc2, _, _ = await _ssh_exec(
+                        host,
+                        f"kill -0 {remote_pid} 2>/dev/null && echo ok",
+                        timeout=5.0,
                     )
-                )
-                while True:
-                    msg = json.loads(await ws.recv())
-                    if msg.get("id") == "h" and msg.get("type") in (
-                        "reply",
-                        "error",
-                    ):
-                        return msg.get("type") == "reply"
-    except (TimeoutError, OSError, websockets.WebSocketException):
-        return False
+                    remote_alive = rc2 == 0
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+        ws_ok = bool(lport) and tunnel_alive and await _ws_health(int(lport))
+        return {
+            "tunnel_alive": tunnel_alive,
+            "remote_alive": remote_alive,
+            "remote_pid": remote_pid,
+            "ws_ok": ws_ok,
+        }
+
+    async def get_webapp(self, id: str) -> dict:
+        rec = self.rec
+        lport = rec.get("local_port")
+        if not lport:
+            return {"error": "ssh_runner.get_webapp: local_port required"}
+        entry = rec.get("entry_path", "") or ""
+        host = rec.get("host") or "remote"
+        return {
+            "url": f"http://localhost:{lport}/{entry}",
+            "default_width": int(rec.get("width") or 800),
+            "default_height": int(rec.get("height") or 600),
+            "title": rec.get("display_name") or host,
+        }
+
+
+def _transport(id, kernel) -> SSHTransport:
+    return SSHTransport(id, kernel.get(id) or {})
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -205,138 +447,22 @@ async def _ws_health(local_port: int) -> bool:
 
 async def _reflect(id, payload, kernel):
     """Identity + every record field + live status. No args."""
-    rec = kernel.get(id) or {}
-    st = _state(id)
-    return {
-        "id": id,
-        "sentence": "Remote `fantastic --port N` lifecycle over SSH.",
-        "host": rec.get("host"),
-        "remote_path": rec.get("remote_path"),
-        "remote_cmd": rec.get("remote_cmd"),
-        "remote_port": rec.get("remote_port"),
-        "local_port": rec.get("local_port"),
-        "entry_path": rec.get("entry_path", ""),
-        "tunnel_pid": st.tunnel_pid,
-        "tunnel_alive": (st.tunnel_proc is not None and st.tunnel_proc.poll() is None),
-        "verbs": {
-            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
-        },
-    }
+    return await core.reflect(id, _transport(id, kernel), kernel, VERBS)
 
 
 async def _boot(id, payload, kernel):
     """No-op. ssh_runner does NOT auto-start the remote — `start` is explicit, so a kernel restart doesn't unintentionally boot every remote."""
-    return None
+    return await core.boot(id, _transport(id, kernel), kernel)
 
 
 async def _start(id, payload, kernel):
     """No args. SSHs to `<host>`, runs `cd <remote_path> && nohup <remote_cmd> --port <remote_port> > .fantastic/serve.log 2>&1 &`, polls the remote `.fantastic/lock.json` to confirm liveness, then opens the local SSH tunnel `-L <local_port>:localhost:<remote_port>`. Returns {started:bool, remote_pid, tunnel_pid} on success or {error} on failure."""
-    rec = kernel.get(id) or {}
-    host = rec.get("host")
-    rp = rec.get("remote_path")
-    cmd = rec.get("remote_cmd")
-    rport_val = rec.get("remote_port")
-    lport = rec.get("local_port")
-    if not (host and rp and cmd and lport and rport_val):
-        return {
-            "error": "ssh_runner.start: host, remote_path, remote_cmd, remote_port, local_port all required"
-        }
-    rport = int(rport_val)
-    lport = int(lport)
-    # Which HTTP bundle to bootstrap on the remote — overridable on the record
-    # (default the standard web bundle), so it's explicit config, not baked in.
-    web_module = rec.get("web_module", "web.tools")
-
-    # Two-step bootstrap on the remote:
-    #   1. one-shot `fantastic fs_loader create_agent handler_module=web.tools port=N`
-    #      persists the web record (uvicorn task dies with the process,
-    #      but the record stays on disk).
-    #   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
-    #      the persisted web, acquires lock, blocks forever.
-    rp_q = shlex.quote(rp)
-    cmd_q = shlex.quote(cmd)
-    remote = (
-        f"cd {rp_q} && mkdir -p .fantastic && "
-        f"{cmd_q} fs_loader create_agent handler_module={shlex.quote(web_module)} port={rport} "
-        f">/dev/null 2>&1 && "
-        f"nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
-    )
-    rc, out, err = await _ssh_exec(host, remote, timeout=15.0)
-    if rc != 0:
-        return {
-            "error": f"ssh_runner.start: ssh failed (rc={rc}): {err.strip() or out.strip()}"
-        }
-
-    # Poll the remote lock.json to confirm serve actually came up.
-    lock_path = f"{rp_q}/.fantastic/lock.json"
-    deadline = asyncio.get_event_loop().time() + REMOTE_LOCK_POLL_TIMEOUT
-    remote_pid: int | None = None
-    while asyncio.get_event_loop().time() < deadline:
-        rc2, out2, _ = await _ssh_exec(
-            host, f"cat {lock_path} 2>/dev/null", timeout=5.0
-        )
-        if rc2 == 0 and out2.strip():
-            try:
-                lock = json.loads(out2)
-                remote_pid = int(lock.get("pid"))
-                break
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        await asyncio.sleep(REMOTE_LOCK_POLL_INTERVAL)
-    if remote_pid is None:
-        return {
-            "error": "ssh_runner.start: remote serve did not write lock.json in time"
-        }
-
-    # Open local tunnel.
-    st = _state(id)
-    if st.tunnel_proc is not None and st.tunnel_proc.poll() is None:
-        # Idempotent — already tunneling.
-        return {
-            "started": True,
-            "remote_pid": remote_pid,
-            "tunnel_pid": st.tunnel_pid,
-            "already_tunneled": True,
-        }
-    try:
-        tunnel = await _open_tunnel(host, lport, rport)
-    except Exception as e:
-        return {
-            "error": f"ssh_runner.start: tunnel failed: {e}",
-            "remote_pid": remote_pid,
-        }
-    st.tunnel_proc = tunnel
-    st.tunnel_pid = tunnel.pid
-    return {"started": True, "remote_pid": remote_pid, "tunnel_pid": tunnel.pid}
+    return await core.start(id, _transport(id, kernel), kernel)
 
 
 async def _stop(id, payload, kernel):
     """No args. Kills the local SSH tunnel (TERM, 2s, KILL); SSHs to the host, reads remote pid from `.fantastic/lock.json`, SIGTERMs it. Idempotent: missing tunnel / missing remote pid is OK."""
-    rec = kernel.get(id) or {}
-    host = rec.get("host")
-    rp = rec.get("remote_path")
-    if not (host and rp):
-        return {"error": "ssh_runner.stop: host + remote_path required"}
-
-    st = _state(id)
-    _kill_tunnel(st.tunnel_proc)
-    st.tunnel_proc = None
-    st.tunnel_pid = None
-
-    # Read remote pid + kill
-    rp_q = shlex.quote(rp)
-    rc, out, _ = await _ssh_exec(
-        host, f"cat {rp_q}/.fantastic/lock.json 2>/dev/null", timeout=5.0
-    )
-    remote_pid: int | None = None
-    if rc == 0 and out.strip():
-        try:
-            remote_pid = int(json.loads(out).get("pid"))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            remote_pid = None
-    if remote_pid:
-        await _ssh_exec(host, f"kill {remote_pid} 2>/dev/null || true", timeout=5.0)
-    return {"stopped": True, "remote_pid": remote_pid}
+    return await core.stop(id, _transport(id, kernel), kernel)
 
 
 async def _restart(id, payload, kernel):
@@ -350,37 +476,7 @@ async def _status(id, payload, kernel):
     is a 2s probe over the WS verb channel (`ws://localhost:<local_port>
     /fs_loader/ws`, reflect frame → reply) through the SSH tunnel — proves
     end-to-end liveness."""
-    rec = kernel.get(id) or {}
-    host = rec.get("host")
-    rp = rec.get("remote_path")
-    lport = rec.get("local_port")
-    st = _state(id)
-
-    tunnel_alive = st.tunnel_proc is not None and st.tunnel_proc.poll() is None
-    remote_alive = False
-    remote_pid: int | None = None
-    if host and rp:
-        rp_q = shlex.quote(rp)
-        rc, out, _ = await _ssh_exec(
-            host, f"cat {rp_q}/.fantastic/lock.json 2>/dev/null", timeout=5.0
-        )
-        if rc == 0 and out.strip():
-            try:
-                lock = json.loads(out)
-                remote_pid = int(lock.get("pid"))
-                rc2, _, _ = await _ssh_exec(
-                    host, f"kill -0 {remote_pid} 2>/dev/null && echo ok", timeout=5.0
-                )
-                remote_alive = rc2 == 0
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-    ws_ok = bool(lport) and tunnel_alive and await _ws_health(int(lport))
-    return {
-        "tunnel_alive": tunnel_alive,
-        "remote_alive": remote_alive,
-        "remote_pid": remote_pid,
-        "ws_ok": ws_ok,
-    }
+    return await core.status(id, _transport(id, kernel), kernel)
 
 
 async def on_delete(agent):
@@ -391,18 +487,7 @@ async def on_delete(agent):
 
 async def _get_webapp(id, payload, kernel):
     """No args. Canvas-facing UI descriptor: {url, default_width, default_height, title}. The url points at the LOCAL tunnel + entry_path so the canvas iframes the remote webapp transparently."""
-    rec = kernel.get(id) or {}
-    lport = rec.get("local_port")
-    if not lport:
-        return {"error": "ssh_runner.get_webapp: local_port required"}
-    entry = rec.get("entry_path", "") or ""
-    host = rec.get("host") or "remote"
-    return {
-        "url": f"http://localhost:{lport}/{entry}",
-        "default_width": int(rec.get("width") or 800),
-        "default_height": int(rec.get("height") or 600),
-        "title": rec.get("display_name") or host,
-    }
+    return await core.get_webapp(id, _transport(id, kernel), kernel)
 
 
 # ─── dispatch ───────────────────────────────────────────────────

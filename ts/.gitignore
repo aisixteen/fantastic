@@ -1,5 +1,8 @@
 /node_modules/
 /dist/
 .map.json
+# vendored esbuild binary — reproduced via `go install` (tools/esbuild/README.md),
+# sha-verified by pack.sh against the committed SHA256SUMS. Not tracked (13MB/platform).
+tools/esbuild/*/esbuild
 # regenerated test-output dumps (e.g. llm_diag.out.md)
 tests/*.out.md

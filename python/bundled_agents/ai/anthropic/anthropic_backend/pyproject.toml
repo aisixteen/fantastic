@@ -7,7 +7,7 @@ name = "fantastic-anthropic-backend"
 version = "0.1.0"
 description = "Fantastic anthropic backend — reflect-driven LLM agent (Claude) with native tool calls."
 requires-python = ">=3.11"
-dependencies = ["httpx"]
+dependencies = ["httpx", "fantastic-ai-core"]
 
 [project.entry-points."fantastic.bundles"]
 anthropic_backend = "anthropic_backend.tools"

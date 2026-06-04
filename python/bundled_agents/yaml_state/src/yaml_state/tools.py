@@ -140,7 +140,9 @@ async def _delete(id, payload, agent):
 
 async def _replace(id, payload, agent):
     """args: doc:object. Overwrite the whole store (distill/prune-rewrite; {} clears)."""
-    doc = payload.get("doc", {})
+    if "doc" not in payload:
+        return {"error": "yaml_state.replace: doc (object) required"}
+    doc = payload["doc"]
     if not isinstance(doc, dict):
         return {"error": "yaml_state.replace: doc must be an object"}
     _dump(agent, doc)

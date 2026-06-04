@@ -1,20 +1,13 @@
 // HTTP host bundle.
 //
-// Mirrors Rust's `fantastic-web::WebBundle` at the verb / data
-// shape level. Vendored third-party assets (Three.js, xterm,
-// xterm-addon-fit) ship as SwiftPM resources alongside the
-// transport.js client runtime.
+// Serves /, /<id>/, /<id>/file/<path>, transport.js, and vendored
+// /_assets/* over a fully live Network.framework HTTP listener
+// (see HTTPServer.swift). No Hummingbird, NIO, or Rust required.
 //
-// Phase 4 ships:
-//   - Verb-level bundle (boot / shutdown / reflect)
-//   - Vendored asset accessors (Three.js, xterm.*, transport.js)
-//   - Route descriptor list for downstream consumers
-//
-// The live HTTP listener (Hummingbird- or NIO-backed) is a separate
-// polish pass — during the dual-kernel migration (Phase 8), the
-// existing Rust XCFramework continues to serve HTTP. Apps wanting
-// to drive the Swift kernel directly can use the asset accessors +
-// route table to wire their own server.
+// Vendored third-party assets (Three.js, xterm, xterm-addon-fit)
+// ship as SwiftPM resources alongside the transport.js client
+// runtime. Verb surfaces (web_ws / web_rest) are sub-agents mounted
+// via get_routes at boot.
 
 import FantasticJSON
 import FantasticKernel

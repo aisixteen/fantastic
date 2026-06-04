@@ -10,8 +10,6 @@ A Fantastic kernel is a tree of agents. One primitive:
                                        daemon (if a web agent is persisted)
     fantastic <id> <verb> [k=v ...]    one-shot RPC — print JSON, exit
     fantastic reflect [<id>] [k=v]     one-shot: <id> reflect (default 'kernel')
-    fantastic install <dir> [pkg ...]  uv venv <dir>/.venv + install
-    fantastic install-bundle <spec>    uv pip install a fantastic bundle
     fantastic --help                   this file
 
 ## Discover the system
@@ -21,8 +19,8 @@ A Fantastic kernel is a tree of agents. One primitive:
     fantastic reflect <id> return_readme=true  any agent + its readme
 
 `reflect` is read-only and lock-free — it works whether or not a
-daemon owns the dir. Every other one-shot (`<id> <verb>`, `install`)
-acquires the PID lock and is **refused while a daemon is running** —
+daemon owns the dir. Every other one-shot (`<id> <verb>`) acquires the
+PID lock and is **refused while a daemon is running** —
 go through that daemon's web surface instead (a `web` agent's
 `web_rest` / `web_ws` children; see `fantastic reflect`).
 

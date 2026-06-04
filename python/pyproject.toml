@@ -26,6 +26,8 @@ dependencies = [
   "fantastic-kernel-bridge",
   "fantastic-ssh-runner",
   "fantastic-local-runner",
+  "fantastic-runner-core",
+  "fantastic-ai-core",
 ]
 
 [project.scripts]
@@ -74,12 +76,14 @@ members = [
   "bundled_agents/scheduler",
   "bundled_agents/file",
   "bundled_agents/terminal",
+  "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/nvidia/nvidia_nim_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/kernel_bridge",
   "bundled_agents/runner/ssh_runner",
   "bundled_agents/runner/local_runner",
+  "bundled_agents/runner/runner_core",
   "bundled_agents/python_runtime",
   "bundled_agents/yaml_state",
   "bundled_agents/loader/fs_loader",
@@ -101,5 +105,7 @@ fantastic-anthropic-backend = { workspace = true }
 fantastic-kernel-bridge = { workspace = true }
 fantastic-ssh-runner = { workspace = true }
 fantastic-local-runner = { workspace = true }
+fantastic-runner-core = { workspace = true }
+fantastic-ai-core = { workspace = true }
 fantastic-python-runtime = { workspace = true }
 fantastic-fs-loader = { workspace = true }

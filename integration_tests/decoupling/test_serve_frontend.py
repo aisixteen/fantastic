@@ -1,60 +1,106 @@
-"""Decoupled-frontend proof — a host with NO view bundles still serves a
-static UI generically through a `file` agent.
+"""Decoupled-frontend proof — a host with NO view bundles serves the REAL
+sovereign frontend artifact (`ts/dist/js_kernel.zip`) generically through a
+`file` agent, with the served bytes' integrity verified against the sha256
+digest embedded in the artifact's own `readme.md`.
 
-This is the post-decoupling contract: the host renders no HTML itself;
-the `ts/` frontend (or any view package) is served from a `file` agent
-rooted at its built `dist/`, reachable at `GET /<id>/file/<path>`. Here
-we root a `file` agent at a throwaway dir holding an `index.html` and
-fetch it over HTTP — the same recipe that serves `ts/dist`, exercised on
-the real rust + swift binaries.
+What is proven:
+- A `file` agent rooted at a plain directory serves `bundle.min.js` over HTTP.
+- The bytes delivered by the kernel match the artifact's own integrity line,
+  confirming zero corruption end-to-end.
+- Individual zip members are pulled directly (no full unzip, no unpacked tree),
+  consistent with the direct-pull discipline in the rest of the harness.
+- The contract holds on all three host runtimes: Python, Rust, and Swift.
 
-GENERATED scaffold — needs the built rust/swift binaries; skips cleanly
-without them. NOT run by the unit-test gate. Run explicitly:
+GENERATED scaffold — needs the built runtime binaries AND the frontend artifact;
+each skips cleanly when its prerequisite is absent. NOT run by the unit-test
+gate. Run explicitly:
 
-    cd integration_tests && uv run pytest test_serve_frontend.py
+    cd integration_tests && uv run pytest decoupling/test_serve_frontend.py
 """
 
 from __future__ import annotations
 
+import hashlib
+
 import httpx
 import pytest
 
-from helpers.seeding import seed_create, seed_web
+from helpers.seeding import (
+    expected_bundle_sha,
+    frontend_zip,
+    pull_member_from_zip,
+    seed_create,
+    seed_web,
+)
 
-_MARKER = "FRONTEND-OK"
 
+async def _serves_frontend_bundle_via_file_agent(
+    binary, spawn, parity_tmp, free_port, tag: str
+) -> None:
+    # Skip guard: require the built frontend artifact.
+    zip_path = frontend_zip()
+    if not zip_path.exists():
+        pytest.skip(f"frontend artifact not built: {zip_path} (run: cd ts && sh scripts/pack.sh)")
 
-async def _serves_static_via_file_agent(binary, spawn, parity_tmp, free_port, tag):
     workdir = parity_tmp(tag) / "host"
     workdir.mkdir(parents=True)
-    # The "dist" a real frontend would point at — a plain static dir.
-    dist = workdir / "frontend_dist"
-    dist.mkdir()
-    (dist / "index.html").write_text(f"<h1>{_MARKER}</h1>", encoding="utf-8")
+    servedir = workdir / "servedir"
+    servedir.mkdir()
+
+    # Direct-pull only the member we serve — no full unzip.
+    bundle_bytes = pull_member_from_zip(zip_path, "bundle.min.js", servedir / "bundle.min.js")
+    # Scrape expected sha from readme.md inside the zip (also pulled, not extracted).
+    expected = expected_bundle_sha(zip_path)
 
     port = free_port()
     seed_web(binary, workdir, port)
-    # Generic static host: a `file` agent rooted at the dist dir. No view
-    # bundle involved — exactly how `ts_dist` serves `ts/dist`.
-    seed_create(binary, workdir, handler_module="file.tools", agent_id="assets", root=str(dist))
+    # Generic file agent — same recipe as the ts_dist file agent that serves ts/dist.
+    # No view bundle involved: the host is completely view-agnostic.
+    seed_create(
+        binary,
+        workdir,
+        handler_module="file.tools",
+        agent_id="js_kernel",
+        root=str(servedir),
+    )
     await spawn(workdir, port)
 
-    url = f"http://127.0.0.1:{port}/assets/file/index.html"
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    url = f"http://127.0.0.1:{port}/js_kernel/file/bundle.min.js"
+    # Generous timeout — the bundle is ~1.2 MB.
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url)
+
     assert resp.status_code == 200, f"{tag}: GET {url} → {resp.status_code}"
-    assert _MARKER in resp.text, f"{tag}: served body missing marker: {resp.text[:200]!r}"
 
-
-@pytest.mark.asyncio
-async def test_rust_serves_frontend_generically(rust_binary, rust_kernel, parity_tmp, free_port):
-    await _serves_static_via_file_agent(
-        rust_binary, rust_kernel, parity_tmp, free_port, "rust_serve"
+    # Primary assertion: served bytes match the artifact's own integrity digest.
+    got = hashlib.sha256(resp.content).hexdigest()
+    assert got == expected, f"{tag}: served bundle sha {got} != artifact expected {expected}"
+    # Belt-and-suspenders: pulled bytes also match (catches local I/O corruption).
+    assert got == hashlib.sha256(bundle_bytes).hexdigest(), (
+        f"{tag}: served sha {got} != locally pulled sha"
     )
 
 
 @pytest.mark.asyncio
-async def test_swift_serves_frontend_generically(swift_binary, swift_kernel, parity_tmp, free_port):
-    await _serves_static_via_file_agent(
-        swift_binary, swift_kernel, parity_tmp, free_port, "swift_serve"
+async def test_python_serves_frontend_bundle(
+    python_binary, python_kernel, parity_tmp, free_port
+) -> None:
+    await _serves_frontend_bundle_via_file_agent(
+        python_binary, python_kernel, parity_tmp, free_port, "python_serve_frontend"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rust_serves_frontend_bundle(rust_binary, rust_kernel, parity_tmp, free_port) -> None:
+    await _serves_frontend_bundle_via_file_agent(
+        rust_binary, rust_kernel, parity_tmp, free_port, "rust_serve_frontend"
+    )
+
+
+@pytest.mark.asyncio
+async def test_swift_serves_frontend_bundle(
+    swift_binary, swift_kernel, parity_tmp, free_port
+) -> None:
+    await _serves_frontend_bundle_via_file_agent(
+        swift_binary, swift_kernel, parity_tmp, free_port, "swift_serve_frontend"
     )

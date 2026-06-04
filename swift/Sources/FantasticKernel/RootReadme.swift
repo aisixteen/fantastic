@@ -1,8 +1,8 @@
 // The canonical root readme — the single substrate doc.
 //
 // `Resources/root_readme.md` is a byte-identical copy of the canonical
-// `python/bundled_agents/core/src/core/readme.md` (also copied into
-// Rust's `fantastic-core/src/readme.md`). It is the one source that
+// `python/bundled_agents/loader/fs_loader/src/fs_loader/readme.md`.
+// It is the one source that
 // feeds BOTH the on-disk `.fantastic/readme.md` (seeded at boot) and
 // `reflect readme=true` on the root — they must be identical. The
 // cross-runtime parity test byte-diffs all three.

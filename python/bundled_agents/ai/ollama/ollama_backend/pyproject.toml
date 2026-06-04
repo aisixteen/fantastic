@@ -7,7 +7,7 @@ name = "fantastic-ollama-backend"
 version = "0.1.0"
 description = "Fantastic ollama backend — reflect-driven LLM agent with native tool calls."
 requires-python = ">=3.11"
-dependencies = ["ollama"]
+dependencies = ["ollama", "fantastic-ai-core"]
 
 [project.entry-points."fantastic.bundles"]
 ollama_backend = "ollama_backend.tools"

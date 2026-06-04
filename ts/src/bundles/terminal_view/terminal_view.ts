@@ -36,12 +36,26 @@ export const terminalView: ViewBundle = {
     const { kernel, mount, selfId, backend } = ctx;
     const host = new Host(kernel, selfId);
 
-    // lazy-load the vendored UMD bundles (resolved via the page import map);
-    // they attach Terminal / FitAddon to globalThis as a side effect.
-    await import("@xterm/xterm");
-    await import("@xterm/addon-fit");
-    const g = globalThis as unknown as XTermGlobals;
-    const term = new g.Terminal({
+    // lazy-load the vendored UMD bundles. As ES modules in the browser (the
+    // dev/importmap build) they attach Terminal / FitAddon to globalThis as a
+    // side effect; rolled up by esbuild (the js_kernel.zip build) the same
+    // ctors arrive on the module namespace instead. Read BOTH so either build
+    // works — the global branch and the CJS-namespace branch of the UMD.
+    const xt = (await import("@xterm/xterm")) as Record<string, unknown>;
+    const xtFit = (await import("@xterm/addon-fit")) as Record<string, unknown>;
+    const g = globalThis as unknown as Partial<XTermGlobals>;
+    const pick = (...cands: unknown[]): unknown => cands.find(Boolean);
+    const TerminalCtor = pick(
+      g.Terminal,
+      xt.Terminal,
+      (xt.default as { Terminal?: unknown } | undefined)?.Terminal,
+    ) as new (opts: unknown) => XTerm;
+    const FitAddonCtor = pick(
+      (g.FitAddon as { FitAddon?: unknown } | undefined)?.FitAddon,
+      xtFit.FitAddon,
+      (xtFit.default as { FitAddon?: unknown } | undefined)?.FitAddon,
+    ) as new () => unknown;
+    const term = new TerminalCtor({
       cursorBlink: true,
       fontSize: 13,
       fontFamily: "'SF Mono', 'Menlo', monospace",
@@ -49,7 +63,7 @@ export const terminalView: ViewBundle = {
       reflowOnResize: false, // freeze old lines; new output wraps at current width
       theme: { background: "#00000000", foreground: "#e5e5e5", cursor: "#e5e5e5" },
     });
-    const fit = new g.FitAddon.FitAddon() as { fit(): void };
+    const fit = new FitAddonCtor() as { fit(): void };
     term.loadAddon(fit);
     mount.style.padding = "6px 14px 6px 8px";
     mount.style.boxSizing = "border-box";

@@ -9,6 +9,7 @@ description = "Local `fantastic` lifecycle — start/stop/restart/status a child
 [dependencies]
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-runner-core = { path = "../fantastic-runner-core" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
