@@ -35,8 +35,23 @@ cd "$REPO"
 echo "build.sh: $ENGINE build $TAG (platform='${PLATFORM:-host}', push=$PUSH)"
 
 if [ -z "$PLATFORM" ]; then
-  # Single-arch host build — fast path, loaded into the local store.
-  "$ENGINE" build -f container/Containerfile -t "$TAG" .
+  # Single-arch host build — fast path, loaded into the local store. Pin the
+  # platform to the host arch EXPLICITLY: otherwise a stale wrong-arch base
+  # image already in the local store (e.g. an amd64 python:slim left by a prior
+  # multi-arch/QEMU build) gets reused, silently producing a cross-arch image
+  # that then runs under emulation. Deriving it from `uname -m` keeps the build
+  # native on both Apple-silicon and x86 hosts.
+  case "$(uname -m)" in
+    arm64|aarch64) HOSTPLAT=linux/arm64 ;;
+    x86_64|amd64)  HOSTPLAT=linux/amd64 ;;
+    *) HOSTPLAT="" ;;
+  esac
+  if [ -n "$HOSTPLAT" ]; then
+    echo "build.sh: pinning host platform $HOSTPLAT"
+    "$ENGINE" build --platform "$HOSTPLAT" -f container/Containerfile -t "$TAG" .
+  else
+    "$ENGINE" build -f container/Containerfile -t "$TAG" .
+  fi
   [ "$PUSH" = 1 ] && "$ENGINE" push "$TAG" || echo "build.sh: push skipped (set PUSH=1 to publish)"
 else
   # Multi-arch manifest list.
