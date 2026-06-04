@@ -49,7 +49,20 @@ case "$RUNTIME" in
 esac
 
 cd "$WORKDIR"
-mkdir -p "$WORKDIR/.fantastic"
+
+# Preflight: $WORKDIR must be writable by THIS user (the container's uid). When
+# you bind-mount your OWN folder, a rootless container's uid (1000) may not own
+# it, so the kernel couldn't write .fantastic/. Fail with the fix, not a cryptic
+# mkdir error. (On podman/docker for macOS the VM maps ownership automatically,
+# so this just passes.)
+if ! mkdir -p "$WORKDIR/.fantastic" 2>/dev/null || ! : >"$WORKDIR/.fantastic/.wtest" 2>/dev/null; then
+  echo "entrypoint: FATAL — $WORKDIR is not writable by uid $(id -u) (the container user)." >&2
+  echo "  You bind-mounted a host folder the container can't write. Grant access:" >&2
+  echo "    podman:  add  --userns=keep-id        (map your host user into the container)" >&2
+  echo "    docker:  add  -u \$(id -u):\$(id -g)     (run as your host uid)" >&2
+  exit 1
+fi
+rm -f "$WORKDIR/.fantastic/.wtest" 2>/dev/null || true
 
 have() { grep -rqs "\"id\"[[:space:]]*:[[:space:]]*\"$1\"" .fantastic/agents 2>/dev/null; }
 

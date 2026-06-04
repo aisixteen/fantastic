@@ -95,10 +95,16 @@ podman|docker run -d --name fantastic-<nodeId> \
   (`-p <H>:8088`, recommend `H == 8088` so the port recorded in `lock.json` stays
   host-valid). To change the **inside** port too, set `-e FANTASTIC_PORT=<C>` and
   `-p <H>:<C>`.
-- **Workdir:** bind-mount `/work`; the kernel writes `/work/.fantastic/` (records,
-  `lock.json`). Runs as `USER fantastic` (uid 1000); with `--userns=keep-id`
-  (podman) the files come out host-owned. Works with/without `:Z` and `keep-id`;
-  the image never relies on `:U`.
+- **Workdir:** bind-mount `/work` (your own project folder works — the kernel
+  reads your existing files and writes `/work/.fantastic/`: records, `lock.json`).
+  Runs as `USER fantastic` (uid 1000), so mounting a host folder it can't write is
+  the one gotcha — the entrypoint fails fast with the fix if so:
+  - **macOS (podman/docker):** just works — the VM maps mount ownership, files
+    come out host-owned, no flag needed.
+  - **rootless podman on Linux:** add **`--userns=keep-id`** (maps your host user
+    into the container → host-owned, writable).
+  - **docker on Linux:** add **`-u $(id -u):$(id -g)`** (run as your host uid).
+  `:Z` (SELinux relabel) is supported; the image never relies on `:U`.
 - **Signals / PID1:** `tini` is the entrypoint init (the kernel `exec`s under it);
   `SIGTERM` → graceful (release `lock.json`, drain the HTTP server), no zombies.
   Passing `--init` as well is harmless.
