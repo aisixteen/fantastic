@@ -36,10 +36,17 @@ _servers: dict[str, "_ServerHandle"] = {}
 
 
 class _ServerHandle:
-    def __init__(self, server: uvicorn.Server, task: asyncio.Task, app: FastAPI):
+    def __init__(
+        self,
+        server: uvicorn.Server,
+        task: asyncio.Task | None,
+        app: FastAPI,
+        port: int = 0,
+    ):
         self.server = server
-        self.task = task
+        self.task = task  # None until _start_serving() schedules the serve loop
         self.app = app
+        self.port = port
         # child_id -> list of Route objects mounted on `app.routes` for that child
         self.routes_by_child: dict[str, list[Any]] = {}
 
@@ -96,6 +103,11 @@ async def _mount_all_surfaces(handle: _ServerHandle, kernel, web_agent_id: str) 
 
 
 async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
+    """Build the FastAPI app + uvicorn server and register the handle —
+    but do NOT start serving yet. The caller mounts child surfaces onto the
+    app first, then calls `_start_serving`, so the port never accepts a
+    request before its full route table is in place (no mount race; parity
+    with the rust host, which builds its whole router before binding)."""
     rec = kernel.get(agent_id) or {}
     port_val = rec.get("port")
     if not port_val:
@@ -113,6 +125,18 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
         loop="asyncio",
     )
     server = uvicorn.Server(config)
+    handle = _ServerHandle(server, None, app, port=port)
+    _servers[agent_id] = handle
+    return handle
+
+
+def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
+    """Schedule the uvicorn serve loop for an already-built (and already
+    route-mounted) handle. Idempotent: a no-op if it's already serving."""
+    if handle.task is not None:
+        return
+    server = handle.server
+    port = handle.port
 
     async def _safe_serve():
         # uvicorn calls sys.exit(1) on bind failure (e.g. port already
@@ -133,14 +157,11 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
         finally:
             _servers.pop(agent_id, None)
 
-    task = asyncio.create_task(_safe_serve())
-    handle = _ServerHandle(server, task, app)
-    _servers[agent_id] = handle
+    handle.task = asyncio.create_task(_safe_serve())
     print(
         f"  [web] {agent_id} listening on http://localhost:{port}/",
         file=sys.stderr,
     )
-    return handle
 
 
 async def _stop_uvicorn(agent_id: str) -> bool:
@@ -148,6 +169,10 @@ async def _stop_uvicorn(agent_id: str) -> bool:
     if not handle:
         return False
     handle.server.should_exit = True
+    if handle.task is None:
+        # Built but never started serving (mounted, then stopped before boot
+        # finished) — nothing to drain.
+        return True
     try:
         await asyncio.wait_for(handle.task, timeout=3.0)
     except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -187,13 +212,18 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. Spawns uvicorn on rec.port (required, no default), then walks this web's children and mounts each one's call-surface routes via duck-typed `get_routes`. Returns {running:true, surfaces:[...]}."""
+    """Idempotent. Builds the host on rec.port (required, no default), mounts each
+    child's call-surface routes via duck-typed `get_routes`, THEN starts uvicorn —
+    so the port never serves a request before its routes are mounted. Returns
+    {running:true, surfaces:[...]}."""
     if id not in _servers:
         await _spawn(id, kernel)
     handle = _servers.get(id)
     if handle is None:
         return {"running": False}
+    # Mount all child surfaces onto the app BEFORE the listener starts accepting.
     await _mount_all_surfaces(handle, kernel, id)
+    _start_serving(id, handle)
     return {"running": True, "surfaces": list(handle.routes_by_child.keys())}
 
 
