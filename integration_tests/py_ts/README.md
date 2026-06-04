@@ -34,6 +34,26 @@ node --test --test-force-exit --test-name-pattern="^A:" \
   scheduler_ai_html.browser.itest.ts                        # one case
 ```
 
+### Target: local binaries (default) or the container
+
+Like the pytest suite, the SAME tests run against either the local venv binary
+or the universal container image, via `FANTASTIC_TARGET` (the `_host.ts` harness
+routes seeding + the daemon through the chosen target — no test changes):
+
+```bash
+node --test --test-force-exit bridge.itest.ts               # FANTASTIC_TARGET=local (default)
+FANTASTIC_TARGET=container node --test --test-force-exit two_tree.browser.itest.ts
+FANTASTIC_IMAGE=fantastic:latest FANTASTIC_TARGET=container npm run test:integration
+```
+
+Container target: needs the image built (`sh container/build.sh`, **host arch**)
+and podman/docker; the daemon runs the python runtime with `-p 127.0.0.1:port:port`
+and `FANTASTIC_HEAD=off`, seeding one-shots run inside the image, and the frontend
+`dist/` is bind-mounted in so the `ts_dist` file agent serves it. Everything is
+host/browser → container (no container↔container), so it works over `-p`. The
+workdir lives under `py_ts/tmp/` (a VM-mounted path) since the OS tmpdir may not
+be mounted in the podman/docker VM.
+
 Prereqs: `cd ../../python && uv sync` (the `fantastic` venv), `cd ../../ts &&
 npm run build` (the `dist/` the browser loads), and system Chrome for the
 `*.browser.itest.ts`. `bundle_revive.browser.itest.ts` additionally needs the

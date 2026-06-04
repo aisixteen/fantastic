@@ -8,13 +8,62 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const FANTASTIC = join(repoRoot, "python", ".venv", "bin", "fantastic");
+
+// Target selection — mirrors the python integration harness. `local` (default)
+// runs the built venv binary; `container` runs the universal image (python
+// runtime). The SAME tests run either way: seeding one-shots run INSIDE the
+// container (a rootless container's uid can't write a host-seeded .fantastic/),
+// the daemon publishes -p 127.0.0.1:port:port with FANTASTIC_HEAD=off, and the
+// frontend dist is bind-mounted in so the `ts_dist` file agent can serve it.
+// e2e is host/browser → container only (no container↔container), so -p suffices.
+const TARGET = (process.env.FANTASTIC_TARGET ?? "local").trim().toLowerCase();
+const IMAGE = process.env.FANTASTIC_IMAGE ?? "fantastic:latest";
+const CONTAINER_BIN = "/opt/fantastic/venv/bin/fantastic"; // python in the image
+const CONTAINER_DIST = "/dist"; // where ts/dist is mounted in container mode
+
+function resolveEngine(): string {
+  for (const e of ["podman", "docker"]) {
+    if (spawnSync(e, ["--version"], { stdio: "ignore" }).status === 0) return e;
+  }
+  throw new Error("FANTASTIC_TARGET=container but no podman/docker found");
+}
+const ENGINE = TARGET === "container" ? resolveEngine() : "";
+
+/** Daemon `run` args for container mode — shared by bootHost + restartHost so a
+ *  restart re-creates an identical container (same name, port, mounts). */
+function containerRunArgs(name: string, port: number, tmp: string, serveDist: boolean): string[] {
+  const args = [
+    "run",
+    "-d",
+    "--name",
+    name,
+    "-p",
+    `127.0.0.1:${port}:${port}`,
+    "-v",
+    `${tmp}:/work`,
+    "-e",
+    "FANTASTIC_RUNTIME=python",
+    "-e",
+    `FANTASTIC_PORT=${port}`,
+    "-e",
+    "FANTASTIC_HEAD=off",
+  ];
+  if (serveDist) args.push("-v", `${DIST_DIR}:${CONTAINER_DIST}:ro`);
+  // Forward LLM keys for the (opt-in, paid) live-LLM tests.
+  const env = envFromDotenv();
+  for (const k of ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"]) {
+    if (env[k]) args.push("-e", `${k}=${env[k]}`);
+  }
+  args.push(IMAGE);
+  return args;
+}
 
 /** Parse the repo `.env` into a {KEY: value} map (so the spawned daemon — which
  *  runs in a tmp cwd and can't see the repo `.env` — gets e.g. ANTHROPIC_KEY in
@@ -63,7 +112,13 @@ export interface Host {
   /** id of a `scheduler` agent, if `scheduler` was set. */
   schedulerId?: string;
   tmp: string;
-  proc: ChildProcess;
+  /** the daemon process (local target) — undefined in container mode. */
+  proc?: ChildProcess;
+  /** the container name (container target) — undefined in local mode. */
+  container?: string;
+  /** whether the frontend dist was mounted/served (needed to re-create the
+   *  container identically on restart). */
+  serveDist?: boolean;
 }
 
 export interface BootOptions {
@@ -91,6 +146,9 @@ export interface BootOptions {
 export const DIST_DIR = join(repoRoot, "ts", "dist");
 
 function fantasticAvailable(): boolean {
+  if (TARGET === "container") {
+    return spawnSync(ENGINE, ["image", "inspect", IMAGE], { stdio: "ignore" }).status === 0;
+  }
   try {
     return statSync(FANTASTIC).isFile();
   } catch {
@@ -99,7 +157,17 @@ function fantasticAvailable(): boolean {
 }
 
 function runCli(tmp: string, args: string[]): string {
-  const r = spawnSync(FANTASTIC, args, { cwd: tmp, encoding: "utf8" });
+  // container: one-shot inside the image, bypassing the dispatch entrypoint,
+  // against the bind-mounted /work (so records are written by the container's
+  // own uid, same as the daemon). local: the historical subprocess path.
+  const r =
+    TARGET === "container"
+      ? spawnSync(
+          ENGINE,
+          ["run", "--rm", "-v", `${tmp}:/work`, "-w", "/work", "--entrypoint", CONTAINER_BIN, IMAGE, ...args],
+          { encoding: "utf8" },
+        )
+      : spawnSync(FANTASTIC, args, { cwd: tmp, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(`fantastic ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
   }
@@ -132,7 +200,14 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   if (!fantasticAvailable()) {
     throw new Error(`no fantastic bin at ${FANTASTIC}`);
   }
-  const tmp = mkdtempSync(join(tmpdir(), "ftbridge-"));
+  // container mode bind-mounts the workdir, so it MUST live on a path the
+  // podman/docker VM mounts. The OS tmpdir is often a harness-set TMPDIR (e.g.
+  // /tmp/claude-501) that the VM can't see → use a repo-relative dir ($HOME is
+  // mounted). local mode keeps the OS tmpdir.
+  const tmpBase =
+    TARGET === "container" ? join(repoRoot, "integration_tests", "py_ts", "tmp") : tmpdir();
+  if (TARGET === "container") mkdirSync(tmpBase, { recursive: true });
+  const tmp = mkdtempSync(join(tmpBase, "ftbridge-"));
   const webOut = runCli(tmp, [
     "fs_loader",
     "create_agent",
@@ -164,12 +239,16 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
   // build output. Its route mounts under web → `/ts_dist/file/<path>` serves
   // every ESM module on the SAME port as the WS surface.
   if (opts.serveDist === true) {
+    // container mode serves the dist from its bind-mount path; local from the
+    // host build dir. (The record only stores the path; the daemon — which has
+    // the mount — does the reading.)
+    const distRoot = TARGET === "container" ? CONTAINER_DIST : DIST_DIR;
     runCli(tmp, [
       webId,
       "create_agent",
       "handler_module=file.tools",
       "id=ts_dist",
-      `root=${DIST_DIR}`,
+      `root=${distRoot}`,
     ]);
   }
 
@@ -228,21 +307,32 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     schedulerId = extractId(schedOut, "scheduler");
   }
 
-  // inject the repo `.env` (e.g. ANTHROPIC_KEY) into the daemon's environment —
-  // it runs in `tmp`, so the python `_load_dotenv` (cwd-relative) won't find it.
-  const proc = spawn(FANTASTIC, [], {
-    cwd: tmp,
-    stdio: "ignore",
-    env: { ...process.env, ...envFromDotenv() },
-  });
-  proc.unref();
-  try {
-    await waitForPort(port, 15000);
-  } catch (e) {
-    teardownHost({ proc, tmp } as Host);
-    throw e;
+  // Spawn the daemon. container: `podman/docker run -d` (publishes the port,
+  // mounts the workdir + dist). local: the venv binary, with the repo `.env`
+  // (e.g. ANTHROPIC_KEY) injected — it runs in `tmp`, so the cwd-relative
+  // `_load_dotenv` wouldn't find it otherwise.
+  let proc: ChildProcess | undefined;
+  let container: string | undefined;
+  if (TARGET === "container") {
+    container = `fte2e-${port}-${process.pid}`;
+    spawnSync(ENGINE, ["rm", "-f", container], { stdio: "ignore" });
+    const r = spawnSync(
+      ENGINE,
+      containerRunArgs(container, port, tmp, opts.serveDist === true),
+      { encoding: "utf8" },
+    );
+    if (r.status !== 0) {
+      throw new Error(`container start failed (:${port}): ${r.stderr || r.stdout}`);
+    }
+  } else {
+    proc = spawn(FANTASTIC, [], {
+      cwd: tmp,
+      stdio: "ignore",
+      env: { ...process.env, ...envFromDotenv() },
+    });
+    proc.unref();
   }
-  return {
+  const host: Host = {
     origin: `ws://127.0.0.1:${port}`,
     httpOrigin: `http://127.0.0.1:${port}`,
     port,
@@ -254,12 +344,27 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     schedulerId,
     tmp,
     proc,
+    container,
+    serveDist: opts.serveDist === true,
   };
+  try {
+    await waitForPort(port, 30000);
+  } catch (e) {
+    teardownHost(host);
+    throw e;
+  }
+  return host;
 }
 
 export function teardownHost(host: Host): void {
   try {
-    host.proc?.kill("SIGTERM");
+    if (host.container) {
+      // never kill the container-internal pid — stop by name (tini → graceful).
+      spawnSync(ENGINE, ["stop", "-t", "8", host.container], { stdio: "ignore" });
+      spawnSync(ENGINE, ["rm", "-f", host.container], { stdio: "ignore" });
+    } else {
+      host.proc?.kill("SIGTERM");
+    }
   } catch {
     /* already gone */
   }
@@ -276,7 +381,11 @@ export function teardownHost(host: Host): void {
  *  daemon restart (the host fs_loader + the frontend store + the browser re-hydrate). */
 export async function restartHost(host: Host): Promise<void> {
   try {
-    host.proc.kill("SIGTERM");
+    if (host.container) {
+      spawnSync(ENGINE, ["rm", "-f", host.container], { stdio: "ignore" });
+    } else {
+      host.proc?.kill("SIGTERM");
+    }
   } catch {
     /* already gone */
   }
@@ -289,12 +398,25 @@ export async function restartHost(host: Host): Promise<void> {
       break;
     }
   }
-  const proc = spawn(FANTASTIC, [], {
-    cwd: host.tmp,
-    stdio: "ignore",
-    env: { ...process.env, ...envFromDotenv() },
-  });
-  proc.unref();
-  (host as { proc: ChildProcess }).proc = proc;
-  await waitForPort(host.port, 15000);
+  if (host.container) {
+    // re-create the SAME container (same name + mounts) — the workdir tmp on
+    // the host persists, so the kernel rehydrates from disk exactly as local.
+    const r = spawnSync(
+      ENGINE,
+      containerRunArgs(host.container, host.port, host.tmp, host.serveDist === true),
+      { encoding: "utf8" },
+    );
+    if (r.status !== 0) {
+      throw new Error(`container restart failed: ${r.stderr || r.stdout}`);
+    }
+  } else {
+    const proc = spawn(FANTASTIC, [], {
+      cwd: host.tmp,
+      stdio: "ignore",
+      env: { ...process.env, ...envFromDotenv() },
+    });
+    proc.unref();
+    (host as { proc: ChildProcess }).proc = proc;
+  }
+  await waitForPort(host.port, 30000);
 }
