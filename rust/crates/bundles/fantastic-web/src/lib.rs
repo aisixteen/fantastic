@@ -671,6 +671,17 @@ async fn serve_root_index() -> impl IntoResponse {
 async fn serve_root_index_dynamic(State(state): State<AppState>) -> impl IntoResponse {
     let kernel = Arc::clone(&state.kernel);
 
+    // Optional custom landing: if FANTASTIC_WEB_INDEX points at a readable HTML
+    // file, serve it at `/` (the container serves the all-readmes "head" page
+    // this way by default). Falls back to the dynamic agent-tree index below.
+    if let Ok(path) = std::env::var("FANTASTIC_WEB_INDEX") {
+        if !path.is_empty() {
+            if let Ok(html) = std::fs::read_to_string(&path) {
+                return Html(html).into_response();
+            }
+        }
+    }
+
     // Pull the root's reflect to get the tree (default tree=all).
     let primer = kernel
         .send(

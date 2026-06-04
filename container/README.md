@@ -26,19 +26,25 @@ must `podman/docker login ghcr.io`, or make the package public).
    serves amd64 + arm64).
 2. **Run** — **not technical? just run it, no flags.** With no `FANTASTIC_RUNTIME`
    set, the image **defaults to the `python` kernel** (the canonical reference) —
-   you don't need to choose anything:
+   you don't need to choose anything. The kernel binds **`:8088` inside** the
+   container (an unprivileged port — no root, no caps); map it straight through to
+   host **`:8088`** (the documented default):
    ```sh
-   podman|docker run -d --name fantastic -p 127.0.0.1:8888:8888 -v "$PWD":/work \
+   podman|docker run -d --name fantastic -p 127.0.0.1:8088:8088 -v "$PWD":/work \
      ghcr.io/alexadar/fantastic:latest
    ```
-   Only set `-e FANTASTIC_RUNTIME=rust|ts|head` if you specifically want another
-   mode; otherwise the safe default is `python`.
-3. **Read the head** (this is all you need — no client library):
-   - headful: `GET http://127.0.0.1:8888/`
+   Only set `-e FANTASTIC_RUNTIME=rust|ts` if you specifically want another
+   runtime; otherwise the safe default is `python`.
+3. **Read the head** — **every container serves a descriptive head page at `/` by
+   default** (it costs almost nothing and makes a fresh container self-explaining).
+   This is all you need — no client library:
+   - headful: open `GET http://127.0.0.1:8088/` → the all-readmes head page.
    - headless self-description: `curl -s -X POST -H 'Content-Type: application/json'
-     http://127.0.0.1:8888/rest/kernel -d '{"type":"reflect","readme":true,"bundles":"all"}'`
-     → the full root readme + bundle catalog. (Or run `FANTASTIC_RUNTIME=head` and
-     just open `/` — the all-readmes page.)
+     http://127.0.0.1:8088/rest/kernel -d '{"type":"reflect","readme":true,"bundles":"all"}'`
+     → the full root readme + bundle catalog.
+
+   Don't want the head? Set `-e FANTASTIC_HEAD=off` and `/` shows the plain
+   agent-tree index instead (the flag turns the head **off**, never on).
 4. **Then drive / build more from the chat:** the image carries `kernel_bridge` +
    `local_runner`, so an AI chat that pulled+ran this image can spawn and manage
    **other** Fantastic kernels (e.g. one per project dir) over the bridge — running
@@ -55,9 +61,10 @@ PUSH=1 PLATFORM=linux/amd64,linux/arm64 \
 ```
 
 > **One tag — `fantastic`.** There is a single universal image
-> (`ghcr.io/alexadar/fantastic:latest`). `head` / `ts` / `rust` are **runtime
-> modes** chosen at launch via `FANTASTIC_RUNTIME`, **not** separate tags. Tag it
-> `fantastic` (no `-head` / `-gpu` / per-runtime variants).
+> (`ghcr.io/alexadar/fantastic:latest`). `ts` / `rust` are **runtime modes** chosen
+> at launch via `FANTASTIC_RUNTIME`, **not** separate tags (and the head page is on
+> by default in every mode). Tag it `fantastic` (no `-head` / `-gpu` / per-runtime
+> variants).
 
 `build.sh` first ensures `ts/dist/js_kernel.zip` exists (runs `ts/scripts/pack.sh`
 if missing) — the image **copies** that prebuilt bundle, it does not build JS.
@@ -68,20 +75,26 @@ if missing) — the image **copies** that prebuilt bundle, it does not build JS.
 podman|docker run -d --name fantastic-<nodeId> \
   --init \                          # or rely on the baked tini
   [--userns=keep-id] \              # podman rootless; docker omits
-  -p 127.0.0.1:<H>:<C> \            # host loopback only
+  -p 127.0.0.1:8088:8088 \          # host loopback :8088 → container :8088
   -v <hostWorkdir>:/work[:Z] \      # :Z = SELinux relabel (podman on RHEL/Fedora)
   -e FANTASTIC_RUNTIME=python \     # python (default) | rust | ts
-  -e FANTASTIC_PORT=<C> \           # bound 0.0.0.0:<C> INSIDE the container
+  -e FANTASTIC_HEAD=on \            # head page at / (default on; `off` disables)
   -e FANTASTIC_WORKDIR=/work \
   fantastic:latest
 ```
 
-- **Env:** `FANTASTIC_RUNTIME` (default `python`), `FANTASTIC_PORT` (default 8888),
-  `FANTASTIC_WORKDIR` (default `/work`), `FANTASTIC_JS_KERNEL_ZIP`
-  (default `/opt/fantastic/js_kernel.zip` — always exported for discovery).
-- **Port:** the kernel binds `0.0.0.0:<C>` inside the isolated namespace; reach it
-  via host loopback `-p 127.0.0.1:<H>:<C>`. Recommend `H == C` so the port in
-  `lock.json` stays host-valid; else the runner records `H` in its accounting.
+- **Env:** `FANTASTIC_RUNTIME` (default `python`), `FANTASTIC_PORT` (default
+  **8088**, bound inside the container), `FANTASTIC_HEAD` (default `on` — the head
+  page at `/`; `off` shows the plain agent-tree index), `FANTASTIC_WORKDIR`
+  (default `/work`), `FANTASTIC_JS_KERNEL_ZIP` (default
+  `/opt/fantastic/js_kernel.zip` — always exported for discovery).
+- **Port:** the kernel binds `0.0.0.0:8088` inside the isolated namespace by
+  default — `8088` is **unprivileged**, so uid 1000 binds it with no root / no
+  capabilities. Reach it via host loopback `-p 127.0.0.1:8088:8088` (same port in
+  and out — the documented default). The host port is arbitrary; pick any free one
+  (`-p <H>:8088`, recommend `H == 8088` so the port recorded in `lock.json` stays
+  host-valid). To change the **inside** port too, set `-e FANTASTIC_PORT=<C>` and
+  `-p <H>:<C>`.
 - **Workdir:** bind-mount `/work`; the kernel writes `/work/.fantastic/` (records,
   `lock.json`). Runs as `USER fantastic` (uid 1000); with `--userns=keep-id`
   (podman) the files come out host-owned. Works with/without `:Z` and `keep-id`;
@@ -96,24 +109,25 @@ podman|docker run -d --name fantastic-<nodeId> \
 
 ## Call surface (composed at boot)
 
-The entrypoint composes a **callable** kernel, not just a renderer — on `<C>`:
+The entrypoint composes a **callable** kernel, not just a renderer — on `:8088`
+inside (host `:8088` by default):
 
 | surface | route | use |
 |---|---|---|
-| `web` | `GET /` , `GET /<id>/…` | HTTP host (rendering + child routes) |
+| `web` | `GET /` , `GET /<id>/…` | HTTP host (the head page at `/` + child routes) |
 | `web_ws` | `GET /web/ws` | WebSocket verb calls — the primary client transport |
 | `rest` | `POST /rest/<target>` (body = payload) | REST diagnostics / one-shot verb calls |
 
 Read the kernel's runtime in one round-trip (send the JSON content-type — rust's
 REST surface requires it): `curl -s -X POST -H 'Content-Type: application/json'
-http://127.0.0.1:<H>/rest/kernel -d '{"type":"reflect"}'` →
+http://127.0.0.1:8088/rest/kernel -d '{"type":"reflect"}'` →
 `{… "runtime": "python"|"rust"|"ts", …}` — gate the app's create-type chooser on it.
 
 ## Headless + headful — both, on one port (they do NOT dim each other)
 
 The container is simultaneously **headless** and **headful** on the **same**
-mapped port `<H>`; they are just different routes on the one `web` host, so
-turning to one never disables the other:
+mapped port (host `:8088` → container `:8088`); they are just different routes on the
+one `web` host, so turning to one never disables the other:
 
 - **Headless** (machines / the runner / an LLM): `web_ws` (`/web/ws`) + `rest`
   (`POST /rest/<target>`) — call verbs, stream events, `reflect`. No browser
@@ -135,19 +149,33 @@ build/flag; one running container serves both.
 | `python` (default) | the canonical python kernel daemon |
 | `rust` | the prebuilt rust kernel daemon (same CLI surface, same `.fantastic`) |
 | `ts` | a python host that also serves the embedded `js_kernel.zip` via a `file` agent (`/js_kernel/file/…`); the LLM pulls the zip's readme + revives the frontend on demand. No JS process. |
-| `head` | the **descriptive head**: a python kernel that serves the **all-readmes page** at `/` (main → kernels → containers + the GitHub URL) AND stays a reflectable/bridgeable brain kernel (`reflect` / `web_ws` / `web_rest`). Binds a rootless-safe port inside → map host **`:80`** with `-p 80:8080`. `docker run -d -p 80:8080 -e FANTASTIC_RUNTIME=head <image>` → open `http://<host>/`. |
+
+**Every runtime serves the descriptive head page at `/` by default** (`python`,
+`rust`, `ts` alike — see below). `FANTASTIC_RUNTIME=head` is still accepted as a
+**back-compat alias of `python`**; you no longer need it — the head is on by
+default everywhere. Set `FANTASTIC_HEAD=off` to drop it.
 
 The embedded JS bundle is always present at `$FANTASTIC_JS_KERNEL_ZIP`; pull its
 guide without unpacking: `unzip -p "$FANTASTIC_JS_KERNEL_ZIP" readme.md`.
 
-## The head as a brain kernel
+## The head — served always by default (the brain-kernel seam)
 
-`FANTASTIC_RUNTIME=head` is the first cut of the always-on **brain kernel** /
-"container runtime head": one endpoint that is BOTH the human-readable all-readmes
-page (`/`) AND a live reflectable/bridgeable kernel (`reflect` / `web_ws` /
-`web_rest`). It's intended to run alongside on-demand spawned kernels (which use
-their own `FANTASTIC_PORT`); a host maps it to `:80`. Examples + recipes will be
-embedded into the head later.
+The **descriptive head** is the all-readmes page (main → kernels → containers + the
+GitHub URL) served at `/`. It is **on by default for every runtime** — serving it
+costs almost nothing and makes a fresh container self-explaining, so it is the
+right default. The same endpoint is BOTH the human-readable head page (`/`) AND a
+live reflectable/bridgeable kernel (`reflect` / `web_ws` / `web_rest`) — the first
+cut of the always-on **brain kernel** / "container runtime head".
+
+- **Default mapping:** container binds `:8088` (unprivileged — no root/caps); map
+  it straight through to host `:8088` (`-p 8088:8088`) → open
+  `http://<host>:8088/`. The host port is arbitrary; `8088` is just the documented
+  default.
+- **Turn it off:** `-e FANTASTIC_HEAD=off` → `/` serves the plain agent-tree index
+  instead. The flag only ever turns the head **off** (it's on by default).
+
+It's intended to run alongside on-demand spawned kernels (which take their own
+`FANTASTIC_PORT`). Examples + recipes will be embedded into the head later.
 
 ## Test the build
 
@@ -156,5 +184,7 @@ sh container/test/build_smoke.sh    # builds + smoke-tests the image (podman/doc
 ```
 
 Separate from the main test suites — it validates the **build + run contract**
-(both runtimes boot + bind, `reflect.runtime` correct, embedded zip pullable,
-SIGTERM-clean, no JS engine / compilers in the final image), not kernel logic.
+(both runtimes boot + bind, `reflect.runtime` correct, the head page served at `/`
+by default + `FANTASTIC_HEAD=off` falls back to the agent index, embedded zip
+pullable, SIGTERM-clean, no JS engine / compilers in the final image), not kernel
+logic.

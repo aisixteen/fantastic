@@ -4,9 +4,9 @@ readmes (main -> kernels -> containers) + the GitHub URL + how to drive the
 kernel. Plain (readmes in <pre> sections) + a tiny inline-JS table of contents;
 NO vendored markdown lib, no external assets.
 
-The container's `head` runtime serves this at `/` on :80 (the python kernel is
-also live there — reflect / web_ws / web_rest — so :80 is BOTH the human-readable
-head AND a reflectable/bridgeable brain kernel).
+Every container runtime serves this at `/` on :8088 BY DEFAULT (the kernel is also
+live there — reflect / web_ws / web_rest — so :8088 is BOTH the human-readable head
+AND a reflectable/bridgeable brain kernel). `FANTASTIC_HEAD=off` drops it.
 
 Run from the repo root:  python3 container/head/gen_head.py > container/head/index.html
 """

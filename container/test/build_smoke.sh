@@ -94,24 +94,53 @@ else
   ok "no node/bun/deno/cargo/go/rustc/gcc in the final image"
 fi
 
-# ── head: the all-readmes page at / + still a live kernel ───────────────────
-echo "== head (descriptive all-readmes page on :80, mapped from :8080) =="
+# ── head ON by default: every runtime serves the all-readmes page at / ──────
+# No FANTASTIC_RUNTIME / FANTASTIC_HEAD set → defaults (python kernel, head on,
+# bind :8088 inside). Map a free host port to the container's default :8088.
+echo "== head ON by default (no flags) + FANTASTIC_HEAD=off fallback =="
 P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$$"
 CONTAINERS="$CONTAINERS $c"
-$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8080" -v "$tmp:/work" \
-  -e FANTASTIC_RUNTIME=head "$TAG" >/dev/null
+$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" "$TAG" >/dev/null
 up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
 page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
 if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD" \
    && printf '%s' "$page" | grep -q "Aisixteen Fantastic"; then
-  ok "head serves the all-readmes page at / (host :$P → :8080)"
+  ok "default run serves the all-readmes head at / (no flags; host :$P → :8088)"
 else
-  bad "head page missing/incomplete ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+  bad "default head page missing/incomplete ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
 fi
 hr=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$P/rest/kernel" -d '{"type":"reflect"}' 2>/dev/null || true)
 printf '%s' "$hr" | grep -Eq '"runtime"[[:space:]]*:[[:space:]]*"python"' \
-  && ok "head is also a live kernel (reflect over REST → python)" \
+  && ok "head endpoint is also a live kernel (reflect over REST → python)" \
   || bad "head reflect-over-REST failed"
+$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
+
+# FANTASTIC_HEAD=off → / falls back to the plain agent-tree index (no head page).
+P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-nohead-$$"
+CONTAINERS="$CONTAINERS $c"
+$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
+  -e FANTASTIC_HEAD=off "$TAG" >/dev/null
+up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
+if [ -n "$up" ] && ! printf '%s' "$page" | grep -q "KERNEL HEAD"; then
+  ok "FANTASTIC_HEAD=off drops the head → plain agent index at /"
+else
+  bad "FANTASTIC_HEAD=off still served the head page (flag ignored?)"
+fi
+$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
+
+# rust also honours the head-by-default hook (FANTASTIC_WEB_INDEX in axum).
+P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-rusthead-$$"
+CONTAINERS="$CONTAINERS $c"
+$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
+  -e FANTASTIC_RUNTIME=rust "$TAG" >/dev/null
+up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
+if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD"; then
+  ok "rust runtime also serves the head at / by default"
+else
+  bad "rust head page missing ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+fi
 $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 
 echo "== result: $PASS passed, $FAIL failed =="

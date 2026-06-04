@@ -55,9 +55,9 @@ COPY container/head/index.html /opt/fantastic/head/index.html
 COPY container/entrypoint.sh /opt/fantastic/entrypoint.sh
 RUN chmod +x /opt/fantastic/entrypoint.sh
 
-# FANTASTIC_PORT is intentionally NOT preset — the entrypoint defaults it
-# per-runtime (python/rust → 8888, head → 8080) so a preset doesn't override the
-# head's rootless-safe port.
+# FANTASTIC_PORT is intentionally NOT preset — the entrypoint defaults it to 8088
+# INSIDE the container (a preset here would shadow that). 8088 is unprivileged so
+# uid 1000 binds it with no caps; the documented default mapping is `-p 8088:8088`.
 ENV FANTASTIC_RUNTIME=python \
     FANTASTIC_WORKDIR=/work \
     FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
@@ -66,7 +66,7 @@ ENV FANTASTIC_RUNTIME=python \
 
 USER fantastic
 WORKDIR /work
-EXPOSE 8888
+EXPOSE 8088
 
 # tini reaps zombies + forwards SIGTERM; entrypoint execs the kernel so signals
 # reach it. Runner may also pass --init (both are fine).
