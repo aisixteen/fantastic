@@ -217,7 +217,11 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let initial = build_router_from_siblings(&state, agent_id, kernel).await;
     let router_lock = Arc::new(AsyncRwLock::new(initial));
 
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    // Bind all interfaces (0.0.0.0) to match the python web host + the
+    // module doc above + to be reachable via container `-p` port mapping
+    // (a loopback-only bind is unreachable from the host through the
+    // container's network namespace).
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => return json!({"error": format!("bind {addr}: {e}")}),

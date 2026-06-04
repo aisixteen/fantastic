@@ -125,6 +125,7 @@ bundle scoreboard.
 | [`swift/`](swift/) | Apple-platform host kernel — multi-platform + macOS-Pro tiers, iOS-safe embedded slice |
 | [`rust/`](rust/) | pure-Rust host kernel — server / CLI, `full` + `embedded` feature tiers |
 | [`ts/`](ts/) | browser frontend kernel (views as agents), served by any host from `ts/dist` |
+| [`container/`](container/) | one universal OCI image (podman/docker, amd64+arm64) — python + rust kernels + embedded JS bundle; runtime chosen at launch; headless API + headful page on one port |
 | [`integration_tests/`](integration_tests/) | cross-runtime bridge matrix (pytest) + `py_ts/` browser/e2e |
 | [`swift/docs/CROSS_ANALYSIS.md`](swift/docs/CROSS_ANALYSIS.md) | Swift ↔ Rust capability matrix |
 | [`.github/workflows/`](.github/workflows/) | CI — python lint/tests, swift lint, codeql, spellcheck |

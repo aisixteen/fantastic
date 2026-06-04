@@ -1,0 +1,68 @@
+# Universal Fantastic kernel container — headless runtime collection.
+#
+# ONE fat OCI image (podman AND docker), tag `fantastic`,
+# carrying TWO execution runtimes (python canonical, rust prebuilt) + ONE
+# bundled runtime (the static js_kernel.zip, copied prebuilt from ts/). The
+# runtime is chosen at launch via FANTASTIC_RUNTIME (entrypoint.sh).
+#
+# NO JS engine (no node/bun/deno — security): the JS kernel ships ONLY as the
+# prebuilt zip, discovered at runtime + served statically. NO swift (its HTTP
+# server is Network.framework-only → can't serve on Linux). NO compilers in the
+# final image.
+#
+# Plain Dockerfile syntax (no BuildKit-only features) so `docker build`,
+# `podman build`, and `buildah` all consume it. Pin bases by @sha256 before
+# publishing (TODO at push time; tags used for local builds now).
+
+# ── rust kernel (prebuilt release binary) ────────────────────────────────
+FROM rust:bookworm AS rust-build
+WORKDIR /src
+COPY rust/ ./
+RUN cargo build --release --bin fantastic \
+    && mkdir -p /out && cp target/release/fantastic /out/fantastic-rust
+
+# ── python kernel (workspace synced into a self-contained venv) ──────────
+# Same base as `final` so the venv's interpreter path stays valid after COPY.
+FROM python:3.11-slim-bookworm AS py-build
+ENV UV_PROJECT_ENVIRONMENT=/opt/fantastic/venv \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_LINK_MODE=copy
+RUN pip install --no-cache-dir uv
+WORKDIR /opt/fantastic/src
+COPY python/ ./
+RUN uv sync --no-dev
+
+# ── final image ──────────────────────────────────────────────────────────
+FROM python:3.11-slim-bookworm AS final
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini curl unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 1000 -m -s /bin/sh fantastic \
+    && mkdir -p /work && chown fantastic:fantastic /work
+
+# python venv + source (identical paths to py-build so the venv resolves).
+COPY --from=py-build /opt/fantastic/venv /opt/fantastic/venv
+COPY --from=py-build /opt/fantastic/src /opt/fantastic/src
+# prebuilt rust binary.
+COPY --from=rust-build /out/fantastic-rust /opt/fantastic/bin/fantastic-rust
+# the bundled JS runtime: the prebuilt frontend zip, COPIED from ts/ (not built).
+COPY ts/dist/js_kernel.zip /opt/fantastic/js_kernel.zip
+# entrypoint.
+COPY container/entrypoint.sh /opt/fantastic/entrypoint.sh
+RUN chmod +x /opt/fantastic/entrypoint.sh
+
+ENV FANTASTIC_RUNTIME=python \
+    FANTASTIC_PORT=8888 \
+    FANTASTIC_WORKDIR=/work \
+    FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
+    FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic \
+    FANTASTIC_RUST=/opt/fantastic/bin/fantastic-rust
+
+USER fantastic
+WORKDIR /work
+EXPOSE 8888
+
+# tini reaps zombies + forwards SIGTERM; entrypoint execs the kernel so signals
+# reach it. Runner may also pass --init (both are fine).
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/fantastic/entrypoint.sh"]

@@ -1,0 +1,18 @@
+# Build-context hygiene for container/Containerfile (podman/docker read this at
+# the context root). Keep the context small + force clean in-image builds.
+.git
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.venv
+rust/target
+**/node_modules
+**/.fantastic
+integration_tests/tmp
+swift/.build
+swift/Tests
+.claude
+# ts/dist is large + regenerated; the image copies ONLY the prebuilt bundle.
+ts/dist/*
+!ts/dist/js_kernel.zip
