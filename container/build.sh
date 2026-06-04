@@ -1,10 +1,16 @@
 #!/bin/sh
 # Build the universal Fantastic kernel image LOCALLY (push deferred).
 #
-#   sh container/build.sh                         # host-arch build, loaded locally
+#   sh container/build.sh                         # host-arch build → fantastic:latest
+#   ARCH=arm64 sh container/build.sh              # one arch (native) → fantastic:arm64
+#   ARCH=amd64 sh container/build.sh              # one arch (emulated on arm host) → fantastic:amd64
 #   PLATFORM=linux/amd64,linux/arm64 sh …/build.sh   # multi-arch manifest (local)
-#   PUSH=1 PLATFORM=linux/amd64,linux/arm64 \
-#     TAG=ghcr.io/alexadar/fantastic:latest sh …/build.sh   # publish (opt-in)
+#   PUSH=1 ARCH=arm64 TAG=ghcr.io/alexadar/fantastic:0.3.0-linux-arm64 sh …/build.sh  # publish one arch
+#
+# `ARCH` builds ONE platform on whatever builder you run it on — native on a
+# matching host (arm64 on Apple silicon), emulated otherwise. That's the local
+# mirror of the per-arch CI release jobs. `PLATFORM` (a list) still does the
+# combined manifest path. All three modes share the same prereqs below.
 #
 # Works with podman OR docker. The prebuilt ts/dist/js_kernel.zip is COPIED into
 # the image (not built there) — this script ensures it exists first.
@@ -13,6 +19,7 @@ set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO=$(CDPATH= cd -- "$HERE/.." && pwd)
 TAG="${TAG:-fantastic:latest}"
+ARCH="${ARCH:-}"
 PLATFORM="${PLATFORM:-}"
 PUSH="${PUSH:-0}"
 
@@ -32,6 +39,25 @@ elif command -v docker >/dev/null 2>&1; then ENGINE=docker
 else echo "build.sh: need podman or docker" >&2; exit 1; fi
 
 cd "$REPO"
+
+# ── per-arch single build (ARCH=amd64|arm64) — the local mirror of the CI ───
+# per-arch release jobs. Native on a matching host, emulated otherwise. Default
+# tag is fantastic:<arch> (override with TAG, e.g. a GHCR per-arch tag).
+if [ -n "$ARCH" ]; then
+  case "$ARCH" in
+    amd64|arm64) ;;
+    *) echo "build.sh: ARCH must be 'amd64' or 'arm64' (got '$ARCH')" >&2; exit 2 ;;
+  esac
+  archtag="$TAG"
+  [ "$TAG" = "fantastic:latest" ] && archtag="fantastic:$ARCH"
+  echo "build.sh: $ENGINE build linux/$ARCH -> $archtag (push=$PUSH)"
+  "$ENGINE" build --platform "linux/$ARCH" -f container/Containerfile -t "$archtag" .
+  [ "$PUSH" = 1 ] && "$ENGINE" push "$archtag" \
+    || echo "build.sh: push skipped (set PUSH=1 to publish)"
+  echo "build.sh: done -> $archtag"
+  exit 0
+fi
+
 echo "build.sh: $ENGINE build $TAG (platform='${PLATFORM:-host}', push=$PUSH)"
 
 if [ -z "$PLATFORM" ]; then

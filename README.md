@@ -14,6 +14,41 @@ exists, it manages durable memory with judgment (saves salient facts, recalls
 them on a fresh turn, prunes the rest), entirely through `send`. Proof:
 [`integration_tests/memory/`](integration_tests/memory/test_ai_memory_judgment.py).
 
+## Run it now — one container, driven by an AI
+
+The whole thing ships as **one OCI image** (multi-arch, podman **and** docker):
+
+| tag | what |
+|---|---|
+| `ghcr.io/alexadar/fantastic:latest` | newest — `linux/amd64` + `linux/arm64` in one manifest; the registry auto-serves your arch on pull |
+| `ghcr.io/alexadar/fantastic:v0.3.0` | a pinned version (same multi-arch manifest) |
+
+**Pull, run, open the port — that's the whole thing:**
+
+```sh
+podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
+  ghcr.io/alexadar/fantastic:latest          # docker is identical
+```
+
+Then **open `http://127.0.0.1:8088/`** → a self-describing **head page**: every
+readme (how it works *and* how to drive it) rendered right there on the port. The
+same self-description, machine-readable, in one call:
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+  http://127.0.0.1:8088/rest/kernel \
+  -d '{"type":"reflect","readme":true,"bundles":"all"}'
+```
+
+**The intended way to use it — give an AI this URL.** It pulls + runs the image,
+reads `reflect` over `web_ws` (`/web/ws`) / `rest` (`POST /rest/<target>`) — **no
+client library, the protocol IS the API** — and then **builds** by composing
+agents (`create_agent` + wiring them with `send`) against the folder you mounted
+at **`/work`** (the `file` / `terminal` / `python_runtime` agents act on it). Hand
+it a [recipe](container/recipes.md) and it assembles a working app — capability
+emerges from self-description, no bespoke glue. Full run contract + 7 recipes:
+[`container/README.md`](container/README.md) · [`container/recipes.md`](container/recipes.md).
+
 ## Four runtimes, one workdir
 
 Four kernels share the same `send`/`reflect` protocol and wire format:
