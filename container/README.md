@@ -13,19 +13,48 @@ a `container`-backend node. Same image under **podman and docker**, amd64 + arm6
 The kernels are self-describing; given only their `reflect` + the zip's readme an
 LLM weaves/​revives the wiring itself (the emergent-code capability).
 
-**Published image:** `ghcr.io/alexadar/fantastic-canvas/base:latest` — multi-arch
+**Published image:** `ghcr.io/alexadar/fantastic:latest` — multi-arch
 manifest (`linux/amd64` + `linux/arm64`, one tag), currently **private** (the host
 must `podman/docker login ghcr.io`, or make the package public).
+
+## Quickstart for an AI chat (e.g. Claude Code) — the distribution model
+
+> **Tagline:** *"Pull `ghcr.io/alexadar/fantastic:latest`, run it, then
+> read its head to learn what it does and how to drive it."*
+
+1. **Image tag:** `ghcr.io/alexadar/fantastic:latest` (multi-arch; one tag
+   serves amd64 + arm64).
+2. **Run** (default runtime = `python`, the canonical kernel):
+   ```sh
+   podman|docker run -d --name fantastic -p 127.0.0.1:8888:8888 \
+     -v "$PWD":/work -e FANTASTIC_RUNTIME=python ghcr.io/alexadar/fantastic:latest
+   ```
+   Pick the runtime with `-e FANTASTIC_RUNTIME=python|rust|ts` (default `python`).
+3. **Read the head** (this is all you need — no client library):
+   - headful: `GET http://127.0.0.1:8888/`
+   - headless self-description: `curl -s -X POST -H 'Content-Type: application/json'
+     http://127.0.0.1:8888/rest/kernel -d '{"type":"reflect","readme":true,"bundles":"all"}'`
+     → the full root readme + bundle catalog. (Or run `FANTASTIC_RUNTIME=head` and
+     just open `/` — the all-readmes page.)
+4. **Then drive / build more from the chat:** the image carries `kernel_bridge` +
+   `local_runner`, so an AI chat that pulled+ran this image can spawn and manage
+   **other** Fantastic kernels (e.g. one per project dir) over the bridge — running
+   and building fleets of kernels straight from a chat session.
 
 ## Build (local) + publish
 
 ```sh
 sh container/build.sh                               # host arch → fantastic:latest (local)
 PLATFORM=linux/amd64,linux/arm64 sh container/build.sh   # multi-arch manifest (local)
-# publish the universal `base` tag (opt-in):
+# publish (opt-in):
 PUSH=1 PLATFORM=linux/amd64,linux/arm64 \
-  TAG=ghcr.io/alexadar/fantastic-canvas/base:latest sh container/build.sh
+  TAG=ghcr.io/alexadar/fantastic:latest sh container/build.sh
 ```
+
+> **One tag — `fantastic`.** There is a single universal image
+> (`ghcr.io/alexadar/fantastic:latest`). `head` / `ts` / `rust` are **runtime
+> modes** chosen at launch via `FANTASTIC_RUNTIME`, **not** separate tags. Tag it
+> `fantastic` (no `-head` / `-gpu` / per-runtime variants).
 
 `build.sh` first ensures `ts/dist/js_kernel.zip` exists (runs `ts/scripts/pack.sh`
 if missing) — the image **copies** that prebuilt bundle, it does not build JS.
@@ -72,8 +101,9 @@ The entrypoint composes a **callable** kernel, not just a renderer — on `<C>`:
 | `web_ws` | `GET /web/ws` | WebSocket verb calls — the primary client transport |
 | `rest` | `POST /rest/<target>` (body = payload) | REST diagnostics / one-shot verb calls |
 
-Read the kernel's runtime in one round-trip:
-`curl -s -X POST http://127.0.0.1:<H>/rest/kernel -d '{"type":"reflect"}'` →
+Read the kernel's runtime in one round-trip (send the JSON content-type — rust's
+REST surface requires it): `curl -s -X POST -H 'Content-Type: application/json'
+http://127.0.0.1:<H>/rest/kernel -d '{"type":"reflect"}'` →
 `{… "runtime": "python"|"rust"|"ts", …}` — gate the app's create-type chooser on it.
 
 ## Headless + headful — both, on one port (they do NOT dim each other)
@@ -102,16 +132,19 @@ build/flag; one running container serves both.
 | `python` (default) | the canonical python kernel daemon |
 | `rust` | the prebuilt rust kernel daemon (same CLI surface, same `.fantastic`) |
 | `ts` | a python host that also serves the embedded `js_kernel.zip` via a `file` agent (`/js_kernel/file/…`); the LLM pulls the zip's readme + revives the frontend on demand. No JS process. |
+| `head` | the **descriptive head**: a python kernel that serves the **all-readmes page** at `/` (main → kernels → containers + the GitHub URL) AND stays a reflectable/bridgeable brain kernel (`reflect` / `web_ws` / `web_rest`). Binds a rootless-safe port inside → map host **`:80`** with `-p 80:8080`. `docker run -d -p 80:8080 -e FANTASTIC_RUNTIME=head <image>` → open `http://<host>/`. |
 
 The embedded JS bundle is always present at `$FANTASTIC_JS_KERNEL_ZIP`; pull its
 guide without unpacking: `unzip -p "$FANTASTIC_JS_KERNEL_ZIP" readme.md`.
 
-## Future seam (not implemented)
+## The head as a brain kernel
 
-A later always-on **brain kernel** — a long-lived kernel on a reserved internal
-port (the "container runtime head"), separate from the on-demand spawned kernels
-(analogous to the app's own brain kernel). The entrypoint's runtime/port dispatch
-is structured to admit it; it is intentionally not built in this pass.
+`FANTASTIC_RUNTIME=head` is the first cut of the always-on **brain kernel** /
+"container runtime head": one endpoint that is BOTH the human-readable all-readmes
+page (`/`) AND a live reflectable/bridgeable kernel (`reflect` / `web_ws` /
+`web_rest`). It's intended to run alongside on-demand spawned kernels (which use
+their own `FANTASTIC_PORT`); a host maps it to `:80`. Examples + recipes will be
+embedded into the head later.
 
 ## Test the build
 

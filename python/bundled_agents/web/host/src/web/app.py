@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 from importlib import resources
 
 from fastapi import FastAPI
@@ -63,6 +64,16 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def root():
+        # Optional custom landing: if FANTASTIC_WEB_INDEX points at a readable
+        # HTML file, serve it at `/` (the container "head" mode uses this to make
+        # `/` the all-readmes descriptive page). Falls back to the agent index.
+        custom = os.environ.get("FANTASTIC_WEB_INDEX")
+        if custom:
+            try:
+                with open(custom, encoding="utf-8") as f:
+                    return HTMLResponse(f.read())
+            except OSError:
+                pass
         return HTMLResponse(await _index_page(kernel))
 
     _favicon_bytes = (resources.files("web") / "favicon.png").read_bytes()

@@ -4,7 +4,7 @@
 #   sh container/build.sh                         # host-arch build, loaded locally
 #   PLATFORM=linux/amd64,linux/arm64 sh …/build.sh   # multi-arch manifest (local)
 #   PUSH=1 PLATFORM=linux/amd64,linux/arm64 \
-#     TAG=ghcr.io/alexadar/fantastic-canvas/base:latest sh …/build.sh   # publish (opt-in)
+#     TAG=ghcr.io/alexadar/fantastic:latest sh …/build.sh   # publish (opt-in)
 #
 # Works with podman OR docker. The prebuilt ts/dist/js_kernel.zip is COPIED into
 # the image (not built there) — this script ensures it exists first.
@@ -21,6 +21,10 @@ if [ ! -f "$REPO/ts/dist/js_kernel.zip" ]; then
   echo "build.sh: ts/dist/js_kernel.zip missing — building it (cd ts && sh scripts/pack.sh)"
   ( cd "$REPO/ts" && sh scripts/pack.sh )
 fi
+
+# ── prereq: generate the descriptive head page from the repo readmes ───────
+python3 "$HERE/head/gen_head.py" > "$HERE/head/index.html"
+echo "build.sh: generated container/head/index.html ($(wc -c < "$HERE/head/index.html" | tr -d ' ')B)"
 
 # ── pick an engine ─────────────────────────────────────────────────────────
 if command -v podman >/dev/null 2>&1; then ENGINE=podman

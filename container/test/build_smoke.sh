@@ -63,7 +63,7 @@ for rt in python rust; do
   else bad "$rt daemon never bound :$P ($($ENGINE logs "$c" 2>&1 | tail -3 | tr '\n' '|'))"; fi
   # Call a verb over the wire (web_rest surface) — proves the kernel is callable,
   # not just rendering, and dispatch works end-to-end.
-  rj=$(curl -s -X POST "http://127.0.0.1:$P/rest/kernel" -d '{"type":"reflect"}' 2>/dev/null || true)
+  rj=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$P/rest/kernel" -d '{"type":"reflect"}' 2>/dev/null || true)
   printf '%s' "$rj" | grep -Eq "\"runtime\"[[:space:]]*:[[:space:]]*\"$rt\"" \
     && ok "$rt reflect over REST (POST /rest/kernel) → runtime=\"$rt\"" \
     || bad "$rt reflect-over-REST failed (got: $(printf '%s' "$rj" | head -c 100))"
@@ -93,6 +93,26 @@ if printf '%s' "$found" | grep -q FOUND; then
 else
   ok "no node/bun/deno/cargo/go/rustc/gcc in the final image"
 fi
+
+# ── head: the all-readmes page at / + still a live kernel ───────────────────
+echo "== head (descriptive all-readmes page on :80, mapped from :8080) =="
+P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$$"
+CONTAINERS="$CONTAINERS $c"
+$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8080" -v "$tmp:/work" \
+  -e FANTASTIC_RUNTIME=head "$TAG" >/dev/null
+up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
+if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD" \
+   && printf '%s' "$page" | grep -q "Aisixteen Fantastic"; then
+  ok "head serves the all-readmes page at / (host :$P → :8080)"
+else
+  bad "head page missing/incomplete ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+fi
+hr=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$P/rest/kernel" -d '{"type":"reflect"}' 2>/dev/null || true)
+printf '%s' "$hr" | grep -Eq '"runtime"[[:space:]]*:[[:space:]]*"python"' \
+  && ok "head is also a live kernel (reflect over REST → python)" \
+  || bad "head reflect-over-REST failed"
+$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 
 echo "== result: $PASS passed, $FAIL failed =="
 [ "$FAIL" = 0 ]

@@ -11,9 +11,19 @@
 set -eu
 
 RUNTIME="${FANTASTIC_RUNTIME:-python}"
-PORT="${FANTASTIC_PORT:-8888}"
 WORKDIR="${FANTASTIC_WORKDIR:-/work}"
 export FANTASTIC_JS_KERNEL_ZIP="${FANTASTIC_JS_KERNEL_ZIP:-/opt/fantastic/js_kernel.zip}"
+
+if [ "$RUNTIME" = head ]; then
+  # The descriptive "head": the python kernel serves the all-readmes page at `/`
+  # (FANTASTIC_WEB_INDEX) AND stays a reflectable/bridgeable brain kernel
+  # (reflect / web_ws / web_rest). Binds a rootless-safe high port INSIDE the
+  # container; map it to host :80 with `-p 80:8080`.
+  PORT="${FANTASTIC_PORT:-8080}"
+  export FANTASTIC_WEB_INDEX="${FANTASTIC_WEB_INDEX:-/opt/fantastic/head/index.html}"
+else
+  PORT="${FANTASTIC_PORT:-8888}"
+fi
 
 PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic}"
 RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
@@ -24,8 +34,9 @@ RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
 case "$RUNTIME" in
   python) BIN="$PY";   ROOT="fs_loader" ;;
   ts)     BIN="$PY";   ROOT="fs_loader" ;;
+  head)   BIN="$PY";   ROOT="fs_loader" ;;
   rust)   BIN="$RUST"; ROOT="core" ;;
-  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust|ts)" >&2
+  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust|ts|head)" >&2
      exit 2 ;;
 esac
 

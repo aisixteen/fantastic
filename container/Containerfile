@@ -48,12 +48,17 @@ COPY --from=py-build /opt/fantastic/src /opt/fantastic/src
 COPY --from=rust-build /out/fantastic-rust /opt/fantastic/bin/fantastic-rust
 # the bundled JS runtime: the prebuilt frontend zip, COPIED from ts/ (not built).
 COPY ts/dist/js_kernel.zip /opt/fantastic/js_kernel.zip
+# the descriptive head page (all readmes), generated from the repo by
+# container/head/gen_head.py — build.sh produces it before the image build.
+COPY container/head/index.html /opt/fantastic/head/index.html
 # entrypoint.
 COPY container/entrypoint.sh /opt/fantastic/entrypoint.sh
 RUN chmod +x /opt/fantastic/entrypoint.sh
 
+# FANTASTIC_PORT is intentionally NOT preset — the entrypoint defaults it
+# per-runtime (python/rust → 8888, head → 8080) so a preset doesn't override the
+# head's rootless-safe port.
 ENV FANTASTIC_RUNTIME=python \
-    FANTASTIC_PORT=8888 \
     FANTASTIC_WORKDIR=/work \
     FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
     FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic \

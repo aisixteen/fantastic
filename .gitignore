@@ -17,3 +17,6 @@ tmp/
 .claude/
 
 .env
+
+# Generated container head page (built from readmes by container/head/gen_head.py)
+container/head/index.html
