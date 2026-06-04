@@ -21,7 +21,7 @@ The whole thing ships as **one OCI image** (multi-arch, podman **and** docker):
 | tag | what |
 |---|---|
 | `ghcr.io/alexadar/fantastic:latest` | newest — `linux/amd64` + `linux/arm64` in one manifest; the registry auto-serves your arch on pull |
-| `ghcr.io/alexadar/fantastic:v0.3.0` | a pinned version (same multi-arch manifest) |
+| `ghcr.io/alexadar/fantastic:v0.4.0` | a pinned version (same multi-arch manifest) |
 
 *What to build with it: 7 ready-to-assemble **[recipes](container/recipes.md)** —
 canvas, terminal, AI-chat-with-tools, compute/training, WebGL, audio-visual, and
