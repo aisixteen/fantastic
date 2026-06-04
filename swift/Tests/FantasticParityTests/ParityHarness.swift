@@ -211,9 +211,14 @@
                 "binary_protocol", "browser_bus", "well_known",
                 "agent_count", "available_bundles",
             ]
-            for (label, r, root) in [("python", pyReply, "fs_loader"), ("swift", swReply, "core")] {
+            for (label, r, root, runtime) in [
+                ("python", pyReply, "fs_loader", "python"),
+                ("swift", swReply, "core", "swift"),
+            ] {
                 #expect(r["id"].asString == root, "\(label) reflect id != \(root)")
                 #expect(r["sentence"].asString != nil, "\(label) reflect lacks sentence")
+                // runtime identity differs BY DESIGN per runtime (like root id).
+                #expect(r["runtime"].asString == runtime, "\(label) reflect runtime != \(runtime)")
                 #expect(r["tree"]["id"].asString == root, "\(label) reflect tree.id != \(root)")
                 #expect(r["bundles"].asArray == nil, "\(label) reflect has bundles by default")
                 for k in gone {

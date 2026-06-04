@@ -283,6 +283,11 @@ class Agent:
         # reply already set one.
         if target.description is not None and "description" not in reply:
             reply["description"] = target.description
+        # Kernel runtime identity — surfaced on the ROOT reflect so a client
+        # gates runtime-specific UI from one round-trip. Same field name +
+        # lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+        if target.parent is None:
+            reply["runtime"] = "python"
         tree = payload.get("tree", "all")
         if tree == "all":
             reply["tree"] = target._tree(depth=None, details=False, current_depth=0)

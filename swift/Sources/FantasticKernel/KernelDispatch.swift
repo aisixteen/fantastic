@@ -102,6 +102,12 @@ extension Kernel {
         if obj["description"] == nil, let d = target.descriptionMeta {
             obj["description"] = .string(d)
         }
+        // Kernel runtime identity — surfaced on the ROOT reflect so a client
+        // gates runtime-specific UI from one round-trip. Same field name +
+        // lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+        if target.parentId == nil {
+            obj["runtime"] = .string("swift")
+        }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)
         case "ids": obj["tree"] = .array(descendantIds(target).map { .string($0) })

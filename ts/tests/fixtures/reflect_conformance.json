@@ -1,5 +1,5 @@
 {
-  "_doc": "CROSS-LANGUAGE reflect contract. The ts kernel (tests/reflect.test.ts) and the python kernel must BOTH reproduce every case's `expect` from `tree`+`bundles`. Edit here once; both runtimes re-verify. This is what keeps a second kernel from drifting.",
+  "_doc": "CROSS-LANGUAGE reflect contract. The ts kernel (tests/reflect.test.ts) and the python kernel must BOTH reproduce every case's `expect` from `tree`+`bundles`. Edit here once; both runtimes re-verify. This is what keeps a second kernel from drifting. NOTE: the root reflect carries a per-runtime `runtime` field (\"python\"|\"rust\"|\"swift\"|\"ts\"); this fixture is exercised by the ts kernel so the root cases expect \"ts\".",
   "bundles": ["terminal_view.js", "canvas.js"],
   "tree": [
     { "id": "fs_loader", "parentId": null, "root": true },
@@ -23,6 +23,7 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "fs_loader",
+        "runtime": "ts",
         "tree": {
           "id": "fs_loader",
           "parent_id": null,
@@ -51,6 +52,7 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "fs_loader",
+        "runtime": "ts",
         "tree": ["fs_loader", "term1"]
       }
     },
@@ -64,6 +66,7 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "fs_loader",
+        "runtime": "ts",
         "bundles": ["canvas", "terminal_view"]
       }
     },

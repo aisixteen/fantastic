@@ -29,6 +29,15 @@ async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
         assert k not in r, f"deleted primer key {k!r} still present"
 
 
+async def test_reflect_root_has_runtime(seeded_kernel):
+    """Root reflect carries the kernel `runtime` id (lowercase enum) so a client
+    can gate runtime-specific UI from one round-trip. Non-root agents omit it."""
+    r = await seeded_kernel.send("kernel", {"type": "reflect"})
+    assert r["runtime"] == "python"
+    child = await seeded_kernel.send("cli", {"type": "reflect"})
+    assert "runtime" not in child
+
+
 async def test_kernel_alias_equals_core(seeded_kernel):
     """`kernel` is an alias for the root; reflecting it == reflecting fs_loader."""
     via_alias = await seeded_kernel.send("kernel", {"type": "reflect"})

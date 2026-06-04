@@ -57,6 +57,13 @@ export function applyReflectFlags(
     obj["description"] = target.description;
   }
 
+  // Kernel runtime identity — surfaced on the ROOT reflect so a client gates
+  // runtime-specific UI from one round-trip. Same field name + lowercase enum
+  // ("python"|"rust"|"swift"|"ts") across all runtimes.
+  if (target.parentId === null) {
+    obj["runtime"] = "ts";
+  }
+
   const tree = flag(payload["tree"], "all");
   if (tree === "all") obj["tree"] = treeNode(target);
   else if (tree === "ids") obj["tree"] = descendantIds(target);

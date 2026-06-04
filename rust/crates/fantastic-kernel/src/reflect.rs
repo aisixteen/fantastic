@@ -97,6 +97,12 @@ pub fn apply_reflect_flags(
             obj.insert("description".to_string(), json!(d));
         }
     }
+    // Kernel runtime identity — surfaced on the ROOT reflect so a client
+    // gates runtime-specific UI from one round-trip. Same field name +
+    // lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+    if target.parent_id.is_none() {
+        obj.insert("runtime".to_string(), json!("rust"));
+    }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
         "all" => {
             obj.insert("tree".to_string(), tree_node(target));

@@ -212,6 +212,12 @@ the next process start.
   readme.md; legacy `return_readme` honored). Verb signatures live in
   docstrings; `reflect` derives them. Discovery is one round-trip;
   transport/wire docs live in the root readme (`reflect readme=true`).
+  The **ROOT** reflect additionally carries `runtime` — a stable lowercase
+  enum (`python` | `rust` | `swift` | `ts`) naming the kernel's runtime, so
+  a client gates runtime-specific UI from one round-trip. Same field name +
+  values across all four runtimes; injected uniformly in
+  `_apply_reflect_flags` (root only). Differs by runtime BY DESIGN (like the
+  root id), so cross-runtime parity asserts the per-runtime value, not equality.
 - **`render_html`** — duck-typed presentation. Any agent returning
   `{html:str}` from `render_html` can be rendered by a view. This is now
   a FRONTEND pattern (a `*.ts` content agent holds the body in its

@@ -27,6 +27,8 @@ struct ReflectUniformTests {
         #expect(r["tree"]["id"].asString == "core")
         // bundles omitted by default.
         #expect(r["bundles"].asArray == nil)
+        // kernel runtime identity — root only, lowercase enum.
+        #expect(r["runtime"].asString == "swift")
         for k in Self.primerKeysGone {
             #expect(r[k] == nil || r[k] == .null, "primer key \(k) still present")
         }
