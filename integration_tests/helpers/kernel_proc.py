@@ -28,17 +28,38 @@ from .ws import ws_call
 
 @dataclass
 class KernelProc:
-    """Live fantastic kernel subprocess."""
+    """Live fantastic kernel daemon — a local subprocess OR a container.
+
+    Local: `proc` is the Popen handle. Container: `proc` is None and
+    `container`/`engine` name the running container (podman/docker). The
+    public surface (`wait_ready`/`call`/`terminate`) is identical either way,
+    so tests are target-agnostic — the `Launcher` (see `launcher.py`) decides
+    which kind it builds.
+    """
 
     binary: Path
     workdir: Path
     port: int  # the port the web agent was seeded with — we know it ahead of spawn
     proc: subprocess.Popen | None = None
     label: str = ""  # human-readable tag for logs ("python" / "swift")
+    # Container mode: the container name + the engine that runs it (else None).
+    container: str | None = None
+    engine: str | None = None
 
     # Captured output buffers (filled by wait_ready / shutdown).
     stdout: str = field(default="", init=False)
     stderr: str = field(default="", init=False)
+
+    def _container_running(self) -> bool | None:
+        """True/False if this is a container (running state); None if local."""
+        if not self.container or not self.engine:
+            return None
+        r = subprocess.run(
+            [self.engine, "inspect", "-f", "{{.State.Running}}", self.container],
+            capture_output=True,
+            text=True,
+        )
+        return r.stdout.strip() == "true"
 
     async def wait_ready(self, timeout: float = 60.0) -> None:
         """Poll HTTP `/` until the kernel's web server is bound.
@@ -56,9 +77,13 @@ class KernelProc:
         """
         url = f"http://127.0.0.1:{self.port}/"
         deadline = time.monotonic() + timeout
+        i = 0
         async with httpx.AsyncClient(timeout=1.0) as client:
             while time.monotonic() < deadline:
-                # Has the daemon died early?
+                i += 1
+                # Has the daemon died early?  Local: poll the Popen. Container:
+                # check the engine's running state (cheap, but only ~1/s to keep
+                # the poll light) so a crashed container fails fast, not at timeout.
                 if self.proc is not None and self.proc.poll() is not None:
                     rc = self.proc.returncode
                     self._drain_output()
@@ -67,11 +92,23 @@ class KernelProc:
                         f"port {self.port}\n--- stdout ---\n{self.stdout}\n"
                         f"--- stderr ---\n{self.stderr}"
                     )
+                if self.container and i % 10 == 0 and self._container_running() is False:
+                    self._drain_output()
+                    raise RuntimeError(
+                        f"{self.label} container '{self.container}' exited before binding "
+                        f"port {self.port}\n--- logs ---\n{self.stderr}"
+                    )
                 try:
                     r = await client.get(url)
                     if r.status_code < 500:
                         return
-                except (httpx.ConnectError, httpx.ReadTimeout):
+                except httpx.TransportError:
+                    # Any transport-level hiccup means "not ready yet, retry":
+                    # ConnectError (port not bound), ReadTimeout, AND
+                    # RemoteProtocolError — podman/docker forward the mapped
+                    # port the instant the container starts, so a connection
+                    # made before the app binds is accepted then closed without
+                    # a response. `TransportError` is the base of all three.
                     pass
                 await asyncio.sleep(0.1)
         # Timeout — surface what we know.
@@ -90,7 +127,26 @@ class KernelProc:
         return await ws_call(self.port, agent_id, verb, **args)
 
     def terminate(self) -> None:
-        """Best-effort graceful shutdown: SIGTERM, then SIGKILL after grace."""
+        """Best-effort graceful shutdown.
+
+        Container: `engine stop -t 8` (SIGTERM via tini → release lock.json,
+        drain the server) then `rm -f` by name — never `kill()` the
+        container-internal pid. Local: SIGTERM, then SIGKILL after grace.
+        """
+        if self.container:
+            self._drain_output()  # capture logs before removal
+            if self.engine:
+                subprocess.run(
+                    [self.engine, "stop", "-t", "8", self.container],
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    [self.engine, "rm", "-f", self.container],
+                    capture_output=True,
+                    text=True,
+                )
+            return
         if self.proc is None or self.proc.poll() is not None:
             self._drain_output()
             return
@@ -108,6 +164,22 @@ class KernelProc:
         self._drain_output()
 
     def _drain_output(self) -> None:
+        # Container: pull the engine logs into stderr (no Popen to communicate).
+        if self.container:
+            if not self.engine:
+                return
+            try:
+                r = subprocess.run(
+                    [self.engine, "logs", self.container],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0,
+                )
+                self.stdout = r.stdout or ""
+                self.stderr = r.stderr or r.stdout or ""
+            except Exception:
+                pass
+            return
         if self.proc is None:
             return
         try:

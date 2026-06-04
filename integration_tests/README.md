@@ -85,6 +85,33 @@ uv run pytest -k swift                                # filter by name
 uv run pytest -s                                      # streamed stdout (verbose)
 ```
 
+### Target: local binaries (default) or the container
+
+The SAME tests run against either locally-built kernel binaries or the universal
+container image, selected by `FANTASTIC_TARGET` (no test changes — the spawn
+fixtures + seeding route through a `Launcher`, see `helpers/launcher.py`):
+
+```bash
+uv run pytest                                         # FANTASTIC_TARGET=local (default)
+FANTASTIC_TARGET=container uv run pytest web/         # run against the container image
+FANTASTIC_IMAGE=fantastic:latest FANTASTIC_TARGET=container uv run pytest web/   # override tag
+```
+
+Container target notes:
+- Needs the image built (`sh container/build.sh`) and podman/docker present;
+  tests skip cleanly otherwise. The image must be the **host arch** (native) —
+  a cross-arch image runs under emulation and is slow.
+- Seeding one-shots run **inside** the container too (a rootless container's uid
+  can't write a host-seeded `.fantastic/`), and the daemon runs with
+  `FANTASTIC_HEAD=off` so `/` is the dynamic readiness signal.
+- **Swift** has no Linux container (Network.framework HTTP) → swift tests skip
+  under `container`.
+- **Bridge matrix (multi-kernel) is local-only for now:** each container's
+  `127.0.0.1` is its own loopback, so a bridge can't reach a peer container's
+  host-mapped port. Container-to-container bridging needs a shared network +
+  dial-by-name (a planned follow-up); run the bridge suite with the `local`
+  target.
+
 ## What's tested
 
 All bridge transport is **WS-only, asymmetric**: the client bridge

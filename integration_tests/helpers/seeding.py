@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from .launcher import as_launcher
 
 _ROOT_ID_CACHE: dict[str, str] = {}
 
@@ -88,16 +89,13 @@ def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
     Python's root is `fs_loader`; rust/swift use `core`. The harness must
     not hardcode either — seeds (and WS paths / reflect targets) that
     attach to the root resolve it here. Cached per (binary, workdir).
+
+    `binary` may be a launcher (local or container) or a raw binary path —
+    `as_launcher` coerces a path so legacy call sites keep working.
     """
     key = f"{binary}|{workdir}"
     if key not in _ROOT_ID_CACHE:
-        proc = subprocess.run(
-            [str(binary), "reflect"],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        proc = as_launcher(binary).cli(workdir, ["reflect"], timeout=timeout)
         out = proc.stdout
         rid = "core"
         brace = out.find("{")
@@ -140,13 +138,7 @@ def seed_create(
     for k, v in meta.items():
         args.append(f"{k}={_render(v)}")
 
-    proc = subprocess.run(
-        [str(binary), *args],
-        cwd=str(workdir),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    proc = as_launcher(binary).cli(workdir, args, timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(
             f"seed_create failed (rc={proc.returncode})\n"

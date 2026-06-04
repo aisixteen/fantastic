@@ -29,35 +29,72 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from helpers.kernel_proc import KernelProc, spawn  # noqa: E402
+from helpers.kernel_proc import KernelProc  # noqa: E402
+from helpers.launcher import (  # noqa: E402
+    ContainerLauncher,
+    LocalLauncher,
+    resolve_engine,
+)
 
 # Repo root (one level up from integration_tests/).
 _REPO_ROOT = _HERE.parent
 
+# Target selection — `local` (default) runs locally-built binaries; `container`
+# runs the universal image (python/rust only) so the SAME tests validate the
+# shipped container. `FANTASTIC_IMAGE` overrides the image tag.
+_TARGET = __import__("os").environ.get("FANTASTIC_TARGET", "local").strip().lower()
+_IMAGE = __import__("os").environ.get("FANTASTIC_IMAGE", "fantastic:latest")
+
+
+def _container_launcher_or_skip(runtime: str) -> ContainerLauncher:
+    """Build a ContainerLauncher for `runtime`, or skip if the engine/image
+    isn't available (keeps `FANTASTIC_TARGET=container` runs self-gating)."""
+    import subprocess
+
+    engine = resolve_engine()
+    if engine is None:
+        pytest.skip("FANTASTIC_TARGET=container but no podman/docker found")
+    present = subprocess.run([engine, "image", "inspect", _IMAGE], capture_output=True, text=True)
+    if present.returncode != 0:
+        pytest.skip(
+            f"FANTASTIC_TARGET=container but image {_IMAGE!r} not built "
+            f"(run `sh container/build.sh`)"
+        )
+    return ContainerLauncher(_IMAGE, runtime, engine)
+
 
 @pytest.fixture(scope="session")
-def python_binary() -> Path:
-    """Path to the canonical Python kernel binary. Skips the test
-    suite cleanly if the venv isn't built yet.
+def python_binary():
+    """A launcher for the Python kernel.
+
+    `FANTASTIC_TARGET=local` (default) → a `LocalLauncher` over the built venv
+    binary (skips if not built). `FANTASTIC_TARGET=container` → a
+    `ContainerLauncher` running the universal image's python runtime. The name
+    is kept (`python_binary`) so no test signature changes; seeding + the
+    spawn fixtures use the launcher's `cli` / `start_daemon`.
     """
+    if _TARGET == "container":
+        return _container_launcher_or_skip("python")
     candidate = _REPO_ROOT / "python" / ".venv" / "bin" / "fantastic"
     if not candidate.exists():
         pytest.skip(f"python kernel binary not built: {candidate} (run `cd python && uv sync`)")
-    return candidate
+    return LocalLauncher(candidate)
 
 
 @pytest.fixture(scope="session")
-def swift_binary() -> Path:
-    """Path to the Swift kernel binary. Skips if not built yet.
+def swift_binary():
+    """A launcher for the Swift kernel — LOCAL ONLY.
 
-    Searches the canonical `swift build` output
-    (`swift/.build/debug/fantastic`) plus the isolated dev-iteration
-    path (`/tmp/swift-fm-build/debug/fantastic`) and picks whichever
-    is **newest by mtime**. Picking newest (rather than a fixed
-    preference order) avoids silently running a stale binary when one
-    location lags behind the other — a stale pick previously masked
-    missing verbs (e.g. `watch_remote`) in cross-runtime tests.
+    Swift's HTTP server is Network.framework-only, so there is no Linux
+    container for it; under `FANTASTIC_TARGET=container` swift tests skip.
+    Searches the canonical `swift build` output plus the isolated
+    dev-iteration path and picks whichever is **newest by mtime** (avoids
+    silently running a stale binary that masked missing verbs before).
     """
+    if _TARGET == "container":
+        pytest.skip(
+            "swift has no Linux container (Network.framework HTTP); skipped under container target"
+        )
     candidates = [
         _REPO_ROOT / "swift" / ".build" / "debug" / "fantastic",
         Path("/tmp/swift-fm-build/debug/fantastic"),
@@ -68,14 +105,16 @@ def swift_binary() -> Path:
             f"swift kernel binary not built: tried {[str(c) for c in candidates]} "
             f"(run `cd swift && swift build`)"
         )
-    return max(existing, key=lambda p: p.stat().st_mtime)
+    return LocalLauncher(max(existing, key=lambda p: p.stat().st_mtime))
 
 
 @pytest.fixture(scope="session")
-def rust_binary() -> Path:
-    """Path to the Rust kernel binary (`fantastic-cli` → `fantastic`).
-    Skips if not built (run `cd rust && cargo build`). Prefers release
-    over debug when both exist, by mtime."""
+def rust_binary():
+    """A launcher for the Rust kernel — `LocalLauncher` (built binary, newest
+    of release/debug by mtime) or a `ContainerLauncher` under the container
+    target."""
+    if _TARGET == "container":
+        return _container_launcher_or_skip("rust")
     candidates = [
         _REPO_ROOT / "rust" / "target" / "release" / "fantastic",
         _REPO_ROOT / "rust" / "target" / "debug" / "fantastic",
@@ -86,7 +125,7 @@ def rust_binary() -> Path:
             f"rust kernel binary not built: tried {[str(c) for c in candidates]} "
             f"(run `cd rust && cargo build`)"
         )
-    return max(existing, key=lambda p: p.stat().st_mtime)
+    return LocalLauncher(max(existing, key=lambda p: p.stat().st_mtime))
 
 
 @pytest.fixture
@@ -164,7 +203,7 @@ async def python_kernel(python_binary):
     spawned: list[KernelProc] = []
 
     async def _spawn(workdir: Path, port: int) -> KernelProc:
-        kp = spawn(python_binary, workdir, port, label="python")
+        kp = python_binary.start_daemon(workdir, port, label="python")
         spawned.append(kp)
         await kp.wait_ready()
         return kp
@@ -181,7 +220,7 @@ async def swift_kernel(swift_binary):
     spawned: list[KernelProc] = []
 
     async def _spawn(workdir: Path, port: int) -> KernelProc:
-        kp = spawn(swift_binary, workdir, port, label="swift")
+        kp = swift_binary.start_daemon(workdir, port, label="swift")
         spawned.append(kp)
         await kp.wait_ready()
         return kp
@@ -198,7 +237,7 @@ async def rust_kernel(rust_binary):
     spawned: list[KernelProc] = []
 
     async def _spawn(workdir: Path, port: int) -> KernelProc:
-        kp = spawn(rust_binary, workdir, port, label="rust")
+        kp = rust_binary.start_daemon(workdir, port, label="rust")
         spawned.append(kp)
         await kp.wait_ready()
         return kp
