@@ -40,6 +40,13 @@ _CONTAINER_BIN = {
     "rust": "/opt/fantastic/bin/fantastic-rust",
 }
 
+# Built-in DNS name a container uses to reach the HOST gateway (and thus another
+# container's host-PUBLISHED port). podman + docker both add it; this is how the
+# "each container is a unit at host:port" model bridges container→container with
+# NO shared/user-defined network. A peer must be published on all interfaces
+# (start_daemon publish_all=True) for the gateway to forward to it.
+CONTAINER_PEER_HOST = "host.containers.internal"
+
 
 class LocalLauncher:
     """Run the kernel from a locally-built binary (the historical path)."""
@@ -118,7 +125,14 @@ class ContainerLauncher:
         *,
         label: str = "",
         extra_env: dict[str, str] | None = None,
+        publish_all: bool = False,
     ) -> KernelProc:
+        # publish_all=True binds the host port on ALL interfaces (`-p port:port`)
+        # instead of loopback-only, so a PEER container can reach it via the host
+        # gateway (CONTAINER_PEER_HOST) — the cross-container "unit" model. The
+        # host still reaches it at 127.0.0.1:port either way. Default stays
+        # loopback-only (safer) for single-kernel tests.
+        publish = f"{port}:{port}" if publish_all else f"127.0.0.1:{port}:{port}"
         name = f"ftit-{self.runtime}-{port}-{os.getpid()}"
         wd = Path(workdir).resolve()  # absolute → real bind mount (not a named volume)
         # Clear any stale container with this name (best effort).
@@ -137,7 +151,7 @@ class ContainerLauncher:
             "--name",
             name,
             "-p",
-            f"127.0.0.1:{port}:{port}",
+            publish,
             "-v",
             f"{wd}:/work",
             "-e",

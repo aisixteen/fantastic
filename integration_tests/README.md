@@ -106,11 +106,18 @@ Container target notes:
   `FANTASTIC_HEAD=off` so `/` is the dynamic readiness signal.
 - **Swift** has no Linux container (Network.framework HTTP) → swift tests skip
   under `container`.
-- **Bridge matrix (multi-kernel) is local-only for now:** each container's
-  `127.0.0.1` is its own loopback, so a bridge can't reach a peer container's
-  host-mapped port. Container-to-container bridging needs a shared network +
-  dial-by-name (a planned follow-up); run the bridge suite with the `local`
-  target.
+- **Bridge across containers — each container is a unit at `host:port`, NO shared
+  network.** The kernel_bridge is weak-binding by URL, so it just dials the peer's
+  PUBLISHED address:
+  - **same host:** publish the peer on all interfaces (`-p port:port`) and dial it
+    via the built-in host gateway `host.containers.internal:port` — the host
+    forwards to it. (`127.0.0.1` is wrong here: inside a container it's that
+    container's own loopback, not the host.)
+  - **another machine:** dial `ws://<machine-ip>:<port>/<peer>/ws` directly, or use
+    the `ssh+ws` bridge transport to tunnel with no exposed port.
+  - Proven by `bridge/test_bridge_container_to_container.py` (container-only;
+    `publish_all=True` + `CONTAINER_PEER_HOST`). The existing python↔python bridge
+    matrix runs against the `local` target.
 
 ## What's tested
 
