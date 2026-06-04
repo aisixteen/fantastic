@@ -106,13 +106,19 @@ jobs:
   # ── 1b) Swift kernel host binary (macOS, Apple-native) ────────────────────
   swift:
     name: swift kernel (macos-arm64)
-    runs-on: macos-14
+    # macos-15 ships Xcode 16 / Swift 6 — the package is swift-tools-version 6.0,
+    # which macos-14's default Swift 5.x toolchain refuses to build.
+    runs-on: macos-15
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
       - uses: actions/checkout@v4
+      - name: Select latest Xcode (Swift 6)
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+      - name: swift --version
+        run: swift --version
       - name: swift build -c release
         working-directory: swift
         run: swift build -c release --product fantastic
