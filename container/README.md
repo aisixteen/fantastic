@@ -24,12 +24,15 @@ must `podman/docker login ghcr.io`, or make the package public).
 
 1. **Image tag:** `ghcr.io/alexadar/fantastic:latest` (multi-arch; one tag
    serves amd64 + arm64).
-2. **Run** (default runtime = `python`, the canonical kernel):
+2. **Run** — **not technical? just run it, no flags.** With no `FANTASTIC_RUNTIME`
+   set, the image **defaults to the `python` kernel** (the canonical reference) —
+   you don't need to choose anything:
    ```sh
-   podman|docker run -d --name fantastic -p 127.0.0.1:8888:8888 \
-     -v "$PWD":/work -e FANTASTIC_RUNTIME=python ghcr.io/alexadar/fantastic:latest
+   podman|docker run -d --name fantastic -p 127.0.0.1:8888:8888 -v "$PWD":/work \
+     ghcr.io/alexadar/fantastic:latest
    ```
-   Pick the runtime with `-e FANTASTIC_RUNTIME=python|rust|ts` (default `python`).
+   Only set `-e FANTASTIC_RUNTIME=rust|ts|head` if you specifically want another
+   mode; otherwise the safe default is `python`.
 3. **Read the head** (this is all you need — no client library):
    - headful: `GET http://127.0.0.1:8888/`
    - headless self-description: `curl -s -X POST -H 'Content-Type: application/json'
