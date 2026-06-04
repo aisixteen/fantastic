@@ -202,6 +202,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build + push by digest (native ${{ matrix.platform }})
         id: build
+        # Don't upload the buildx build-record (`*.dockerbuild`) artifact — it's
+        # not a release asset, and the release job's download-artifact (which
+        # pulls ALL run artifacts) repeatedly flaked trying to fetch it.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+          DOCKER_BUILD_SUMMARY: "false"
         uses: docker/build-push-action@v6
         with:
           context: .
