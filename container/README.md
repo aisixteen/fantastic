@@ -46,7 +46,7 @@ must `podman/docker login ghcr.io`, or make the package public).
    Don't want the head? Set `-e FANTASTIC_HEAD=off` and `/` shows the plain
    agent-tree index instead (the flag turns the head **off**, never on).
 4. **Connect an LLM to the kernel and let it BUILD — this is the intended way.**
-   The running kernel is fully driveable over `web_ws` (`GET /web/ws`) and `rest`
+   The running kernel is fully drivable over `web_ws` (`GET /web/ws`) and `rest`
    (`POST /rest/<target>`) — **no client library, the protocol IS the API.** An LLM
    reads `reflect` (step 3), then **composes agents with `create_agent` and wires
    them with `send`** — building your app *inside this kernel*, operating on the
