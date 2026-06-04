@@ -1,0 +1,251 @@
+# Manual release builder — NOT automatic. Press "Run workflow" (workflow_dispatch)
+# to build + publish, all from GitHub (so the artifacts carry GH build provenance
+# that anyone can verify):
+#   1) kernel hosts  — rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
+#                      prebuilt binaries; python kernel source tarball
+#   2) js archive    — ts/dist/js_kernel.zip (built with the vendored esbuild)
+#   3) docker cont.  — multi-arch ghcr.io/<owner>/fantastic:<version> (+ :latest)
+# Each artifact gets a SLSA build-provenance attestation (actions/attest-build-
+# provenance) and the container carries OCI source labels + registry attestations,
+# so every release is transparently "built + pushed from this repo on GitHub".
+name: Release (manual)
+
+run-name: "Release ${{ inputs.version }} by @${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version / tag (e.g. v0.1.0)"
+        required: true
+        type: string
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: false
+        type: boolean
+        default: true
+      publish_container:
+        description: "Build + push the multi-arch container to GHCR"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 2) JS archive ─────────────────────────────────────────────────────────
+  js:
+    name: js archive (js_kernel.zip)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build vendored esbuild (linux-x64) + pack the bundle
+        run: |
+          GOBIN="$PWD/ts/tools/esbuild/linux-x64" \
+            go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
+          # record the sha so pack.sh's integrity gate passes
+          ( cd ts/tools/esbuild && shasum -a 256 linux-x64/esbuild \
+              | awk '{print $1"  linux-x64/esbuild"}' >> SHA256SUMS )
+          ( cd ts && sh scripts/pack.sh )
+          mkdir -p dist
+          cp ts/dist/js_kernel.zip "dist/js_kernel-${{ inputs.version }}.zip"
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/js_kernel-${{ inputs.version }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js_kernel
+          path: dist/js_kernel-*.zip
+
+  # ── 1a) Rust kernel host binaries (matrix) ────────────────────────────────
+  rust:
+    name: rust kernel (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    label: linux-amd64 }
+          - { os: ubuntu-24.04-arm, label: linux-arm64 }
+          - { os: macos-14,         label: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build --release
+        working-directory: rust
+        run: cargo build --release --bin fantastic
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          tar -czf "dist/fantastic-rust-${{ matrix.label }}-${{ inputs.version }}.tar.gz" \
+            -C rust/target/release fantastic
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/fantastic-rust-${{ matrix.label }}-${{ inputs.version }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.label }}
+          path: dist/fantastic-rust-*.tar.gz
+
+  # ── 1b) Swift kernel host binary (macOS, Apple-native) ────────────────────
+  swift:
+    name: swift kernel (macos-arm64)
+    runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build -c release
+        working-directory: swift
+        run: swift build -c release --product fantastic
+      - name: Package binary
+        working-directory: swift
+        run: |
+          mkdir -p dist
+          tar -czf "dist/fantastic-swift-macos-arm64-${{ inputs.version }}.tar.gz" \
+            -C .build/release fantastic
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "swift/dist/fantastic-swift-macos-arm64-${{ inputs.version }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swift-macos-arm64
+          path: swift/dist/fantastic-swift-*.tar.gz
+
+  # ── 1c) Python kernel host source tarball (interpreted; uv sync to install) ─
+  python:
+    name: python kernel (source tarball)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package python kernel source
+        run: |
+          mkdir -p dist
+          tar --exclude='python/.venv' --exclude='*__pycache__*' \
+              --exclude='*.pyc' --exclude='*.pytest_cache*' --exclude='*.ruff_cache*' \
+              -czf "dist/python-kernel-${{ inputs.version }}.tar.gz" python
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/python-kernel-${{ inputs.version }}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-kernel
+          path: dist/python-kernel-*.tar.gz
+
+  # ── 3) Multi-arch container → GHCR (with provenance + OCI source labels) ───
+  container:
+    name: container (ghcr multi-arch)
+    if: ${{ inputs.publish_container }}
+    needs: [js]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lowercase image name
+        id: img
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fantastic" >> "$GITHUB_OUTPUT"
+      # the image COPYs the prebuilt zip — fetch it from the js job
+      - uses: actions/download-artifact@v4
+        with:
+          name: js_kernel
+          path: dist
+      - name: Stage build context (zip + head page)
+        run: |
+          mkdir -p ts/dist
+          cp dist/js_kernel-*.zip ts/dist/js_kernel.zip
+          python3 container/head/gen_head.py > container/head/index.html
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push multi-arch
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.img.outputs.image }}:${{ inputs.version }}
+            ${{ steps.img.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+      - name: Attest container build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ steps.img.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # ── Collect everything into a GitHub Release ──────────────────────────────
+  release:
+    name: GitHub Release
+    needs: [js, rust, swift, python, container]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Lowercase image name
+        id: img
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fantastic" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
+          ls -la release/
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          draft: ${{ inputs.draft }}
+          generate_release_notes: true
+          files: release/*
+          body: |
+            Built + published from GitHub Actions (verifiable build provenance on each asset).
+
+            **Container:** `${{ steps.img.outputs.image }}:${{ inputs.version }}`
+            (multi-arch linux/amd64 + linux/arm64; also tagged `:latest`).
+            `docker pull ${{ steps.img.outputs.image }}:${{ inputs.version }}`
+
+            **Kernel hosts:** rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
+            prebuilt binaries; python kernel source tarball (install via `uv sync`).
+            **JS:** `js_kernel.zip` (self-contained frontend bundle).
