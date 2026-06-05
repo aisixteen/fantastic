@@ -1,19 +1,22 @@
 #!/bin/sh
-# Universal entrypoint — pick a runtime at launch, ensure a web agent on the
-# requested port, then exec the kernel as the (tini-supervised) daemon.
+# Universal entrypoint — pick a runtime at launch, then exec the kernel as the
+# (tini-supervised) daemon. It performs NO agent autocreation: the kernel boots
+# exactly what the bind-mounted workdir already contains. Composition is the
+# operator's job (a project that carries its own web stack, or an LLM driving the
+# kernel) — see the note printed when no web host is found.
 #
 #   FANTASTIC_RUNTIME = python (default) | rust | ts
-#   FANTASTIC_PORT    = port bound 0.0.0.0:<port> INSIDE the container (default 8088)
+#   FANTASTIC_PORT    = suggested port for a web you compose (default 8088); used
+#                       only in the "compose a web" hint, not bound by the entrypoint
 #   FANTASTIC_WORKDIR = /work (bind-mounted; holds .fantastic/lock.json)
-#   FANTASTIC_HEAD    = on (default) | off — serve the descriptive head page at `/`
+#   FANTASTIC_HEAD    = on (default) | off — IF you compose a web, serve the head at `/`
 #
-# Every runtime SERVES the descriptive "head" page at `/` BY DEFAULT (it costs
-# almost nothing and makes a fresh container self-explaining). The kernel under
-# it stays fully reflectable/bridgeable (reflect / web_ws / web_rest) regardless.
-# Set FANTASTIC_HEAD=off to drop the head and show the plain agent-tree index.
+# FANTASTIC_HEAD only sets FANTASTIC_WEB_INDEX (an env hint); a web host you
+# compose then serves the descriptive head page at `/`. No web → nothing serves.
 #
-# The JS runtime is the prebuilt zip at $FANTASTIC_JS_KERNEL_ZIP — no engine
-# runs it; it's discovered + served statically. Swift is not in this image.
+# The frontend is the prebuilt zip at $FANTASTIC_JS_KERNEL_ZIP — the image only
+# CARRIES it (not a CDN); copy bundle.min.js out of it into your project and serve
+# it via a file agent (the copy-from-zip convention). Swift is not in this image.
 set -eu
 
 RUNTIME="${FANTASTIC_RUNTIME:-python}"
@@ -35,10 +38,9 @@ PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic}"
 RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
 
 # Runtime → (binary, root id). python root = fs_loader; rust root = core.
-# `ts` is hosted by the python kernel (no JS engine) + it serves the embedded
-# frontend zip via a file agent so an LLM can discover + pull-revive it.
-# `head` is accepted as a back-compat alias of `python` (the head is now on by
-# default for every runtime, not a separate mode).
+# `ts` is a back-compat alias of `python` (a python host; the frontend is the
+# copy-from-zip bundle the operator serves, not an auto-served zip). `head` is
+# also a back-compat alias of `python`.
 case "$RUNTIME" in
   python) BIN="$PY";   ROOT="fs_loader" ;;
   ts)     BIN="$PY";   ROOT="fs_loader" ;;
@@ -64,28 +66,25 @@ if ! mkdir -p "$WORKDIR/.fantastic" 2>/dev/null || ! : >"$WORKDIR/.fantastic/.wt
 fi
 rm -f "$WORKDIR/.fantastic/.wtest" 2>/dev/null || true
 
-have() { grep -rqs "\"id\"[[:space:]]*:[[:space:]]*\"$1\"" .fantastic/agents 2>/dev/null; }
-
-# Compose the call surface (idempotent — the bind-mounted workdir persists across
-# restarts, so this runs once). All created BEFORE the daemon boots them:
-#   web     = HTTP host on $PORT (rendering + mounts children's routes)
-#   web_ws  = the WebSocket verb surface Fantastic clients use to call verbs (/web/ws)
-#   rest    = a REST diagnostic surface (POST /rest/<target> body=payload → reply)
-if ! have web; then
-  echo "entrypoint: composing web + web_ws + rest on port $PORT ($RUNTIME / $ROOT)"
-  "$BIN" "$ROOT" create_agent handler_module=web.tools id=web "port=$PORT" >/dev/null
-  "$BIN" web create_agent handler_module=web_ws.tools id=web_ws >/dev/null
-  "$BIN" web create_agent handler_module=web_rest.tools id=rest >/dev/null
+# NO AGENT AUTOCREATION. Composition is the operator's explicit act (the
+# substrate's no-architectural-automation rule: the only autoagent is the
+# loader). The kernel boots whatever the bind-mounted workdir already contains —
+# a real project carries its own web stack (+ a frontend bundle copied from
+# $FANTASTIC_JS_KERNEL_ZIP per the copy-from-zip convention); a fresh/empty
+# workdir serves nothing until you (or an LLM driving the kernel) compose one.
+# We only DETECT a web host (by handler_module, so a suffixed id like web_ab12cd
+# counts) to print a helpful note — we create nothing.
+has_web() { grep -rqs '"handler_module"[[:space:]]*:[[:space:]]*"web.tools"' .fantastic/agents 2>/dev/null; }
+if ! has_web; then
+  echo "entrypoint: no web agent in $WORKDIR/.fantastic — this image composes nothing." >&2
+  echo "  Mount a project that carries its own web stack, or compose one explicitly:" >&2
+  echo "    $BIN $ROOT create_agent handler_module=web.tools id=web port=$PORT" >&2
+  echo "    $BIN web create_agent handler_module=web_ws.tools id=web_ws" >&2
+  echo "    $BIN web create_agent handler_module=web_rest.tools id=rest" >&2
+  echo "  (without a web host the kernel boots, has nothing to serve, and exits.)" >&2
 fi
 
-# ts: also expose the embedded frontend zip via a generic file agent so it's
-# HTTP-discoverable (GET /js_kernel/file/js_kernel.zip) + pull-revivable.
-if [ "$RUNTIME" = ts ] && ! have js_kernel; then
-  echo "entrypoint: ts — serving embedded $FANTASTIC_JS_KERNEL_ZIP via file agent 'js_kernel'"
-  "$BIN" "$ROOT" create_agent handler_module=file.tools id=js_kernel root=/opt/fantastic >/dev/null || true
-fi
-
-echo "entrypoint: exec $RUNTIME kernel — bind 0.0.0.0:$PORT, workdir $WORKDIR"
+echo "entrypoint: exec $RUNTIME kernel — workdir $WORKDIR (binds the port of the web you composed)"
 # exec → the kernel becomes the process tini supervises; SIGTERM reaches it for
 # graceful shutdown (release .fantastic/lock.json, drain uvicorn/axum).
 exec "$BIN"

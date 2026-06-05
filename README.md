@@ -33,20 +33,22 @@ docker). **Pick the one for your machine** — there is no merged "latest" manif
 canvas, terminal, AI-chat-with-tools, compute/training, WebGL, audio-visual, and
 federated multi-kernel — also rendered on the served head page.*
 
-**Pull, run, open the port — that's the whole thing** (arm64 shown; use `:amd64` on Intel/AMD):
+**Pull + run** (arm64 shown; use `:amd64` on Intel/AMD):
 
 ```sh
 podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
   ghcr.io/alexadar/fantastic:arm64           # :amd64 on Intel/AMD; docker is identical
 ```
 
-Then **open `http://127.0.0.1:8088/`** → a self-describing **head page**: every
-readme (how it works *and* how to drive it) rendered right there on the port. The
-same self-description, machine-readable, in one call:
+> The image **composes nothing on its own** (no agent autocreation — composition
+> is explicit). So either mount a project that **carries its own web stack** (it
+> serves immediately), or let your **AI compose one** (next paragraph). Once a web
+> host exists, **open `http://127.0.0.1:8088/`** → a self-describing **head page**,
+> and the same self-description is one call away:
 
 ```sh
 curl -s -X POST -H 'Content-Type: application/json' \
-  http://127.0.0.1:8088/rest/kernel \
+  http://127.0.0.1:8088/<rest_id>/kernel \
   -d '{"type":"reflect","readme":true,"bundles":"all"}'
 ```
 

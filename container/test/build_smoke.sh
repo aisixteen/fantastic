@@ -29,6 +29,17 @@ trap cleanup EXIT INT TERM
 
 freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
+# The image performs NO agent autocreation — the OPERATOR composes the web stack.
+# These one-shots (entrypoint bypassed) seed web+web_ws+rest into a workdir, the
+# way a project/LLM would, before the daemon boots it. $1=workdir $2=bin $3=root $4=port
+PYBIN=/opt/fantastic/venv/bin/fantastic
+RUSTBIN=/opt/fantastic/bin/fantastic-rust
+compose_web() {
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=web.tools id=web "port=$4" >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest >/dev/null 2>&1
+}
+
 # ── build ──────────────────────────────────────────────────────────────────
 if [ "$BUILD" = 1 ]; then
   echo "== build =="
@@ -52,6 +63,8 @@ echo "== serve (bind 0.0.0.0 + -p mapping + workdir) =="
 for rt in python rust; do
   P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-$rt-$$"
   CONTAINERS="$CONTAINERS $c"
+  case "$rt" in python) bin=$PYBIN; root=fs_loader ;; rust) bin=$RUSTBIN; root=core ;; esac
+  compose_web "$tmp" "$bin" "$root" "$P"   # explicit composition (image autocreates nothing)
   $ENGINE run -d --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
     -e FANTASTIC_RUNTIME="$rt" -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
   up=""
@@ -94,12 +107,13 @@ else
   ok "no node/bun/deno/cargo/go/rustc/gcc in the final image"
 fi
 
-# ── head ON by default: every runtime serves the all-readmes page at / ──────
-# No FANTASTIC_RUNTIME / FANTASTIC_HEAD set → defaults (python kernel, head on,
-# bind :8088 inside). Map a free host port to the container's default :8088.
-echo "== head ON by default (no flags) + FANTASTIC_HEAD=off fallback =="
+# ── head: a composed web serves the all-readmes page at / (head on by default) ─
+# The image autocreates nothing, so compose a python web on :8088 first; with
+# head on (default) its / serves the head page.
+echo "== head served by a composed web (default on) + FANTASTIC_HEAD=off fallback =="
 P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$$"
 CONTAINERS="$CONTAINERS $c"
+compose_web "$tmp" "$PYBIN" fs_loader 8088
 $ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" "$TAG" >/dev/null
 up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
 page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
@@ -118,6 +132,7 @@ $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 # FANTASTIC_HEAD=off → / falls back to the plain agent-tree index (no head page).
 P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-nohead-$$"
 CONTAINERS="$CONTAINERS $c"
+compose_web "$tmp" "$PYBIN" fs_loader 8088
 $ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
   -e FANTASTIC_HEAD=off "$TAG" >/dev/null
 up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
@@ -129,9 +144,10 @@ else
 fi
 $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 
-# rust also honours the head-by-default hook (FANTASTIC_WEB_INDEX in axum).
+# rust also honours the head hook (FANTASTIC_WEB_INDEX in axum) for a composed web.
 P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-rusthead-$$"
 CONTAINERS="$CONTAINERS $c"
+compose_web "$tmp" "$RUSTBIN" core 8088
 $ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
   -e FANTASTIC_RUNTIME=rust "$TAG" >/dev/null
 up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
@@ -140,6 +156,20 @@ if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD"; then
   ok "rust runtime also serves the head at / by default"
 else
   bad "rust head page missing ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+fi
+$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
+
+# ── no agent autocreation: a BLANK workdir gets nothing composed ────────────
+echo "== no agent autocreation (blank workdir) =="
+tmp=$(mktemp -d); c="ftsmoke-noauto-$$"; CONTAINERS="$CONTAINERS $c"
+out=$($ENGINE run --name "$c" -v "$tmp:/work" "$TAG" 2>&1 || true)   # boots, no web → exits
+printf '%s' "$out" | grep -q "composes nothing" \
+  && ok "blank workdir → entrypoint composes nothing (prints the note)" \
+  || bad "expected 'composes nothing' note (got: $(printf '%s' "$out" | tail -3 | tr '\n' '|'))"
+if grep -rqs '"handler_module"[[:space:]]*:[[:space:]]*"web.tools"' "$tmp/.fantastic/agents" 2>/dev/null; then
+  bad "a web.tools agent was AUTOCREATED in a blank workdir (autocreation not removed!)"
+else
+  ok "no web/web_ws/rest agent autocreated in the blank workdir"
 fi
 $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 
