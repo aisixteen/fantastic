@@ -218,6 +218,16 @@ the next process start.
   values across all four runtimes; injected uniformly in
   `_apply_reflect_flags` (root only). Differs by runtime BY DESIGN (like the
   root id), so cross-runtime parity asserts the per-runtime value, not equality.
+  The root reflect ALSO carries two deployment-context fields, in key order
+  `runtime → env → version`: `env` (read from `$FANTASTIC_ENV`, default
+  `"host"`; the container image bakes `"container"`) tells a client WHERE the
+  kernel runs — e.g. `env:"container"` means `shutdown_kernel` stops + (under
+  `--rm`) removes a whole container, not just a process — and `version` (read
+  from `$FANTASTIC_VERSION`, default `null`; the image bakes the release tag)
+  names the build. Both are RUN-scoped (read inline at root reflect, never
+  persisted to the portable `.fantastic` workdir, which can move host↔container)
+  and root-only like `runtime`. The host runtimes read the envs; the browser
+  `ts` kernel has no OS env, so it is always `env:"host"`, `version:null`.
 - **`render_html`** — duck-typed presentation. Any agent returning
   `{html:str}` from `render_html` can be rendered by a view. This is now
   a FRONTEND pattern (a `*.ts` content agent holds the body in its

@@ -55,14 +55,27 @@ COPY container/head/index.html /opt/fantastic/head/index.html
 COPY container/entrypoint.sh /opt/fantastic/entrypoint.sh
 RUN chmod +x /opt/fantastic/entrypoint.sh
 
+# Deployment context baked into the image. The kernel reads these at boot and
+# surfaces them in its ROOT reflect (next to `runtime`), so anyone who hops to a
+# running kernel learns WHERE it runs and which build — in one round-trip:
+#   FANTASTIC_ENV=container  → reflect `env:"container"` (a bare host = "host"),
+#       e.g. a client knows `shutdown_kernel` here stops + auto-removes a whole
+#       container, not just a process.
+#   FANTASTIC_VERSION        → reflect `version:"<tag>"`; threaded from the build
+#       arg (the release `version` input); defaults to "dev" for local builds.
+# RUN-scoped — echoed in reflect, never written to the portable .fantastic workdir.
+#
 # FANTASTIC_PORT is intentionally NOT preset — the entrypoint defaults it to 8088
 # INSIDE the container (a preset here would shadow that). 8088 is unprivileged so
 # uid 1000 binds it with no caps; the documented default mapping is `-p 8088:8088`.
+ARG FANTASTIC_VERSION=dev
 ENV FANTASTIC_RUNTIME=python \
     FANTASTIC_WORKDIR=/work \
     FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
     FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic \
-    FANTASTIC_RUST=/opt/fantastic/bin/fantastic-rust
+    FANTASTIC_RUST=/opt/fantastic/bin/fantastic-rust \
+    FANTASTIC_ENV=container \
+    FANTASTIC_VERSION=${FANTASTIC_VERSION}
 
 USER fantastic
 WORKDIR /work

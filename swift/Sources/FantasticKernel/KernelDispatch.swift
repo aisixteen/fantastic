@@ -102,11 +102,20 @@ extension Kernel {
         if obj["description"] == nil, let d = target.descriptionMeta {
             obj["description"] = .string(d)
         }
-        // Kernel runtime identity — surfaced on the ROOT reflect so a client
-        // gates runtime-specific UI from one round-trip. Same field name +
-        // lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+        // Kernel runtime identity + deployment context — surfaced on the ROOT
+        // reflect so a client that hops to this kernel learns, in one
+        // round-trip: which runtime (`runtime`), WHERE it runs (`env` —
+        // "container" when launched from the image, else "host"), and which
+        // build (`version`). env/version come from the optional FANTASTIC_ENV /
+        // FANTASTIC_VERSION envs the container bakes in; RUN-scoped (never
+        // persisted to the portable .fantastic workdir). Same field names + key
+        // order (runtime → env → version) across all four runtimes.
         if target.parentId == nil {
             obj["runtime"] = .string("swift")
+            obj["env"] = .string(ProcessInfo.processInfo.environment["FANTASTIC_ENV"] ?? "host")
+            obj["version"] =
+                ProcessInfo.processInfo.environment["FANTASTIC_VERSION"].map { JSON.string($0) }
+                ?? .null
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)

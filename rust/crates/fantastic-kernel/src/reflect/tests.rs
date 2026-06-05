@@ -72,8 +72,11 @@ async fn root_reflect_is_uniform_no_primer_keys() {
     assert_eq!(v["tree"]["id"], "core");
     // bundles omitted by default.
     assert!(v.get("bundles").is_none());
-    // kernel runtime identity — root only, lowercase enum.
+    // kernel runtime identity + deployment context — root only.
     assert_eq!(v["runtime"], "rust");
+    // No FANTASTIC_ENV / FANTASTIC_VERSION in the test process → host defaults.
+    assert_eq!(v["env"], "host");
+    assert!(v["version"].is_null());
     for k in PRIMER_KEYS_GONE {
         assert!(v.get(k).is_none(), "deleted primer key {k} still present");
     }
@@ -91,8 +94,10 @@ async fn child_reflect_is_uniform() {
     assert_eq!(v["id"], "kid_1");
     assert_eq!(v["parent_id"], "core");
     assert_eq!(v["tree"]["id"], "kid_1");
-    // runtime is root-only — a child must not carry it.
+    // runtime + env/version are root-only — a child must not carry them.
     assert!(v.get("runtime").is_none());
+    assert!(v.get("env").is_none());
+    assert!(v.get("version").is_none());
     for k in PRIMER_KEYS_GONE {
         assert!(v.get(k).is_none());
     }

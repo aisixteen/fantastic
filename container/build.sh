@@ -22,6 +22,9 @@ TAG="${TAG:-fantastic:latest}"
 ARCH="${ARCH:-}"
 PLATFORM="${PLATFORM:-}"
 PUSH="${PUSH:-0}"
+# Baked into the image as FANTASTIC_VERSION → surfaced in the kernel's reflect.
+# Defaults to "dev" for local builds; CI passes the release tag (e.g. v0.5.3).
+VERSION="${FANTASTIC_VERSION:-dev}"
 
 # ── prereq: the bundled JS runtime (copied prebuilt from ts/) ──────────────
 if [ ! -f "$REPO/ts/dist/js_kernel.zip" ]; then
@@ -50,8 +53,9 @@ if [ -n "$ARCH" ]; then
   esac
   archtag="$TAG"
   [ "$TAG" = "fantastic:latest" ] && archtag="fantastic:$ARCH"
-  echo "build.sh: $ENGINE build linux/$ARCH -> $archtag (push=$PUSH)"
-  "$ENGINE" build --platform "linux/$ARCH" -f container/Containerfile -t "$archtag" .
+  echo "build.sh: $ENGINE build linux/$ARCH -> $archtag (push=$PUSH, version=$VERSION)"
+  "$ENGINE" build --platform "linux/$ARCH" --build-arg "FANTASTIC_VERSION=$VERSION" \
+    -f container/Containerfile -t "$archtag" .
   [ "$PUSH" = 1 ] && "$ENGINE" push "$archtag" \
     || echo "build.sh: push skipped (set PUSH=1 to publish)"
   echo "build.sh: done -> $archtag"
@@ -74,22 +78,26 @@ if [ -z "$PLATFORM" ]; then
   esac
   if [ -n "$HOSTPLAT" ]; then
     echo "build.sh: pinning host platform $HOSTPLAT"
-    "$ENGINE" build --platform "$HOSTPLAT" -f container/Containerfile -t "$TAG" .
+    "$ENGINE" build --platform "$HOSTPLAT" --build-arg "FANTASTIC_VERSION=$VERSION" \
+      -f container/Containerfile -t "$TAG" .
   else
-    "$ENGINE" build -f container/Containerfile -t "$TAG" .
+    "$ENGINE" build --build-arg "FANTASTIC_VERSION=$VERSION" \
+      -f container/Containerfile -t "$TAG" .
   fi
   [ "$PUSH" = 1 ] && "$ENGINE" push "$TAG" || echo "build.sh: push skipped (set PUSH=1 to publish)"
 else
   # Multi-arch manifest list.
   if [ "$ENGINE" = podman ]; then
     podman manifest rm "$TAG" 2>/dev/null || true
-    podman build --platform "$PLATFORM" --manifest "$TAG" -f container/Containerfile .
+    podman build --platform "$PLATFORM" --manifest "$TAG" \
+      --build-arg "FANTASTIC_VERSION=$VERSION" -f container/Containerfile .
     [ "$PUSH" = 1 ] && podman manifest push --all "$TAG" "docker://$TAG" \
       || echo "build.sh: push skipped (set PUSH=1 to publish)"
   else
     # docker buildx (creates/uses a builder; --load can't do multi-arch, so
     # multi-arch implies --push). Build single-arch per platform to load locally.
-    docker buildx build --platform "$PLATFORM" -f container/Containerfile \
+    docker buildx build --platform "$PLATFORM" --build-arg "FANTASTIC_VERSION=$VERSION" \
+      -f container/Containerfile \
       $( [ "$PUSH" = 1 ] && echo --push || echo --output=type=image ) -t "$TAG" .
     [ "$PUSH" = 1 ] || echo "build.sh: multi-arch built (docker can't --load multi; PUSH=1 to publish)"
   fi

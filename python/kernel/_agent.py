@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
 import secrets
 import sys
 from importlib.metadata import entry_points
@@ -287,11 +288,19 @@ class Agent:
         # reply already set one.
         if target.description is not None and "description" not in reply:
             reply["description"] = target.description
-        # Kernel runtime identity — surfaced on the ROOT reflect so a client
-        # gates runtime-specific UI from one round-trip. Same field name +
-        # lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+        # Kernel runtime identity + deployment context — surfaced on the ROOT
+        # reflect so a client that hops to this kernel learns, in one
+        # round-trip: which runtime (`runtime`), WHERE it runs (`env` —
+        # "container" when launched from the image, else "host"), and which
+        # build (`version`). env/version are read from the optional
+        # FANTASTIC_ENV / FANTASTIC_VERSION envs the container bakes in; they
+        # are RUN-scoped (never persisted to the portable .fantastic workdir,
+        # which can move host↔container). Same field names + key order
+        # (runtime → env → version) across all four runtimes.
         if target.parent is None:
             reply["runtime"] = "python"
+            reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
+            reply["version"] = os.environ.get("FANTASTIC_VERSION")
         tree = payload.get("tree", "all")
         if tree == "all":
             reply["tree"] = target._tree(depth=None, details=False, current_depth=0)

@@ -221,6 +221,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           provenance: false
+          # Baked into the image as FANTASTIC_VERSION → the kernel surfaces it in
+          # its root reflect, so a client learns the build in one round-trip.
+          build-args: |
+            FANTASTIC_VERSION=${{ inputs.version }}
           tags: |
             ${{ steps.img.outputs.image }}:${{ matrix.arch }}
             ${{ steps.img.outputs.image }}:${{ inputs.version }}-${{ matrix.arch }}

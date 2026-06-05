@@ -80,6 +80,14 @@ for rt in python rust; do
   printf '%s' "$rj" | grep -Eq "\"runtime\"[[:space:]]*:[[:space:]]*\"$rt\"" \
     && ok "$rt reflect over REST (POST /rest/kernel) → runtime=\"$rt\"" \
     || bad "$rt reflect-over-REST failed (got: $(printf '%s' "$rj" | head -c 100))"
+  # Deployment context baked into the image: the kernel reflects env="container"
+  # and a non-null version (FANTASTIC_ENV / FANTASTIC_VERSION inherited from ENV).
+  printf '%s' "$rj" | grep -Eq "\"env\"[[:space:]]*:[[:space:]]*\"container\"" \
+    && ok "$rt reflect → env=\"container\" (deployment context)" \
+    || bad "$rt reflect missing env=\"container\" (got: $(printf '%s' "$rj" | head -c 120))"
+  printf '%s' "$rj" | grep -Eq "\"version\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" \
+    && ok "$rt reflect → version present (build tag baked in)" \
+    || bad "$rt reflect missing a non-null version (got: $(printf '%s' "$rj" | head -c 120))"
   [ -d "$tmp/.fantastic" ] && ok "$rt wrote /work/.fantastic (workdir bind ok)" \
     || bad "$rt did not write /work/.fantastic"
   # SIGTERM-clean: stop should return promptly (tini forwards; no 10s kill wait).

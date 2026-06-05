@@ -57,11 +57,18 @@ export function applyReflectFlags(
     obj["description"] = target.description;
   }
 
-  // Kernel runtime identity — surfaced on the ROOT reflect so a client gates
-  // runtime-specific UI from one round-trip. Same field name + lowercase enum
-  // ("python"|"rust"|"swift"|"ts") across all runtimes.
+  // Kernel runtime identity + deployment context — surfaced on the ROOT
+  // reflect so a client that hops to this kernel learns, in one round-trip:
+  // which runtime (`runtime`), WHERE it runs (`env`), and which build
+  // (`version`). This kernel runs in the BROWSER — it has no OS env, so env is
+  // always "host" and version null (a browser frontend is never the
+  // containerized host; the host it federates to reports its own env/version).
+  // Same field names + key order (runtime → env → version) as the other
+  // runtimes, which read these from FANTASTIC_ENV / FANTASTIC_VERSION.
   if (target.parentId === null) {
     obj["runtime"] = "ts";
+    obj["env"] = "host";
+    obj["version"] = null;
   }
 
   const tree = flag(payload["tree"], "all");

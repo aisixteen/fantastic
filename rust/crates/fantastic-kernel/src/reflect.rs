@@ -97,11 +97,24 @@ pub fn apply_reflect_flags(
             obj.insert("description".to_string(), json!(d));
         }
     }
-    // Kernel runtime identity — surfaced on the ROOT reflect so a client
-    // gates runtime-specific UI from one round-trip. Same field name +
-    // lowercase enum ("python"|"rust"|"swift"|"ts") across all runtimes.
+    // Kernel runtime identity + deployment context — surfaced on the ROOT
+    // reflect so a client that hops to this kernel learns, in one round-trip:
+    // which runtime (`runtime`), WHERE it runs (`env` — "container" when
+    // launched from the image, else "host"), and which build (`version`).
+    // env/version come from the optional FANTASTIC_ENV / FANTASTIC_VERSION
+    // envs the container bakes in; RUN-scoped (never persisted to the portable
+    // .fantastic workdir). Same field names + key order (runtime → env →
+    // version) across all four runtimes.
     if target.parent_id.is_none() {
         obj.insert("runtime".to_string(), json!("rust"));
+        obj.insert(
+            "env".to_string(),
+            json!(std::env::var("FANTASTIC_ENV").unwrap_or_else(|_| "host".to_string())),
+        );
+        obj.insert(
+            "version".to_string(),
+            json!(std::env::var("FANTASTIC_VERSION").ok()),
+        );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
         "all" => {

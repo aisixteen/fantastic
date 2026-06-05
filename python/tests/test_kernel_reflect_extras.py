@@ -30,12 +30,28 @@ async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
 
 
 async def test_reflect_root_has_runtime(seeded_kernel):
-    """Root reflect carries the kernel `runtime` id (lowercase enum) so a client
-    can gate runtime-specific UI from one round-trip. Non-root agents omit it."""
+    """Root reflect carries the kernel `runtime` id + deployment context
+    (`env`, `version`) so a client that hops to this kernel can gate behavior
+    from one round-trip. Non-root agents omit all three."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
     assert r["runtime"] == "python"
+    # No FANTASTIC_ENV / FANTASTIC_VERSION in a bare test process → host defaults.
+    assert r["env"] == "host"
+    assert "version" in r and r["version"] is None
     child = await seeded_kernel.send("cli", {"type": "reflect"})
     assert "runtime" not in child
+    assert "env" not in child and "version" not in child
+
+
+async def test_reflect_root_env_version_from_environ(seeded_kernel, monkeypatch):
+    """`env`/`version` are read at reflect time from the optional FANTASTIC_ENV /
+    FANTASTIC_VERSION envs the container bakes in — so a client learns it is
+    talking to a disposable container and which build, in one round-trip."""
+    monkeypatch.setenv("FANTASTIC_ENV", "container")
+    monkeypatch.setenv("FANTASTIC_VERSION", "v9.9.9")
+    r = await seeded_kernel.send("kernel", {"type": "reflect"})
+    assert r["env"] == "container"
+    assert r["version"] == "v9.9.9"
 
 
 async def test_kernel_alias_equals_core(seeded_kernel):
