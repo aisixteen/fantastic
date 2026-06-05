@@ -4,7 +4,8 @@
 #   1) kernel hosts  — rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
 #                      prebuilt binaries; python kernel source tarball
 #   2) js archive    — ts/dist/js_kernel.zip (built with the vendored esbuild)
-#   3) docker cont.  — multi-arch ghcr.io/<owner>/fantastic:<version> (+ :latest)
+#   3) docker cont.  — TWO per-arch tags: ghcr.io/<owner>/fantastic:amd64 + :arm64
+#                      (+ :<version>-amd64 / :<version>-arm64). NOT a merged manifest.
 # Each artifact gets a SLSA build-provenance attestation (actions/attest-build-
 # provenance) and the container carries OCI source labels + registry attestations,
 # so every release is transparently "built + pushed from this repo on GitHub".
@@ -25,7 +26,7 @@ on:
         type: boolean
         default: true
       publish_container:
-        description: "Build + push the multi-arch container to GHCR"
+        description: "Build + push the per-arch container images (amd64 + arm64) to GHCR"
         required: false
         type: boolean
         default: true
@@ -160,25 +161,29 @@ jobs:
           name: python-kernel
           path: dist/python-kernel-*.tar.gz
 
-  # ── 3a) Per-arch container builds → GHCR (NATIVE runners, no QEMU) ─────────
-  # Each arch builds on its OWN native runner (amd64 on ubuntu-latest, arm64 on
-  # ubuntu-24.04-arm) and pushes the image BY DIGEST (no tag). The merge job
-  # then assembles the multi-arch manifest. Native per-arch is ~2-3 min/arch vs
-  # ~30 min for a single QEMU-emulated build.
-  container-build:
-    name: container build (${{ matrix.label }})
+  # ── 3) Per-arch container images → GHCR — TWO SEPARATE TAGS (no manifest) ──
+  # Deliberately NOT a multi-arch manifest: each architecture is its own image
+  # tag so consumers (and an LLM) pick the right one EXPLICITLY:
+  #   :amd64  /  :<version>-amd64   — Intel/AMD x86-64 (a.k.a. x64)
+  #   :arm64  /  :<version>-arm64   — Apple silicon / ARM (aarch64)
+  # Each builds on its OWN native runner (amd64 on ubuntu-latest, arm64 on
+  # ubuntu-24.04-arm) — ~2-3 min/arch, no QEMU, no merge step.
+  container:
+    name: container (${{ matrix.arch }})
     if: ${{ inputs.publish_container }}
     needs: [js]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    platform: linux/amd64, label: linux-amd64 }
-          - { os: ubuntu-24.04-arm, platform: linux/arm64, label: linux-arm64 }
+          - { os: ubuntu-latest,    platform: linux/amd64, arch: amd64 }
+          - { os: ubuntu-24.04-arm, platform: linux/arm64, arch: arm64 }
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - name: Lowercase image name
@@ -200,11 +205,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build + push by digest (native ${{ matrix.platform }})
+      - name: Build + push (native ${{ matrix.platform }} → :${{ matrix.arch }})
         id: build
-        # Don't upload the buildx build-record (`*.dockerbuild`) artifact — it's
-        # not a release asset, and the release job's download-artifact (which
-        # pulls ALL run artifacts) repeatedly flaked trying to fetch it.
+        # provenance:false keeps each tag a CLEAN single-arch image (no extra
+        # attestation manifest in the tag); the attest step below adds verifiable
+        # provenance by digest. DOCKER_BUILD_RECORD_UPLOAD:false drops the flaky
+        # *.dockerbuild artifact the release job's download-all used to choke on.
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
           DOCKER_BUILD_SUMMARY: "false"
@@ -213,67 +219,20 @@ jobs:
           context: .
           file: container/Containerfile
           platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.img.outputs.image }}:${{ matrix.arch }}
+            ${{ steps.img.outputs.image }}:${{ inputs.version }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ inputs.version }}
-          outputs: type=image,name=${{ steps.img.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ matrix.label }}
-          path: /tmp/digests/*
-          retention-days: 1
-          if-no-files-found: error
-
-  # ── 3b) Merge the per-arch digests into ONE multi-arch manifest (+ provenance)
-  container:
-    name: container (ghcr manifest)
-    if: ${{ inputs.publish_container }}
-    needs: [container-build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    steps:
-      - name: Lowercase image name
-        id: img
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fantastic" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-*
-          merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create + push the multi-arch manifest
-        id: manifest
-        working-directory: /tmp/digests
-        run: |
-          IMG="${{ steps.img.outputs.image }}"
-          docker buildx imagetools create \
-            -t "$IMG:${{ inputs.version }}" \
-            -t "$IMG:latest" \
-            $(printf "$IMG@sha256:%s " *)
-          docker buildx imagetools inspect "$IMG:${{ inputs.version }}"
-          digest=$(docker buildx imagetools inspect "$IMG:${{ inputs.version }}" \
-            --format '{{json .Manifest.Digest}}' | tr -d '"')
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            org.opencontainers.image.version=${{ inputs.version }}-${{ matrix.arch }}
       - name: Attest container build provenance
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ steps.img.outputs.image }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
+          subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
   # ── Collect everything into a GitHub Release ──────────────────────────────
@@ -307,9 +266,11 @@ jobs:
           body: |
             Built + published from GitHub Actions (verifiable build provenance on each asset).
 
-            **Container:** `${{ steps.img.outputs.image }}:${{ inputs.version }}`
-            (multi-arch linux/amd64 + linux/arm64; also tagged `:latest`).
-            `docker pull ${{ steps.img.outputs.image }}:${{ inputs.version }}`
+            **Container — two separate per-arch images (pick one, no merged manifest):**
+            - Intel/AMD x86-64: `${{ steps.img.outputs.image }}:amd64` (pinned `:${{ inputs.version }}-amd64`)
+            - Apple silicon / ARM: `${{ steps.img.outputs.image }}:arm64` (pinned `:${{ inputs.version }}-arm64`)
+
+            `docker pull ${{ steps.img.outputs.image }}:amd64`  # or `:arm64`
 
             **Kernel hosts:** rust (linux amd64/arm64, macOS arm64) + swift (macOS arm64)
             prebuilt binaries; python kernel source tarball (install via `uv sync`).

@@ -1,7 +1,9 @@
 # Universal Fantastic kernel container
 
 One fat OCI image — a **headless runtime collection** the app's runner spawns as
-a `container`-backend node. Same image under **podman and docker**, amd64 + arm64.
+a `container`-backend node. Same recipe under **podman and docker**, shipped as
+**two separate per-arch image tags** (`:amd64` + `:arm64`) — pick the one for your
+machine (no merged manifest).
 
 - **Two execution runtimes:** `python` (canonical) + `rust` (prebuilt binary).
 - **One bundled runtime:** the static `js_kernel.zip` (the browser frontend),
@@ -13,17 +15,22 @@ a `container`-backend node. Same image under **podman and docker**, amd64 + arm6
 The kernels are self-describing; given only their `reflect` + the zip's readme an
 LLM weaves/​revives the wiring itself (the emergent-code capability).
 
-**Published image:** `ghcr.io/alexadar/fantastic:latest` — multi-arch
-manifest (`linux/amd64` + `linux/arm64`, one tag), currently **private** (the host
-must `podman/docker login ghcr.io`, or make the package public).
+**Published images (public, GHCR) — pick your architecture:**
+- `ghcr.io/alexadar/fantastic:amd64` — **Intel / AMD x86-64** (a.k.a. x64); pinned `:vX.Y.Z-amd64`
+- `ghcr.io/alexadar/fantastic:arm64` — **Apple silicon / ARM** (aarch64); pinned `:vX.Y.Z-arm64`
+
+These are **single-arch images** — the registry does NOT auto-select, so pull the
+one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). There is
+**no merged `:latest` manifest** (by design — pick explicitly).
 
 ## Quickstart for an AI chat (e.g. Claude Code) — the distribution model
 
-> **Tagline:** *"Pull `ghcr.io/alexadar/fantastic:latest`, run it, then
+> **Tagline:** *"Pull `ghcr.io/alexadar/fantastic:<your-arch>`, run it, then
 > read its head to learn what it does and how to drive it."*
 
-1. **Image tag:** `ghcr.io/alexadar/fantastic:latest` (multi-arch; one tag
-   serves amd64 + arm64).
+1. **Image tag — choose by arch:** `:amd64` (Intel/AMD x86-64) or `:arm64` (Apple
+   silicon / ARM). `uname -m` → `x86_64`/`amd64` ⇒ `:amd64`; `arm64`/`aarch64` ⇒
+   `:arm64`.
 2. **Run** — **not technical? just run it, no flags.** With no `FANTASTIC_RUNTIME`
    set, the image **defaults to the `python` kernel** (the canonical reference) —
    you don't need to choose anything. The kernel binds **`:8088` inside** the
@@ -31,7 +38,7 @@ must `podman/docker login ghcr.io`, or make the package public).
    host **`:8088`** (the documented default):
    ```sh
    podman|docker run -d --name fantastic -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-     ghcr.io/alexadar/fantastic:latest
+     ghcr.io/alexadar/fantastic:arm64        # :amd64 on Intel/AMD
    ```
    Only set `-e FANTASTIC_RUNTIME=rust|ts` if you specifically want another
    runtime; otherwise the safe default is `python`.
@@ -63,17 +70,20 @@ must `podman/docker login ghcr.io`, or make the package public).
 
 ```sh
 sh container/build.sh                               # host arch → fantastic:latest (local)
-PLATFORM=linux/amd64,linux/arm64 sh container/build.sh   # multi-arch manifest (local)
-# publish (opt-in):
-PUSH=1 PLATFORM=linux/amd64,linux/arm64 \
-  TAG=ghcr.io/alexadar/fantastic:latest sh container/build.sh
+ARCH=arm64 sh container/build.sh                    # one arch (native) → fantastic:arm64
+ARCH=amd64 sh container/build.sh                    # one arch (emulated on arm host) → fantastic:amd64
+# publish ONE arch (opt-in) — push its own tag:
+PUSH=1 ARCH=arm64 TAG=ghcr.io/alexadar/fantastic:arm64 sh container/build.sh
+PUSH=1 ARCH=amd64 TAG=ghcr.io/alexadar/fantastic:amd64 sh container/build.sh
 ```
 
-> **One tag — `fantastic`.** There is a single universal image
-> (`ghcr.io/alexadar/fantastic:latest`). `ts` / `rust` are **runtime modes** chosen
-> at launch via `FANTASTIC_RUNTIME`, **not** separate tags (and the head page is on
-> by default in every mode). Tag it `fantastic` (no `-head` / `-gpu` / per-runtime
-> variants).
+CI builds each arch on its OWN native runner (amd64 on `ubuntu-latest`, arm64 on
+`ubuntu-24.04-arm`) and pushes its own tag — see `.github/workflows/release.yml`.
+
+> **Per-arch tags, not a merged manifest.** The image is published as **`:amd64`**
+> and **`:arm64`** (+ `:vX.Y.Z-<arch>`) — pick one explicitly. `ts` / `rust` are
+> **runtime modes** chosen at launch via `FANTASTIC_RUNTIME`, **not** separate tags
+> (and the head page is on by default in every mode). No `-head` / `-gpu` variants.
 
 `build.sh` first ensures `ts/dist/js_kernel.zip` exists (runs `ts/scripts/pack.sh`
 if missing) — the image **copies** that prebuilt bundle, it does not build JS.
@@ -89,7 +99,7 @@ podman|docker run -d --name fantastic-<nodeId> \
   -e FANTASTIC_RUNTIME=python \     # python (default) | rust | ts
   -e FANTASTIC_HEAD=on \            # head page at / (default on; `off` disables)
   -e FANTASTIC_WORKDIR=/work \
-  fantastic:latest
+  ghcr.io/alexadar/fantastic:arm64   # or :amd64 — pick your arch
 ```
 
 - **Env:** `FANTASTIC_RUNTIME` (default `python`), `FANTASTIC_PORT` (default
