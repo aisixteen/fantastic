@@ -16,22 +16,28 @@ them on a fresh turn, prunes the rest), entirely through `send`. Proof:
 
 ## Run it now — one container, driven by an AI
 
-The whole thing ships as **one OCI image** (multi-arch, podman **and** docker):
+The container ships as **two separate per-architecture images** (podman **and**
+docker). **Pick the one for your machine** — there is no merged "latest" manifest:
 
-| tag | what |
-|---|---|
-| `ghcr.io/alexadar/fantastic:latest` | newest — `linux/amd64` + `linux/arm64` in one manifest; the registry auto-serves your arch on pull |
-| `ghcr.io/alexadar/fantastic:v0.4.0` | a pinned version (same multi-arch manifest) |
+| image tag | use this on | also pinned |
+|---|---|---|
+| `ghcr.io/alexadar/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.0-amd64` |
+| `ghcr.io/alexadar/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.0-arm64` |
+
+> **AI / LLM: choose by the host arch.** `uname -m` → `x86_64`/`amd64` ⇒ pull
+> `:amd64`; `arm64`/`aarch64` ⇒ pull `:arm64`. (Pulling the wrong arch fails or runs
+> slowly under emulation — these are single-arch images, the registry does **not**
+> auto-select.)
 
 *What to build with it: 7 ready-to-assemble **[recipes](container/recipes.md)** —
 canvas, terminal, AI-chat-with-tools, compute/training, WebGL, audio-visual, and
 federated multi-kernel — also rendered on the served head page.*
 
-**Pull, run, open the port — that's the whole thing:**
+**Pull, run, open the port — that's the whole thing** (arm64 shown; use `:amd64` on Intel/AMD):
 
 ```sh
 podman run -d -p 127.0.0.1:8088:8088 -v "$PWD":/work \
-  ghcr.io/alexadar/fantastic:latest          # docker is identical
+  ghcr.io/alexadar/fantastic:arm64           # :amd64 on Intel/AMD; docker is identical
 ```
 
 Then **open `http://127.0.0.1:8088/`** → a self-describing **head page**: every
