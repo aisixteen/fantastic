@@ -64,6 +64,10 @@ _SYSTEM_VERBS = frozenset(
         "delete_agent",
         "update_agent",
         "list_agents",
+        # Root-only control verb — gated inside its handler to the tree
+        # root (a non-root agent answers with an error). Stops the whole
+        # kernel process gracefully; see `_verb_shutdown_kernel`.
+        "shutdown_kernel",
     }
 )
 
@@ -601,7 +605,48 @@ class Agent:
             return await self._verb_update_agent(payload)
         if verb == "delete_agent":
             return await self._verb_delete_agent(payload)
+        if verb == "shutdown_kernel":
+            return await self._verb_shutdown_kernel(payload)
         return {"error": f"unhandled system verb {verb!r}"}
+
+    async def _verb_shutdown_kernel(self, payload: dict) -> dict:
+        """Gracefully stop the whole kernel PROCESS (root control surface
+        only). Privileged: a non-root agent answers with an error so the
+        verb is gated to the kernel's own control surface, not an
+        arbitrary child.
+
+        Order: (1) ack `{type:"shutdown_kernel", ok:true}` and let it
+        flush; (2) AFTER the reply is on the wire, trigger the daemon's
+        normal graceful path (release `.fantastic/lock.json`, drain
+        in-flight + stop the HTTP/WS listeners), (3) exit code 0. The exit
+        is DEFERRED via `call_later` so the in-flight REST body / WS frame
+        is fully written before uvicorn is drained — never exit
+        synchronously here or the caller sees a dropped socket, not an ack.
+
+        Backend-agnostic stop: the kernel is PID 1 in a container, so its
+        exit stops the container (auto-removed under `--rm`); a bare host
+        process simply dies. Either way the port goes down and the lock
+        releases — the caller need not know how the kernel was launched.
+
+        Idempotent / one-shot: reuses the daemon's single `stop` event, so
+        a racing SIGTERM collapses to one shutdown; a second call lands on
+        a dead port. In non-daemon contexts (one-shot CLI / REPL-only with
+        no serve loop) there is nothing to stop — it still acks."""
+        if self.parent is not None:
+            return {
+                "error": (
+                    "shutdown_kernel: root control surface only; address "
+                    "the kernel root (alias 'kernel')"
+                )
+            }
+        ev = self.ctx.shutdown_event
+        if ev is not None and not ev.is_set():
+            # Defer the trigger so the ack reply is fully flushed to the
+            # caller before the serve loop tears uvicorn down. 100ms is
+            # imperceptible and well within a bounded grace; uvicorn's own
+            # graceful drain (server.should_exit) handles the socket close.
+            asyncio.get_running_loop().call_later(0.1, ev.set)
+        return {"type": "shutdown_kernel", "ok": True}
 
     def _verb_list_agents(self, payload: dict) -> dict:
         # Flat list of every agent's record (global registry). For

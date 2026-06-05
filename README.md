@@ -21,8 +21,8 @@ docker). **Pick the one for your machine** — there is no merged "latest" manif
 
 | image tag | use this on | also pinned |
 |---|---|---|
-| `ghcr.io/alexadar/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.0-amd64` |
-| `ghcr.io/alexadar/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.0-arm64` |
+| `ghcr.io/alexadar/fantastic:amd64` | **Intel / AMD** x86-64 (a.k.a. x64) — most Linux servers, Intel Macs/PCs | `:v0.5.2-amd64` |
+| `ghcr.io/alexadar/fantastic:arm64` | **Apple silicon / ARM** (aarch64) — M-series Macs, ARM servers, Raspberry Pi | `:v0.5.2-arm64` |
 
 > **AI / LLM: choose by the host arch.** `uname -m` → `x86_64`/`amd64` ⇒ pull
 > `:amd64`; `arm64`/`aarch64` ⇒ pull `:arm64`. (Pulling the wrong arch fails or runs

@@ -122,6 +122,24 @@ port yourself):
         # frontend kernel served from ts/dist over the bridge for its actual root/view kinds
 ...then they restart the daemon.
 
+## Stopping the kernel
+
+`send kernel {"type":"shutdown_kernel"}` gracefully stops the whole kernel
+PROCESS. It acks `{"type":"shutdown_kernel","ok":true}` FIRST, then (after the
+reply is on the wire) releases `.fantastic/lock.json`, drains in-flight work,
+stops the HTTP/WS listeners, and exits code 0. Reachable over both `web_rest`
+(POST) and `web_ws`, so a remote operator can stop the kernel with one verb —
+no `kill`, no backend knowledge.
+
+This is **PRIVILEGED and root-only**: it is gated to the kernel's own control
+surface (the tree root, alias `kernel`); sending it to any child agent returns
+an error. It is **backend-agnostic**: the kernel is PID 1 in a container, so its
+exit stops the container (auto-removed if it was run with `--rm`); a bare host
+process simply dies. Either way the port goes down and the lock releases — the
+caller does not need to know how the kernel was launched. Idempotent / one-shot:
+a second call lands on a dead port. The bind-mounted `.fantastic/` workdir
+persists across the stop.
+
 ## Mental model
 
 Agents are recursive — an agent can own children. `create_agent

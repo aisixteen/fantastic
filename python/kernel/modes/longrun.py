@@ -48,6 +48,10 @@ async def _default(kernel) -> None:
         # uvicorn etc. die before the kernel exits — instead of
         # being left as orphans for the user to clean up by hand.
         stop = asyncio.Event()
+        # Publish the SAME event on the kernel ctx so the root-only
+        # `shutdown_kernel` verb can trigger this exact graceful path
+        # remotely (over web_rest / web_ws), not just via an OS signal.
+        kernel.shutdown_event = stop
         loop = asyncio.get_running_loop()
 
         def _request_stop(sig_name: str) -> None:

@@ -338,7 +338,14 @@ async fn dispatch_binary(
 fn is_system_verb(verb: &str) -> bool {
     matches!(
         verb,
-        "create_agent" | "delete_agent" | "update_agent" | "list_agents" | "get"
+        "create_agent"
+            | "delete_agent"
+            | "update_agent"
+            | "list_agents"
+            | "get"
+            // Root-only control verb — gated inside `handle_system_verb`
+            // to the tree root; a non-root target answers with an error.
+            | "shutdown_kernel"
     )
 }
 
@@ -367,6 +374,34 @@ async fn handle_system_verb(
         "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
         "delete_agent" => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
         "update_agent" => update_from_payload(kernel, target, payload).await,
+        "shutdown_kernel" => {
+            // Privileged: root control surface only. Gate on rootness
+            // (parent_id is None) so it holds whether the verb was
+            // addressed to the literal root id or via the `kernel` alias —
+            // never an arbitrary child agent.
+            if target.parent_id.is_some() {
+                return json!({
+                    "error": "shutdown_kernel: root control surface only; \
+                              address the kernel root (alias 'kernel')"
+                });
+            }
+            // DEFER the shutdown signal so this ack is enqueued onto the WS
+            // out-channel / written as the HTTP body and flushed to the
+            // caller BEFORE the daemon serve loop begins teardown — mirrors
+            // the Python side's `call_later(0.1, ev.set)`. The verb returns
+            // the ack synchronously here (running inside a web task); ~100ms
+            // later `request_shutdown()` fires and the CLI serve loop (which
+            // adds its own short grace) drains agents, releases lock.json,
+            // and exits 0. Never exit inline / signal before the ack is even
+            // enqueued — that would risk truncating the ack mid-flush. Wire
+            // shape mirrors Python exactly (`type` before `ok`).
+            let k = Arc::clone(kernel);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                k.request_shutdown();
+            });
+            json!({ "type": "shutdown_kernel", "ok": true })
+        }
         "get" => {
             let id = payload.get("id").and_then(Value::as_str).map(AgentId::from);
             match id.and_then(|i| kernel.agents.get(&i).map(|e| Arc::clone(&e))) {

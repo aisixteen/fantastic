@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 /// Bounded inbox capacity per agent — matches Python's `INBOX_BOUND`.
 /// 256 fits a chat-paced workload comfortably and bounds memory on a
@@ -64,6 +64,13 @@ pub struct Kernel {
     /// [`Self::save`] / [`Self::load`] for the on-demand API both
     /// modes share.
     pub storage: StorageMode,
+    /// Graceful-shutdown signal. The root-only `shutdown_kernel` verb
+    /// calls [`Self::request_shutdown`] AFTER returning its ack; the CLI
+    /// daemon awaits [`Self::shutdown_requested`] alongside SIGINT/SIGTERM
+    /// and runs the SAME drain + lock-release + `exit 0` path. Lets an
+    /// in-kernel verb stop the process remotely (over web_rest / web_ws),
+    /// not just via an OS signal.
+    shutdown: Notify,
 }
 
 impl Default for Kernel {
@@ -106,7 +113,25 @@ impl Kernel {
             root: ArcSwapOption::const_empty(),
             inbox_bound: bound,
             storage,
+            shutdown: Notify::new(),
         }
+    }
+
+    /// Signal the daemon serve loop to begin a graceful shutdown. Called
+    /// by the root-only `shutdown_kernel` verb AFTER it has produced its
+    /// ack reply, so the reply flushes over the web surface before the
+    /// process exits. Idempotent — extra calls collapse to one shutdown
+    /// (the serve loop awaits this once, then unwinds straight-line).
+    pub fn request_shutdown(&self) {
+        self.shutdown.notify_one();
+    }
+
+    /// Resolves once [`Self::request_shutdown`] has been called. The CLI
+    /// daemon awaits this in its `tokio::select!` next to SIGINT/SIGTERM;
+    /// when it fires, the daemon drains agents, releases `lock.json`, and
+    /// returns `ExitCode::SUCCESS`.
+    pub async fn shutdown_requested(&self) {
+        self.shutdown.notified().await;
     }
 
     /// Register an agent in the flat index + auto-vivify its inbox.

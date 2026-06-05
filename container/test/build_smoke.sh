@@ -89,6 +89,51 @@ for rt in python rust; do
   $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 done
 
+# ── graceful self-shutdown verb (the backend-agnostic stop) ─────────────────
+# `send kernel {type:shutdown_kernel}` over REST → the kernel acks, then exits 0.
+# The kernel is PID 1 (under tini), so its exit STOPS the container — and with
+# `--rm` the container AUTO-REMOVES. The bind-mounted /work/.fantastic persists.
+# This is the whole point: the app stops a kernel with one verb, container or not.
+echo "== shutdown_kernel (--rm container stops + auto-removes; workdir persists) =="
+P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-shutdown-$$"
+CONTAINERS="$CONTAINERS $c"
+compose_web "$tmp" "$PYBIN" fs_loader "$P"
+$ENGINE run -d --rm --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
+  -e FANTASTIC_RUNTIME=python -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
+up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+if [ -z "$up" ]; then
+  bad "shutdown_kernel: container never bound :$P ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+else
+  # lock.json is present while up → the post-shutdown persistence/exit is a
+  # real transition, not a vacuous pass.
+  [ -f "$tmp/.fantastic/lock.json" ] && ok "lock.json present while the kernel is up" \
+    || bad "lock.json missing while the kernel is up"
+  ack=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$P/rest/kernel" -d '{"type":"shutdown_kernel"}' 2>/dev/null || true)
+  printf '%s' "$ack" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' \
+    && ok "shutdown_kernel acked {ok:true} over REST" \
+    || bad "shutdown_kernel ack missing (got: $(printf '%s' "$ack" | head -c 80))"
+  # CORE assertion: the kernel exited → PID 1 gone → container STOPPED. Robust
+  # to --rm timing: inspect reporting Running=false OR failing (already
+  # auto-removed) both mean stopped. Decoupled from the async auto-remove below.
+  stopped=""; i=0; while [ $i -lt 60 ]; do
+    st=$($ENGINE inspect -f '{{.State.Running}}' "$c" 2>/dev/null) || { stopped=1; break; }
+    [ "$st" = "false" ] && { stopped=1; break; }
+    sleep 0.5; i=$((i+1))
+  done
+  [ -n "$stopped" ] && ok "shutdown_kernel → kernel exited (container stopped)" \
+    || bad "container still running after shutdown_kernel (state: $($ENGINE inspect -f '{{.State.Running}}' "$c" 2>&1))"
+  # Secondary: --rm auto-removes the stopped container (async; own ceiling).
+  removed=""; i=0; while [ $i -lt 40 ]; do
+    $ENGINE inspect "$c" >/dev/null 2>&1 || { removed=1; break; }
+    sleep 0.5; i=$((i+1))
+  done
+  [ -n "$removed" ] && ok "--rm auto-removed the stopped container" \
+    || bad "container not auto-removed under --rm (still listed)"
+  [ -d "$tmp/.fantastic" ] && ok "bind-mounted /work/.fantastic persists after shutdown" \
+    || bad "workdir .fantastic vanished after shutdown_kernel"
+fi
+rm -rf "$tmp"
+
 # ── embedded JS zip discoverable + pull-revivable (no engine) ───────────────
 echo "== embedded js_kernel.zip =="
 zout=$($ENGINE run --rm --entrypoint sh "$TAG" -c \

@@ -210,6 +210,17 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm() => {},
+        // A root-only `shutdown_kernel` verb fired (over web_rest / web_ws).
+        // The verb already DEFERRED this signal ~100ms (see send.rs) so the
+        // ack was enqueued + flushed over the web surface (WS frame across
+        // out_tx -> send_task -> sink; HTTP body written by hyper after the
+        // handler returned) before we got here. This extra short grace is
+        // belt-and-suspenders before we drain the listeners below.
+        // Backend-agnostic stop: this exit stops the container (PID 1) or
+        // kills the bare process, identically.
+        _ = kernel.shutdown_requested() => {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        },
     }
     eprintln!("fantastic: shutting down...");
     // Issue shutdown on every loaded agent (LIFO so children stop

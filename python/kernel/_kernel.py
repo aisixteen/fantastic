@@ -165,6 +165,15 @@ class Kernel:
     # and the atexit safety net don't double-run bundle teardown.
     _shutdown_complete: bool = field(default=False)
 
+    # The daemon serve loop's stop Event, published here so an in-kernel
+    # verb (the root-only `shutdown_kernel`) can trigger the SAME graceful
+    # exit a SIGTERM does — reachable from any handler via `agent.ctx`.
+    # None outside daemon mode (one-shot / REPL-only / before the daemon
+    # installs it) and must be created INSIDE the running loop (asyncio.
+    # Event binds to a loop), so the daemon assigns it; never default it
+    # to `asyncio.Event()` at dataclass-construction time.
+    shutdown_event: "asyncio.Event | None" = field(default=None)
+
     # ─── tree management (front-door API) ──────────────────────
 
     async def send(self, target_id: str, payload: dict) -> dict | None:
