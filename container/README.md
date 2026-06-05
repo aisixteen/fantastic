@@ -45,7 +45,7 @@ one matching `uname -m` (`x86_64`→`:amd64`, `arm64`/`aarch64`→`:arm64`). The
    > A blank workdir serves nothing until a web host is composed (the entrypoint
    > prints the exact `create_agent` hint when it finds none).
 3. **Read the head** — once a web host exists, with head on (default) its `/`
-   serves the descriptive head page; the kernel is also driveable headless:
+   serves the descriptive head page; the kernel is also drivable headless:
    - headful: open `GET http://127.0.0.1:<port>/` → the all-readmes head page.
    - headless self-description: `curl -s -X POST -H 'Content-Type: application/json'
      http://127.0.0.1:<port>/<rest_id>/kernel -d '{"type":"reflect","readme":true,"bundles":"all"}'`
