@@ -2,11 +2,23 @@
 
 Receives `token`, `done`, `say`, `error`, `status` payloads. Prints to stdout.
 Unknown verbs are silently dropped (cli is a render sink).
+
+Renders the PTY intro too, but as a DUMB SINK — it prints what it is told and
+NEVER inspects the tree. The kernel/agents push to it:
+  - `intro_booting` (kernel → cli, before boot): identity + the pull/push
+    control-plane map (port-independent).
+  - each agent announces its OWN endpoints during its boot (e.g. `web` sends a
+    `say` with its listening URL) — the producer owns the info, not this sink.
+  - `booted` (kernel → cli, after the boot loop): the "all booted" close.
+`longrun` fires `intro_booting` / `booted` only when stdin is a tty. Best-effort:
+no renderer or a race is fine — the full map is in the intro + `reflect
+readme=true`. The kernel stays decoupled (it sends verbs; it never imports this).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 
@@ -88,6 +100,55 @@ async def _status(id, payload, kernel):
     return None
 
 
+# ─── two-phase PTY intro (first contact) ────────────────────────
+
+
+def _identity(ctx) -> str:
+    """`python · env=<…> · v<…>? · root=<…> · pid <…>` — the same deployment
+    context the root reflect carries, rendered for the terminal."""
+    env = os.environ.get("FANTASTIC_ENV", "host")
+    ver = os.environ.get("FANTASTIC_VERSION")
+    root = ctx.root.id if ctx.root is not None else "fs_loader"
+    parts = ["python", f"env={env}"]
+    if ver:
+        parts.append(ver)
+    parts += [f"root={root}", f"pid {os.getpid()}"]
+    return " · ".join(parts)
+
+
+async def _intro_booting(id, payload, kernel):
+    """First PTY push, BEFORE boot. Identity + the pull/push control-plane map — port-independent, so it prints instantly. No args. Returns None."""
+    ctx = kernel.ctx
+    print(f"[fantastic] {_identity(ctx)} — booting…")
+    print(
+        '  one envelope: send(<id>, {"type":"<verb>", …})'
+        "   ·   kernel = root   ·   full map: reflect readme=true"
+    )
+    print(
+        "  PULL  ask → reply        REST POST /<rest>/<id>        ·  this REPL: @<id> <verb> k=v"
+    )
+    print(
+        "  PUSH  async stream/emit  WS /<id>/ws : watch{src} · emit{target,payload} · state_subscribe"
+    )
+    print(
+        "  REACH one call by id, any unit: "
+        "compute(python_runtime) · infer(ai) · memory(yaml_state) · shell(terminal_backend)"
+    )
+    return None
+
+
+async def _booted(id, payload, kernel):
+    """Final PTY push — the kernel's "all booted" signal, sent AFTER the boot
+    loop. cli is a DUMB SINK: it does NOT inspect the tree for ports/surfaces.
+    Each agent announces its OWN endpoints to cli during its boot (e.g. `web`
+    sends a `say` with its listening URL), so this just closes the intro. Live
+    coordinates therefore arrive between `intro_booting` and here, or — if no
+    renderer / a race — they are in the map above + `reflect readme=true`.
+    No args. Returns None."""
+    print("[kernel] up — all booted. attach via the map above, or reflect readme=true")
+    return None
+
+
 # ─── dispatch ───────────────────────────────────────────────────
 
 
@@ -98,6 +159,8 @@ VERBS = {
     "say": _say,
     "error": _error,
     "status": _status,
+    "intro_booting": _intro_booting,
+    "booted": _booted,
 }
 
 

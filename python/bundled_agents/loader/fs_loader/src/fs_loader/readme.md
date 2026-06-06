@@ -11,6 +11,15 @@ target is the tree root (alias `kernel`), so `reflect readme=true` alone
 hands you the whole substrate description (this file) next to the live
 tree. Start there.
 
+## First contact — if you arrived via the terminal
+
+If a `fantastic` daemon was launched on a tty (or you are an LLM in a
+`terminal_backend` PTY here), it greeted you with a TWO-PHASE intro: first
+`[fantastic] … — booting…` (identity + a compact PULL/PUSH control-plane map),
+then `[kernel] up` (the live REST/WS attach coordinates, or a compose hint if no
+web surface exists yet). That banner is the SHORT map; this readme
+(`reflect readme=true`) is the full one it pointed you to.
+
 ## The reflect surface
 
 `reflect` is the one discovery verb. It returns the ADDRESSED agent

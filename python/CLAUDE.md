@@ -148,6 +148,27 @@ REPL `add web port=N`). Next invocation boots it as a daemon.
 The bootstrap wires the stdout renderer (Cli) when stdin is a tty —
 ephemeral, never persisted.
 
+**First contact (tty / PTY).** On a tty — a human, or an LLM dropped into a
+`terminal_backend` PTY — the daemon greets whoever lands there (the tty twin of
+the container's HTTP head page). The renderer (`cli`) is a **DUMB SINK** — it
+prints what it is told and NEVER inspects the tree. The flow:
+  - **`intro_booting`** (kernel → cli, before boot): identity
+    (`runtime · env · version · root · pid`) + the **pull/push control-plane
+    map** — one envelope `send(<id>,{type})`, PULL (REST / REPL), PUSH (WS
+    watch/emit/state_subscribe), REACH compute/infer/memory/shell by id — and a
+    pointer to the full map (`reflect readme=true`). Port-independent.
+  - **boot-event convention:** each agent announces its OWN endpoints during
+    boot. `web`, once it binds, sends cli a `say` with its listening URL (Rust:
+    publishes a `say` state event the cli subscriber renders) — the producer
+    owns the info; the sink never reaches in for it.
+  - **`booted`** (kernel → cli, after the boot loop): the "all booted" close.
+`longrun` fires `intro_booting`/`booted` only on a tty; non-tty (the container
+daemon) keeps the plain `[kernel] up`. **Best-effort:** no renderer or a race is
+fine — everything is in the intro map + `reflect readme=true`. The verbs/text
+live in the `cli` bundle; the kernel stays decoupled (it sends verbs, never
+imports the bundle). Rust mirrors it: the `fantastic-cli` binary prints
+`fantastic_cli_bundle::intro_booting`/`booted`.
+
 REPL example:
 
 ```

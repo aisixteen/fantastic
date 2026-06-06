@@ -38,8 +38,22 @@ async def _default(kernel) -> None:
 
     # Lock-first — before booting (so port binds don't happen on conflict).
     with FantasticLock():
+        # First PTY push (tty only): orient whoever lands in the terminal —
+        # human or an LLM dropped into the PTY — BEFORE boot, while the port is
+        # still unknown. The text lives in the `cli` renderer bundle; the kernel
+        # stays decoupled and just sends it a verb (the cli agent exists only
+        # when stdin is a tty, composed in main._bootstrap).
+        if has_repl:
+            await kernel.send("cli", {"type": "intro_booting"})
         await _boot_all_agents(kernel)
-        print("[kernel] up", flush=True)
+        # Second PTY push: the "all booted" close. Each agent already announced
+        # its OWN endpoints to cli during its boot (e.g. web sent its listening
+        # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
+        # keeps the plain one-line marker so logs / smoke greps are unchanged.
+        if has_repl:
+            await kernel.send("cli", {"type": "booted"})
+        else:
+            print("[kernel] up", flush=True)
 
         # Graceful-shutdown plumbing: SIGTERM / SIGINT / SIGHUP set
         # the stop event, the `wait(FIRST_COMPLETED)` returns, and the

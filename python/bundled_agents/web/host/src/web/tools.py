@@ -158,10 +158,6 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
             _servers.pop(agent_id, None)
 
     handle.task = asyncio.create_task(_safe_serve())
-    print(
-        f"  [web] {agent_id} listening on http://localhost:{port}/",
-        file=sys.stderr,
-    )
 
 
 async def _stop_uvicorn(agent_id: str) -> bool:
@@ -224,6 +220,21 @@ async def _boot(id, payload, kernel):
     # Mount all child surfaces onto the app BEFORE the listener starts accepting.
     await _mount_all_surfaces(handle, kernel, id)
     _start_serving(id, handle)
+    # Announce OURSELVES to the cli renderer (the boot-event convention): the web
+    # host owns its port, so it tells the terminal where to attach — the renderer
+    # never reaches in for it. Best-effort: cli's `say` returns None; if there is
+    # no cli (non-tty), fall back to a stderr log so container logs still record
+    # the bind.
+    line = (
+        f"listening on http://127.0.0.1:{handle.port}/"
+        " · rest/ws are children (reflect kernel for ids)"
+    )
+    reply = await kernel.send("cli", {"type": "say", "source": "web", "text": line})
+    if reply is not None:
+        print(
+            f"  [web] {id} listening on http://localhost:{handle.port}/",
+            file=sys.stderr,
+        )
     return {"running": True, "surfaces": list(handle.routes_by_child.keys())}
 
 

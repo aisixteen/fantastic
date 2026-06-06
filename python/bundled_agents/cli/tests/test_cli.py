@@ -126,3 +126,28 @@ async def test_status_streaming_and_done_are_silent(seeded_kernel, capsys):
         "cli", {"type": "status", "phase": "done", "detail": {"reason": "ok"}}
     )
     assert capsys.readouterr().out == ""
+
+
+# ─── two-phase PTY intro ────────────────────────────────────────
+
+
+async def test_intro_booting_prints_control_plane_map(seeded_kernel, capsys):
+    """First PTY push (pre-boot): identity + the pull/push plane map, port-free."""
+    await seeded_kernel.send("cli", {"type": "intro_booting"})
+    out = capsys.readouterr().out
+    assert "booting" in out
+    assert "send(<id>" in out
+    assert "PULL" in out and "PUSH" in out and "REACH" in out
+    assert "reflect readme=true" in out
+    # identity line carries deployment context + the root id + this pid
+    assert "python" in out and "env=" in out and "root=fs_loader" in out
+
+
+async def test_booted_is_a_dumb_sink_no_tree_inspection(seeded_kernel, capsys):
+    """Final PTY push: the kernel's 'all booted' close. cli is a dumb sink — it
+    prints a fixed line and never inspects the tree for ports/surfaces (those are
+    announced by each agent on its own boot)."""
+    await seeded_kernel.send("cli", {"type": "booted"})
+    out = capsys.readouterr().out
+    assert "all booted" in out
+    assert "reflect readme=true" in out

@@ -180,6 +180,14 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // First PTY push (tty only): orient whoever lands in the terminal — human
+    // or an LLM dropped into the PTY — BEFORE boot, while the port is unknown.
+    // The text lives in the cli bundle; the binary is the composition root, so
+    // it may call it directly (the kernel crate stays decoupled).
+    if has_tty {
+        println!("{}", fantastic_cli_bundle::intro_booting(&kernel));
+    }
+
     // `boot` every loaded agent. The web bundle uses this to spawn its
     // axum listener; other bundles use it for whatever lazy init they
     // need. Failures are logged + skipped — boot must never abort the
@@ -202,11 +210,18 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Wait for SIGINT/SIGTERM, then graceful shutdown.
-    eprintln!(
-        "fantastic: daemon up. {} agent(s) loaded. Ctrl-C to stop.",
-        booted.loaded.len()
-    );
+    // Second PTY push (tty only): the "all booted" close. Each agent already
+    // announced its OWN endpoints during boot (web published its listening URL,
+    // rendered by the cli subscriber) — main does NOT gather them. Non-tty keeps
+    // the plain one-line marker so logs are stable.
+    if has_tty {
+        println!("{}", fantastic_cli_bundle::booted());
+    } else {
+        eprintln!(
+            "fantastic: daemon up. {} agent(s) loaded. Ctrl-C to stop.",
+            booted.loaded.len()
+        );
+    }
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm() => {},

@@ -282,6 +282,18 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             sub_token,
         },
     );
+    // Announce OURSELVES to the cli renderer (the boot-event convention): the web
+    // host owns its port, so it tells the terminal where to attach — the renderer
+    // never reaches in for it. The rust cli renderer is a state subscriber, so we
+    // publish a `say` event (parity of Python's send(cli, say)). Best-effort: no
+    // renderer => nobody renders it.
+    kernel.publish_state(&json!({
+        "type": "say",
+        "source": "web",
+        "text": format!(
+            "listening on http://127.0.0.1:{actual_port}/ · rest/ws are children (reflect kernel for ids)"
+        ),
+    }));
     json!({
         "id": agent_id.as_str(),
         "running": true,
