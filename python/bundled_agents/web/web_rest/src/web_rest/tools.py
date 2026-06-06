@@ -106,10 +106,6 @@ def _make_reflect_root(self_id: str, kernel):
     return _reflect_kernel
 
 
-# Alias kept for tests that import the legacy endpoint factory name.
-_make_endpoint = _make_post_endpoint
-
-
 # ─── verbs ──────────────────────────────────────────────────────
 
 

@@ -298,12 +298,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             let removed = detach(agentId: agentId)
             return .object(["ok": .bool(true), "removed": .bool(removed)])
         case "forward":
-            // Python is canonical: arg name is `target` (no
-            // `target_id` legacy). Accept `target_id` too for
-            // backward compat with older Swift callers.
-            let targetStr =
-                payload["target"].asString
-                ?? payload["target_id"].asString
+            // Python is canonical: the arg name is `target`.
+            let targetStr = payload["target"].asString
             guard let targetStr else {
                 return .object([
                     "error": .string(

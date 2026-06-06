@@ -8,8 +8,9 @@
 > out-of-scope: chat UI flow (now the TS `ai_view` in `ts/`)
 
 Rate-limit handling: on HTTP 429 BEFORE any chunk has been streamed,
-the backend honors `Retry-After` (clamped to 60s), emits a `say`
-event, and retries once. A second 429 surfaces a clean error
+the backend honors `Retry-After` (clamped to 60s), emits a
+`status(thinking, waiting_on='rate_limit')` event, and retries once. A
+second 429 surfaces a clean error
 (`send: rate limited (429); retry in Ns`). Mid-stream 429 is rare
 and propagates without retry to avoid duplicate tokens.
 

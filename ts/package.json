@@ -1,5 +1,6 @@
 {
   "name": "fantastic-ts",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "type": "module",
   "description": "Fantastic frontend kernel — view logic as typed agents, federated to the host over the bridge. Zero runtime deps; vendored (no CDN). The python `web` bundle serves dist/.",

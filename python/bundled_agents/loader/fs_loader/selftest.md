@@ -255,9 +255,8 @@ rm -rf .fantastic
 fantastic reflect >/dev/null    # any invocation bootstraps the kernel
 test -f .fantastic/readme.md && echo "  root readme on disk: OK"
 grep -qF "Fantastic kernel" .fantastic/readme.md && echo "  is the primer: OK"
-# The readme documents the readme flag (canonical `readme=true`; the
-# legacy `return_readme` spelling still works and may also appear).
-grep -qEF -e "readme=true" -e "return_readme" .fantastic/readme.md && echo "  documents the flag: OK"
+# The readme documents the readme flag (canonical `readme=true`).
+grep -qF "readme=true" .fantastic/readme.md && echo "  documents the flag: OK"
 rm -rf .fantastic
 ```
 Expected: all three `OK` lines. Regression signal: missing file →
@@ -278,8 +277,7 @@ the new agent's dir on create (copy-if-missing).
 
 ### Test 13: reflect readme flag — lean by default, readme on request
 
-The canonical flag is `readme=true`; the legacy `return_readme=true`
-spelling still works as an alias.
+The flag is `readme=true`.
 
 ```bash
 rm -rf .fantastic
@@ -293,11 +291,6 @@ fantastic $ID reflect readme=true | python -c "
 import json,sys; d=json.load(sys.stdin)
 ok = isinstance(d.get('readme'), str) and 'file' in d['readme'].lower()
 print('readme=true: PASS' if ok else 'FAIL')"
-# Legacy spelling still honored.
-fantastic $ID reflect return_readme=true | python -c "
-import json,sys; d=json.load(sys.stdin)
-ok = isinstance(d.get('readme'), str) and 'file' in d['readme'].lower()
-print('return_readme alias: PASS' if ok else 'FAIL')"
 # Same on the kernel target → the root readme (bootstrap primer).
 fantastic reflect readme=true | python -c "
 import json,sys; d=json.load(sys.stdin)
@@ -306,7 +299,7 @@ print('kernel-readme: PASS' if ok else 'FAIL')"
 rm -rf .fantastic
 ```
 Expected: `lean-by-default: PASS`, `readme=true: PASS`,
-`return_readme alias: PASS`, `kernel-readme: PASS`. Reflect stays lean
+`kernel-readme: PASS`. Reflect stays lean
 unless the flag is set; `reflect kernel readme=true` returns
 `.fantastic/readme.md`.
 
@@ -314,13 +307,13 @@ unless the flag is set; `reflect kernel readme=true` returns
 
 `--help` / `-h` / `help` print `kernel/help.md` — a file-backed
 markdown cheatsheet that points at `fantastic reflect
-return_readme=true` for the live system bootstrap.
+readme=true` for the live system bootstrap.
 
 ```bash
 fantastic --help | python -c "
 import sys; s = sys.stdin.read()
 ok = ('fantastic — CLI' in s
-      and 'reflect return_readme=true' in s
+      and 'reflect readme=true' in s
       and 'send(target_id, payload)' in s)
 print('help-is-cheatsheet: PASS' if ok else 'FAIL')"
 # -h and help are aliases — same output.
@@ -357,5 +350,5 @@ rm -rf /tmp/core_test
 | 10 | unknown verb / unknown agent rejected cleanly | |
 | 11 | root readme seeded (bootstrap primer on disk) | |
 | 12 | create_agent seeds bundle readme into agent dir | |
-| 13 | reflect readme flag (lean default, readme on request; return_readme alias) | |
+| 13 | reflect readme flag (lean default, readme on request) | |
 | 14 | --help prints the CLI cheatsheet (kernel/help.md) | |

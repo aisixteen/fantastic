@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-local-runner"
 version = "0.1.0"
 description = "Fantastic local runner — `fantastic serve` lifecycle for local projects (subprocess + .fantastic/lock.json)."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["fantastic-runner-core"]
 

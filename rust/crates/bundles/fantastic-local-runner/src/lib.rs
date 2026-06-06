@@ -380,10 +380,9 @@ impl Transport for LocalTransport {
 ///
 /// Ladder:
 /// 1. `record.remote_cmd` (the Python bundle's preferred field)
-/// 2. `record.fantastic_path` (legacy alias)
-/// 3. `FANTASTIC_BIN` env var
-/// 4. `which fantastic`
-/// 5. Error
+/// 2. `FANTASTIC_BIN` env var
+/// 3. `which fantastic`
+/// 4. Error
 pub fn resolve_fantastic_bin(meta: &Map<String, Value>) -> Result<PathBuf, String> {
     if let Some(c) = meta_str(meta, "remote_cmd") {
         if !c.is_empty() {
@@ -396,11 +395,6 @@ pub fn resolve_fantastic_bin(meta: &Map<String, Value>) -> Result<PathBuf, Strin
                 return Ok(p);
             }
             return Ok(PathBuf::from(c)); // fall through; spawn will error if missing
-        }
-    }
-    if let Some(c) = meta_str(meta, "fantastic_path") {
-        if !c.is_empty() {
-            return Ok(PathBuf::from(c));
         }
     }
     if let Ok(p) = std::env::var("FANTASTIC_BIN") {

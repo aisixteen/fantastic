@@ -3,6 +3,12 @@
 *A medium that unifies humans and AIs into a single workspace.*
 Repo codename: `fantastic-canvas` — the open-core kernels + browser frontend.
 
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![CodeQL](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/codeql.yml)
+[![Python lint](https://github.com/Alexadar/fantastic_canvas/actions/workflows/python-lint-typecheck.yml/badge.svg)](https://github.com/Alexadar/fantastic_canvas/actions/workflows/python-lint-typecheck.yml)
+![runtimes: python · rust · swift · ts](https://img.shields.io/badge/runtimes-python%20%C2%B7%20rust%20%C2%B7%20swift%20%C2%B7%20ts-informational)
+![status: alpha](https://img.shields.io/badge/status-alpha-orange)
+
 Recursive `Agent` nodes, one primitive (`send`), compile-time-linked
 bundles. Every agent answers `{"type":"reflect"}` — the universal
 discovery verb. No client library: the protocol IS the API. The on-disk
@@ -205,14 +211,23 @@ Commits and pushes require explicit consent per project convention.
 ## License & brand
 
 The source in this repository — the kernels (`python/`, `swift/`, `rust/`)
-and the browser frontend (`ts/`) — is the **open core**, licensed
-**Apache-2.0** ([`LICENSE`](LICENSE) at the repo root). Apache-2.0 carries a
-patent grant and, deliberately, grants **no trademark rights**.
+and the browser frontend (`ts/`) — is licensed **AGPL-3.0-or-later**
+([`LICENSE`](LICENSE) at the repo root). If you run a modified kernel as a
+network service, AGPL §13 requires you to offer that modified source to its
+users.
 
-**"Aisixteen Fantastic"** and the **AISIXTEEN** word mark (USPTO reg.
-7,238,635) are trademarks. The license covers the code only — it does not
-license these marks, so a fork must ship under a different name. The
-`.fantastic` workdir format is treated as a brand asset of the project.
+This kernel is **not an independent project.** It and the
+[Aisixteen Fantastic Apple client](https://github.com/Alexadar/fantastic_app)
+are by the **same author — Koreniuk Oleksandr (aisixteen, kvazis@gmail.com)**
+— and form one product family under one license (AGPL-3.0-or-later). The
+client links this Swift kernel directly as a dependency.
+
+**Trademark carve-out (AGPL §7):** **"Aisixteen Fantastic"** and the
+**AISIXTEEN** word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.
+The license
+covers the code only — it does **not** license these marks, so a fork must
+ship under a different name. The `.fantastic` workdir format is treated as a
+brand asset of the project.
 
 Any managed cloud / relay / sync layer is a separate offering, separately
 licensed, and is not part of this repository.

@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-ollama-backend"
 version = "0.1.0"
 description = "Fantastic ollama backend — reflect-driven LLM agent with native tool calls."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["ollama", "fantastic-ai-core"]
 

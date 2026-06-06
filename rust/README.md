@@ -355,7 +355,7 @@ are driven by `.github/workflows/release-rust.yml` — see
 
 ## License & brand
 
-Open core, licensed **Apache-2.0** ([`../LICENSE`](../LICENSE)). "Aisixteen
+Licensed **AGPL-3.0-or-later** ([`../LICENSE`](../LICENSE)). "Aisixteen
 Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen;
 the license covers the code only, not the marks — forks must rename. See the
 [root README](../README.md#license--brand).

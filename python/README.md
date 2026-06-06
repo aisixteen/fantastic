@@ -289,7 +289,7 @@ special. Compose the reply with flags:
   `ids` = flat descendant-id index; `none` = just this agent.
 - `bundles=all|ids|none` (default `none`) — the installable-bundle
   catalog (what you can `create_agent` from); `ids` = names only.
-- `readme=true` (legacy `return_readme` honored) — attach the agent's
+- `readme=true` — attach the agent's
   readme.md. On the kernel/root this is the root readme: every
   transport, the wire/binary-protocol details, the `kernel` alias, the
   two-kernel model. Transport docs live there now, NOT in the reflect
@@ -300,4 +300,4 @@ are fetched on demand.
 
 ---
 
-*Part of **Aisixteen Fantastic** — open core, licensed **Apache-2.0** ([`../LICENSE`](../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../README.md#license--brand).*
+*Part of **Aisixteen Fantastic** — licensed **AGPL-3.0-or-later** ([`../LICENSE`](../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../README.md#license--brand).*

@@ -179,11 +179,4 @@ async fn readme_flag_tiers() {
     let r = bare_reflect(&kernel, &root, &json!({"type": "reflect", "readme": true}));
     assert!(r.get("readme").is_some());
     assert_eq!(r["readme"], Value::Null);
-    // legacy return_readme also honored.
-    let legacy = bare_reflect(
-        &kernel,
-        &root,
-        &json!({"type": "reflect", "return_readme": true}),
-    );
-    assert!(legacy.get("readme").is_some());
 }

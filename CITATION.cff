@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: "Aisixteen Fantastic — fantastic-canvas"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - family-names: Koreniuk
+    given-names: Oleksandr
+    alias: aisixteen
+    email: kvazis@gmail.com
+abstract: >-
+  A medium that unifies humans and AIs into a single workspace: recursive Agent
+  nodes with one primitive (send) and a universal discovery verb (reflect),
+  across four runtimes (python, swift, rust host kernels + a ts browser
+  frontend). Capabilities emerge from self-description — given only the readmes,
+  an AI weaves the wiring itself.
+repository-code: "https://github.com/Alexadar/fantastic_canvas"
+url: "https://github.com/Alexadar/fantastic_canvas"
+license: AGPL-3.0-or-later
+keywords:
+  - agents
+  - llm
+  - kernel
+  - protocol
+  - multi-runtime

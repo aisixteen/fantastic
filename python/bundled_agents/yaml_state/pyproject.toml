@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-yaml-state"
 version = "0.1.0"
 description = "Fantastic yaml_state agent — durable YAML key-value memory agent (mem/data)."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["pyyaml>=6"]
 

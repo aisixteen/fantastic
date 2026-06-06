@@ -630,7 +630,7 @@ async fn serve_rest_reflect_root_dynamic(
     let target = AgentId::from("kernel");
     let payload = serde_json::json!({
         "type": "reflect",
-        "return_readme": q.readme.unwrap_or(0) != 0,
+        "readme": q.readme.unwrap_or(0) != 0,
     });
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
         state.kernel.send(&target, payload).await
@@ -655,7 +655,7 @@ async fn serve_rest_reflect_dynamic(
     let target = AgentId::from(target_id.as_str());
     let payload = serde_json::json!({
         "type": "reflect",
-        "return_readme": q.readme.unwrap_or(0) != 0,
+        "readme": q.readme.unwrap_or(0) != 0,
     });
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
         state.kernel.send(&target, payload).await
@@ -667,13 +667,6 @@ async fn serve_rest_reflect_dynamic(
         reply.to_string(),
     )
         .into_response()
-}
-
-/// Static fallback used by tests + by the dynamic handler when reflect
-/// fails. Kept for backwards-compat with the pre-dynamic-mount tests.
-#[allow(dead_code)]
-async fn serve_root_index() -> impl IntoResponse {
-    Html(ROOT_INDEX_HTML)
 }
 
 /// Dynamic root index: walks the substrate tree, probes each agent

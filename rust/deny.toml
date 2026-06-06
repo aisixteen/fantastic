@@ -25,9 +25,11 @@ ignore = [
 ]
 
 [licenses]
-# Common permissive OSS licenses every dep in our tree currently
-# resolves to. Tighten before publishing crates externally.
+# The project's own license (workspace crates are AGPL-3.0-or-later), plus the
+# common permissive OSS licenses every dep in our tree resolves to (all one-way
+# compatible with AGPL). Tighten before publishing crates externally.
 allow = [
+    "AGPL-3.0-or-later",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

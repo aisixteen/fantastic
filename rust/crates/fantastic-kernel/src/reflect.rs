@@ -10,8 +10,7 @@
 //!   flat descendant-id index / omitted.
 //! - `bundles=all|ids|none` (default `none`) — `{name, handler_module}`
 //!   catalog / names / omitted.
-//! - `readme=true` (legacy `return_readme` honored) — attach the agent's
-//!   readme.md (string or null).
+//! - `readme=true` — attach the agent's readme.md (string or null).
 //!
 //! There is NO `primer`: transport/wire docs moved into the root readme
 //! (`reflect readme=true`); `available_bundles` is now the `bundles` flag.
@@ -79,8 +78,8 @@ fn sentence_for(target: &Arc<Agent>) -> &'static str {
 
 /// Append the composable reflect flags to any reflect reply — applied
 /// uniformly to bare-agent and bundle reflects. `tree` defaults to
-/// `all`, `bundles` to `none`, `readme` to false (legacy `return_readme`
-/// also honored). Non-object replies (errors / null) pass through.
+/// `all`, `bundles` to `none`, `readme` to false. Non-object replies
+/// (errors / null) pass through.
 pub fn apply_reflect_flags(
     kernel: &Arc<Kernel>,
     target: &Arc<Agent>,
@@ -148,11 +147,7 @@ pub fn apply_reflect_flags(
     let want_readme = payload
         .get("readme")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || payload
-            .get("return_readme")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        .unwrap_or(false);
     if want_readme {
         let readme = std::fs::read_to_string(target.readme_file()).ok();
         obj.insert(

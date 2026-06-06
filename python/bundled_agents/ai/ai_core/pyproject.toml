@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-ai-core"
 version = "0.1.0"
 description = "Fantastic ai_core — shared reflect-driven LLM agent machinery (queue/lock/menu-cache state, prompt assembly, the agentic _run loop, and the send/reflect/history/interrupt/refresh_menu/status/boot verb bodies) for the ollama / anthropic / nvidia_nim backends. A library, not a bundle (no fantastic.bundles entry point); each backend binds its own Provider + config via ai_core.build()."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = []
 

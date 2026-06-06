@@ -3,7 +3,7 @@
 Every bundle ships a `readme.md` package resource. The loader copies it
 into the agent's dir (`<agent_dir>/readme.md`) when it persists the
 record (copy-if-missing) — `Agent` itself never touches disk. `reflect`
-with `return_readme: true` attaches that file's content; default reflect
+with `readme: true` attaches that file's content; default reflect
 stays lean.
 
 Tests call `persist()` (a synchronous full flush via the loader) to
@@ -60,43 +60,39 @@ async def test_reflect_omits_readme_by_default(seeded_kernel):
     assert "readme" not in r
 
 
-async def test_reflect_return_readme_attaches_content(seeded_kernel):
-    """reflect with `return_readme: true` → reply carries the agent's
+async def test_reflect_readme_attaches_content(seeded_kernel):
+    """reflect with `readme: true` → reply carries the agent's
     readme.md content (seeded by the loader on persist)."""
     rec = await seeded_kernel.send(
         "fs_loader", {"type": "create_agent", "handler_module": "file.tools"}
     )
     persist(seeded_kernel)
-    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "return_readme": True})
+    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "readme": True})
     assert "readme" in r
     assert isinstance(r["readme"], str)
     assert "file" in r["readme"].lower()
 
 
-async def test_reflect_return_readme_null_when_absent(seeded_kernel):
+async def test_reflect_readme_null_when_absent(seeded_kernel):
     """An agent with no readme.md on disk → `readme` is null (not a
     missing key, not a crash)."""
     rec = await seeded_kernel.send(
         "fs_loader", {"type": "create_agent", "handler_module": "file.tools"}
     )
     # No persist → no readme on disk for this agent.
-    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "return_readme": True})
+    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "readme": True})
     assert r["readme"] is None
 
 
 async def test_kernel_reflect_readme_is_root_readme(kernel):
     """`reflect kernel readme=true` → the root's readme
     (`.fantastic/readme.md`), the bootstrap doc. The root is an
-    `fs_loader` agent, so the bootstrap seeds fs_loader's readme there.
-    Both the new `readme` flag and the legacy `return_readme` work and
-    agree."""
+    `fs_loader` agent, so the bootstrap seeds fs_loader's readme there."""
     r = await kernel.send("kernel", {"type": "reflect", "readme": True})
     assert isinstance(r["readme"], str)
     assert "Fantastic kernel" in r["readme"]
     # The readme documents the reflect surface (the bootstrap doc).
     assert "reflect" in r["readme"]
-    legacy = await kernel.send("kernel", {"type": "reflect", "return_readme": True})
-    assert legacy["readme"] == r["readme"]
 
 
 async def test_root_readme_seeded_on_disk(kernel):

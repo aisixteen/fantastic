@@ -1,0 +1,45 @@
+Aisixteen Fantastic — Kernel (python / swift / rust) + frontend (ts)
+Copyright (C) 2026 Koreniuk Oleksandr (aisixteen) <kvazis@gmail.com>
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. See LICENSE for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+If you run a modified version of this program on a server and make it
+available to users over a network, AGPL-3.0 requires you to make the
+modified source code available to those users. See LICENSE §13.
+
+This kernel is NOT an independent project. It and the Aisixteen Fantastic
+Apple client (https://github.com/Alexadar/fantastic_app) are by the same
+author and form one product family under one license (AGPL-3.0-or-later).
+
+---
+
+Trademark (AGPL-3.0 §7 additional term): "Aisixteen Fantastic" and the
+"AISIXTEEN" word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.
+The license covers the code only and does not license these marks — a fork
+must ship under a different name. The `.fantastic` workdir format is a brand
+asset of the project, not licensed by these terms.
+
+---
+
+Bundled / vendored third-party components (their own licenses apply, not
+this project's AGPL terms):
+
+  - THREE.js (https://github.com/mrdoob/three.js) — MIT. Vendored as
+    `three.module.js` under the ts frontend and the swift/rust web assets.
+
+  - @xterm/* — xterm.js, addon-fit, and xterm.css
+    (https://github.com/xtermjs/xterm.js) — MIT. Copyright (c) 2014 The
+    xterm.js authors; xterm.css also (c) 2012-2013 Christopher Jeffrey
+    (term.js, MIT). Vendored under the ts frontend (`src/vendor/`) and the
+    swift/rust web assets.
+
+Per-runtime dependency manifests (python/pyproject.toml, rust/Cargo.toml +
+rust/THIRD_PARTY_LICENSES.md, ts/package.json) enumerate the full set.

@@ -646,16 +646,6 @@ async def _run(
             await _emit_status(
                 kernel, self_id, client_id, "tool_calling", tool=tool_entry_done
             )
-            await _to_caller(
-                kernel,
-                self_id,
-                client_id,
-                {
-                    "type": "say",
-                    "text": f"[tool {target} -> {reply_str[:120]}]",
-                    "source": self_id,
-                },
-            )
             return {
                 "role": "tool",
                 "tool_call_id": c["id"],
@@ -706,11 +696,10 @@ def _make_reflect(cfg: Backend):
             },
             "generating": id in _tasks and not _tasks[id].done(),
             "emits": {
-                "queued": "{type:'queued', source, client_id, send_id} — back-compat: emitted when send arrives but a previous generation holds the lock. The new `status` event with phase='queued' carries the same signal plus structured fields.",
+                "queued": "{type:'queued', source, client_id, send_id} — emitted when send arrives but a previous generation holds the lock. The `status` event with phase='queued' carries the same signal plus structured fields.",
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-                "say": "{type:'say', text:'[tool target -> reply…]', source, client_id} — per tool_call summary. Back-compat; the new `status` event with phase='tool_calling' carries structured target/verb/args/reply_preview.",
                 "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'interrupted'|'timeout'|'error' for done. detail.ahead for queued.",
-                "done": "{type:'done', source, client_id} — back-compat: end of generation, interrupted, or timed out. Always preceded by status(phase='done', detail.reason).",
+                "done": "{type:'done', source, client_id} — end of generation, interrupted, or timed out. Always preceded by status(phase='done', detail.reason).",
             },
             "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`interrupt` skip the lock and stay snappy.",
         }

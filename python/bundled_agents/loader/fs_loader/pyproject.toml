@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-fs-loader"
 version = "0.1.0"
 description = "Fantastic fs_loader — the disk persistence/hydration root agent (the tree root)."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 
 [project.entry-points."fantastic.bundles"]

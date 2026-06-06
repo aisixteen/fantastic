@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-web-ws"
 version = "0.1.0"
 description = "Fantastic web_ws — WebSocket verb-invocation surface. Mounted as a route on the parent web's FastAPI app via the duck-typed `get_routes` verb."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["fantastic-web", "fastapi", "websockets>=12,<17"]
 

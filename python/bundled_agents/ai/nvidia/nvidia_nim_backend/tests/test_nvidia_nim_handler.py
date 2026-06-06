@@ -604,7 +604,8 @@ def test_parse_retry_after_clamps_and_defaults():
 
 async def test_send_retries_once_on_rate_limit(seeded_kernel, file_agent):
     """Provider raises 429 on first chat() call (before any chunk yielded);
-    backend sleeps Retry-After, emits a `say` event, retries, succeeds."""
+    backend sleeps Retry-After, emits a status(thinking, waiting_on=
+    'rate_limit') event, retries, succeeds."""
     nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
 
     class _RateLimitedThenOk:
@@ -626,10 +627,17 @@ async def test_send_retries_once_on_rate_limit(seeded_kernel, file_agent):
             r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
         assert r["final"] == "ok"
         assert fp.calls == 2  # initial + retry
-        # `say` event surfaced the rate-limit wait to the caller (cli).
-        cli_says = [p for t, p in sends if t == "cli" and p.get("type") == "say"]
-        rate_says = [p for p in cli_says if "rate limited" in p.get("text", "")]
-        assert len(rate_says) == 1, f"expected one rate-limit say, got {cli_says}"
+        # status(thinking, waiting_on='rate_limit') surfaced the wait to
+        # the caller (cli — the default client routes via `send`).
+        rate_status = [
+            p
+            for t, p in sends
+            if t == "cli"
+            and p.get("type") == "status"
+            and p.get("phase") == "thinking"
+            and p.get("detail", {}).get("waiting_on") == "rate_limit"
+        ]
+        assert len(rate_status) == 1, f"expected one rate-limit status, got {sends}"
     finally:
         nt._providers.pop(nid, None)
 
@@ -1045,8 +1053,7 @@ async def test_status_event_includes_send_id(seeded_kernel, file_agent):
 
 
 async def test_status_thinking_during_429_wait(seeded_kernel, file_agent):
-    """The 429 retry path emits status(thinking, waiting_on='rate_limit')
-    in addition to the back-compat `say` notice."""
+    """The 429 retry path emits status(thinking, waiting_on='rate_limit')."""
     nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
 
     class _RLThenOk:

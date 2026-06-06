@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-anthropic-backend"
 version = "0.1.0"
 description = "Fantastic anthropic backend — reflect-driven LLM agent (Claude) with native tool calls."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["httpx", "fantastic-ai-core"]
 

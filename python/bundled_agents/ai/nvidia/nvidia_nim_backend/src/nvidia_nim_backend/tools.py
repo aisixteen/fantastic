@@ -47,7 +47,6 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     _providers,
     _queue,
     _tasks,
-    _to_caller,
 )
 
 # Free tier of NIM rate-limits at ~40 RPM/model. On 429 we retry ONCE
@@ -124,8 +123,8 @@ async def _stream_with_rate_limit_retry(
 
     On HTTP 429 BEFORE any chunk is yielded, sleep `Retry-After` (clamped)
     and retry once. Mid-stream 429 (rare — quota usually checked up front)
-    or any non-429 error propagates unchanged. A back-compat `say` event
-    AND a `status(thinking, waiting_on='rate_limit')` event surface the
+    or any non-429 error propagates unchanged. A
+    `status(thinking, waiting_on='rate_limit')` event surfaces the
     wait so the chat UI can pulse "waiting on provider".
     """
     attempt = 0
@@ -145,16 +144,6 @@ async def _stream_with_rate_limit_retry(
                 raise
             attempt += 1
             wait = _parse_retry_after(e.response)
-            await _to_caller(
-                kernel,
-                self_id,
-                client_id,
-                {
-                    "type": "say",
-                    "text": f"[provider rate limited (429); waiting {wait}s]",
-                    "source": self_id,
-                },
-            )
             await _emit_status(
                 kernel,
                 self_id,

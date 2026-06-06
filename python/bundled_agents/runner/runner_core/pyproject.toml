@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-runner-core"
 version = "0.1.0"
 description = "Fantastic runner_core — shared lifecycle (reflect/boot/start/stop/restart/status/get_webapp), WS health probe, and Transport seam for the local/ssh `fantastic` runner bundles. A library, not a bundle (no fantastic.bundles entry point)."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["websockets"]
 

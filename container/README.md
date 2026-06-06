@@ -82,7 +82,7 @@ CI builds each arch on its OWN native runner (amd64 on `ubuntu-latest`, arm64 on
 `ubuntu-24.04-arm`) and pushes its own tag — see `.github/workflows/release.yml`.
 
 > **Per-arch tags, not a merged manifest.** The image is published as **`:amd64`**
-> and **`:arm64`** (+ `:vX.Y.Z-<arch>`) — pick one explicitly. `ts` / `rust` are
+> and **`:arm64`** (+ `:vX.Y.Z-<arch>`) — pick one explicitly. `python` / `rust` are
 > **runtime modes** chosen at launch via `FANTASTIC_RUNTIME`, **not** separate tags
 > (and the head page is on by default in every mode). No `-head` / `-gpu` variants.
 
@@ -166,8 +166,8 @@ one `web` host, so turning to one never disables the other:
   (`POST /rest/<target>`) — call verbs, stream events, `reflect`. No browser
   needed; this is how a program drives the kernel.
 - **Headful** (a human or an LLM with a browser): `GET /` renders, and the
-  embedded frontend is servable (`GET /js_kernel/file/bundle.min.js`, esp. with
-  `FANTASTIC_RUNTIME=ts`) — a visible UI.
+  embedded frontend is servable (`GET /js_kernel/file/bundle.min.js`, the
+  copy-from-zip bundle you serve) — a visible UI.
 
 Because both surfaces are live at once, an LLM pointed at the URL can **read** the
 page *and* `reflect` for the machine self-description (`reflect readme=true
@@ -181,10 +181,9 @@ build/flag; one running container serves both.
 |---|---|
 | `python` (default) | the canonical python kernel daemon |
 | `rust` | the prebuilt rust kernel daemon (same CLI surface, same `.fantastic`) |
-| `ts` | back-compat alias of `python`; the frontend is the copy-from-zip bundle you serve, not an auto-served zip |
 
-`FANTASTIC_RUNTIME=head` / `ts` are **back-compat aliases of `python`** (no separate
-modes). The embedded JS bundle is at `$FANTASTIC_JS_KERNEL_ZIP`; pull its guide
+The frontend is not a runtime — it is the copy-from-zip JS bundle you serve. The
+embedded JS bundle is at `$FANTASTIC_JS_KERNEL_ZIP`; pull its guide
 without unpacking (`unzip -p "$FANTASTIC_JS_KERNEL_ZIP" readme.md`) — then COPY
 `bundle.min.js` out of it into your project and serve it (copy-from-zip; the image
 is not a CDN).

@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-web"
 version = "0.1.0"
 description = "Fantastic web transport — uvicorn HTTP+WS proxy serving agent UIs."
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = ["fastapi", "uvicorn", "websockets>=12,<17"]
 

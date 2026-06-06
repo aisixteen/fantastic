@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in a kernel, the frontend, or the container is broken.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Not for security issues** — those go through
+        [private vulnerability reporting](../../security/advisories/new), see SECURITY.md.
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime(s)
+      description: Which kernel / surface is affected? (Python is the canonical reference.)
+      multiple: true
+      options:
+        - python
+        - rust
+        - swift
+        - ts (browser frontend)
+        - container image
+        - protocol / cross-runtime
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit / image tag
+      placeholder: "e.g. v0.5.4, commit abc1234, or ghcr.io/.../fantastic:v0.5.4-arm64"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps — commands, the `send` payloads, or a small snippet.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / reflect output
+      description: Relevant kernel stderr, or `reflect` output if useful. Redact secrets.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: This is not a security vulnerability (those use private reporting).
+          required: true
+        - label: I searched existing issues.
+          required: true

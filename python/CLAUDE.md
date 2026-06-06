@@ -230,7 +230,7 @@ the next process start.
   `tree=all|ids|none` (default `all` — nested distilled subtree; `ids` =
   flat descendant-id index), `bundles=all|ids|none` (default `none` —
   the installable-bundle catalog), `readme=true` (attach the agent's
-  readme.md; legacy `return_readme` honored). Verb signatures live in
+  readme.md). Verb signatures live in
   docstrings; `reflect` derives them. Discovery is one round-trip;
   transport/wire docs live in the root readme (`reflect readme=true`).
   The **ROOT** reflect additionally carries `runtime` — a stable lowercase

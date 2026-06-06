@@ -123,15 +123,11 @@ async def test_reflect_readme_default_omitted(seeded_kernel):
     assert "readme" not in r
 
 
-async def test_reflect_readme_flag_and_legacy(seeded_kernel):
-    """readme=true attaches the root readme; legacy return_readme also works."""
+async def test_reflect_readme_flag(seeded_kernel):
+    """readme=true attaches the root readme."""
     new = await seeded_kernel.send("kernel", {"type": "reflect", "readme": True})
-    legacy = await seeded_kernel.send(
-        "kernel", {"type": "reflect", "return_readme": True}
-    )
     assert isinstance(new["readme"], str)
     assert "Fantastic kernel" in new["readme"]
-    assert legacy["readme"] == new["readme"]
 
 
 # ─── description field ─────────────────────────────────────────

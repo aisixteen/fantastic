@@ -5,7 +5,7 @@
 # operator's job (a project that carries its own web stack, or an LLM driving the
 # kernel) — see the note printed when no web host is found.
 #
-#   FANTASTIC_RUNTIME = python (default) | rust | ts
+#   FANTASTIC_RUNTIME = python (default) | rust
 #   FANTASTIC_PORT    = suggested port for a web you compose (default 8088); used
 #                       only in the "compose a web" hint, not bound by the entrypoint
 #   FANTASTIC_WORKDIR = /work (bind-mounted; holds .fantastic/lock.json)
@@ -38,15 +38,10 @@ PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic}"
 RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
 
 # Runtime → (binary, root id). python root = fs_loader; rust root = core.
-# `ts` is a back-compat alias of `python` (a python host; the frontend is the
-# copy-from-zip bundle the operator serves, not an auto-served zip). `head` is
-# also a back-compat alias of `python`.
 case "$RUNTIME" in
   python) BIN="$PY";   ROOT="fs_loader" ;;
-  ts)     BIN="$PY";   ROOT="fs_loader" ;;
-  head)   BIN="$PY";   ROOT="fs_loader"; RUNTIME=python ;;
   rust)   BIN="$RUST"; ROOT="core" ;;
-  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust|ts)" >&2
+  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust)" >&2
      exit 2 ;;
 esac
 

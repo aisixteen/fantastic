@@ -93,8 +93,8 @@ extension Kernel {
 
     /// Append the composable reflect flags to any reflect reply —
     /// applied uniformly to bare-agent and bundle reflects. `tree`
-    /// defaults to `all`, `bundles` to `none`, `readme` to false (legacy
-    /// `return_readme` honored). Non-object replies pass through.
+    /// defaults to `all`, `bundles` to `none`, `readme` to false.
+    /// Non-object replies pass through.
     func applyReflectFlags(_ target: Agent, _ payload: JSON, _ reply: inout JSON) {
         guard case .object(var obj) = reply else { return }
         // `description` is a substrate meta field — surface it on every
@@ -135,7 +135,7 @@ extension Kernel {
             obj["bundles"] = .array(availableBundles().map { .string($0.name) })
         default: break  // "none" → omit
         }
-        if payload["readme"].asBool == true || payload["return_readme"].asBool == true {
+        if payload["readme"].asBool == true {
             obj["readme"] = readReadme(target)
         }
         reply = .object(obj)

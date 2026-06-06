@@ -82,7 +82,7 @@ export function applyReflectFlags(
     obj["bundles"] = kernel.availableBundles().map((b) => b.name);
   }
 
-  if (payload["readme"] === true || payload["return_readme"] === true) {
+  if (payload["readme"] === true) {
     const rd = target.meta["readme"];
     obj["readme"] =
       typeof rd === "string"

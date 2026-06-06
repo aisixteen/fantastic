@@ -29,7 +29,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
         """
         web_rest — HTTP verb channel (diagnostic). Child of a web agent.
         POST /<self_id>/<target_id> body=payload → kernel.send → JSON. \
-        Address-bar-friendly GET shortcuts: GET /<self_id>/_reflect[/<target>][?return_readme=1]. \
+        Address-bar-friendly GET shortcuts: GET /<self_id>/_reflect[/<target>][?readme=1]. \
         Multiple instances coexist.
         """
     }
@@ -117,9 +117,9 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
         // GET _reflect[/target] → reflect kernel or a specific agent.
         let reflectTarget = target ?? "kernel"
         var reflectPayload: OrderedDictionary<String, JSON> = ["type": .string("reflect")]
-        let rr = payload["query"]["return_readme"].asString
+        let rr = payload["query"]["readme"].asString
         if rr == "true" || rr == "1" {
-            reflectPayload["return_readme"] = .bool(true)
+            reflectPayload["readme"] = .bool(true)
         }
         let reply = await kernel.send(AgentId(reflectTarget), .object(reflectPayload))
         return jsonResponse(200, reply)

@@ -88,9 +88,9 @@ struct ReflectUniformTests {
         let r = await kernel.send("core", ["type": "reflect", "readme": true])
         #expect(r["readme"].asString == RootReadme.text)
         #expect(r["readme"].asString?.hasPrefix("# This is a Fantastic kernel.") == true)
-        // legacy return_readme honored.
+        // readme honored.
         let legacy = await kernel.send(
-            "core", ["type": "reflect", "return_readme": true])
+            "core", ["type": "reflect", "readme": true])
         #expect(legacy["readme"].asString == RootReadme.text)
     }
 

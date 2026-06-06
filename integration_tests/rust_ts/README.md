@@ -33,4 +33,4 @@ Skips (never fails) when any is absent.
 
 ---
 
-*Part of **Aisixteen Fantastic** — open core, licensed **Apache-2.0** ([`../../LICENSE`](../../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../../README.md#license--brand).*
+*Part of **Aisixteen Fantastic** — licensed **AGPL-3.0-or-later** ([`../../LICENSE`](../../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../../README.md#license--brand).*

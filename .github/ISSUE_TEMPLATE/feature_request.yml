@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a capability, bundle, or protocol change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Capability in this system tends to **emerge from self-description** (an
+        agent + a readme + `send`/`reflect`) rather than bespoke glue — so first
+        consider whether your idea is composable from existing agents. If it
+        needs a new bundle or a protocol change, describe it here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do that you can't today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: New bundle? new verb? a recipe? Sketch the `send` shape if relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Does it touch the protocol surface?
+      description: HTTP/WS/REST shapes, system verbs, the reflect contract, or the on-disk `.fantastic/` format must land in EVERY host runtime (see CONTRIBUTING).
+      options:
+        - "No — a single bundle / runtime, no wire impact"
+        - "Yes — cross-runtime protocol change (python canonical + all hosts)"
+        - "Not sure"
+    validations:
+      required: true

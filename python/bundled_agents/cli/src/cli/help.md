@@ -15,8 +15,8 @@ A Fantastic kernel is a tree of agents. One primitive:
 ## Discover the system
 
     fantastic reflect                       the live agent tree + bundles
-    fantastic reflect return_readme=true     ...plus the bootstrap readme
-    fantastic reflect <id> return_readme=true  any agent + its readme
+    fantastic reflect readme=true     ...plus the bootstrap readme
+    fantastic reflect <id> readme=true  any agent + its readme
 
 `reflect` is read-only and lock-free — it works whether or not a
 daemon owns the dir. Every other one-shot (`<id> <verb>`) acquires the
@@ -33,5 +33,5 @@ There is no `--port` flag. Persist a web agent first, then boot:
     fantastic <web_id> create_agent handler_module=web_rest.tools
     fantastic                          # rehydrates + serves
 
-Start with `fantastic reflect return_readme=true` — it tells you
+Start with `fantastic reflect readme=true` — it tells you
 everything else.

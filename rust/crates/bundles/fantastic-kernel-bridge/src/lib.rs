@@ -225,10 +225,9 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
                 None => return json!({"error": "kernel_bridge: ws transport requires peer_id"}),
             };
             // Canonical field is `local_port` (Python parity);
-            // accept `remote_port`/`port` as fallbacks.
+            // accept `remote_port` as a fallback.
             let port = match meta_u64(agent_id, kernel, "local_port")
                 .or_else(|| meta_u64(agent_id, kernel, "remote_port"))
-                .or_else(|| meta_u64(agent_id, kernel, "port"))
             {
                 Some(p) => p as u16,
                 None => return json!({"error": "kernel_bridge: ws transport requires local_port"}),

@@ -6,8 +6,7 @@ build-backend = "hatchling.build"
 name = "fantastic-kernel"
 version = "0.1.0"
 description = "Fantastic kernel — agents, send, filesystem registry. Plugin-discovered bundles via fantastic.bundles entry points."
-license = "Apache-2.0"
-license-files = ["../LICENSE"]
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
   "fantastic-cli",

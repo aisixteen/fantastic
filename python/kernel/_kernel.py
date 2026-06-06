@@ -179,7 +179,7 @@ class Kernel:
     async def send(self, target_id: str, payload: dict) -> dict | None:
         """Flat global send from outside any handler. Delegates to the
         root Agent's `send` so all of `Agent.send`'s behavior — the
-        `kernel` primer alias, the `return_readme` reflect post-process
+        `kernel` primer alias, the readme reflect post-process
         — applies uniformly whether you call through `Kernel` or an
         `Agent`."""
         if self.root is None:
