@@ -58,7 +58,13 @@ function containerRunArgs(name: string, port: number, tmp: string, serveDist: bo
   if (serveDist) args.push("-v", `${DIST_DIR}:${CONTAINER_DIST}:ro`);
   // Forward LLM keys for the (opt-in, paid) live-LLM tests.
   const env = envFromDotenv();
-  for (const k of ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"]) {
+  // Forward ONLY the selected backend's secret (no anthropic key into an ollama
+  // run) — same no-leak guarantee as daemonEnv(), for the container target.
+  const forward =
+    LLM_BACKEND === "ollama"
+      ? ["OLLAMA_HOST"]
+      : ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "OLLAMA_HOST"];
+  for (const k of forward) {
     if (env[k]) args.push("-e", `${k}=${env[k]}`);
   }
   args.push(IMAGE);
@@ -136,7 +142,7 @@ export interface BootOptions {
    *  `anthropic_backend.tools` for Claude). `model`/`endpoint` are passed only
    *  when set (each bundle defaults its own). The repo `.env` is injected into
    *  the daemon env, so a key like ANTHROPIC_KEY reaches the backend. */
-  llm?: { bundle?: string; model?: string; endpoint?: string };
+  llm?: { bundle?: string; model?: string; endpoint?: string; num_ctx?: number };
   /** Also create a `scheduler` agent (+ a `file` agent `sched_files` for its
    *  schedules) — fire a chosen payload to a target after N seconds. */
   scheduler?: boolean;
@@ -144,6 +150,71 @@ export interface BootOptions {
 
 /** Absolute path to the built frontend (`ts/dist`) — served when `serveDist`. */
 export const DIST_DIR = join(repoRoot, "ts", "dist");
+
+// ─── LLM backend selection — ONE env switch (`LLM_BACKEND`) so every live-LLM
+//     itest runs against either Claude or a local ollama model (parity). The
+//     in-kernel AI agent is created identically via `bootHost({ llm })`; only the
+//     bundle/model differ, so the whole suite is reused verbatim, no fork. ───
+export const LLM_BACKEND = (process.env.LLM_BACKEND ?? "claude").toLowerCase();
+
+/** The active LLM agent config for `bootHost({ llm })`, chosen by `LLM_BACKEND`.
+ *  `claude` (default) → anthropic_backend; `ollama` → ollama_backend at the
+ *  MODEL'S FULL context (gemma4:12b = 262144 / 256K) — proven to fit RAM on the
+ *  32GB box (resident KV is usage-based, ~8GB at low fill), not an invented cap.
+ *  Override the model/ctx via env for a different model. */
+export const ACTIVE_LLM: NonNullable<BootOptions["llm"]> =
+  LLM_BACKEND === "ollama"
+    ? {
+        bundle: "ollama_backend.tools",
+        model: process.env.OLLAMA_MODEL ?? "gemma4:12b",
+        num_ctx: Number(process.env.OLLAMA_NUM_CTX ?? 262144),
+        endpoint: process.env.OLLAMA_ENDPOINT, // unset → ollama_backend default :11434
+      }
+    : {
+        bundle: "anthropic_backend.tools",
+        model: process.env.ANTHROPIC_MODEL ?? "claude-opus-4-8",
+      };
+
+/** Is the active backend reachable? (skip — never hang/fail — when not.) ollama:
+ *  the server answers `/api/tags` AND has the model pulled. Claude: a key in
+ *  `.env` AND api.anthropic.com reachable. */
+export async function llmReachable(): Promise<boolean> {
+  if (LLM_BACKEND === "ollama") {
+    const raw = process.env.OLLAMA_HOST ?? "127.0.0.1:11434";
+    const base = raw.startsWith("http") ? raw : `http://${raw}`;
+    try {
+      const r = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(3000) });
+      if (!r.ok) return false;
+      const j = (await r.json()) as { models?: { name?: string }[] };
+      const want = ACTIVE_LLM.model ?? "";
+      return (j.models ?? []).some(
+        (m) => m.name === want || (m.name ?? "").startsWith(`${want.split(":")[0]}:`),
+      );
+    } catch {
+      return false;
+    }
+  }
+  if (!dotenvKey("ANTHROPIC_KEY") && !dotenvKey("ANTHROPIC_API_KEY")) return false;
+  try {
+    await fetch("https://api.anthropic.com/", { signal: AbortSignal.timeout(3000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The daemon's env: process env + repo `.env`, but with the NON-selected
+ *  backend's secret STRIPPED. An `LLM_BACKEND=ollama` run therefore carries NO
+ *  ANTHROPIC_KEY — Claude cannot run, and any stray `anthropic_backend` agent
+ *  fails loudly instead of silently "leaking" Claude into the ollama comparison. */
+function daemonEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...envFromDotenv() };
+  if (LLM_BACKEND === "ollama") {
+    delete env.ANTHROPIC_KEY;
+    delete env.ANTHROPIC_API_KEY;
+  }
+  return env;
+}
 
 function fantasticAvailable(): boolean {
   if (TARGET === "container") {
@@ -284,6 +355,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     ];
     if (opts.llm.model) args.push(`model=${opts.llm.model}`);
     if (opts.llm.endpoint) args.push(`endpoint=${opts.llm.endpoint}`);
+    if (opts.llm.num_ctx) args.push(`num_ctx=${opts.llm.num_ctx}`);
     const out = runCli(tmp, args);
     ollamaId = extractId(out, bundle.replace(/\.tools$/, ""));
   }
@@ -328,7 +400,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     proc = spawn(FANTASTIC, [], {
       cwd: tmp,
       stdio: "ignore",
-      env: { ...process.env, ...envFromDotenv() },
+      env: daemonEnv(),
     });
     proc.unref();
   }
@@ -413,7 +485,7 @@ export async function restartHost(host: Host): Promise<void> {
     const proc = spawn(FANTASTIC, [], {
       cwd: host.tmp,
       stdio: "ignore",
-      env: { ...process.env, ...envFromDotenv() },
+      env: daemonEnv(),
     });
     proc.unref();
     (host as { proc: ChildProcess }).proc = proc;

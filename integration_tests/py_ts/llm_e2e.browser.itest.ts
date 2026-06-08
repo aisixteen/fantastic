@@ -13,7 +13,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -124,11 +124,13 @@ async function wsCall(origin: string, target: string, payload: Record<string, un
 before(async () => {
   if (!chromeAvailable()) return void (skipReason = "system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return void (skipReason = "ts/dist not built");
+  if (!(await llmReachable()))
+    return void (skipReason = `${LLM_BACKEND} backend unreachable (key/server/model)`);
   try {
     host = await bootHost(8916, {
       webLoader: true,
       serveDist: true,
-      llm: { bundle: "anthropic_backend.tools", model: "claude-opus-4-8" },
+      llm: ACTIVE_LLM,
     });
     // seed the canvas ROOT in the web_loader store (the operator step from the
     // readme web-setup recipe). Panels parent to it; without a `canvas/agent.json`
@@ -167,7 +169,7 @@ after(() => {
   if (host !== null) teardownHost(host);
 });
 
-test("DIAGNOSTIC: can claude-opus-4-8 wire the panel demo from the readme alone?", async (t) => {
+test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?", async (t) => {
   if (host === null || browser === null) return t.skip(skipReason);
   const h = host;
   const lines: string[] = [];
@@ -175,14 +177,14 @@ test("DIAGNOSTIC: can claude-opus-4-8 wire the panel demo from the readme alone?
     lines.push(s);
   };
 
-  log(`# LLM diagnostic — claude-opus-4-8 (anthropic_backend)\n`);
+  log(`# LLM diagnostic — ${ACTIVE_LLM.model ?? "(default)"} (${ACTIVE_LLM.bundle})\n`);
   log(`ollama agent: \`${h.ollamaId}\` · python_runtime: \`${h.pyId}\`\n`);
 
   // ── drive the LLM ──
   const t0 = Date.now();
   let run: LlmRun;
   try {
-    run = await runLLM(h.origin, h.ollamaId ?? "", PROMPT, 200000);
+    run = await runLLM(h.origin, h.ollamaId ?? "", PROMPT, Number(process.env.LLM_RUN_TIMEOUT_MS ?? 200000));
   } catch (e) {
     log(`\n**LLM run errored/timed out:** ${(e as Error).message}`);
     run = { final: null, events: [] };
@@ -240,6 +242,12 @@ test("DIAGNOSTIC: can claude-opus-4-8 wire the panel demo from the readme alone?
     log(`${x.n}. \`${x.target}.${x.verb}\`(${x.args})${x.reply ? ` → ${x.reply}` : ""}`);
   }
   log(`\n**Final text:**\n\n> ${String(run.final?.["final"] ?? run.final?.["response"] ?? "(none)").replace(/\n/g, "\n> ")}`);
+
+  // ── full dialog recovery: the agent's VERBATIM emit stream (every token of the
+  //    model's reasoning + each tool call/result), captured by runLLM. Ground
+  //    truth for WIRING gap (info never surfaced) vs MODEL gap (had it, missed it). ──
+  log(`\n## Full dialog (verbatim event stream — ${run.events.length} events)`);
+  log("```json\n" + JSON.stringify(run.events, null, 1).slice(0, 30000) + "\n```");
 
   // ── snapshot the resulting trees ──
   let webTree: unknown = null;

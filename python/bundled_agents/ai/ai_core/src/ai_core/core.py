@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import secrets
 import sys
 import time
@@ -85,7 +86,9 @@ _current: dict[str, dict] = {}
 
 # ─── shared constants ───────────────────────────────────────────
 
-SEND_TIMEOUT = 180.0  # hard ceiling per-generation; releases the lock
+SEND_TIMEOUT = float(
+    os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "180")
+)  # hard ceiling per-generation; releases the lock (env-overridable — slow local models need more)
 DEFAULT_CLIENT_ID = "cli"  # headless / REPL caller defaults here
 MAX_CALL_DEPTH = 8  # recursion guard: AI→AI→… chains refuse past this depth
 
@@ -251,7 +254,9 @@ SEND_TOOL = {
         "name": "send",
         "description": (
             "Send a message to any agent in the Fantastic substrate. "
-            "Universal verb on every agent: reflect (returns identity + state). "
+            "Universal verb on every agent: reflect (returns identity + state; "
+            "add readme:true for the agent's full guide, and reflect the ROOT "
+            "agent with readme:true for the whole-system guide). "
             "Discover agents by sending list_agents to the fs_loader agent."
         ),
         "parameters": {
@@ -381,7 +386,8 @@ def _render_menu(menu: list[dict]) -> str:
     if not menu:
         return "## Available agents\n(none — only `fs_loader` and `self`)"
     lines = [
-        "## Available agents (reflect on any for full verb signatures + arg shapes)"
+        "## Available agents (reflect any for verb signatures; reflect the root"
+        " agent with readme:true for the full system guide)"
     ]
     for m in menu:
         verbs = m.get("verbs") or []
@@ -392,6 +398,12 @@ def _render_menu(menu: list[dict]) -> str:
 
 _SEND_HOWTO = """## How to use the `send` tool
 You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
+- ORIENT FIRST. For anything beyond the menu's verb names — especially the
+  browser frontend (panels/views), persistence, or how agents are wired — read
+  the full system guide in ONE call BEFORE acting:
+  `send('fs_loader', {type:'reflect', readme:true})`. It explains the transports,
+  how compute/memory/views are addressed, and how the browser frontend and
+  persistence work. Don't guess the wiring — read it first.
 - To do something concrete (read a file, run python, list agents, etc.), pick
   an agent from the menu above whose verbs cover what you need, then build
   `{type:'<verb>', ...args}` and pass it as `payload`.

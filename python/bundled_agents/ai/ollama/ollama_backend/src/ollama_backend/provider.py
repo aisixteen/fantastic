@@ -10,9 +10,18 @@ DEFAULT_MODEL = "gemma4:e2b"
 
 
 class OllamaProvider:
-    def __init__(self, endpoint: str = DEFAULT_ENDPOINT, model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        endpoint: str = DEFAULT_ENDPOINT,
+        model: str = DEFAULT_MODEL,
+        num_ctx: int | None = None,
+    ):
         self._endpoint = endpoint
         self._model = model
+        # Context window. ollama defaults to 4096 when unset, which is too small
+        # for the agentic menu + tool results + history of a multi-step run; the
+        # record's `num_ctx` lifts it (e.g. 32768; gemma4 supports up to 262144).
+        self._num_ctx = num_ctx
         self._client = None
 
     def _get_client(self):
@@ -31,11 +40,15 @@ class OllamaProvider:
             {"tool_call": {"id":..., "name":..., "arguments":{...}}}
         """
         client = self._get_client()
+        kwargs: dict = {}
+        if self._num_ctx:
+            kwargs["options"] = {"num_ctx": self._num_ctx}
         stream = await client.chat(
             model=self._model,
             messages=messages,
             tools=tools,
             stream=True,
+            **kwargs,
         )
         # ollama sometimes returns these fields as `null` (not absent), so
         # `.get(key, default)` is not enough — use `or default` to normalize

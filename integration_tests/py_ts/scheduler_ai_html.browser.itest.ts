@@ -20,7 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, dotenvKey, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR } from "./_host.ts";
 import type { BootOptions, Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -95,20 +95,12 @@ async function scenario(
 const READ_OUT =
   "(() => { const e = document.getElementById('out'); return e && e.textContent !== '—' ? e.textContent : null; })()";
 
-// Live-LLM gate: a key in .env AND the provider actually reachable (no network →
-// skip, never hang/fail). The user's env has both; CI/offline skips cleanly.
-async function anthropicReachable(): Promise<boolean> {
-  if (!dotenvKey("ANTHROPIC_KEY") && !dotenvKey("ANTHROPIC_API_KEY")) return false;
-  try {
-    await fetch("https://api.anthropic.com/", { signal: AbortSignal.timeout(3000) });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const ANTHROPIC: BootOptions["llm"] = { bundle: "anthropic_backend.tools" };
+// Live-LLM gate + backend selector: `llmReachable()` / `ACTIVE_LLM` resolve to
+// Claude (default) or a local ollama model via the `LLM_BACKEND` env switch — so
+// this whole A–J suite is the PARITY harness: identical chains, either backend,
+// no fork. Offline / missing-key / missing-model skips cleanly (never hangs).
 const J = (s: string): string => JSON.stringify(s);
+const W = (ms: number): number => Math.round(ms * Number(process.env.LLM_WAIT_X ?? 1)); // scale LLM waits for slow local models
 
 // ─── A. scheduler → python_runtime → 3rd html panel (deterministic) ──
 
@@ -148,10 +140,10 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(py)}, interval_seconds
 test("B: scheduler → anthropic ai_agent → 3rd html panel (apples or bananas)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8921,
-    { webLoader: true, serveDist: true, scheduler: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const sch = host.schedulerId as string;
@@ -174,7 +166,7 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(ai)}, interval_seconds
       seedCanvas(tmp, [{ id: "panel3", html }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 45000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
       assert.ok(out && /\b(apples|bananas)\b/i.test(out), `panel shows the AI's scheduled answer (got ${JSON.stringify(out)})`);
     },
   );
@@ -185,10 +177,10 @@ fantastic.send(${J(sch)}, { type: "schedule", target: ${J(ai)}, interval_seconds
 test("C: AI tool-call → 3rd html panel (AI drives the UI by id)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8922,
-    { webLoader: true, serveDist: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       // The panel creates a host "bus" agent at runtime, watches it, then asks the
@@ -211,7 +203,7 @@ const out = () => document.getElementById("out");
       seedCanvas(tmp, [{ id: "panel3", html }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 45000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
       assert.ok(out && /\b(apples|bananas)\b/i.test(out), `AI drove the panel via a tool-call (got ${JSON.stringify(out)})`);
     },
   );
@@ -222,10 +214,10 @@ const out = () => document.getElementById("out");
 test("D: AI tool-call → python_runtime (AI spawns a compute job)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8923,
-    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
@@ -244,7 +236,7 @@ fantastic.send(${J(ai)}, { type: "send", client_id: "d",
       seedCanvas(tmp, [{ id: "panel3", html }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 45000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(45000));
       assert.ok(out && /42/.test(out), `the AI-spawned python job's result reached the panel (got ${JSON.stringify(out)})`);
     },
   );
@@ -255,10 +247,10 @@ fantastic.send(${J(ai)}, { type: "send", client_id: "d",
 test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8924,
-    { webLoader: true, serveDist: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       // The panel spins up a SECOND, leaf AI (shares the llm_files history agent),
@@ -285,7 +277,7 @@ const out = () => document.getElementById("out");
       seedCanvas(tmp, [{ id: "panel3", html }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 60000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));
       assert.ok(out && /\b(apples|bananas)\b/i.test(out), `driver A relayed leaf B's answer (got ${JSON.stringify(out)})`);
     },
   );
@@ -296,10 +288,10 @@ const out = () => document.getElementById("out");
 test("F: python job uses its kernel connector to call an AI → result on a panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8925,
-    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
@@ -322,7 +314,7 @@ fantastic.send(${J(py)}, { type: "start", code: ${JSON.stringify(JOB)} });
       seedCanvas(tmp, [{ id: "panel3", html }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 50000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(50000));
       assert.ok(
         out && /ANS=.*\b(apples|bananas)\b/i.test(out),
         `python job reached the AI via its connector (got ${JSON.stringify(out)})`,
@@ -338,7 +330,7 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   await scenario(
     8926,
-    { webLoader: true, serveDist: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const canvasDir = join(tmp, ".fantastic", "web", "agents", "canvas");
@@ -366,7 +358,13 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
       const model = await b.evaluate<string>(
         "(() => { const e = document.querySelector('.chat-view .c-model'); return e ? e.textContent : ''; })()",
       );
-      assert.ok(/claude/i.test(model || ""), `ai_view mounted + shows its backend model (got ${JSON.stringify(model)})`);
+      // model-agnostic: the rendered backend model must match the ACTIVE backend
+      // (e.g. "claude-opus-4-8" or "gemma4:12b") — not a hard-coded "claude".
+      const wantModel = (ACTIVE_LLM.model ?? "").split(":")[0];
+      assert.ok(
+        (model || "").length > 0 && (wantModel === "" || (model || "").includes(wantModel)),
+        `ai_view mounted + shows its backend model (got ${JSON.stringify(model)}, want ~${ACTIVE_LLM.model})`,
+      );
       assert.deepEqual(b.pageErrors, [], "no uncaught page errors");
     },
   );
@@ -377,10 +375,10 @@ test("G: ai_view renders inline fronting an AI backend", async (t) => {
 test("H: AI tool-calls scheduler to compose a schedule → it fires python → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8927,
-    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
@@ -404,7 +402,7 @@ fantastic.watch(${J(py)}, (ev) => {
       seedCanvas(tmp, [{ id: "drive", html: drive }, { id: "out", html: out }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 60000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));
       assert.ok(out && /SCHED-BY-AI/.test(out), `AI-composed schedule fired the python job (got ${JSON.stringify(out)})`);
     },
   );
@@ -415,10 +413,10 @@ fantastic.watch(${J(py)}, (ev) => {
 test("I: scheduler fires a python job that calls an AI via its connector → panel", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8928,
-    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
@@ -439,7 +437,7 @@ fantastic.send(${J(sched)}, { type: "schedule", target: ${J(py)}, interval_secon
       seedCanvas(tmp, [{ id: "out", html: out }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 75000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(75000));
       assert.ok(
         out && /DEEP=.*\b(apples|bananas)\b/i.test(out),
         `scheduled python job reached the AI via its connector (got ${JSON.stringify(out)})`,
@@ -453,10 +451,10 @@ fantastic.send(${J(sched)}, { type: "schedule", target: ${J(py)}, interval_secon
 test("J: scheduler tick drives a panel that calls the AI", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
-  if (!(await anthropicReachable())) return t.skip("ANTHROPIC_KEY absent or provider unreachable");
+  if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8929,
-    { webLoader: true, serveDist: true, scheduler: true, llm: ANTHROPIC },
+    { webLoader: true, serveDist: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const sched = host.schedulerId as string;
@@ -475,7 +473,7 @@ fantastic.send(${J(sched)}, { type: "schedule", target: ${J(sched)}, interval_se
       seedCanvas(tmp, [{ id: "out", html: out }]);
     },
     async (_host, b) => {
-      const out = await b.evalInAnyIframe<string>(READ_OUT, 60000);
+      const out = await b.evalInAnyIframe<string>(READ_OUT, W(60000));
       assert.ok(
         out && /JAI=.*\b(apples|bananas)\b/i.test(out),
         `scheduler tick drove the panel to call the AI (got ${JSON.stringify(out)})`,
