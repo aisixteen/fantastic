@@ -108,6 +108,17 @@ def make_context(
     ctx = SSL.Context(SSL.TLS_SERVER_METHOD if server else SSL.TLS_CLIENT_METHOD)
     ctx.set_min_proto_version(SSL.TLS1_3_VERSION)
     ctx.set_max_proto_version(SSL.TLS1_3_VERSION)
+    # The min/max pin above already forces TLS 1.3, but also disable every
+    # pre-1.3 protocol explicitly via OP_NO_*: static analysis (CodeQL
+    # py/insecure-protocol) only recognizes these options, so this both clears
+    # the alert and makes "TLS 1.3 only" unmistakable / defence-in-depth.
+    ctx.set_options(
+        SSL.OP_NO_SSLv2
+        | SSL.OP_NO_SSLv3
+        | SSL.OP_NO_TLSv1
+        | SSL.OP_NO_TLSv1_1
+        | SSL.OP_NO_TLSv1_2
+    )
     ctx.use_certificate(x509.load_pem_x509_certificate(cert_pem))
     ctx.use_privatekey(load_pem_private_key(key_pem, password=None))
 
