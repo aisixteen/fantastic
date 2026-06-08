@@ -71,7 +71,7 @@ kernel modules.
 | tools | `FantasticTools` | both | LLM tool registry |
 | scheduler | `FantasticScheduler` | both | cron / interval triggers |
 | cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
-| kernel_bridge | `FantasticKernelBridge` | both | in-memory + WS transports (asymmetric; WS targets remote `web_ws`) |
+| kernel_bridge | `FantasticKernelBridge` | both | cross-kernel comms. Transports: in-memory + WS (asymmetric; WS targets remote `web_ws`) + `cloud_bridge` (peer↔peer TLS 1.3 mTLS through the zero-trust relay, pinned by Ed25519 pubkey) |
 | web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |

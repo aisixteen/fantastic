@@ -216,11 +216,13 @@ and the browser frontend (`ts/`) — is licensed **AGPL-3.0-or-later**
 network service, AGPL §13 requires you to offer that modified source to its
 users.
 
-This kernel is **not an independent project.** It and the
+This kernel is **not an independent project.** It, the
 [Aisixteen Fantastic Apple client](https://github.com/Alexadar/fantastic_app)
+and the [zero-trust cloud relay](https://github.com/Alexadar/fantastic_relay)
 are by the **same author — Koreniuk Oleksandr (aisixteen, kvazis@gmail.com)**
 — and form one product family under one license (AGPL-3.0-or-later). The
-client links this Swift kernel directly as a dependency.
+client links this Swift kernel directly as a dependency; the relay is the
+`cloud_bridge` rendezvous that pairs kernels across networks.
 
 **Trademark carve-out (AGPL §7):** **"Aisixteen Fantastic"** and the
 **AISIXTEEN** word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.

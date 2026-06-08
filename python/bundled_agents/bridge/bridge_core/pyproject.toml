@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-bridge-core"
+version = "0.1.0"
+description = "Fantastic bridge_core — the transport-agnostic kernel-bridge engine (read loop, forward/watch verbs, reply correlation, lifecycle) + the build_transport seam shared by the kernel_bridge and cloud_bridge bundles. A library, not a bundle (no fantastic.bundles entry point)."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bridge_core"]

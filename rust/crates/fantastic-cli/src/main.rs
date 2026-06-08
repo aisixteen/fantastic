@@ -100,6 +100,17 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // `__cloud-cert <id_key_b64url>` — print this runtime's deterministic device
+    // cert (PEM) for an Ed25519 id_key. No workdir/bootstrap; used by the relay
+    // e2e harness to cross-pin a rust leg's actual cert.
+    if args.first().map(String::as_str) == Some("__cloud-cert") {
+        let idk = args
+            .get(1)
+            .ok_or("__cloud-cert: id_key (b64url) required")?;
+        print!("{}", fantastic_kernel_bridge::cloud_cert_pem_b64url(idk)?);
+        return Ok(());
+    }
+
     let workdir = std::env::current_dir()?;
 
     // Seed `.fantastic/readme.md` if missing, regardless of which mode

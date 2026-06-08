@@ -9,6 +9,7 @@ description = "Fantastic kernel_bridge — cross-kernel agent comms. Pairs of br
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
+  "fantastic-bridge-core",
   "websockets>=12,<17",
 ]
 

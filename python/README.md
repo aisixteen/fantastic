@@ -270,7 +270,9 @@ uv run pytest -n auto
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core
     ├── ai/nvidia/nvidia_nim_backend          # NVIDIA NIM (OpenAI-compatible) — thin binding over ai_core + NIM-specific key/retry verbs
     ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
-    ├── kernel_bridge/                        # cross-kernel WS bridge (asymmetric)
+    ├── bridge/bridge_core/                   # shared kernel-bridge engine (read loop, verbs, lifecycle, transport seam); a library, not an agent
+    ├── bridge/kernel_bridge/                 # cross-kernel WS bridge (asymmetric) — ws / ssh+ws transports
+    ├── bridge/cloud_bridge/                  # cross-kernel bridge via a zero-trust relay — dial-out + Noise E2E (CONTRACT v1)
     ├── runner/runner_core/                   # shared runner lifecycle + Transport seam; local_runner and ssh_runner bind to it
     └── runner/{local_runner, ssh_runner}     # spawn local / remote `fantastic`
 ```

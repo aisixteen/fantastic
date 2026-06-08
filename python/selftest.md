@@ -133,7 +133,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/terminal/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
-| `bundled_agents/kernel_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
+| `bundled_agents/bridge/kernel_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
 | `bundled_agents/ssh_runner/selftest.md` | kernel, ssh | remote `fantastic` lifecycle; SSH tunnel for canvas iframing |
 | `bundled_agents/python_runtime/selftest.md` | kernel | async Python JOB spawner — start/status/stop/interrupt/clear; progress/job_done events |
 

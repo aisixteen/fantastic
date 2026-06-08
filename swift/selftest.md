@@ -100,7 +100,7 @@ Surviving bundles that run cross-runtime against the Swift binary
 | tools | covered by `reflect` across the per-bundle specs |
 | scheduler | [`scheduler/selftest.md`](../python/bundled_agents/scheduler/selftest.md) |
 | cli | [`cli/selftest.md`](../python/bundled_agents/cli/selftest.md) |
-| kernel_bridge | [`kernel_bridge/selftest.md`](../python/bundled_agents/kernel_bridge/selftest.md) |
+| kernel_bridge | [`kernel_bridge/selftest.md`](../python/bundled_agents/bridge/kernel_bridge/selftest.md) |
 | web | [`web/host/selftest.md`](../python/bundled_agents/web/host/selftest.md) |
 | web_ws | [`web/web_ws/selftest.md`](../python/bundled_agents/web/web_ws/selftest.md) |
 | web_rest | [`web/web_rest/selftest.md`](../python/bundled_agents/web/web_rest/selftest.md) |

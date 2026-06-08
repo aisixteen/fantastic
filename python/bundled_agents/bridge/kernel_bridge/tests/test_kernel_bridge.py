@@ -15,10 +15,8 @@ import asyncio
 import pytest
 
 from _testkit import boot_root
+from bridge_core._transport import MemoryTransport
 from kernel_bridge import tools as kb
-from kernel_bridge._transport import (
-    MemoryTransport,
-)
 
 
 # ─── fixtures ────────────────────────────────────────────────────

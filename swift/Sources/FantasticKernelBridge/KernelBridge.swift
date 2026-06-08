@@ -34,12 +34,15 @@ public let HANDLER_MODULE = "kernel_bridge.tools"
 enum BridgeTransport {
     case memory(InMemoryBridge)
     case ws(WebSocketTransport)
+    case cloud(CloudBridgeTransport)
 
     func forward(target: AgentId, payload: JSON) async -> JSON {
         switch self {
         case .memory(let bridge):
             return await bridge.forward(target: target, payload: payload)
         case .ws(let transport):
+            return await transport.forward(target: target, payload: payload)
+        case .cloud(let transport):
             return await transport.forward(target: target, payload: payload)
         }
     }
@@ -50,6 +53,8 @@ enum BridgeTransport {
             return await bridge.watchRemote(target: target)
         case .ws(let transport):
             return await transport.watchRemote(target: target)
+        case .cloud(let transport):
+            return await transport.watchRemote(target: target)
         }
     }
 
@@ -59,6 +64,17 @@ enum BridgeTransport {
             return await bridge.unwatchRemote(target: target)
         case .ws(let transport):
             return await transport.unwatchRemote(target: target)
+        case .cloud(let transport):
+            return await transport.unwatchRemote(target: target)
+        }
+    }
+
+    /// Release transport resources (receive loop, heartbeat, relay socket).
+    /// memory/ws legs are torn down by ARC; the cloud leg holds long-lived
+    /// Tasks + a WS, so it needs an explicit close.
+    func close() async {
+        if case .cloud(let transport) = self {
+            await transport.close()
         }
     }
 }
@@ -190,12 +206,17 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     }
 
     /// Drop the transport for `agentId`. Returns whether a transport
-    /// was attached.
+    /// was attached. A cloud leg is closed asynchronously (it owns a
+    /// receive loop, heartbeat, and relay socket that must be released).
     @discardableResult
     public func detach(agentId: AgentId) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-        return bridges.removeValue(forKey: agentId) != nil
+        let removed = bridges.removeValue(forKey: agentId)
+        lock.unlock()
+        if let removed {
+            Task { await removed.close() }
+        }
+        return removed != nil
     }
 
     /// Sync lookup helper — keeps the NSLock outside any async scope.
@@ -203,6 +224,116 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return bridges[agentId]
+    }
+
+    /// The TokenSource seam (cloud_bridge does NOT authenticate or mint): a literal
+    /// `token`, else POST the relay's `/issue` control-plane endpoint with
+    /// `provider`/`password`. Provider-agnostic — `provider` selects the auth method
+    /// (password today; Apple/Google later = the same call, a different provider).
+    private func resolveCloudToken(agent: Agent) async -> (token: String?, error: String?) {
+        if let t = agent.metaValue(forKey: "token")?.asString {
+            return (t, nil)
+        }
+        guard let urlStr = agent.metaValue(forKey: "issue_url")?.asString,
+            let url = URL(string: urlStr)
+        else {
+            return (nil, "cloud_bridge: token or issue_url required")
+        }
+        let body: [String: String] = [
+            "provider": agent.metaValue(forKey: "provider")?.asString ?? "password",
+            "credential": agent.metaValue(forKey: "password")?.asString ?? "",
+            "peer_id": agent.metaValue(forKey: "peer_id")?.asString ?? "",
+            "partner_peer_id": agent.metaValue(forKey: "partner_peer_id")?.asString ?? "",
+            "rendezvous": agent.metaValue(forKey: "rendezvous")?.asString ?? "",
+        ]
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 10
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return (nil, "cloud_bridge: issue endpoint denied (HTTP \(http.statusCode))")
+            }
+            let token = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return token.isEmpty
+                ? (nil, "cloud_bridge: issue endpoint returned no token")
+                : (token, nil)
+        } catch {
+            return (nil, "cloud_bridge: issue endpoint request: \(error)")
+        }
+    }
+
+    /// Boot a `cloud_bridge` leg: dial the relay, run peer↔peer mTLS, attach.
+    /// Mirrors the Rust `"cloud_bridge"` boot arm + Python's `build_transport`.
+    /// Required meta: `relay_url`, `id_key` (b64url Ed25519 seed),
+    /// `approved_peer_certs` (PEM list), `token`. TLS role: `tls_role`
+    /// ("server"/"client") | `initiator` (bool) | derived from
+    /// `peer_id`/`partner_peer_id` (server = peer_id >= partner_peer_id, so the
+    /// lexicographically-smaller peer initiates).
+    private func bootCloudBridge(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
+        guard let relayURLStr = agent.metaValue(forKey: "relay_url")?.asString,
+            let relayURL = URL(string: relayURLStr)
+        else {
+            return .object(["error": .string("cloud_bridge: relay_url required")])
+        }
+        guard let idKeyB64 = agent.metaValue(forKey: "id_key")?.asString,
+            let idKey = CloudCert.b64urlDecode(idKeyB64)
+        else {
+            return .object(["error": .string("cloud_bridge: id_key (b64url) required")])
+        }
+        let approved = (agent.metaValue(forKey: "approved_peer_certs")?.asArray ?? [])
+            .compactMap { $0.asString }
+        guard !approved.isEmpty else {
+            return .object(["error": .string("cloud_bridge: approved_peer_certs required")])
+        }
+        let (resolvedToken, tokenError) = await resolveCloudToken(agent: agent)
+        guard let token = resolvedToken else {
+            return .object(["error": .string(tokenError ?? "cloud_bridge: token unavailable")])
+        }
+        let server: Bool
+        switch agent.metaValue(forKey: "tls_role")?.asString {
+        case "server": server = true
+        case "client": server = false
+        default:
+            if let initiator = agent.metaValue(forKey: "initiator")?.asBool {
+                server = !initiator
+            } else {
+                let peer = agent.metaValue(forKey: "peer_id")?.asString ?? ""
+                let partner = agent.metaValue(forKey: "partner_peer_id")?.asString ?? ""
+                guard !partner.isEmpty else {
+                    return .object([
+                        "error": .string(
+                            "cloud_bridge: need tls_role, initiator, or partner_peer_id")
+                    ])
+                }
+                server = peer >= partner
+            }
+        }
+        let certDER: [UInt8]
+        let keyPKCS8: [UInt8]
+        do {
+            (certDER, keyPKCS8) = try CloudCert.selfSigned(idKey: idKey)
+        } catch {
+            return .object(["error": .string("cloud_bridge: cert: \(error)")])
+        }
+        let wsChannel = WSByteChannel(relayURL: relayURL, token: token)
+        do {
+            let transport = try await CloudBridgeTransport.connect(
+                channel: wsChannel, server: server,
+                certDER: certDER, keyPKCS8: keyPKCS8, approvedPeerPEMs: approved,
+                localAgentId: agentId, localKernel: kernel)
+            attachTransport(agentId: agentId, transport: .cloud(transport))
+            return .object([
+                "booted": .bool(true),
+                "transport": .string("cloud_bridge"),
+                "role": .string(server ? "server" : "client"),
+            ])
+        } catch {
+            return .object(["error": .string("cloud_bridge: connect failed: \(error)")])
+        }
     }
 
     public var readme: String? {
@@ -213,6 +344,14 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         Verbs: forward (await reply), watch_remote/unwatch_remote (stream \
         remote emits onto this bridge's inbox). Weak binding — remote is \
         addressed by URL + path only, no shared types.
+        Transports: ws (default) · cloud_bridge. cloud_bridge reaches a peer \
+        through a zero-trust relay: both peers dial OUT (WSS), the relay pairs \
+        + forwards opaque frames, and the peers run peer↔peer TLS 1.3 mutual \
+        auth (self-signed Ed25519 device certs, pinned by PUBLIC KEY) — so the \
+        relay sees only ciphertext. Meta: transport=cloud_bridge, relay_url, \
+        id_key (b64url Ed25519), approved_peer_certs (PEM list), a token source \
+        (token | issue_url+password+provider — POST the relay's /issue), \
+        tls_role|initiator|partner_peer_id.
         """
     }
 
@@ -231,6 +370,10 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 "sentence": .string(
                     "Cross-kernel transport (WS-only, asymmetric; in-memory test backbone)."
                 ),
+                // `connected` is the canonical field (python/rust); the transport
+                // attaches only after a successful boot/handshake, so it tracks
+                // attachment. `attached` kept as a swift-side alias.
+                "connected": .bool(attached),
                 "attached": .bool(attached),
                 "verbs": [
                     "forward":
@@ -286,6 +429,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                     "error": .string(
                         "kernel_bridge: memory transport requires explicit attachInMemory")
                 ])
+            case "cloud_bridge":
+                return await bootCloudBridge(agentId: agentId, agent: agent, kernel: kernel)
             default:
                 return .object([
                     "error": .string("kernel_bridge: unknown transport \(kind)")

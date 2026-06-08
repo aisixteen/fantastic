@@ -64,6 +64,20 @@ use transport::{BridgeTransport, TransportError};
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "kernel_bridge.tools";
 
+/// Derive this runtime's deterministic self-signed device cert (PEM) for an
+/// Ed25519 identity key, given as b64url-nopad. Exposed for the relay e2e
+/// harness to cross-pin a rust leg's ACTUAL cert (each runtime's DER differs, so
+/// a python/swift validator that pins by exact cert needs the rust cert verbatim).
+pub fn cloud_cert_pem_b64url(id_key_b64url: &str) -> Result<String, String> {
+    use base64::Engine as _;
+    let id_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(id_key_b64url.trim_end_matches('='))
+        .map_err(|e| format!("bad id_key b64url: {e}"))?;
+    let (der, _key) =
+        transport::cloud::self_signed_cert(&id_key).map_err(|e| format!("cert: {e:?}"))?;
+    Ok(transport::cloud::der_to_pem(&der))
+}
+
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
@@ -162,6 +176,65 @@ fn meta_u64(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<u64> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
     meta.get(key).and_then(Value::as_u64)
+}
+
+fn meta_bool(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<bool> {
+    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
+    let meta = agent.meta.read().expect("meta poisoned");
+    meta.get(key).and_then(Value::as_bool)
+}
+
+fn meta_strings(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Vec<String>> {
+    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
+    let meta = agent.meta.read().expect("meta poisoned");
+    meta.get(key).and_then(Value::as_array).map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    })
+}
+
+/// The TokenSource seam (cloud_bridge does NOT authenticate or mint): a literal
+/// `token`, else POST the relay's `/issue` control-plane endpoint with
+/// `provider`/`password`. Provider-agnostic — `provider` selects the auth method
+/// (password today; Apple/Google later = the same call, a different provider).
+async fn resolve_token(agent_id: &AgentId, kernel: &Kernel) -> Result<String, String> {
+    if let Some(t) = meta_string(agent_id, kernel, "token") {
+        return Ok(t);
+    }
+    let Some(url) = meta_string(agent_id, kernel, "issue_url") else {
+        return Err("cloud_bridge: token or issue_url required".into());
+    };
+    let body = json!({
+        "provider": meta_string(agent_id, kernel, "provider").unwrap_or_else(|| "password".into()),
+        "credential": meta_string(agent_id, kernel, "password").unwrap_or_default(),
+        "peer_id": meta_string(agent_id, kernel, "peer_id").unwrap_or_default(),
+        "partner_peer_id": meta_string(agent_id, kernel, "partner_peer_id").unwrap_or_default(),
+        "rendezvous": meta_string(agent_id, kernel, "rendezvous").unwrap_or_default(),
+    });
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("cloud_bridge: issue endpoint request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "cloud_bridge: issue endpoint denied (HTTP {})",
+            resp.status().as_u16()
+        ));
+    }
+    let token = resp
+        .text()
+        .await
+        .map_err(|e| format!("cloud_bridge: issue endpoint body: {e}"))?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err("cloud_bridge: issue endpoint returned no token".into());
+    }
+    Ok(token)
 }
 
 // ── verb implementations ────────────────────────────────────────────
@@ -274,6 +347,62 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             return json!({
                 "error": "kernel_bridge: ssh+ws transport requires the `full` feature"
             })
+        }
+        "cloud_bridge" => {
+            use base64::Engine as _;
+            use transport::cloud::{self_signed_cert, CloudTransport, WsByteChannel};
+            let relay_url = match meta_string(agent_id, kernel, "relay_url") {
+                Some(u) => u,
+                None => return json!({"error": "cloud_bridge: relay_url required"}),
+            };
+            let id_key_b64 = match meta_string(agent_id, kernel, "id_key") {
+                Some(k) => k,
+                None => return json!({"error": "cloud_bridge: id_key required"}),
+            };
+            let id_key = match base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(id_key_b64.trim_end_matches('='))
+            {
+                Ok(k) => k,
+                Err(e) => return json!({"error": format!("cloud_bridge: bad id_key: {e}")}),
+            };
+            let approved = match meta_strings(agent_id, kernel, "approved_peer_certs") {
+                Some(a) if !a.is_empty() => a,
+                _ => return json!({"error": "cloud_bridge: approved_peer_certs required"}),
+            };
+            // TokenSource: literal `token`, else POST the relay's `/issue` endpoint.
+            let token = match resolve_token(agent_id, kernel).await {
+                Ok(t) => t,
+                Err(e) => return json!({ "error": e }),
+            };
+            // TLS role: tls_role | initiator | derived (initiator = peer_id < partner ⇒ client).
+            let server = match meta_string(agent_id, kernel, "tls_role").as_deref() {
+                Some("server") => true,
+                Some("client") => false,
+                _ => match meta_bool(agent_id, kernel, "initiator") {
+                    Some(i) => !i,
+                    None => {
+                        let peer = meta_string(agent_id, kernel, "peer_id").unwrap_or_default();
+                        let partner =
+                            meta_string(agent_id, kernel, "partner_peer_id").unwrap_or_default();
+                        if partner.is_empty() {
+                            return json!({"error": "cloud_bridge: need tls_role, initiator, or partner_peer_id"});
+                        }
+                        peer >= partner
+                    }
+                },
+            };
+            let (cert, key) = match self_signed_cert(&id_key) {
+                Ok(c) => c,
+                Err(e) => return json!({"error": format!("cloud_bridge: cert: {e}")}),
+            };
+            let channel = match WsByteChannel::connect(&relay_url, &token).await {
+                Ok(c) => c,
+                Err(e) => return json!({"error": format!("cloud_bridge: relay dial: {e}")}),
+            };
+            match CloudTransport::connect(channel, server, cert, key, &approved).await {
+                Ok(t) => t,
+                Err(e) => return json!({"error": format!("cloud_bridge: handshake: {e}")}),
+            }
         }
         other => return json!({"error": format!("kernel_bridge: unknown transport {other:?}")}),
     };

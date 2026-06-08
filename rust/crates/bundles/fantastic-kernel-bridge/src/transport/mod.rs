@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
 
+pub mod cloud;
 pub mod memory;
 #[cfg(feature = "full")]
 pub mod ssh;

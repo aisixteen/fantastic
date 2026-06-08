@@ -397,3 +397,72 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
         .await;
     assert_eq!(ref_r["connected"], false, "reflect: {ref_r}");
 }
+
+// ── cloud_bridge: in-process TLS 1.3 mTLS loopback (no relay, no net) ──
+
+#[tokio::test]
+async fn cloud_bridge_tls_loopback_round_trip() {
+    use crate::transport::cloud::{
+        der_to_pem, self_signed_cert, CloudTransport, MemoryByteChannel,
+    };
+    use crate::transport::BridgeTransport;
+
+    let (cert_a, key_a) = self_signed_cert(&[1u8; 32]).unwrap();
+    let (cert_b, key_b) = self_signed_cert(&[2u8; 32]).unwrap();
+    let approved_a = [der_to_pem(&cert_b)]; // A pins B
+    let approved_b = [der_to_pem(&cert_a)]; // B pins A
+    let (ch_a, ch_b) = MemoryByteChannel::pair();
+
+    // A = TLS client, B = TLS server; each PINS the other's cert. Both connects
+    // drive the handshake, so they must run concurrently to exchange messages.
+    let (ra, rb) = tokio::join!(
+        CloudTransport::connect(ch_a, false, cert_a, key_a, &approved_a),
+        CloudTransport::connect(ch_b, true, cert_b, key_b, &approved_b),
+    );
+    let ta = ra.expect("client handshake/pin");
+    let tb = rb.expect("server handshake/pin");
+    // Each learned the other's real Ed25519 identity (32-byte pubkey), distinct.
+    assert_eq!(ta.peer_pubkey.len(), 32);
+    assert_eq!(tb.peer_pubkey.len(), 32);
+    assert_ne!(ta.peer_pubkey, tb.peer_pubkey);
+
+    // call A→B round-trips as TLS app-data.
+    ta.send_frame(json!({"type": "call", "id": "1", "target": "x"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        tb.recv_frame().await.unwrap(),
+        json!({"type": "call", "id": "1", "target": "x"})
+    );
+    // keepalive is dropped; the real reply (and a >64KB frame) surface intact.
+    let blob = "x".repeat(200_000);
+    tb.send_frame(json!({"type": "keepalive"})).await.unwrap();
+    tb.send_frame(json!({"type": "reply", "id": "1", "data": {"blob": blob}}))
+        .await
+        .unwrap();
+    let got = ta.recv_frame().await.unwrap();
+    assert_eq!(got["data"]["blob"], json!(blob));
+
+    ta.close().await;
+    tb.close().await;
+}
+
+#[tokio::test]
+async fn cloud_bridge_pins_peer_cert_rejects_unapproved() {
+    use crate::transport::cloud::{
+        der_to_pem, self_signed_cert, CloudTransport, MemoryByteChannel,
+    };
+
+    let (cert_a, key_a) = self_signed_cert(&[1u8; 32]).unwrap();
+    let (cert_b, key_b) = self_signed_cert(&[2u8; 32]).unwrap();
+    let (cert_c, _key_c) = self_signed_cert(&[9u8; 32]).unwrap();
+    let approved_a = [der_to_pem(&cert_c)]; // A trusts C, NOT B → B is unapproved
+    let approved_b = [der_to_pem(&cert_a)];
+    let (ch_a, ch_b) = MemoryByteChannel::pair();
+
+    let (ra, _rb) = tokio::join!(
+        CloudTransport::connect(ch_a, false, cert_a, key_a, &approved_a),
+        CloudTransport::connect(ch_b, true, cert_b, key_b, &approved_b),
+    );
+    assert!(ra.is_err(), "client must reject the unapproved server cert");
+}

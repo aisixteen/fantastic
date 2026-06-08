@@ -24,7 +24,7 @@ inbox so local watchers see remote streams through
 ## Test 1 — MemoryTransport pair round-trip + streaming (in-process)
 
 The headline correctness suite. Covered by the unit tests at
-`bundled_agents/kernel_bridge/tests/test_kernel_bridge.py`:
+`bundled_agents/bridge/kernel_bridge/tests/test_kernel_bridge.py`:
 
   - `test_memory_transport_pair_round_trip` — two `Kernel()` instances,
     two paired `MemoryTransport`s, a
@@ -37,7 +37,7 @@ The headline correctness suite. Covered by the unit tests at
   - `test_unwatch_remote_sends_unwatch_frame` — symmetric teardown.
 
 ```bash
-uv run pytest bundled_agents/kernel_bridge/tests/ -v
+uv run pytest bundled_agents/bridge/kernel_bridge/tests/ -v
 ```
 Expected: all 14 tests pass.
 

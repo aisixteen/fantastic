@@ -1,35 +1,27 @@
-"""kernel_bridge transports — abstract `send(frame) / recv()` shim.
+"""bridge_core transports — the transport-agnostic abstraction shared by every
+bridge bundle (`kernel_bridge`, `cloud_bridge`, …).
 
-Two implementations:
-  - WSTransport: real `websockets` client connection (used for `ws`
-    and `ssh+ws` bridges; for ssh+ws the SSH tunnel is set up
-    separately by the bridge state machine before this opens).
-  - MemoryTransport: in-process asyncio.Queue pair, two halves
-    cross-wired via `MemoryTransport.pair()`. Lets unit tests cover
-    the whole forward round-trip without touching network or
-    subprocesses.
+A transport is the thin `send(frame) / recv()` shim the dispatch engine
+(`core.py`) talks to. Concrete transports live in the bundles:
+  - `kernel_bridge._ws.WSTransport` — a `websockets` client to a remote `web_ws`.
+  - `cloud_bridge._transport.CloudBridgeTransport` — dial-out relay + Noise E2E.
+This module ships only the contract + the in-process `MemoryTransport` that the
+whole test suite runs on (no network, no subprocess).
 
-Both expose:
+Every transport exposes:
     async def send(frame: dict) -> None
     async def recv() -> dict           # raises ConnectionClosed when peer closed
     async def close() -> None
     @property
     closed: bool
 
-Wire shape matches the existing web_ws/_proxy.py protocol — raw
-`{type:'call', target, payload, id}` for requests,
-`{type:'reply', id, data}` for replies, `{type:'watch', src}` for
-stream subscriptions, `{type:'event', payload}` for stream
-deliveries. A WSTransport against a real fantastic web's `/<id>/ws`
-endpoint just works — no `forward` envelope wrapping, the bridge
-talks the same wire as a browser.
+Wire shape is the kernel bridge protocol: `{type:'call', target, payload, id}` /
+`{type:'reply', id, data}` / `{type:'watch', src}` / `{type:'event', payload}`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-from typing import Any
 
 
 class ConnectionClosed(Exception):
@@ -111,52 +103,3 @@ class MemoryTransport(_BaseTransport):
 
     async def close(self) -> None:
         self._own_close.set()
-
-
-class WSTransport(_BaseTransport):
-    """websockets client connection wrapper. Frames serialize as
-    JSON text (matches web_ws/_proxy.py default mode — binary path
-    is reserved for byte-heavy payloads via the kernel's
-    binary_protocol; bridges don't currently mint binary)."""
-
-    def __init__(self, ws: Any) -> None:
-        self._ws = ws
-
-    @classmethod
-    async def connect(cls, url: str) -> "WSTransport":
-        # Local import so MemoryTransport-only test environments don't
-        # require websockets installed (it IS in the bundle deps, but
-        # this keeps the import surface small for the in-memory path).
-        import websockets
-
-        ws = await websockets.connect(url, max_size=2**24)
-        return cls(ws)
-
-    @property
-    def closed(self) -> bool:
-        # websockets >= 12 exposes State, but `.closed` is the stable
-        # cross-version flag.
-        return getattr(self._ws, "closed", False)
-
-    async def send(self, frame: dict) -> None:
-        try:
-            await self._ws.send(json.dumps(frame, default=str))
-        except Exception as e:
-            raise ConnectionClosed(str(e)) from e
-
-    async def recv(self) -> dict:
-        import websockets
-
-        try:
-            raw = await self._ws.recv()
-        except websockets.ConnectionClosed as e:
-            raise ConnectionClosed(str(e)) from e
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        return json.loads(raw)
-
-    async def close(self) -> None:
-        try:
-            await self._ws.close()
-        except Exception:
-            pass

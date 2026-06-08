@@ -19,6 +19,26 @@
             "target": "fantastic",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release fantastic (swift)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "name": "Debug CloudBridgeDerisk (swift)",
+            "target": "CloudBridgeDerisk",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug CloudBridgeDerisk (swift)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:fantastic_canvas}/swift",
+            "name": "Release CloudBridgeDerisk (swift)",
+            "target": "CloudBridgeDerisk",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release CloudBridgeDerisk (swift)"
         }
     ]
 }

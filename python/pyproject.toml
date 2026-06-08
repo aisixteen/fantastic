@@ -22,7 +22,9 @@ dependencies = [
   "fantastic-nvidia-nim-backend",
   "fantastic-anthropic-backend",
   "fantastic-python-runtime",
+  "fantastic-bridge-core",
   "fantastic-kernel-bridge",
+  "fantastic-cloud-bridge",
   "fantastic-ssh-runner",
   "fantastic-local-runner",
   "fantastic-runner-core",
@@ -59,7 +61,9 @@ testpaths = [
   "bundled_agents/terminal/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
-  "bundled_agents/kernel_bridge/tests",
+  "bundled_agents/bridge/bridge_core/tests",
+  "bundled_agents/bridge/kernel_bridge/tests",
+  "bundled_agents/bridge/cloud_bridge/tests",
   "bundled_agents/runner/ssh_runner/tests",
   "bundled_agents/runner/local_runner/tests",
   "bundled_agents/python_runtime/tests",
@@ -79,7 +83,9 @@ members = [
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/nvidia/nvidia_nim_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
-  "bundled_agents/kernel_bridge",
+  "bundled_agents/bridge/bridge_core",
+  "bundled_agents/bridge/kernel_bridge",
+  "bundled_agents/bridge/cloud_bridge",
   "bundled_agents/runner/ssh_runner",
   "bundled_agents/runner/local_runner",
   "bundled_agents/runner/runner_core",
@@ -101,7 +107,9 @@ fantastic-terminal-backend = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-nvidia-nim-backend = { workspace = true }
 fantastic-anthropic-backend = { workspace = true }
+fantastic-bridge-core = { workspace = true }
 fantastic-kernel-bridge = { workspace = true }
+fantastic-cloud-bridge = { workspace = true }
 fantastic-ssh-runner = { workspace = true }
 fantastic-local-runner = { workspace = true }
 fantastic-runner-core = { workspace = true }
