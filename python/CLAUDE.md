@@ -5,6 +5,18 @@ A medium that unifies humans and AIs into a single workspace. Recursive
 (`send(target_id, payload)`), plugin-discovered bundles. Every agent
 answers `{type:"reflect"}` — the universal discovery verb.
 
+> **NO FALLBACKS — this is a kernel, not a SaaS. Build it fallback-less, close to
+> the Linux kernel.** Every operation has exactly ONE path. If a precondition (a
+> wired provider, a gate, a dependency) is absent, the operation is a **no-op or
+> fails** — it NEVER silently routes around the gap via a second mechanism. No
+> `try X; else do Y`, no `if not provider: write_directly`, no "prefer X else Y",
+> no defensive default that papers over a missing dependency. Example: with no
+> persistence provider wired, `kernel_state` does NOT auto-persist — the tree stays
+> in RAM (lost on restart) until you wire one. That is correct. Fallbacks add
+> complexity, hide bugs, and create two truths; a kernel refuses them. Bootstrap
+> cold primitives (the one-time root seed, `read_tree` at boot) are the single cold
+> path, not fallbacks.
+
 > **This is the canonical reference implementation** of the Fantastic
 > protocol. When other runtimes (`swift/`, the Apple app's embedded
 > kernel) disagree with this kernel on wire shape, on-disk format,
@@ -23,13 +35,15 @@ answers `{type:"reflect"}` — the universal discovery verb.
 │   Agent  — recursive node; .send / .emit / .create / .delete             │
 │   Kernel — tree-wide ctx (flat agents index, state stream, save/load)    │
 │   System verbs (create/delete/update/list_agents) baked into Agent.      │
-│   Persistence DECOUPLED — a loader agent owns the medium, not Agent.      │
+│   Persistence DECOUPLED — `kernel_state` (root) is a weak-bound STREAM      │
+│   CONSUMER: it auto-persists records THROUGH a `file_bridge` provider's     │
+│   write_stream (ephemeral `kernel_store`); cold read stays direct.          │
 └────────────────────────┬─────────────────────────────────────────────────┘
                          │  agent ⇌ agent ⇌ agent (agent.send)
        ┌─────────────────┼─────────────────────────────┐
        ▼                 ▼                             ▼
    ┌──────────┐    ┌────────────┐              ┌────────────────┐
-   │ fs_loader│    │ web        │              │ python_runtime │
+   │ kernel_state│    │ web        │              │ python_runtime │
    │  (ROOT)  │    │ (uvicorn)  │              │ terminal · ai  │
    │ cli·file │    │ HTTP + WS  │              │ runners · ...  │
    └──────────┘    └─────┬──────┘              └────────────────┘
@@ -54,13 +68,13 @@ WS `kernel.reflect` round-trip (open `ws://host/<any-agent>/ws`, send a
 
 The system is built by **conscious operator decisions** (the LLM/human composing
 it). NO bundle auto-spawns children; NO agent acts autonomously. The **only
-autoagent is the loader** (persistence/hydration): the root `fs_loader` on disk +
-its peers (a host `web/fs_loader` for the frontend, the JS `proxy_loader`)
+autoagent is the loader** (persistence/hydration): the root `kernel_state` on disk +
+its peers (a host `web/kernel_state` for the frontend, the JS `proxy_loader`)
 mechanically save what the operator built and restore it. Everything else —
 composition, membership, wiring — is an explicit `create_agent` / `update_agent` /
 `delete_agent`. This is *why* binding is weak (agents reference peers by id, never
 couple), why setup is documented procedure (create a `web` agent, then create its
-`web_ws` / `web_rest` / `fs_loader` children), and why the host knows nothing of
+`web_ws` / `web_rest` / `kernel_state` children), and why the host knows nothing of
 the frontend. Declared-config metas the substrate wires (not behavior): `alias`
 (reach an agent by a stable name), `root` (a loader serves a sub-namespace),
 `watch` (a loader only answers verbs), `children_dir` (the on-disk container dir
@@ -127,12 +141,12 @@ uv sync                                              # install workspace + bundl
 fantastic                                            # boot all + REPL (tty) + daemon (if web is persisted)
 fantastic <id> <verb> [k=v ...]                      # one-shot RPC
 fantastic reflect [<id>]                             # shorthand: <id> reflect (default: kernel)
-fantastic fs_loader create_agent handler_module=web.tools port=8888    # persist web record (first time)
+fantastic kernel_state create_agent handler_module=web.tools port=8888    # persist web record (first time)
 ```
 
-`main.py` bootstraps the substrate: `Kernel()` → `fs_loader.read_tree`
+`main.py` bootstraps the substrate: `Kernel()` → `kernel_state.read_tree`
 reads `.fantastic` → `kernel.load(records)`. The ROOT agent IS an
-`fs_loader` (`id="fs_loader"`) — the persistence/hydration root that owns
+`kernel_state` (`id="kernel_state"`) — the persistence/hydration root that owns
 `.fantastic/`; a fresh dir seeds it. Then argv goes to `dispatch_argv`
 (`kernel/modes/`):
   - one-shot: `<id> <verb> [k=v]` / `reflect [<id>]`
@@ -144,6 +158,30 @@ reads `.fantastic` → `kernel.load(records)`. The ROOT agent IS an
 Web composition is **explicit** — no `--port` flag. To make `fantastic`
 serve HTTP, persist a web agent first (one-shot create_agent or
 REPL `add web port=N`). Next invocation boots it as a daemon.
+
+**The web call legs SEAL by default — open them consciously.** A `web` host
+serves only render/static routes; its call surfaces (`web_ws`, `web_rest`) are
+`io_bridge` inbound derivations and a freshly-created leg with **no rule denies**
+(a browser can't connect, REST returns `403`) until the operator opens it:
+
+```bash
+# local dev — open the WS leg wide:
+fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all
+# shared group — require the group token (from $FANTASTIC_GROUP_TOKEN):
+fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password
+```
+
+Without the `ingress_rule`, the leg mounts but every inbound frame/request is
+denied (`{reason:"unauthorized"}`) — opening is a deliberate act
+(G2: sealed by default). Same for a bridge leg (`ws_bridge`/`cloud_bridge`): set
+`ingress_rule` to admit inbound calls.
+
+**Octet serving** — `web` bakes in `GET /<agent_id>/file/<path>` (see `app.py`):
+any agent answering `read`/`read_stream` becomes an HTTP file server. It prefers
+the SOURCE stream verb (`read_stream`) so a LARGE file pipes out chunk-by-chunk;
+the **allowance is the served agent's own gate** (a sealed `file_bridge` denies →
+`404`), path clamped to its root. The PUMP (`file_bridge.pump`) is the server-side
+SOURCE→SINK copy. (Minted-alias URL tier — an opaque token for one file — TBD.)
 
 The bootstrap wires the stdout renderer (Cli) when stdin is a tty —
 ephemeral, never persisted.
@@ -172,9 +210,9 @@ imports the bundle). Rust mirrors it: the `fantastic-cli` binary prints
 REPL example:
 
 ```
-fantastic> add file
+fantastic> add file_bridge
 fantastic> add python_runtime
-fantastic> @fs_loader list_agents
+fantastic> @kernel_state list_agents
 ```
 
 The view layer (canvas compositor, terminal/chat views, gl/html content
@@ -188,23 +226,24 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 
 | bundle | role |
 |---|---|
-| `fs_loader` | the ROOT agent (`id="fs_loader"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). System verbs are native to Agent; the bootstrap wires Cli when `stdin.isatty()`. |
+| `kernel_state` | the ROOT agent (`id="kernel_state"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). System verbs are native to Agent; the bootstrap wires Cli when `stdin.isatty()`. |
 | `cli` | singleton child of root; renders token/done/say/error events to stdout |
 | `web` | uvicorn HTTP host. Serves rendering only — `/` (root index from `templates/index.html`), `/<id>/` (agent's `render_html`), `/<id>/file/<path>` (read-verb file proxy), favicon. Call surfaces (WS, REST) live in sibling sub-agents and mount via the duck-typed `get_routes` verb. The TS frontend kernel brings its own typed WS bridge (`ts/`) — no transport script is injected here. |
-| `web_ws` | WebSocket verb-invocation surface. Child of a `web` agent. Mounts `/<host_id>/ws` on its parent web's FastAPI app. Opt-in: `create_agent handler_module=web_ws.tools parent_id=<web>`. |
-| `web_rest` | REST diagnostic surface. Child of a `web` agent. Mounts `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON reply. Multiple instances coexist with different ids. Opt-in. |
-| `file` | filesystem-as-agent (`read`, `write`, `list`, `delete`, `rename`, `mkdir`) |
-| `scheduler` | recurring tasks; persistence routed through `file_agent_id` |
+| `web_ws` | WebSocket verb-invocation surface — the **ws INBOUND derivation of `io_bridge`**. Child of a `web` agent. Mounts `/<host_id>/ws` on its parent web's FastAPI app. Gates every inbound frame at the shared `gate_inbound` choke point with the leg's own `ingress_rule` (credential on the frame envelope `auth_token`); `egress_rule`/`auth` per leg as on a bridge. **SEALED BY DEFAULT** — a freshly-created `web_ws` with no rule denies (a browser can't connect until opened); open it consciously (see "Run"). Opt-in: `create_agent handler_module=web_ws.tools parent_id=<web> ingress_rule=allow_all`. |
+| `web_rest` | REST diagnostic surface — the **http INBOUND derivation of `io_bridge`**. Child of a `web` agent. Mounts `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON reply (+ `GET /_reflect` shortcuts). Gates each request via the leg's `ingress_rule` at `gate_inbound`; the credential rides the **`X-Fantastic-Auth` header** (http carrier, not the envelope). **SEALED BY DEFAULT** — absent rule ⇒ deny (`403 {reason:"unauthorized"}`); open with `ingress_rule=allow_all`/`password`. Multiple instances coexist with different ids. Opt-in. |
+| `io/file_bridge` | filesystem-as-agent (`read`, `write`, `list`, `delete`, `rename`, `mkdir`) — the **fs edge of the io family**: crossing kernel↔disk is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all`), and bound by the **running-dir law**: root + every path are clamped inside the dir the kernel runs in (`../`, `~`, absolute escapes, outward symlinks refuse) |
+| `scheduler` | recurring tasks; persistence routed through `file_bridge_id` |
 | `python_runtime` | async Python JOB spawner — `start` runs `python -u -c <code>` in the background (many in parallel), returns a `job_id` at once + streams `progress`/`job_done` events; `status`/`stop`/`interrupt`/`clear` by job_id over a RAM job table (`on_delete` kills the owner's jobs). No blocking run-and-wait. |
-| `yaml_state` | durable YAML key-value memory agent; mount anywhere (`mode=mem|data`); write-through sidecar (`state.yaml`) it owns directly |
+| `yaml_state` | durable YAML key-value memory agent; mount anywhere (`mode=mem|data`); persists `state.yaml` THROUGH a gated `file_bridge` agent referenced by `file_bridge_id` (deny-all by default; `set`/`delete`/`replace` failfast until wired+opened) — owns no disk surface of its own, like `scheduler`/`ai_core` |
 | `terminal_backend` | PTY shell backend (at `bundled_agents/terminal/`). VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). The xterm view (`terminal_view`) lives in the TS frontend kernel (`ts/`). |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache |
-| `ai/nvidia/nvidia_nim_backend` | NVIDIA NIM LLM agent (OpenAI-compatible); api_key sidecar via `file_agent_id`; rate-limit retry; same surface as ollama_backend |
+| `ai/nvidia/nvidia_nim_backend` | NVIDIA NIM LLM agent (OpenAI-compatible); api_key sidecar via `file_bridge_id`; rate-limit retry; same surface as ollama_backend |
 | `ai/anthropic/anthropic_backend` (`anthropic_backend.tools`) | Claude LLM agent — Anthropic Messages API (default model `claude-opus-4-8`); key from `ANTHROPIC_KEY`/`ANTHROPIC_API_KEY` (env / `.env`); per-client chat threads, FIFO lock, native tool-calls, menu cache; same surface as ollama_backend |
-| `bridge/kernel_bridge` | cross-kernel comms — **WS-only, asymmetric**. A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. |
-| `bridge/cloud_bridge` | cross-kernel comms through a **zero-trust relay** (`../fantastic_relay`, CONTRACT v1). Same verbs/frames as `kernel_bridge` (both ride the shared `bridge/bridge_core` engine), but BOTH peers dial OUT (WSS) to a relay that pairs them by `(tenant_id, rendezvous)` and forwards **opaque** frames; the peers run a peer↔peer **TLS 1.3 mutual-auth** handshake (pyOpenSSL over a memory BIO — no hand-rolled crypto) with self-signed **Ed25519** device certs **pinned by the device's PUBLIC KEY** (a custom verify callback checks the peer's Ed25519 pubkey ∈ the approved device set; the cert is a disposable carrier that may rotate / be non-deterministic across runtimes — only the key is the identity, and `peer_id` key IS that key), and tunnel the bridge frames as **TLS application data**, so the relay sees only ciphertext + metadata (a forged route just fails the handshake). All three host runtimes (python/rust/swift) interop any-to-any — proven by `integration_tests/relay_e2e` against a live relay. `transport="cloud_bridge"`; control-plane token via a `token`/`token_provider` seam (not minted here). `bridge_core` is a library, not an agent (no entry point). |
+| `io/io_bridge` | the **IO base — pure shared library, NOT a registered bundle/agent** (no entry point, never instantiated; the merge of the former `io_core` + `bridge_core` libs). Holds the channel model (`direction · modality · transport · rule · extractor`), the `ingress_rules`/`egress_rules` registries, the transport-agnostic bridge engine (read loop, the 6 verbs, lifecycle, `make_verbs` factory), the unified `gate_inbound`/`stamp_egress` choke point, and the in-process `MemoryTransport`. Every derivation (`ws_bridge`/`cloud_bridge`/`web_ws`/`web_rest`/`file_bridge`) **imports** from it and reuses `rule.authorize`. IO legs are **SEALED BY DEFAULT** (`resolve_ingress({})` ⇒ `DenyInbound`); the open interior is unaffected. A denied client is taught by the denial's `hint` (the inline recipe — `update_agent <id> ingress_rule=allow_all`) and `reflect readme=true` on the **sealed agent itself** (each derivation ships its own short readme). |
+| `io/ws_bridge` | cross-kernel comms — a thin **WS-only, asymmetric** transport **derivation of `io_bridge`** (was `kernel_bridge`). A bridge agent opens a WS to the remote's `web_ws` surface and ships raw `{type:"call", target, payload}` frames; the remote dispatches `kernel.send` exactly like a browser frame and replies over the same socket — **no peer bridge needed**. Transports: memory (test backbone) / ws / ssh+ws. Streaming via `watch_remote` (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the bridge's own inbox). All transports are **weak binding** — addressed by URL + path only; no shared Python types with the remote kernel. Weak proxy: local→local stays direct. **Authorization**: two symmetric typed per-leg rules (enforced on the receiver) — `ingress_rule` (inbound FILTER, gated at the shared `gate_inbound` choke point) + `egress_rule` (outbound DECORATOR, stamps a credential on the frame envelope); `auth` is a shorthand for both. **SEALED BY DEFAULT** — absent rule ⇒ `deny_inbound` (reply `{reason:"unauthorized"}`); open consciously with `ingress_rule=allow_all`/`password` (kernel-GROUP shared secret from an env var). Resolved by name from the `io_bridge.ingress_rules` / `egress_rules` registries; shared with cloud_bridge. |
+| `io/cloud_bridge` | cross-kernel comms through a **zero-trust relay** (`../fantastic_relay`, CONTRACT v1). Same verbs/frames as `ws_bridge` (both ride the shared `io/io_bridge` engine), but BOTH peers dial OUT (WSS) to a relay that pairs them by `(tenant_id, rendezvous)` and forwards **opaque** frames; the peers run a peer↔peer **TLS 1.3 mutual-auth** handshake (pyOpenSSL over a memory BIO — no hand-rolled crypto) with self-signed **Ed25519** device certs **pinned by the device's PUBLIC KEY** (a custom verify callback checks the peer's Ed25519 pubkey ∈ the approved device set; the cert is a disposable carrier that may rotate / be non-deterministic across runtimes — only the key is the identity, and `peer_id` key IS that key), and tunnel the bridge frames as **TLS application data**, so the relay sees only ciphertext + metadata (a forged route just fails the handshake). All three host runtimes (python/rust/swift) interop any-to-any — proven by `integration_tests/relay_e2e` against a live relay. `transport="cloud_bridge"`; control-plane token via a `token`/`token_provider` seam (not minted here). Symmetric per-leg `ingress_rule`/`egress_rule` (or the `auth` shorthand) give directional/hub-spoke topology + kernel-group membership (a shared-secret `password` token from env, mirroring the relay's abstract-auth/password-provider shape) — IO legs are **SEALED BY DEFAULT** (absent rule ⇒ `deny_inbound`); opening a leg is a conscious control-plane act (set `ingress_rule=allow_all`/`password`). `io_bridge` is **pure shared code** (no entry point, no agent) — the base both bridges AND the inbound web faces import; a denied client opens the leg per the denial's inline `hint`. |
 | `local_runner` (`local_runner.tools`) | local sub-`fantastic` lifecycle — `start`/`stop`/`restart`/`status`/`get_webapp` for one project dir; truth read from the project's `.fantastic/lock.json` (PID) + its web agent record (port) |
-| `ssh_runner` | remote `fantastic` lifecycle over SSH — start/stop/restart/status + local SSH tunnel for canvas iframing. Pure subprocess ssh; composes with `kernel_bridge` for messaging |
+| `ssh_runner` | remote `fantastic` lifecycle over SSH — start/stop/restart/status + local SSH tunnel for canvas iframing. Pure subprocess ssh; composes with `ws_bridge` for messaging |
 
 **View bundles live in the FRONTEND kernel (`ts/`), not here.** The
 canvas compositor and its view/content agents are `*.ts` bundles that
@@ -234,6 +273,13 @@ the next process start.
   readme.md). Verb signatures live in
   docstrings; `reflect` derives them. Discovery is one round-trip;
   transport/wire docs live in the root readme (`reflect readme=true`).
+  Each distilled **tree node** also carries the wiring/posture meta it
+  has — `ingress_rule`/`egress_rule`/`auth` (a leg's lock: `allow_all` =
+  open, `password` = gated, `deny_inbound` or **absent on an io leg** =
+  sealed-by-default), `root` (a file_bridge's served dir), `file_bridge_id`
+  (what a consumer persists THROUGH) — so the whole IO landscape (which
+  legs are open vs sealed, what's wired to what) is readable from ONE root
+  reflect, no per-agent round-trips.
   The **ROOT** reflect additionally carries `runtime` — a stable lowercase
   enum (`python` | `rust` | `swift` | `ts`) naming the kernel's runtime, so
   a client gates runtime-specific UI from one round-trip. Same field name +
@@ -250,6 +296,12 @@ the next process start.
   persisted to the portable `.fantastic` workdir, which can move host↔container)
   and root-only like `runtime`. The host runtimes read the envs; the browser
   `ts` kernel has no OS env, so it is always `env:"host"`, `version:null`.
+  The root reflect ALSO carries `persistence: {provider:<id>|null}` — WHICH
+  file_bridge the loader auto-persists records THROUGH (the discovered store),
+  or `null` = nothing wired (state in RAM). Contributed by the loader via a
+  duck-typed `reflect_root_extra(agent)` hook (no substrate↔bundle coupling),
+  so a client sees in one reflect whether persistence is wired — and, with the
+  provider's posture inline in the tree, whether the wired leg is actually open.
 - **`render_html`** — duck-typed presentation. Any agent returning
   `{html:str}` from `render_html` can be rendered by a view. This is now
   a FRONTEND pattern (a `*.ts` content agent holds the body in its
@@ -263,8 +315,8 @@ the next process start.
   subscribes to it; any agent that emits `{type:"reload_html"}` on its
   own inbox triggers a reload of the connected view. `set_html` and the
   canvas frame ⟳ button both go through it.
-- **`file_agent_id`** — bundles that need persistence (ollama_backend,
-  scheduler) carry an `file_agent_id` on
+- **`file_bridge_id`** — bundles that need persistence (ollama_backend,
+  scheduler) carry an `file_bridge_id` on
   their record. Failfast if unset (no implicit fallback).
 - **`delete_lock: true`** on a record refuses delete. The root's
   `delete_agent` returns `{error, locked:true, id}` so LLM callers
@@ -277,7 +329,7 @@ the next process start.
   DISK cleanup is NOT here — the `removed` state event drives a loader
   to rmtree the dir. Bundles port teardown into this function —
   `terminal_backend.on_delete` closes the PTY, `web.on_delete` drains
-  uvicorn, `kernel_bridge.on_delete` cancels the read loop + tunnel,
+  uvicorn, `ws_bridge.on_delete` cancels the read loop + tunnel,
   runner bundles call their own `_stop`.
 - **`ephemeral` class flag** — `class Cli(Agent): ephemeral = True`
   means a loader skips it entirely (never written to disk; `save()`
@@ -336,8 +388,8 @@ regression — it belongs in the root readme."
 - **Unit** — `pytest -n auto` (`pytest-xdist`). 420+ tests, parallel,
   in-process. Each bundle's tests live in `bundled_agents/<bundle>/tests/`;
   kernel-level tests live in `tests/`. `conftest.py` at root exposes
-  `kernel`, `seeded_kernel`, `file_agent` fixtures (the root is an
-  `fs_loader`); `_testkit.py` adds `boot_root` / `persist` for disk tests.
+  `kernel`, `seeded_kernel`, `file_bridge` fixtures (the root is an
+  `kernel_state`); `_testkit.py` adds `boot_root` / `persist` for disk tests.
 - **Selftests** — scope-tagged markdown specs. AI agents read them,
   drive the system at the user-facing surface (CLI, HTTP, WS, PTY,
   browser), and fill summary tables. Index + protocol at root
@@ -372,7 +424,7 @@ review, force-push surprise, polluted history) is high.
 - All async (`asyncio` throughout). `pytest-asyncio` with
   `asyncio_mode = "auto"`.
 - Agent IDs: `{bundle}_{hex6}` (e.g. `ollama_backend_b04b35`).
-  Singletons use the bundle name (`fs_loader`, `cli`).
+  Singletons use the bundle name (`kernel_state`, `cli`).
 - Every bundle's `tools.py` defines:
   - per-verb `async def _<name>(id, payload, kernel)` with a
     one-line docstring (auto-fed into reflect's `verbs` dict).
@@ -382,7 +434,7 @@ review, force-push surprise, polluted history) is high.
   Process-memory state (PTY child, uvicorn server, in-flight tasks)
   is per-process and visible only to the kernel that owns it —
   reflect from the live `serve` to see it, NOT via a fresh
-  `fantastic call` (which spawns a separate kernel).
+  `fantastic <id> <verb>` (which spawns a separate kernel).
 
 ## Storage policy
 
@@ -391,14 +443,59 @@ review, force-push surprise, polluted history) is high.
   records, per-agent sidecars (chat_<client>.json,
   schedules.json, history.jsonl), `lock.json`, `readme.md`.
   Wipe-and-rebuild safe.
-- Use the `file` agent (rooted at any path) for HTTP-served content:
+- Use a `file_bridge` agent (rooted INSIDE the running dir — the clamp;
+  created OPEN with `ingress_rule=allow_all`) for HTTP-served content:
   `<img src="/<file_id>/file/imgs/foo.png">` works in any html view.
+
+## Disk surface — ALL IO through the gated bridge
+
+**The model (the coherent end-state): ALL IO goes through a `file_bridge` AGENT, no
+exceptions, deny-all by default, opened on demand by the operator/LLM.** Two layers, both
+unbypassable:
+1. **The clamp** — `file_bridge.fs` (`io/file_bridge/.../fs.py`) is the SINGLE module that
+   calls `open()`; the running-dir law lives there, so nothing can read/write outside its
+   root by going around it (there's no other disk code to go around to).
+2. **The gate** — the `file_bridge` AGENT wraps `fs` with the io-bridge ingress rule:
+   **SEALED / deny-all by default** (every verb except `reflect` denies). A bundle that
+   needs disk does NOT import `fs`; it `send`s `read`/`write`/`read_stream`/`write_stream`
+   to a file_bridge agent referenced by **`file_bridge_id`** on its record. The operator/LLM
+   **wires + opens** that provider on demand (`create_agent file_bridge … ingress_rule=…`,
+   then set `file_bridge_id`). So the *access control* is real for in-process bundles too —
+   not just the clamp. `yaml_state` / `scheduler` / `ai_core` / `nvidia_nim` already route
+   this way; they failfast if `file_bridge_id` is unset (no silent RAM).
+
+The ONLY code that imports `fs` directly is **the file_bridge agent itself** (it IS the
+gate) and **the cold bootstrap** — the bring-up *before* any agent/gate exists, not an
+exception to access control: substrate fixed-path reads (`kernel/_lock.py`, `_env`,
+`Agent._read_readme`; the substrate is decoupled from bundles and cannot import one) +
+`kernel_state`'s boot-read of `.fantastic` (`read_tree`, the chicken-egg root hydration).
+*In flight toward the end-state:* `local_runner`/`terminal` still import `fs`
+(`external=True`) because they reach OUTSIDE cwd (sibling projects, /tmp) — they fold into
+the agent model once a file_bridge agent can carry an explicit external root. (`web` is
+already clean: `/` is the agent index, `/file/` proxies to gated agents, own assets are
+importlib package resources — no `fs`.)
+
+`fs`'s two surfaces, picked STATICALLY per call site (never tried in sequence — that would
+be a fallback, which this kernel refuses):
+- **clamped** (default) — `fs.read_text(root, path)`: `root` clamped to cwd, `path`
+  clamped within `root`. This is the kernel's OWN state (its `.fantastic`). The running-dir
+  law guarantees the kernel can't escape its own dir.
+- **external** (`fs.read_text(root, path, external=True)`) — `root` is an operator/peer
+  base that may live ANYWHERE; `path` still clamped within it. For surfaces that operate
+  OUTSIDE cwd BY DESIGN: `local_runner` orchestrating a SIBLING project, `terminal`'s
+  clipboard-image temp scratch dir.
+
+The ONLY disk code outside `fs`: the substrate's fixed-path bootstrap (`kernel/_lock.py`,
+`_env`, `Agent._read_readme` — the substrate is decoupled from bundles, cannot import one)
+and `importlib.resources` reads of a bundle's OWN baked-in assets (readme/help/index/
+favicon — a package lookup, not an arbitrary path).
 
 ## Path conventions
 
-- All paths relative when invoked via `fantastic call` (cwd = project
+- All paths relative when invoked via `fantastic <id> <verb>` (cwd = project
   dir).
-- The file agent's path-safety refuses anything escaping its `root`.
+- The file_bridge's path-safety refuses anything escaping its `root`, and
+  the running-dir law clamps the `root` itself inside the kernel's cwd.
 - `fantastic` writes `.fantastic/lock.json` with `{pid, port}`;
   a second serve in the same dir refuses with a clear error and stale
   locks (dead pid) get overwritten.
@@ -407,7 +504,7 @@ review, force-push surprise, polluted history) is high.
 
 These existed in an older codebase iteration; deferred, replaced, or moved:
 
-- `core` — cut. The root IS the `fs_loader` agent now; there's no
+- `core` — cut. The root IS the `kernel_state` agent now; there's no
   separate userland-orchestrator class.
 - `canvas_backend` / `html_agent` / `gl_agent` — the spatial UI + view/
   content agents are no longer HOST bundles; they moved to the FRONTEND
@@ -422,4 +519,4 @@ These existed in an older codebase iteration; deferred, replaced, or moved:
 - `content_alias_file` registry — replaced by the URL convention
   `/<file_id>/file/<path>`.
 - agent `memory_long.jsonl` append-only memory — replaceable by the
-  `file` agent + path convention.
+  `file_bridge` agent + path convention.

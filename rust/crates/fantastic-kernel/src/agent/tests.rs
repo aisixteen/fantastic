@@ -7,7 +7,7 @@ use std::path::Path;
 fn make() -> Arc<Agent> {
     Agent::new(
         "test_1".into(),
-        Some("file.tools".to_string()),
+        Some("file_bridge.tools".to_string()),
         Some("core".into()),
         {
             let mut m = Map::new();
@@ -35,14 +35,14 @@ fn record_includes_meta_and_omits_none() {
     let a = make();
     let rec = a.record();
     assert_eq!(rec.id, "test_1");
-    assert_eq!(rec.handler_module.as_deref(), Some("file.tools"));
+    assert_eq!(rec.handler_module.as_deref(), Some("file_bridge.tools"));
     assert_eq!(rec.parent_id.as_deref(), Some("core"));
     assert_eq!(rec.meta.get("display_name"), Some(&json!("Testy")));
     assert_eq!(rec.meta.get("port"), Some(&json!(8080)));
     // Round-trip respects skip_serializing_if=None.
     let v = serde_json::to_value(&rec).unwrap();
     assert_eq!(v["id"], "test_1");
-    assert_eq!(v["handler_module"], "file.tools");
+    assert_eq!(v["handler_module"], "file_bridge.tools");
     assert_eq!(v["parent_id"], "core");
     assert_eq!(v["display_name"], "Testy");
     assert_eq!(v["port"], 8080);

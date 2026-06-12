@@ -93,9 +93,16 @@ let package = Package(
         ),
 
         // ── Trivially-portable bundles (Phase 3) ─────────────────
+        // The IO base — the shared auth/gate/codec library (mirror of py
+        // `io/io_bridge` + rust `fantastic-io-bridge`). Every io derivation
+        // (file_bridge / web_ws / web_rest / the bridges) imports it.
+        .target(
+            name: "FantasticIoBridge",
+            dependencies: ["FantasticKernel", "FantasticJSON"]
+        ),
         .target(
             name: "FantasticFile",
-            dependencies: ["FantasticKernel", "FantasticJSON",
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
@@ -133,7 +140,7 @@ let package = Package(
         .target(
             name: "FantasticKernelBridge",
             dependencies: [
-                "FantasticKernel", "FantasticJSON",
+                "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -143,7 +150,7 @@ let package = Package(
         ),
         .target(
             name: "FantasticWeb",
-            dependencies: ["FantasticKernel", "FantasticJSON"],
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge"],
             resources: [
                 .copy("Resources/three.module.js"),
                 .copy("Resources/xterm.min.js"),
@@ -158,12 +165,12 @@ let package = Package(
         // depends on FantasticWeb (no cycle).
         .target(
             name: "FantasticWebWS",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge"]
         ),
         .target(
             name: "FantasticWebRest",
             dependencies: [
-                "FantasticKernel", "FantasticJSON",
+                "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),

@@ -55,14 +55,14 @@ struct AgentRecordCodableTests {
 
         let rec = AgentRecord(
             id: "demo",
-            handlerModule: "file.tools",
+            handlerModule: "file_bridge.tools",
             parentId: "core",
             meta: meta
         )
         let data = try JSONEncoder().encode(rec)
         let decoded = try JSONDecoder().decode(AgentRecord.self, from: data)
         #expect(decoded.id == "demo")
-        #expect(decoded.handlerModule == "file.tools")
+        #expect(decoded.handlerModule == "file_bridge.tools")
         #expect(decoded.parentId == "core")
         #expect(decoded.meta["display_name"]?.asString == "My Agent")
         #expect(decoded.meta["port"]?.asInt == 8080)

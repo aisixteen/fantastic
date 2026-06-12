@@ -7,10 +7,15 @@
 //   - data → current scratch-state, overwrite-in-place.
 //   - mem  → durable keyed facts, accrete + prune at LLM discretion.
 //
-// Disk-is-truth: its state is a YAML file (`state.yaml`) in the agent's
-// own dir — human-editable, atomic-write (String.write atomically). The
-// single-agent inbox serializes writes, so no locking. Cascade-delete
-// removes the agent dir (and the file) for free — no onDelete needed.
+// ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge — sealed /
+// deny-all by default), referenced by `file_bridge_id` on this agent's record.
+// This bundle owns NO disk surface of its own and never touches FileManager: it
+// `send`s `read` / `write` verbs to its provider, exactly like the Python bundle.
+// `set` / `delete` / `replace` FAILFAST until `file_bridge_id` is set (and
+// surface a denied write rather than losing it). Wire it to the `.fantastic`
+// store (the one the loader persists records through — ONE file_bridge serves
+// both): the path is store-relative `agents/<id>/state.yaml`, next to its
+// `agent.json`. Disk-is-truth (read fresh each call, no cache).
 //
 // Keys are flat namespaced strings (dotted convention:
 // `domain.subject.attribute`). Values are arbitrary JSON. Mirrors the
@@ -38,22 +43,26 @@ public struct YamlStateBundle: AgentBundle {
         let verb = payload["type"].asString ?? ""
         switch verb {
         case "reflect":
-            return reflectReply(agent)
+            return await reflectReply(agent, kernel: kernel)
         case "boot", "shutdown":
             return .null
         case "read":
-            let doc = load(agent)
+            let doc = await load(agent, kernel: kernel)
             if let key = payload["key"].asString {
                 return .object(["key": .string(key), "value": doc[key] ?? .null])
             }
-            return .object(["doc": .object(OrderedDictionary(uniqueKeysWithValues: doc.map { ($0, $1) }))])
+            return .object([
+                "doc": .object(OrderedDictionary(uniqueKeysWithValues: doc.map { ($0, $1) }))
+            ])
         case "keys":
-            let doc = load(agent)
+            let doc = await load(agent, kernel: kernel)
             let items: [JSON] = doc.keys.sorted().map { k in
                 .object(["key": .string(k), "size": .integer(Int64(valueSize(doc[k]!)))])
             }
             return .object(["keys": .array(items)])
         case "set":
+            // FAILFAST first — persistence needs an opened file_bridge.
+            if let err = needFileBridge(agent, verb: "set") { return err }
             guard let key = payload["key"].asString, !key.isEmpty else {
                 return .object([
                     "error": .string("yaml_state.set: key (non-empty str) required")
@@ -62,24 +71,33 @@ public struct YamlStateBundle: AgentBundle {
             guard let value = payload.asObject?["value"] else {
                 return .object(["error": .string("yaml_state.set: value required")])
             }
-            var doc = load(agent)
+            var doc = await load(agent, kernel: kernel)
             doc[key] = value
-            dump(agent, doc)
+            if let err = await persist(agent, kernel: kernel, doc: doc, verb: "set") {
+                return err
+            }
             return .object(["key": .string(key), "set": .bool(true)])
         case "delete":
+            if let err = needFileBridge(agent, verb: "delete") { return err }
             guard let key = payload["key"].asString, !key.isEmpty else {
                 return .object([
                     "error": .string("yaml_state.delete: key (non-empty str) required")
                 ])
             }
-            var doc = load(agent)
+            var doc = await load(agent, kernel: kernel)
             let existed = doc.removeValue(forKey: key) != nil
-            dump(agent, doc)
+            if let err = await persist(agent, kernel: kernel, doc: doc, verb: "delete") {
+                return err
+            }
             return .object(["key": .string(key), "deleted": .bool(existed)])
         case "replace":
+            if let err = needFileBridge(agent, verb: "replace") { return err }
+            // `doc` is REQUIRED ({} clears) — a missing doc is an error, not a
+            // silent clear (matches Python).
             guard let docVal = payload.asObject?["doc"] else {
-                dump(agent, [:])
-                return .object(["replaced": .bool(true), "keys": .integer(0)])
+                return .object([
+                    "error": .string("yaml_state.replace: doc (object) required")
+                ])
             }
             guard case .object(let obj) = docVal else {
                 return .object([
@@ -88,28 +106,59 @@ public struct YamlStateBundle: AgentBundle {
             }
             var doc: [String: JSON] = [:]
             for (k, v) in obj { doc[k] = v }
-            dump(agent, doc)
+            if let err = await persist(agent, kernel: kernel, doc: doc, verb: "replace") {
+                return err
+            }
             return .object(["replaced": .bool(true), "keys": .integer(Int64(doc.count))])
         case "state_yaml":
-            return .object(["yaml": .string(emit(load(agent)))])
+            return .object(["yaml": .string(emit(await load(agent, kernel: kernel)))])
         default:
-            return .object(["error": .string("yaml_state: unknown type \"\(verb)\"")])
+            return .object(["error": .string("yaml_state: unknown type '\(verb)'")])
         }
     }
 
-    // ── persistence ─────────────────────────────────────────────
+    // ── persistence (THROUGH a file_bridge provider) ────────────
+    //
+    // ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge), keyed
+    // by `file_bridge_id` on this agent's record — exactly like the Python
+    // bundle. This bundle owns NO disk surface and never touches FileManager: it
+    // `send`s read/write to its provider. set/delete/replace FAILFAST until
+    // file_bridge_id is wired.
 
-    private func statePath(_ agent: Agent) -> URL {
-        agent.rootPath.appendingPathComponent("state.yaml")
+    private func fileBridgeId(_ agent: Agent) -> String? {
+        agent.metaValue(forKey: "file_bridge_id")?.asString
+    }
+
+    /// `state.yaml` in the agent's own dir, RELATIVE to the provider's root (the
+    /// `.fantastic` store) — `agents/<id>/state.yaml`, next to its agent.json.
+    private func statePath(_ agent: Agent) -> String {
+        "agents/\(agent.id.value)/state.yaml"
+    }
+
+    /// Failfast if no provider is wired. Error text byte-identical to Python.
+    private func needFileBridge(_ agent: Agent, verb: String) -> JSON? {
+        if fileBridgeId(agent) == nil {
+            return .object([
+                "error": .string(
+                    "yaml_state.\(verb): file_bridge_id required — wire (and open) a file_bridge to persist"
+                )
+            ])
+        }
+        return nil
     }
 
     private func modeOf(_ agent: Agent) -> String {
         agent.metaValue(forKey: "mode")?.asString == "mem" ? "mem" : "data"
     }
 
-    private func load(_ agent: Agent) -> [String: JSON] {
+    /// Read the store THROUGH the wired provider. Unwired / missing / denied ⇒ [:].
+    private func load(_ agent: Agent, kernel: Kernel) async -> [String: JSON] {
+        guard let fid = fileBridgeId(agent) else { return [:] }
+        let r = await kernel.send(
+            AgentId(fid),
+            .object(["type": .string("read"), "path": .string(statePath(agent))]))
         guard
-            let text = try? String(contentsOf: statePath(agent), encoding: .utf8),
+            let text = r["content"].asString,
             !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             let parsed = try? Yams.load(yaml: text),
             let dict = parsed as? [String: Any]
@@ -128,12 +177,32 @@ public struct YamlStateBundle: AgentBundle {
         return (try? Yams.dump(object: anyDict, allowUnicode: true, sortKeys: true)) ?? ""
     }
 
-    private func dump(_ agent: Agent, _ doc: [String: JSON]) {
-        let path = statePath(agent)
-        try? FileManager.default.createDirectory(
-            at: agent.rootPath, withIntermediateDirectories: true)
-        // `atomically: true` writes a temp file then renames — atomic.
-        try? emit(doc).write(to: path, atomically: true, encoding: .utf8)
+    /// Write the store THROUGH the provider; surface a denied/failed write as an
+    /// error (no silent loss). Returns an error JSON, or nil on success. Error
+    /// text byte-identical to Python.
+    private func persist(_ agent: Agent, kernel: Kernel, doc: [String: JSON], verb: String) async
+        -> JSON?
+    {
+        guard let fid = fileBridgeId(agent) else {
+            return .object(["error": .string("yaml_state.\(verb): file_bridge_id required")])
+        }
+        let w = await kernel.send(
+            AgentId(fid),
+            .object([
+                "type": .string("write"), "path": .string(statePath(agent)),
+                "content": .string(emit(doc)),
+            ]))
+        guard case .object = w else {
+            return .object(["error": .string("yaml_state.\(verb): provider gave no reply")])
+        }
+        let reason =
+            w["error"].asString ?? (w["reason"].asString == "unauthorized" ? "unauthorized" : nil)
+        if let reason {
+            return .object([
+                "error": .string("yaml_state.\(verb): provider refused write — \(reason)")
+            ])
+        }
+        return nil
     }
 
     private func valueSize(_ j: JSON) -> Int {
@@ -141,19 +210,22 @@ public struct YamlStateBundle: AgentBundle {
         return j.serialize().count
     }
 
-    private func reflectReply(_ agent: Agent) -> JSON {
+    private func reflectReply(_ agent: Agent, kernel: Kernel) async -> JSON {
         let mode = modeOf(agent)
-        let doc = load(agent)
+        let doc = await load(agent, kernel: kernel)
         return .object([
             "id": .string(agent.id.value),
             "sentence": .string(mode == "mem" ? Self.memSentence : Self.dataSentence),
             "mode": .string(mode),
             "key_count": .integer(Int64(doc.count)),
+            "file_bridge_id": fileBridgeId(agent).map { JSON.string($0) } ?? .null,
             "verbs": .object([
                 "read": .string(
                     "args: key?:str. Value at key (null if absent); whole doc if key omitted."),
                 "keys": .string("args: none. List keys + value sizes — the table-of-contents."),
-                "set": .string("args: key:str, value:any. Upsert one key."),
+                "set": .string(
+                    "args: key:str, value:any. Upsert one key. Persisted through file_bridge_id; failfast if unwired."
+                ),
                 "delete": .string("args: key:str. Remove a key."),
                 "replace": .string("args: doc:object. Overwrite the whole store ({} clears)."),
                 "state_yaml": .string("args: none. The entire store as YAML text."),

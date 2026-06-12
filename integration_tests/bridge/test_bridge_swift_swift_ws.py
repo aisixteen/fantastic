@@ -67,7 +67,7 @@ async def test_swift_swift_ws_forward_reflect(
         workdir_a,
         agent_id="bridge",
         # "kernel" is the runtime-neutral alias for the root agent on any kernel
-        # (Python root=fs_loader, Swift/Rust root=core).  Using the alias here
+        # (Python root=kernel_state, Swift/Rust root=core).  Using the alias here
         # means the WS path the bridge dials — /<peer_id>/ws — resolves
         # correctly on all runtimes without hardcoding a runtime-specific id.
         peer_id="kernel",

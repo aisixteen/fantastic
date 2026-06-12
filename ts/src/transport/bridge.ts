@@ -5,7 +5,7 @@ import type { Envelope } from "./frame.ts";
 
 // The WS bridge: the frontend kernel's federation transport. Speaks the EXACT
 // wire python web_ws/_proxy.py serves (call/emit/watch/unwatch/reply/error/event +
-// the binary frame), the same one transport.js + kernel_bridge speak — no new
+// the binary frame), the same one transport.js + ws_bridge speak — no new
 // dialect.
 //
 // FEDERATION ROUTING. The `event` frame carries no source id (the proxy mirrors

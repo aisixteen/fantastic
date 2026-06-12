@@ -29,7 +29,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
     kernel
         .bundles
-        .register("file.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -49,9 +49,10 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
             &AgentId::from("core"),
             json!({
                 "type":"create_agent",
-                "handler_module":"file.tools",
+                "handler_module":"file_bridge.tools",
                 "id": file_id,
-                "root": tmp.path().to_string_lossy(),
+                "root": tmp.path().join(".fantastic").to_string_lossy(),
+                "ingress_rule": "allow_all",
             }),
         )
         .await;
@@ -63,7 +64,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
                 "type":"create_agent",
                 "handler_module":HANDLER_MODULE,
                 "id": sch_id,
-                "file_agent_id": file_id,
+                "file_bridge_id": file_id,
                 "tick_sec": 0.1,
             }),
         )
@@ -84,23 +85,23 @@ async fn reflect_reports_state() {
     let r = kernel.send(&sch.clone(), json!({"type": "reflect"})).await;
     assert_eq!(r["id"], sch.as_str());
     let expected_ff = format!("ff_{}", sch.as_str());
-    assert_eq!(r["file_agent_id"], expected_ff);
+    assert_eq!(r["file_bridge_id"], expected_ff);
     assert_eq!(r["paused"], false);
     // `create_agent` auto-fires boot (Python parity — see
     // lifecycle::create_from_payload). Scheduler.boot with
-    // file_agent_id + tick_sec set starts the tick loop, so
+    // file_bridge_id + tick_sec set starts the tick loop, so
     // running is true by reflect time.
     assert_eq!(r["running"], true);
 }
 
 #[tokio::test]
-async fn boot_refuses_without_file_agent_id() {
+async fn boot_refuses_without_file_bridge_id() {
     let tmp = TempDir::new().unwrap();
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
     kernel
         .bundles
-        .register("file.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -121,7 +122,7 @@ async fn boot_refuses_without_file_agent_id() {
     let r = kernel
         .send(&AgentId::from("sch2"), json!({"type": "boot"}))
         .await;
-    assert!(r["error"].as_str().unwrap().contains("file_agent_id"));
+    assert!(r["error"].as_str().unwrap().contains("file_bridge_id"));
 }
 
 #[tokio::test]

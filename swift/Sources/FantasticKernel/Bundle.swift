@@ -32,15 +32,19 @@ public protocol AgentBundle: Sendable {
         kernel: Kernel
     ) async throws -> JSON?
 
-    /// Dispatch a binary-framed verb (raw bytes alongside JSON
-    /// header). Default delegates to `handle` with the bytes
-    /// base64-encoded into `header["data"]`.
+    /// Dispatch a binary-framed verb. The binary channel is **symmetric**: a
+    /// request carries `(header, blob)` and the reply carries `(JSON?, Data)` —
+    /// raw bytes flow in BOTH directions, never base64 (mirrors py/rust's
+    /// `read_stream`/`write_stream`). The returned `Data` is the raw reply body
+    /// (empty when the verb returns no bytes, e.g. `write_stream`'s status).
+    /// Default: base64-decode the request blob into `header["data"]` and route
+    /// through `handle` (the legacy text bridge), returning an empty reply body.
     func handleBinary(
         agentId: AgentId,
         header: JSON,
         blob: Data,
         kernel: Kernel
-    ) async throws -> JSON?
+    ) async throws -> (JSON?, Data)
 
     /// Fired during cascade delete BEFORE the agent unregisters.
     /// Use for cleanup (close connections, dispose sessions, etc.).
@@ -59,11 +63,12 @@ extension AgentBundle {
         header: JSON,
         blob: Data,
         kernel: Kernel
-    ) async throws -> JSON? {
-        // Default: base64 the blob into header.data and call handle.
+    ) async throws -> (JSON?, Data) {
+        // Default: base64 the blob into header.data and call handle. No reply body.
         var payload = header
         payload["data"] = .string(blob.base64EncodedString())
-        return try await handle(agentId: agentId, payload: payload, kernel: kernel)
+        let reply = try await handle(agentId: agentId, payload: payload, kernel: kernel)
+        return (reply, Data())
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {}

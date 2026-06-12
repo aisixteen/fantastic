@@ -33,6 +33,9 @@ pub mod send;
 pub mod state;
 pub mod storage;
 
+#[doc(hidden)]
+pub mod test_support;
+
 pub use agent::{Agent, AgentId, AgentRecord};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};

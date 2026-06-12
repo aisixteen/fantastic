@@ -9,16 +9,16 @@ ollama agent: `anthropic_backend_f58abf` · python_runtime: `python_runtime_8aab
 - used `create_agent` (predicted mistake for a `*.ts` agent): **false**
 
 ## Full tool-call trace
-1. `fs_loader.reflect`({"target_id":"fs_loader","payload":{"type":"reflect"}}) → "{\"id\": \"fs_loader\", \"sentence\": \"Fantastic kernel. Everything is reachable by sending messages to agents.\", \"parent_id\":"
-2. `fs_loader.list_agents`({"target_id":"fs_loader","payload":{"type":"list_agents"}}) → "{\"agents\": [{\"id\": \"fs_loader\", \"handler_module\": \"fs_loader.tools\"}, {\"id\": \"anthropic_backend_f58abf\", \"handler_module"
+1. `kernel_state.reflect`({"target_id":"kernel_state","payload":{"type":"reflect"}}) → "{\"id\": \"kernel_state\", \"sentence\": \"Fantastic kernel. Everything is reachable by sending messages to agents.\", \"parent_id\":"
+2. `kernel_state.list_agents`({"target_id":"kernel_state","payload":{"type":"list_agents"}}) → "{\"agents\": [{\"id\": \"kernel_state\", \"handler_module\": \"kernel_state.tools\"}, {\"id\": \"anthropic_backend_f58abf\", \"handler_module"
 3. `llm_files.list`({"target_id":"llm_files","payload":{"type":"list"}}) → "{\"path\": \"\", \"files\": [{\"name\": \"agent.json\", \"path\": \"agent.json\", \"type\": \"file\", \"size\": 62}, {\"name\": \"agents\", \"pat"
 4. `web_97bdb9.reflect`({"target_id":"web_97bdb9","payload":{"type":"reflect"}}) → "{\"id\": \"web_97bdb9\", \"sentence\": \"HTTP host \\u2014 rendering routes baked in; call surfaces mounted from sub-agents.\", \""
 5. `llm_files.read`({"target_id":"llm_files","payload":{"type":"read","path":"readme.md"}}) → "{\"path\": \"readme.md\", \"content\": \"# This is a Fantastic kernel.\\n\\nA tree of agents. One primitive: `send(target_id, pay"
 6. `python_runtime_8aabce.reflect`({"target_id":"python_runtime_8aabce","payload":{"type":"reflect"}}) → "{\"id\": \"python_runtime_8aabce\", \"sentence\": \"Python subprocess runner.\", \"cwd\": \"<process default>\", \"python\": \"/Users/o"
-7. `fs_loader_1c3b4f.load_tree`({"target_id":"fs_loader_1c3b4f","payload":{"type":"load_tree"}}) → "{\"records\": [{\"id\": \"fs_loader_1c3b4f\", \"handler_module\": \"fs_loader.tools\", \"parent_id\": \"web_97bdb9\", \"root\": \".fantas"
-8. `fs_loader_1c3b4f.persist_record`({"target_id":"fs_loader_1c3b4f","payload":{"type":"persist_record","record":{"id":"panel2","handler_module":"html_agent.ts","parent_id":"canvas","sentence":"Receiver panel — displays values pushed poi) → "{\"ok\": true}"
-9. `fs_loader_1c3b4f.persist_record`({"target_id":"fs_loader_1c3b4f","payload":{"type":"persist_record","record":{"id":"panel1","handler_module":"html_agent.ts","parent_id":"canvas","sentence":"Run panel — runs Python on each click, show) → "{\"ok\": true}"
-10. `fs_loader_1c3b4f.load_tree`({"target_id":"fs_loader_1c3b4f","payload":{"type":"load_tree"}}) → "{\"records\": [{\"id\": \"fs_loader_1c3b4f\", \"handler_module\": \"fs_loader.tools\", \"parent_id\": \"web_97bdb9\", \"root\": \".fantas"
+7. `kernel_state_1c3b4f.load_tree`({"target_id":"kernel_state_1c3b4f","payload":{"type":"load_tree"}}) → "{\"records\": [{\"id\": \"kernel_state_1c3b4f\", \"handler_module\": \"kernel_state.tools\", \"parent_id\": \"web_97bdb9\", \"root\": \".fantas"
+8. `kernel_state_1c3b4f.persist_record`({"target_id":"kernel_state_1c3b4f","payload":{"type":"persist_record","record":{"id":"panel2","handler_module":"html_agent.ts","parent_id":"canvas","sentence":"Receiver panel — displays values pushed poi) → "{\"ok\": true}"
+9. `kernel_state_1c3b4f.persist_record`({"target_id":"kernel_state_1c3b4f","payload":{"type":"persist_record","record":{"id":"panel1","handler_module":"html_agent.ts","parent_id":"canvas","sentence":"Run panel — runs Python on each click, show) → "{\"ok\": true}"
+10. `kernel_state_1c3b4f.load_tree`({"target_id":"kernel_state_1c3b4f","payload":{"type":"load_tree"}}) → "{\"records\": [{\"id\": \"kernel_state_1c3b4f\", \"handler_module\": \"kernel_state.tools\", \"parent_id\": \"web_97bdb9\", \"root\": \".fantas"
 11. `python_runtime_8aabce.exec`({"target_id":"python_runtime_8aabce","payload":{"type":"exec","code":"import random;print(random.randint(1000,9999))"}}) → "{\"stdout\": \"6614\\n\", \"stderr\": \"\", \"exit_code\": 0, \"timed_out\": false}"
 
 **Final text:**
@@ -36,7 +36,7 @@ ollama agent: `anthropic_backend_f58abf` · python_runtime: `python_runtime_8aab
 > | `panel1` | `html_agent.ts` (frontend panel) | Has the **Run** button |
 > | `panel2` | `html_agent.ts` (frontend panel) | Receiver, shows the pushed value |
 > 
-> Both were `persist_record`ed into **`fs_loader_1c3b4f`** (alias `web_loader`, the frontend store) as children of the existing **`canvas`** root. The existing **`python_runtime_8aabce`** host agent does the computing — I didn't need to create it.
+> Both were `persist_record`ed into **`kernel_state_1c3b4f`** (alias `web_loader`, the frontend store) as children of the existing **`canvas`** root. The existing **`python_runtime_8aabce`** host agent does the computing — I didn't need to create it.
 > 
 > ## How they're wired
 > 
@@ -51,7 +51,7 @@ ollama agent: `anthropic_backend_f58abf` · python_runtime: `python_runtime_8aab
 - `panel1` [html_agent.ts]
 - `panel2` [html_agent.ts]
 
-Host tree ids: ["fs_loader","anthropic_backend_f58abf","llm_files","python_runtime_8aabce","web_97bdb9","fs_loader_1c3b4f","ts_dist","web_ws_99609a"]
+Host tree ids: ["kernel_state","anthropic_backend_f58abf","llm_files","python_runtime_8aabce","web_97bdb9","kernel_state_1c3b4f","ts_dist","web_ws_99609a"]
 
 ## Browser check
 - a panel with a button rendered: **true**

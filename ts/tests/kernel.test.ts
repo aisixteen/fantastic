@@ -7,15 +7,15 @@ import type { Json, Payload } from "../src/kernel/json.ts";
 
 function withRoot(): Kernel {
   const k = new Kernel();
-  k.setRoot(new Agent({ id: "fs_loader" }));
+  k.setRoot(new Agent({ id: "kernel_state" }));
   return k;
 }
 
 test("'kernel' alias resolves to the root agent", async () => {
   const k = withRoot();
   const viaAlias = (await k.send("kernel", { type: "reflect" })) as Payload;
-  const viaId = (await k.send("fs_loader", { type: "reflect" })) as Payload;
-  assert.equal(viaAlias["id"], "fs_loader");
+  const viaId = (await k.send("kernel_state", { type: "reflect" })) as Payload;
+  assert.equal(viaAlias["id"], "kernel_state");
   assert.deepEqual(viaAlias, viaId);
 });
 
@@ -23,7 +23,7 @@ test("a local view-agent dispatches its domain verb to its handler", async () =>
   const k = withRoot();
   k.registerBundle("echo.js", (_id, p) => ({ echoed: p["text"] ?? null }));
   k.register(
-    new Agent({ id: "e1", parentId: "fs_loader", handlerModule: "echo.js" }),
+    new Agent({ id: "e1", parentId: "kernel_state", handlerModule: "echo.js" }),
   );
   const r = (await k.send("e1", { type: "say", text: "hi" })) as Payload;
   assert.deepEqual(r, { echoed: "hi" });
@@ -36,7 +36,7 @@ test("reflect is kernel-native even for handler-bearing agents", async () => {
   k.register(
     new Agent({
       id: "v",
-      parentId: "fs_loader",
+      parentId: "kernel_state",
       handlerModule: "evil.js",
       sentence: "I am a view.",
     }),
@@ -48,7 +48,7 @@ test("reflect is kernel-native even for handler-bearing agents", async () => {
 
 test("bare local agent answers reflect but errors on a domain verb", async () => {
   const k = withRoot();
-  k.register(new Agent({ id: "bare", parentId: "fs_loader" }));
+  k.register(new Agent({ id: "bare", parentId: "kernel_state" }));
   const refl = (await k.send("bare", { type: "reflect" })) as Payload;
   assert.equal(refl["id"], "bare");
   const err = (await k.send("bare", { type: "frobnicate" })) as Payload;
@@ -82,7 +82,7 @@ test("unknown target with no bridge errors; with a bridge it forwards", async ()
 
 test("emit fans out to inbox listeners and watchers", async () => {
   const k = withRoot();
-  k.register(new Agent({ id: "src", parentId: "fs_loader" }));
+  k.register(new Agent({ id: "src", parentId: "kernel_state" }));
   const seenDirect: Payload[] = [];
   const seenWatcher: Payload[] = [];
   k.onInbox("src", (p) => seenDirect.push(p));

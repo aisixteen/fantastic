@@ -213,8 +213,8 @@ impl Bundle for OllamaBackendBundle {
 }
 
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_agent_id(agent_id, kernel).is_none() {
-        return json!({"error": "ollama_backend: file_agent_id required"});
+    if helpers::file_bridge_id(agent_id, kernel).is_none() {
+        return json!({"error": "ollama_backend: file_bridge_id required"});
     }
     let provider: Arc<dyn Provider> = Arc::new(OllamaProvider {
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
@@ -226,17 +226,17 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
     let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
-    let file_agent_id = helpers::meta_string(agent_id, kernel, "file_agent_id");
+    let file_bridge_id = helpers::meta_string(agent_id, kernel, "file_bridge_id");
     let generating = state::is_generating(agent_id);
     json!({
         "id": agent_id.as_str(),
         "sentence": "Ollama-backed LLM agent (native tool-calling).",
         "model": model,
         "endpoint": endpoint,
-        "file_agent_id": file_agent_id,
+        "file_bridge_id": file_bridge_id,
         "generating": generating,
         "verbs": {
-            "reflect": "Identity + model + endpoint + generating flag + file_agent_id binding. No args.",
+            "reflect": "Identity + model + endpoint + generating flag + file_bridge_id binding. No args.",
             "boot": "No-op. Returns null.",
             "shutdown": "Aborts any in-flight send and drops process-memory state. Returns {stopped:bool}.",
             "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Per-backend FIFO lock. Returns {response, final, client_id}.",

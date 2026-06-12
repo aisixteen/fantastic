@@ -36,9 +36,9 @@ live in the readme, not the reflect JSON.
 ### Test 2: persistence round-trip — merge-only
 
 ```bash
-$FANTASTIC core create_agent handler_module=file.tools id=foo root=/tmp/fk_root
+$FANTASTIC core create_agent handler_module=file_bridge.tools id=foo root=/tmp/fk_root
 test -f .fantastic/agents/foo/agent.json
-jq -e '.handler_module == "file.tools"' .fantastic/agents/foo/agent.json
+jq -e '.handler_module == "file_bridge.tools"' .fantastic/agents/foo/agent.json
 # Plant a custom field the kernel doesn't know:
 jq '. + {user_note: "preserve me"}' .fantastic/agents/foo/agent.json \
   > /tmp/foo.json && mv /tmp/foo.json .fantastic/agents/foo/agent.json
@@ -55,8 +55,8 @@ the kernel doesn't manage (the dirty-binding contract).
 ### Test 3: cascade delete removes subtree
 
 ```bash
-$FANTASTIC core create_agent handler_module=file.tools id=tmp_a
-$FANTASTIC tmp_a create_agent handler_module=file.tools id=tmp_b
+$FANTASTIC core create_agent handler_module=file_bridge.tools id=tmp_a
+$FANTASTIC tmp_a create_agent handler_module=file_bridge.tools id=tmp_b
 $FANTASTIC core delete_agent id=tmp_a
 test ! -e .fantastic/agents/tmp_a
 test ! -e .fantastic/agents/tmp_a/agents/tmp_b

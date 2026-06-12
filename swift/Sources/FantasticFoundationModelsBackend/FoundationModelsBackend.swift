@@ -137,14 +137,19 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             memoryAgents(agentId: agentId, kernel: kernel).compactMap {
                 kernel.agent($0)?.metaValue(forKey: "mode")?.asString
             })
+        // yaml_state persists THROUGH a file_bridge provider (no own disk
+        // surface). Discover the `.fantastic` store + wire `file_bridge_id` so
+        // the mounted memory persists. No store wired ⇒ field omitted (the
+        // memory is RAM-only and `set` failfasts — no silent fallback).
+        let storeId = kernel.findStore()?.value
         for mode in ["mem", "data"] where !have.contains(mode) {
-            _ = await kernel.send(
-                agentId,
-                .object([
-                    "type": .string("create_agent"),
-                    "handler_module": .string("yaml_state.tools"),
-                    "mode": .string(mode),
-                ]))
+            var rec: JSON = .object([
+                "type": .string("create_agent"),
+                "handler_module": .string("yaml_state.tools"),
+                "mode": .string(mode),
+            ])
+            if let storeId { rec["file_bridge_id"] = .string(storeId) }
+            _ = await kernel.send(agentId, rec)
         }
     }
 

@@ -337,7 +337,8 @@ public final class WebServer: @unchecked Sendable {
                 let hostId = params["host_id"]
             {
                 runWebSocketProxy(
-                    hostId: hostId, connection: connection, request: request, kernel: kernel)
+                    hostId: hostId, legId: spec.ownerId, connection: connection,
+                    request: request, kernel: kernel)
                 return
             }
             await write(
@@ -429,36 +430,35 @@ public final class WebServer: @unchecked Sendable {
                 body: (reply["error"].asString ?? "no render_html reply")
                     .data(using: .utf8) ?? Data())
         }
-        // `GET /<id>/file/<path>` → read verb
+        // `GET /<id>/file/<path>` → pipe the agent's `read_stream` SOURCE (raw
+        // bytes, chunked; gated by the served agent's OWN leg — a sealed
+        // file_bridge denies → 404). Mirrors py/rust's read_stream octet route;
+        // no whole-file `read`/`image_base64` fallback.
         if request.method == "GET",
             request.path.hasPrefix("/\(firstSeg)/file/")
         {
             let filePath = String(
                 request.path.dropFirst("/\(firstSeg)/file/".count))
-            let reply = await kernel.send(
-                agentTarget,
-                .object([
-                    "type": .string("read"),
-                    "path": .string(filePath),
-                ]))
-            if let content = reply["content"].asString {
-                return HTTPResponse(
-                    status: 200,
-                    contentType: guessMime(path: filePath),
-                    body: content.data(using: .utf8) ?? Data())
-            }
-            if let b64 = reply["image_base64"].asString,
-                let bytes = Data(base64Encoded: b64)
-            {
-                return HTTPResponse(
-                    status: 200,
-                    contentType: reply["mime"].asString ?? "application/octet-stream",
-                    body: bytes)
+            var buf = Data()
+            var offset = 0
+            while true {
+                let (meta, body) = await kernel.sendWithBinary(
+                    agentTarget,
+                    .object([
+                        "type": .string("read_stream"), "path": .string(filePath),
+                        "offset": .integer(Int64(offset)), "length": .integer(262144),
+                    ]), Data())
+                if let err = meta["error"].asString {
+                    return HTTPResponse(
+                        status: 404, contentType: "text/plain",
+                        body: err.data(using: .utf8) ?? Data())
+                }
+                buf.append(body)
+                offset = Int(meta["next_offset"].asInt ?? Int64(offset))
+                if meta["eof"].asBool ?? true { break }
             }
             return HTTPResponse(
-                status: 404, contentType: "text/plain",
-                body: (reply["error"].asString ?? "no content").data(using: .utf8)
-                    ?? Data())
+                status: 200, contentType: guessMime(path: filePath), body: buf)
         }
         // POST/REST surfaces are no longer served by the host — they
         // live in the `web_rest` child (parity with Python). An

@@ -81,10 +81,10 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
             "detail": {
                 "tool": {
                     "call_id": "c1",
-                    "target": "fs_loader",
+                    "target": "kernel_state",
                     "verb": "list_agents",
                     "args": {
-                        "target_id": "fs_loader",
+                        "target_id": "kernel_state",
                         "payload": {"type": "list_agents"},
                     },
                 },
@@ -100,10 +100,10 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
             "detail": {
                 "tool": {
                     "call_id": "c1",
-                    "target": "fs_loader",
+                    "target": "kernel_state",
                     "verb": "list_agents",
                     "args": {},
-                    "reply_preview": '{"agents":[{"id":"fs_loader"}]}',
+                    "reply_preview": '{"agents":[{"id":"kernel_state"}]}',
                 },
             },
         },
@@ -114,8 +114,8 @@ async def test_status_handler_renders_phase_markers(seeded_kernel, capsys):
     assert "queued (2 ahead)" in lines[0]
     assert "thinking" in lines[1]
     assert "rate-limited" in lines[2] and "5s" in lines[2]
-    assert "→ list_agents(fs_loader)" in lines[3]
-    assert "← list_agents(fs_loader)" in lines[4]
+    assert "→ list_agents(kernel_state)" in lines[3]
+    assert "← list_agents(kernel_state)" in lines[4]
 
 
 async def test_status_streaming_and_done_are_silent(seeded_kernel, capsys):
@@ -140,7 +140,7 @@ async def test_intro_booting_prints_control_plane_map(seeded_kernel, capsys):
     assert "PULL" in out and "PUSH" in out and "REACH" in out
     assert "reflect readme=true" in out
     # identity line carries deployment context + the root id + this pid
-    assert "python" in out and "env=" in out and "root=fs_loader" in out
+    assert "python" in out and "env=" in out and "root=kernel_state" in out
 
 
 async def test_booted_is_a_dumb_sink_no_tree_inspection(seeded_kernel, capsys):

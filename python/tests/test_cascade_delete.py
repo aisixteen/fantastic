@@ -6,7 +6,7 @@ every descendant (deepest first) BEFORE removing records. Any
 `{locked, blocked_by, error}` and zero state mutations. By the time
 delete returns, every descendant is gone from `ctx.agents` and the
 parent's `_children`. Disk cleanup (rmtree) is the loader's job, driven
-by the `removed` state event — covered in the fs_loader tests.
+by the `removed` state event — covered in the kernel_state tests.
 """
 
 from __future__ import annotations
@@ -15,13 +15,13 @@ from __future__ import annotations
 async def test_cascade_walks_deepest_first(seeded_kernel):
     """Three-level pyramid: delete root of subtree → all descendants
     removed; ctx.agents and disk both reflect the cascade."""
-    seeded_kernel.create("file.tools", id="P")
-    seeded_kernel.create("file.tools", id="C", display_name="child")
+    seeded_kernel.create("file_bridge.tools", id="P")
+    seeded_kernel.create("file_bridge.tools", id="C", display_name="child")
     # Children-of-children: simulate a nested tree by spawning under
     # the parent agent (P) rather than under root.
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file.tools", id="GC1")
-    p_agent.create("file.tools", id="GC2")
+    p_agent.create("file_bridge.tools", id="GC1")
+    p_agent.create("file_bridge.tools", id="GC2")
     assert {"P", "GC1", "GC2"}.issubset(seeded_kernel.ctx.agents.keys())
 
     r = await seeded_kernel.delete("P")
@@ -36,10 +36,10 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
     """delete_lock on a deep descendant blocks the cascade. Response
     carries `locked:true, blocked_by:<id>, error:...`. NO mutations
     happen — the entire subtree is intact."""
-    seeded_kernel.create("file.tools", id="P")
+    seeded_kernel.create("file_bridge.tools", id="P")
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file.tools", id="LOCKED", delete_lock=True)
-    p_agent.create("file.tools", id="OK")
+    p_agent.create("file_bridge.tools", id="LOCKED", delete_lock=True)
+    p_agent.create("file_bridge.tools", id="OK")
     r = await seeded_kernel.delete("P")
     assert r["locked"] is True
     assert r["blocked_by"] == "LOCKED"
@@ -51,9 +51,9 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
 
 async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
     """Clear the lock via update_agent; cascade proceeds."""
-    seeded_kernel.create("file.tools", id="P")
+    seeded_kernel.create("file_bridge.tools", id="P")
     p_agent = seeded_kernel.ctx.agents["P"]
-    p_agent.create("file.tools", id="L", delete_lock=True)
+    p_agent.create("file_bridge.tools", id="L", delete_lock=True)
     blocked = await seeded_kernel.delete("P")
     assert blocked["locked"] is True
     seeded_kernel.update("L", delete_lock=False)
@@ -66,7 +66,7 @@ async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
 async def test_cascade_emits_agent_deleted(seeded_kernel):
     """The `delete_agent` verb on root emits `agent_deleted` after the
     cascade returns successfully — NOT for the silent system call."""
-    seeded_kernel.create("file.tools", id="X")
+    seeded_kernel.create("file_bridge.tools", id="X")
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(events.append)
     await seeded_kernel.send(seeded_kernel.id, {"type": "delete_agent", "id": "X"})
@@ -90,7 +90,7 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
     (kills PTY in real life), then both records vanish."""
     parent = await seeded_kernel.send(
         seeded_kernel.id,
-        {"type": "create_agent", "handler_module": "file.tools"},
+        {"type": "create_agent", "handler_module": "file_bridge.tools"},
     )
     parent_id = parent["id"]
     backend = await seeded_kernel.send(

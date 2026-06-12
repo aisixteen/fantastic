@@ -20,6 +20,17 @@ struct FmMemoryInjectTests {
         return u
     }
 
+    /// Wire the `.fantastic` store so the self-mounted memory agents discover a
+    /// provider (`findStore`) and persist through it (no own disk surface).
+    private func wireStore(_ kernel: Kernel) async {
+        _ = await kernel.send(
+            "core",
+            [
+                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+                "root": ".fantastic", "ingress_rule": "allow_all",
+            ])
+    }
+
     private func mkBackend(_ kernel: Kernel) async -> AgentId {
         let rec = await kernel.send(
             "core",
@@ -31,6 +42,7 @@ struct FmMemoryInjectTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let fmId = await mkBackend(kernel)
         _ = await kernel.send(fmId, ["type": "boot"])
 
@@ -49,6 +61,7 @@ struct FmMemoryInjectTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let fmId = await mkBackend(kernel)
         _ = await kernel.send(fmId, ["type": "boot"])
 

@@ -1,2 +1,2 @@
 # web_rest — HTTP verb channel (diagnostic)
-Child of a web agent. `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON. Address-bar-friendly GET shortcuts: `GET /<self_id>/_reflect[/<target>][?readme=1]`. Multiple instances coexist.
+Child of a web agent. `POST /<self_id>/<target_id>` body=payload → kernel.send → JSON. Address-bar-friendly GET shortcuts: `GET /<self_id>/_reflect[/<target>][?readme=1]`. Multiple instances coexist. **Sealed by default** — a bare leg replies `403 {reason:"unauthorized"}`; open it with `update_agent <id> ingress_rule=allow_all` (or `password`). The credential rides the `X-Fantastic-Auth` header.

@@ -4,9 +4,9 @@ import { WsBridge } from "./transport/bridge.ts";
 import type { Payload } from "./kernel/json.ts";
 
 // Starter entry — NO canvas. Proves the frontend kernel + bridge boot in the
-// browser and federate to the live host: dial /fs_loader/ws, reflect the kernel,
+// browser and federate to the live host: dial /kernel_state/ws, reflect the kernel,
 // render the live agent tree. Served via the web/http alias method (an
-// html_agent renders the mount page; a file agent serves this dist/) — no new
+// html_agent renders the mount page; a file_bridge agent serves this dist/) — no new
 // host routes. The canvas view-agent layers on once this shape is approved.
 
 const CSS = `
@@ -62,7 +62,7 @@ document.body.innerHTML =
 
 const kernel = new Kernel();
 kernel.setRoot(new Agent({ id: "frontend", sentence: "TS frontend kernel (starter)." }));
-const bridge = new WsBridge(kernel, { origin, controlEndpoint: "fs_loader" });
+const bridge = new WsBridge(kernel, { origin, controlEndpoint: "kernel_state" });
 
 try {
   const reply = (await kernel.send("kernel", {

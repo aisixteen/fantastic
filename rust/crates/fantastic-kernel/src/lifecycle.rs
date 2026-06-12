@@ -44,7 +44,7 @@ pub fn mint_id(handler_module: &str) -> String {
 ///
 /// `payload` shape (matches the workdir wire format):
 /// ```json
-/// {"type":"create_agent","handler_module":"file.tools","id":"opt"}
+/// {"type":"create_agent","handler_module":"file_bridge.tools","id":"opt"}
 /// ```
 /// Any extra fields become the new agent's meta.
 pub(crate) async fn create_from_payload(
@@ -93,25 +93,26 @@ pub(crate) async fn create_from_payload(
         root_path,
         false,
     );
-    // Persist + seed readme (the bundle ships its readme via the
-    // `Bundle::readme()` method; we read it from the registry).
-    // Both calls are no-ops in InMemory mode; in Disk mode they
-    // create the per-agent dir and merge fields into agent.json
-    // (never wholesale overwrite — see `persistence::persist` docs).
-    if let Err(e) = persistence::persist(&new_agent, &kernel.storage) {
-        return json!({ "error": format!("persist: {e}") });
-    }
-    if let Some(bundle) = kernel.bundles.get(hm) {
-        if let Some(readme) = bundle.readme() {
-            let _ = persistence::seed_readme(&new_agent, readme, &kernel.storage);
-        }
-    }
-
-    // Wire into kernel + parent.
+    // Wire into kernel + parent FIRST, then persist. Order matters now that
+    // persistence routes THROUGH a discovered `file_bridge` provider (a child of
+    // root): a freshly-created store must already be a registered child so it can
+    // persist its OWN record through itself (find_store sees it). No-ops in
+    // InMemory mode or when no provider is wired (RAM — see `persistence::persist`).
     let _rx = kernel.register(Arc::clone(&new_agent));
     parent
         .children
         .insert(new_agent.id.clone(), Arc::clone(&new_agent));
+
+    // Persist + seed readme (the bundle ships its readme via `Bundle::readme()`).
+    // Both go through the provider's stream verbs; merge-not-overwrite.
+    if let Err(e) = persistence::persist(kernel, &new_agent).await {
+        return json!({ "error": format!("persist: {e}") });
+    }
+    if let Some(bundle) = kernel.bundles.get(hm) {
+        if let Some(readme) = bundle.readme() {
+            let _ = persistence::seed_readme(kernel, &new_agent, readme).await;
+        }
+    }
 
     let event = json!({
         "type": "created",
@@ -243,12 +244,10 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
     }
     // Unregister + drop inbox.
     kernel.unregister(&target.id);
-    // Disk cleanup. Removes the agent's own dir (its agent.json +
-    // any sidecars bundles wrote there). InMemory mode never has
-    // on-disk sidecars; skip entirely.
-    if kernel.storage.is_disk() && !target.ephemeral && target.root_path.exists() {
-        let _ = std::fs::remove_dir_all(&target.root_path);
-    }
+    // Disk cleanup THROUGH the discovered provider (its recursive `delete`
+    // verb) — the substrate owns no `fs` surface here. No-op without a wired
+    // provider or in InMemory mode (the dir, if any, was never ours to remove).
+    let _ = persistence::forget(kernel, target).await;
     let event = json!({ "type": "removed", "id": target.id.0 });
     kernel.publish_state(&event);
 }

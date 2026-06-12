@@ -10,7 +10,7 @@ import type { Envelope } from "../src/transport/frame.ts";
 // ─── frame codec ──────────────────────────────────────────────────────────
 
 test("frame codec round-trips a text frame", () => {
-  const env = { type: "call", target: "fs_loader", payload: { type: "reflect" }, id: "1" };
+  const env = { type: "call", target: "kernel_state", payload: { type: "reflect" }, id: "1" };
   const enc = encodeFrame(env);
   assert.equal(enc.binary, false);
   assert.deepEqual(decodeFrame(enc.data), env);
@@ -97,7 +97,7 @@ async function until(fn: () => boolean, ms = 1000): Promise<void> {
 
 function kernelWithRoot(): Kernel {
   const k = new Kernel();
-  k.setRoot(new Agent({ id: "fs_loader" }));
+  k.setRoot(new Agent({ id: "kernel_state" }));
   return k;
 }
 
@@ -108,13 +108,13 @@ test("forward sends a call on the control socket and resolves the reply by id", 
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
     origin: "ws://host",
-    controlEndpoint: "fs_loader",
+    controlEndpoint: "kernel_state",
     makeSocket: fk.factory,
   });
 
   const p = bridge.forward("file_x", { type: "list", path: "." });
-  await until(() => (fk.forEndpoint("fs_loader")[0]?.lastCall() ?? undefined) !== undefined);
-  const sock = fk.forEndpoint("fs_loader")[0]!;
+  await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
   const call = sock.lastCall()!;
   assert.equal(call["target"], "file_x");
   assert.deepEqual(call["payload"], { type: "list", path: "." });
@@ -129,12 +129,12 @@ test("an error frame rejects the matching call", async () => {
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
     origin: "ws://host",
-    controlEndpoint: "fs_loader",
+    controlEndpoint: "kernel_state",
     makeSocket: fk.factory,
   });
-  const p = bridge.forward("fs_loader", { type: "nope" });
-  await until(() => (fk.forEndpoint("fs_loader")[0]?.lastCall() ?? undefined) !== undefined);
-  const sock = fk.forEndpoint("fs_loader")[0]!;
+  const p = bridge.forward("kernel_state", { type: "nope" });
+  await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+  const sock = fk.forEndpoint("kernel_state")[0]!;
   sock.deliver({ type: "error", id: sock.lastCall()!["id"], error: "boom" });
   await assert.rejects(p, /boom/);
   bridge.close();
@@ -145,7 +145,7 @@ test("watchRemote dials /<src>/ws; its events route to emit(src) only", async ()
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
     origin: "ws://host",
-    controlEndpoint: "fs_loader",
+    controlEndpoint: "kernel_state",
     makeSocket: fk.factory,
   });
 
@@ -154,8 +154,8 @@ test("watchRemote dials /<src>/ws; its events route to emit(src) only", async ()
   k.onInbox("pty1", (pl) => pty1.push(pl));
   k.onInbox("pty2", (pl) => pty2.push(pl));
   // a local view-agent watches each backend
-  k.register(new Agent({ id: "view1", parentId: "fs_loader" }));
-  k.register(new Agent({ id: "view2", parentId: "fs_loader" }));
+  k.register(new Agent({ id: "view1", parentId: "kernel_state" }));
+  k.register(new Agent({ id: "view2", parentId: "kernel_state" }));
   k.onInbox("view1", (pl) => pty1.push(pl));
   k.onInbox("view2", (pl) => pty2.push(pl));
   k.watch("pty1", "view1"); // remote → bridge.watchRemote("pty1")
@@ -179,13 +179,13 @@ test("a pending call rejects when its socket drops", async () => {
   const k = kernelWithRoot();
   const bridge = new WsBridge(k, {
     origin: "ws://host",
-    controlEndpoint: "fs_loader",
+    controlEndpoint: "kernel_state",
     makeSocket: fk.factory,
     maxReconnectDelay: 5,
   });
-  const p = bridge.forward("fs_loader", { type: "slow" });
-  await until(() => (fk.forEndpoint("fs_loader")[0]?.lastCall() ?? undefined) !== undefined);
-  fk.forEndpoint("fs_loader")[0]!.drop();
+  const p = bridge.forward("kernel_state", { type: "slow" });
+  await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+  fk.forEndpoint("kernel_state")[0]!.drop();
   await assert.rejects(p, /disconnected/);
   bridge.close();
 });

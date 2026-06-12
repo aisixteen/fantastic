@@ -13,7 +13,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR, writeServedDist } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -146,8 +146,9 @@ before(async () => {
       }),
     );
     // write the canvas mount page used by the browser check
-    writeFileSync(
-      join(DIST_DIR, "_test_canvas.html"),
+    writeServedDist(
+      host,
+      "_test_canvas.html",
       `<!doctype html><html><head><meta charset="utf-8"><title>fantastic·canvas</title>
 <link rel="stylesheet" href="/ts_dist/file/vendor/xterm.css">
 <script type="importmap">{ "imports": {
@@ -258,12 +259,12 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
     log(`\n(web_loader load_tree failed: ${(e as Error).message})`);
   }
   try {
-    hostTree = await wsCall(h.origin, "fs_loader", { type: "reflect", tree: "ids", bundles: "none" });
+    hostTree = await wsCall(h.origin, "kernel_state", { type: "reflect", tree: "ids", bundles: "none" });
   } catch {
     /* ignore */
   }
   const webRecords = ((webTree as { records?: { id?: string; handler_module?: string }[] })?.records ?? []).filter(
-    (r) => r.handler_module && r.handler_module !== "fs_loader.tools",
+    (r) => r.handler_module && r.handler_module !== "kernel_state.tools",
   );
   log(`\n## Resulting frontend tree (.fantastic/web)`);
   log(webRecords.length ? webRecords.map((r) => `- \`${r.id}\` [${r.handler_module}]`).join("\n") : "- (empty — no frontend agents created)");

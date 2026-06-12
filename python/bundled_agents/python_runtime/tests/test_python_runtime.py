@@ -9,7 +9,7 @@ import time
 
 async def _make(kernel, **meta):
     rec = await kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "python_runtime.tools", **meta},
     )
     return rec["id"]

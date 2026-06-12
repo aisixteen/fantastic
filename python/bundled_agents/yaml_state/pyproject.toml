@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Fantastic yaml_state agent — durable YAML key-value memory agent (mem/data)."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
+# No file_bridge IMPORT — persistence routes through a file_bridge AGENT at runtime
+# (referenced by `file_bridge_id`, opened on demand), like scheduler / ai_core.
 dependencies = ["pyyaml>=6"]
 
 [project.entry-points."fantastic.bundles"]

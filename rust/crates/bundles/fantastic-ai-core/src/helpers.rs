@@ -22,8 +22,8 @@ pub fn meta_string_or(agent_id: &AgentId, kernel: &Kernel, key: &str, default: &
 }
 
 /// The bound file agent id, if any.
-pub fn file_agent_id(self_id: &AgentId, kernel: &Kernel) -> Option<String> {
-    meta_string(self_id, kernel, "file_agent_id")
+pub fn file_bridge_id(self_id: &AgentId, kernel: &Kernel) -> Option<String> {
+    meta_string(self_id, kernel, "file_bridge_id")
 }
 
 /// Trim + sanitise a client id so it's safe as a filename suffix.
@@ -55,17 +55,16 @@ pub fn safe_client(client_id: &str) -> String {
 
 /// Per-client chat thread path under the agent's dir.
 pub fn chat_path(self_id: &AgentId, client_id: &str) -> String {
-    format!(
-        ".fantastic/agents/{}/chat_{}.json",
-        self_id,
-        safe_client(client_id)
-    )
+    // STORE-RELATIVE (`agents/<id>/…`): wire `file_bridge_id` to the `.fantastic`
+    // store so the sidecar lands next to the agent's own agent.json (one store,
+    // no `.fantastic/.fantastic/…` double-nest). Matches Python.
+    format!("agents/{}/chat_{}.json", self_id, safe_client(client_id))
 }
 
 /// Read a file via the bound file agent. `None` if no file agent or the
 /// reply carries no `content`.
 pub async fn file_read(self_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> Option<String> {
-    let fid = file_agent_id(self_id, kernel)?;
+    let fid = file_bridge_id(self_id, kernel)?;
     let reply = kernel
         .send(
             &AgentId::from(fid.as_str()),
@@ -85,7 +84,7 @@ pub async fn file_write(
     path: &str,
     content: &str,
 ) -> Result<(), String> {
-    let fid = file_agent_id(self_id, kernel).ok_or_else(|| "file_agent_id unset".to_string())?;
+    let fid = file_bridge_id(self_id, kernel).ok_or_else(|| "file_bridge_id unset".to_string())?;
     let reply = kernel
         .send(
             &AgentId::from(fid.as_str()),
@@ -100,7 +99,7 @@ pub async fn file_write(
 
 /// Delete a file via the bound file agent. Returns the `deleted` flag.
 pub async fn file_delete(self_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> bool {
-    let Some(fid) = file_agent_id(self_id, kernel) else {
+    let Some(fid) = file_bridge_id(self_id, kernel) else {
         return false;
     };
     let reply = kernel

@@ -68,10 +68,29 @@ preferences, decisions); `data` = current state (UI, hyperparams,
 selection). For an LLM agent, the memory agents mounted under it are
 auto-loaded into its context on boot — you do not fetch memory, it is
 already present; you only `set` what's worth keeping, under a descriptive
-namespaced key (`user.name`, `decision.db`). Mount one with `create_agent
-handler_module=yaml_state.tools mode=mem|data`; `reflect readme=true` on
-it for the verb guide (read / keys / set / delete / replace /
-state_yaml).
+namespaced key (`user.name`, `decision.db`).
+
+**Persistence is wired, not automatic.** The tree lives in RAM until the
+root has somewhere to write: it auto-persists records (and every agent's
+sidecars) ONLY through a `file_bridge` provider it DISCOVERS — the first
+`file_bridge` child of the root whose `root` resolves to `.fantastic`. NO
+provider ⇒ no persistence, lost on exit; there is no direct-write
+fallback. So wire the store FIRST, before anything worth keeping:
+
+    create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all
+
+The `file_bridge` edge is SEALED by default — `ingress_rule=allow_all`
+opens it; `reflect` then shows `persistence: {provider: "store"}`. A
+`yaml_state` agent owns NO disk of its own: it persists `state.yaml`
+THROUGH the file_bridge named by its `file_bridge_id` meta, so mount it
+BOUND to the store — `create_agent handler_module=yaml_state.tools
+mode=mem|data file_bridge_id=store`. Until that's wired, `set` / `delete`
+/ `replace` FAILFAST (`file_bridge_id required`) rather than silently
+dropping to RAM. One store serves both the root's records AND every
+agent's sidecar: the sidecar lands at `agents/<id>/state.yaml`, next to
+that agent's own `agent.json` (store-relative — no `.fantastic/.fantastic/…`
+nesting). `reflect readme=true` on the agent for its verb guide (read /
+keys / set / delete / replace / state_yaml).
 
 ## Transports — every way to talk to this kernel
 

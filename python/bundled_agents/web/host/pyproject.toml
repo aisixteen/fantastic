@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Fantastic web transport — uvicorn HTTP+WS proxy serving agent UIs."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
+# web does NO direct disk IO — `/` is the agent index, `/file/` proxies to gated
+# file_bridge AGENTS over the bus, and its own assets are importlib package resources.
 dependencies = ["fastapi", "uvicorn", "websockets>=12,<17"]
 
 [project.entry-points."fantastic.bundles"]

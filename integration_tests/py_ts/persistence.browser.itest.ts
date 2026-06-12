@@ -1,4 +1,4 @@
-// Integration: save/load across a REAL daemon restart. The host fs_loader unit tests
+// Integration: save/load across a REAL daemon restart. The host kernel_state unit tests
 // cover host-side persist→reboot→rehydrate; this proves the FULL stack — the frontend
 // store (web_loader) + a RUNTIME-persisted record + the browser re-hydration — all
 // survive killing and re-spawning the daemon process.
@@ -14,7 +14,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, restartHost, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, restartHost, DIST_DIR, writeServedDist } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -63,7 +63,7 @@ test("persistence: seeded + runtime-persisted records survive a daemon restart",
   try {
     host = await bootHost(8931, { webLoader: true, serveDist: true });
     seed(host.tmp);
-    writeFileSync(MOUNT_FILE, MOUNT_HTML);
+    writeServedDist(host, "_persist_canvas.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
 
     // first boot: p1 renders + its script persists p2 to the host web_loader

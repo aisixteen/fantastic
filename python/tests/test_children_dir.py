@@ -11,13 +11,13 @@ wires.
 from __future__ import annotations
 
 from _testkit import persist
-from fs_loader.tools import read_tree, write_record
+from kernel_state.tools import read_tree, write_record
 from kernel import Kernel
 
 
 def test_default_children_dir_is_agents(kernel):
     assert kernel.ctx.children_dir == "agents"
-    kernel.create("file.tools", id="x")
+    kernel.create("file_bridge.tools", id="x")
     p = kernel.ctx.agents["x"]._root_path
     assert p.name == "x" and p.parent.name == "agents"
 
@@ -29,8 +29,8 @@ def test_custom_children_dir_round_trips(tmp_path, monkeypatch):
     write_record(
         root_dir,
         {
-            "id": "fs_loader",
-            "handler_module": "fs_loader.tools",
+            "id": "kernel_state",
+            "handler_module": "kernel_state.tools",
             "children_dir": "host_agents",
         },
     )
@@ -40,7 +40,7 @@ def test_custom_children_dir_round_trips(tmp_path, monkeypatch):
     assert k.children_dir == "host_agents"
 
     # a child nests under host_agents/, not agents/
-    k.create("file.tools", id="f1", x=7)
+    k.create("file_bridge.tools", id="f1", x=7)
     persist(k.root)
     assert (root_dir / "host_agents" / "f1" / "agent.json").exists()
     assert not (root_dir / "agents").exists()

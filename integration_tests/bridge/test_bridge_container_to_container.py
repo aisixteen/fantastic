@@ -2,7 +2,7 @@
 model, with NO shared / user-defined network.
 
 Two kernel CONTAINERS (A = client, B = server), each PUBLISHED on the host
-(`-p port:port`, all interfaces). A's `kernel_bridge` dials B through the
+(`-p port:port`, all interfaces). A's `ws_bridge` dials B through the
 built-in host-gateway name `host.containers.internal:<port_b>` — the host
 forwards that to B's published port. This proves container↔container bridging
 works over plain published ports, exactly the way you'd reach a container on

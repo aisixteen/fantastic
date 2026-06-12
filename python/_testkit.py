@@ -4,7 +4,7 @@
 state stream + a debounced flush. For deterministic tests we expose:
 
   - `boot_root()` — production-style bootstrap in the cwd: read the
-    `.fantastic` tree (or seed a fresh `fs_loader` root, `id="fs_loader"`),
+    `.fantastic` tree (or seed a fresh `kernel_state` root, `id="kernel_state"`),
     rebuild it in memory, materialize the root's agent.json + readme.
     Returns the root Agent. Does NOT start the flush loop, so the
     ~480 logic tests stay pure in-memory (no background task, no
@@ -22,13 +22,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fs_loader.tools import read_tree, write_record
+from kernel_state.tools import read_tree, write_record
 
 from kernel import Kernel
 
 
 def boot_root(*, compose_cli: bool = False):
-    """Bootstrap a root `fs_loader` agent in the cwd, like `main._bootstrap`.
+    """Bootstrap a root `kernel_state` agent in the cwd, like `main._bootstrap`.
 
     Reads an existing `.fantastic` tree if present (reboot), else seeds a
     fresh root. Returns the root Agent. The flush loop is NOT started —
@@ -37,7 +37,7 @@ def boot_root(*, compose_cli: bool = False):
     root_dir = Path(".fantastic")
     records = read_tree(root_dir)
     if not records:
-        records = [{"id": "fs_loader", "handler_module": "fs_loader.tools"}]
+        records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}]
     k.load(records, root_path=root_dir)
     write_record(k.root._root_path, k.root.record)  # root agent.json + readme
     if compose_cli:

@@ -3,39 +3,39 @@
 from __future__ import annotations
 
 
-async def _make_scheduler(kernel, file_agent_id):
+async def _make_scheduler(kernel, file_bridge_id):
     rec = await kernel.send(
-        "fs_loader",
+        "kernel_state",
         {
             "type": "create_agent",
             "handler_module": "scheduler.tools",
-            "file_agent_id": file_agent_id,
+            "file_bridge_id": file_bridge_id,
         },
     )
     return rec["id"]
 
 
-async def test_reflect_includes_file_agent_id(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_reflect_includes_file_bridge_id(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(sid, {"type": "reflect"})
-    assert r["file_agent_id"] == file_agent
+    assert r["file_bridge_id"] == store_agent
     assert "schedule" in r["verbs"]
 
 
-async def test_boot_requires_file_agent_id(seeded_kernel):
+async def test_boot_requires_file_bridge_id(seeded_kernel):
     rec = await seeded_kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "scheduler.tools"},
     )
-    # boot was auto-called by fs_loader; explicit reboot should still fail
+    # boot was auto-called by kernel_state; explicit reboot should still fail
     r = await seeded_kernel.send(rec["id"], {"type": "boot"})
     assert "error" in r
-    assert "file_agent_id" in r["error"]
+    assert "file_bridge_id" in r["error"]
 
 
-async def test_schedule_requires_file_agent_id(seeded_kernel):
+async def test_schedule_requires_file_bridge_id(seeded_kernel):
     rec = await seeded_kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "scheduler.tools"},
     )
     r = await seeded_kernel.send(
@@ -48,11 +48,11 @@ async def test_schedule_requires_file_agent_id(seeded_kernel):
         },
     )
     assert "error" in r
-    assert "file_agent_id" in r["error"]
+    assert "file_bridge_id" in r["error"]
 
 
-async def test_schedule_persists_via_file_agent(seeded_kernel, file_agent, tmp_path):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_schedule_persists_via_file_bridge(seeded_kernel, store_agent, tmp_path):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -69,8 +69,8 @@ async def test_schedule_persists_via_file_agent(seeded_kernel, file_agent, tmp_p
     assert r["schedule_id"] in persisted
 
 
-async def test_schedule_validation(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_schedule_validation(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     no_target = await seeded_kernel.send(
         sid,
         {"type": "schedule", "payload": {"type": "x"}, "interval_seconds": 5},
@@ -83,8 +83,8 @@ async def test_schedule_validation(seeded_kernel, file_agent):
     assert "error" in no_payload_type
 
 
-async def test_unschedule(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_unschedule(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -99,8 +99,8 @@ async def test_unschedule(seeded_kernel, file_agent):
     assert out["removed"] is True
 
 
-async def test_list(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_list(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     await seeded_kernel.send(
         sid,
         {
@@ -114,8 +114,8 @@ async def test_list(seeded_kernel, file_agent):
     assert len(r["schedules"]) == 1
 
 
-async def test_pause_resume_one(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_pause_resume_one(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -132,8 +132,8 @@ async def test_pause_resume_one(seeded_kernel, file_agent):
     assert r["resumed"] is True
 
 
-async def test_tick_now_fires(seeded_kernel, file_agent, tmp_path):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -152,8 +152,8 @@ async def test_tick_now_fires(seeded_kernel, file_agent, tmp_path):
     assert "schedule_fired" in hist_path.read_text()
 
 
-async def test_history(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_history(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -169,8 +169,8 @@ async def test_history(seeded_kernel, file_agent):
     assert h["count"] >= 1
 
 
-async def test_fire_emits_to_target_inbox(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         sid,
         {
@@ -192,7 +192,7 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, file_agent):
     assert "say" in types
 
 
-async def test_unknown_verb_errors(seeded_kernel, file_agent):
-    sid = await _make_scheduler(seeded_kernel, file_agent)
+async def test_unknown_verb_errors(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel, store_agent)
     r = await seeded_kernel.send(sid, {"type": "garbage"})
     assert "error" in r

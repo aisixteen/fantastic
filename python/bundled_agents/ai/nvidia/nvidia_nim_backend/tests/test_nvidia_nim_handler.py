@@ -1,5 +1,5 @@
-"""nvidia_nim_backend handler — verb dispatching, file_agent_id + api_key
-failfast, multi-step _run, key sidecar via file_agent_id, rate-limit retry.
+"""nvidia_nim_backend handler — verb dispatching, file_bridge_id + api_key
+failfast, multi-step _run, key sidecar via file_bridge_id, rate-limit retry.
 
 Mirror of ollama_backend's test_handler.py with the provider stubbed
 out and the new api_key surface (set_api_key, clear_api_key,
@@ -30,18 +30,18 @@ class _FakeProvider:
             yield x
 
 
-async def _make_nvidia(kernel, file_agent_id=None, with_key: str | None = None):
+async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None):
     meta = {"handler_module": "nvidia_nim_backend.tools"}
-    if file_agent_id is not None:
-        meta["file_agent_id"] = file_agent_id
-    rec = await kernel.send("fs_loader", {"type": "create_agent", **meta})
+    if file_bridge_id is not None:
+        meta["file_bridge_id"] = file_bridge_id
+    rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
     nid = rec["id"]
-    if with_key and file_agent_id is not None:
+    if with_key and file_bridge_id is not None:
         await kernel.send(
-            file_agent_id,
+            file_bridge_id,
             {
                 "type": "write",
-                "path": f".fantastic/agents/{nid}/api_key",
+                "path": f"agents/{nid}/api_key",
                 "content": with_key,
             },
         )
@@ -51,18 +51,20 @@ async def _make_nvidia(kernel, file_agent_id=None, with_key: str | None = None):
 # ─── reflect / failfast ────────────────────────────────────────
 
 
-async def test_reflect_includes_file_agent_id_and_no_history(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_reflect_includes_file_bridge_id_and_no_history(
+    seeded_kernel, store_agent
+):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "reflect"})
-    assert r["file_agent_id"] == file_agent
+    assert r["file_bridge_id"] == store_agent
     assert "send" in r["verbs"]
     assert "set_api_key" in r["verbs"]
     assert "clear_api_key" in r["verbs"]
 
 
-async def test_reflect_has_api_key_flips_after_set(seeded_kernel, file_agent):
+async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
     """has_api_key reports the boolean — never the key value itself."""
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r0 = await seeded_kernel.send(nid, {"type": "reflect"})
     assert r0["has_api_key"] is False
     blob0 = json.dumps(r0)
@@ -78,29 +80,29 @@ async def test_reflect_has_api_key_flips_after_set(seeded_kernel, file_agent):
     assert "nvapi-secret" not in blob1
 
 
-async def test_send_requires_file_agent_id(seeded_kernel):
+async def test_send_requires_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
     r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
     assert "error" in r
-    assert "file_agent_id" in r["error"]
+    assert "file_bridge_id" in r["error"]
 
 
-async def test_send_requires_api_key(seeded_kernel, file_agent):
+async def test_send_requires_api_key(seeded_kernel, store_agent):
     """No api_key sidecar → send failfasts before touching the network."""
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
     assert "error" in r
     assert "api_key" in r["error"]
 
 
-async def test_history_requires_file_agent_id(seeded_kernel):
+async def test_history_requires_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
     r = await seeded_kernel.send(nid, {"type": "history"})
     assert "error" in r
 
 
-async def test_unknown_verb_errors(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_unknown_verb_errors(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "garbage"})
     assert "error" in r
 
@@ -108,8 +110,8 @@ async def test_unknown_verb_errors(seeded_kernel, file_agent):
 # ─── api_key verbs ─────────────────────────────────────────────
 
 
-async def test_set_api_key_writes_via_file_agent(seeded_kernel, file_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_set_api_key_writes_via_file_bridge(seeded_kernel, store_agent, tmp_path):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": "nvapi-abc"})
     assert r == {"ok": True}
     key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
@@ -117,8 +119,8 @@ async def test_set_api_key_writes_via_file_agent(seeded_kernel, file_agent, tmp_
     assert key_path.read_text().strip() == "nvapi-abc"
 
 
-async def test_set_api_key_strips_whitespace(seeded_kernel, file_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_set_api_key_strips_whitespace(seeded_kernel, store_agent, tmp_path):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     await seeded_kernel.send(
         nid, {"type": "set_api_key", "api_key": "   nvapi-padded  \n"}
     )
@@ -126,8 +128,8 @@ async def test_set_api_key_strips_whitespace(seeded_kernel, file_agent, tmp_path
     assert key_path.read_text() == "nvapi-padded"
 
 
-async def test_set_api_key_invalidates_cached_provider(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-old")
+async def test_set_api_key_invalidates_cached_provider(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-old")
     sentinel = object()
     nt._providers[nid] = sentinel
     try:
@@ -137,22 +139,22 @@ async def test_set_api_key_invalidates_cached_provider(seeded_kernel, file_agent
         nt._providers.pop(nid, None)
 
 
-async def test_set_api_key_failfast_without_file_agent_id(seeded_kernel):
+async def test_set_api_key_failfast_without_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
     r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": "nvapi-x"})
     assert "error" in r
-    assert "file_agent_id" in r["error"]
+    assert "file_bridge_id" in r["error"]
 
 
-async def test_set_api_key_rejects_empty(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_set_api_key_rejects_empty(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     for bad in ("", "   ", None, 42):
         r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": bad})
         assert "error" in r, f"unexpected ok for api_key={bad!r}"
 
 
-async def test_clear_api_key_deletes_file(seeded_kernel, file_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_clear_api_key_deletes_file(seeded_kernel, store_agent, tmp_path):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
     assert key_path.exists()
     r = await seeded_kernel.send(nid, {"type": "clear_api_key"})
@@ -165,7 +167,7 @@ async def test_clear_api_key_deletes_file(seeded_kernel, file_agent, tmp_path):
     assert "api_key" in r3.get("error", "")
 
 
-async def test_clear_api_key_failfast_without_file_agent_id(seeded_kernel):
+async def test_clear_api_key_failfast_without_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
     r = await seeded_kernel.send(nid, {"type": "clear_api_key"})
     assert "error" in r
@@ -174,16 +176,16 @@ async def test_clear_api_key_failfast_without_file_agent_id(seeded_kernel):
 # ─── history persistence (per-client) ─────────────────────────
 
 
-async def test_history_returns_messages(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_history_returns_messages(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     chat = json.dumps(
         [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     )
     await seeded_kernel.send(
-        file_agent,
+        store_agent,
         {
             "type": "write",
-            "path": f".fantastic/agents/{nid}/chat_cli.json",
+            "path": f"agents/{nid}/chat_cli.json",
             "content": chat,
         },
     )
@@ -192,8 +194,8 @@ async def test_history_returns_messages(seeded_kernel, file_agent):
     assert r["client_id"] == "cli"
 
 
-async def test_history_per_client(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_history_per_client(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     for cid, last in (("alice", "A-reply"), ("bob", "B-reply")):
         chat = json.dumps(
             [
@@ -202,10 +204,10 @@ async def test_history_per_client(seeded_kernel, file_agent):
             ]
         )
         await seeded_kernel.send(
-            file_agent,
+            store_agent,
             {
                 "type": "write",
-                "path": f".fantastic/agents/{nid}/chat_{cid}.json",
+                "path": f"agents/{nid}/chat_{cid}.json",
                 "content": chat,
             },
         )
@@ -218,8 +220,8 @@ async def test_history_per_client(seeded_kernel, file_agent):
 # ─── _run multi-step / persistence ────────────────────────────
 
 
-async def test_run_no_tool_calls_returns_content(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["Hello! ", "How are you?"]])
     nt._providers[nid] = fp
     try:
@@ -230,8 +232,8 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider(
         [
             [
@@ -240,7 +242,7 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -258,8 +260,10 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_run_persists_history_via_file_agent(seeded_kernel, file_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_run_persists_history_via_file_bridge(
+    seeded_kernel, store_agent, tmp_path
+):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["reply"]])
     nt._providers[nid] = fp
     try:
@@ -273,8 +277,8 @@ async def test_run_persists_history_via_file_agent(seeded_kernel, file_agent, tm
         nt._providers.pop(nid, None)
 
 
-async def test_run_persists_per_client_threads(seeded_kernel, file_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_path):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     nt._providers[nid] = fp
     try:
@@ -295,9 +299,9 @@ async def test_run_persists_per_client_threads(seeded_kernel, file_agent, tmp_pa
         nt._providers.pop(nid, None)
 
 
-async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent):
+async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):
     """No fixed step cap. Same Claude-Code-style loop as ollama_backend."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     scripts = [
         [
             {
@@ -305,7 +309,7 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
                     "id": f"call_{i}",
                     "name": "send",
                     "arguments": {
-                        "target_id": "fs_loader",
+                        "target_id": "kernel_state",
                         "payload": {"type": "list_agents"},
                     },
                 }
@@ -327,8 +331,8 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
 # ─── routing ───────────────────────────────────────────────────
 
 
-async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["chunk1 ", "chunk2"]])
     nt._providers[nid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
@@ -351,8 +355,8 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["a", "b"]])
     nt._providers[nid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
@@ -380,21 +384,21 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent
 # ─── menu ───────────────────────────────────────────────────────
 
 
-async def test_assemble_includes_agent_menu(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_assemble_includes_agent_menu(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     nt._invalidate_menu(nid)
     msgs = await nt._assemble(nid, "hello", seeded_kernel, "alice")
     sys_block = msgs[0]["content"]
     assert "Available agents" in sys_block
-    assert file_agent in sys_block
+    assert store_agent in sys_block
     assert "read" in sys_block
     assert "send tool" in sys_block.lower()
     assert "refresh_menu" in sys_block
     assert nid in nt._menu_cache
 
 
-async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_menu_invalidates_after_tool_call(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider(
         [
             [
@@ -403,7 +407,7 @@ async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -423,8 +427,8 @@ async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_refresh_menu_verb_invalidates(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_refresh_menu_verb_invalidates(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     nt._menu_cache[nid] = [{"id": "stale", "sentence": "", "verbs": []}]
     r = await seeded_kernel.send(nid, {"type": "refresh_menu"})
     assert r == {"refreshed": True}
@@ -434,8 +438,8 @@ async def test_refresh_menu_verb_invalidates(seeded_kernel, file_agent):
 # ─── concurrency ────────────────────────────────────────────────
 
 
-async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _SlowFirst:
         def __init__(self):
@@ -486,8 +490,8 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_concurrent_sends_serialize_per_backend(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     in_flight = 0
     max_in_flight = 0
@@ -527,13 +531,13 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, file_agent)
 
 
 async def test_assistant_tool_calls_serialize_arguments_to_json_string(
-    seeded_kernel, file_agent
+    seeded_kernel, store_agent
 ):
     """OpenAI-flavored backends require tool_call.function.arguments as
     a JSON string. We hand-roll the assistant message inside _run, so
     verify the serialization happens correctly when the second iteration
     inspects message history."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     seen_messages: list[list[dict]] = []
 
     class _CapturingProvider:
@@ -549,7 +553,7 @@ async def test_assistant_tool_calls_serialize_arguments_to_json_string(
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -573,7 +577,7 @@ async def test_assistant_tool_calls_serialize_arguments_to_json_string(
     args = tcs[0]["function"]["arguments"]
     assert isinstance(args, str), f"OpenAI-shape requires string args, got {type(args)}"
     decoded = json.loads(args)
-    assert decoded == {"target_id": "fs_loader", "payload": {"type": "list_agents"}}
+    assert decoded == {"target_id": "kernel_state", "payload": {"type": "list_agents"}}
 
 
 # ─── rate-limit retry ──────────────────────────────────────────
@@ -602,11 +606,11 @@ def test_parse_retry_after_clamps_and_defaults():
     assert nt._parse_retry_after(make("garbage")) == nt.RATE_LIMIT_DEFAULT_WAIT
 
 
-async def test_send_retries_once_on_rate_limit(seeded_kernel, file_agent):
+async def test_send_retries_once_on_rate_limit(seeded_kernel, store_agent):
     """Provider raises 429 on first chat() call (before any chunk yielded);
     backend sleeps Retry-After, emits a status(thinking, waiting_on=
     'rate_limit') event, retries, succeeds."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _RateLimitedThenOk:
         def __init__(self):
@@ -642,9 +646,11 @@ async def test_send_retries_once_on_rate_limit(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_send_surfaces_error_after_repeated_rate_limit(seeded_kernel, file_agent):
+async def test_send_surfaces_error_after_repeated_rate_limit(
+    seeded_kernel, store_agent
+):
     """Two 429s in a row → retry exhausted → `_send` returns a clean error."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _AlwaysRateLimited:
         def __init__(self):
@@ -669,9 +675,9 @@ async def test_send_surfaces_error_after_repeated_rate_limit(seeded_kernel, file
     assert fp.calls == 2
 
 
-async def test_send_does_not_retry_on_non_429_http_error(seeded_kernel, file_agent):
+async def test_send_does_not_retry_on_non_429_http_error(seeded_kernel, store_agent):
     """500/503/auth errors are NOT retried — surfaced once, cleanly."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _ServerError:
         def __init__(self):
@@ -694,11 +700,11 @@ async def test_send_does_not_retry_on_non_429_http_error(seeded_kernel, file_age
     assert fp.calls == 1  # no retry on 5xx
 
 
-async def test_mid_stream_429_propagates_without_retry(seeded_kernel, file_agent):
+async def test_mid_stream_429_propagates_without_retry(seeded_kernel, store_agent):
     """If a 429 fires AFTER chunks were yielded (rare; quota usually
     checked up front), retrying would duplicate tokens — so we don't.
     The error surfaces; partial tokens already streamed are fine."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _MidStream429:
         def __init__(self):
@@ -727,7 +733,7 @@ async def test_mid_stream_429_propagates_without_retry(seeded_kernel, file_agent
 def test_key_path_lives_under_agent_dir():
     p = nt._key_path("nvidia_xxx")
     assert Path(p).parts[-2:] == ("nvidia_xxx", "api_key")
-    assert ".fantastic/agents" in p
+    assert "agents/" in p and ".fantastic" not in p
 
 
 # ─── status pipeline (mirrors ollama_backend) ──────────────────
@@ -758,8 +764,8 @@ def _capture(seeded_kernel):
     return sends, emits, _Ctx()
 
 
-async def test_status_event_sequence_no_tool_calls(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["hello"]])
     nt._providers[nid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
@@ -778,8 +784,8 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_event_sequence_with_tool_call(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider(
         [
             [
@@ -788,7 +794,7 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -826,8 +832,8 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_queue_populated_and_drained_on_contention(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     queue_sizes: list[int] = []
 
     class _SlowFirst:
@@ -864,8 +870,8 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, file_age
     assert nid not in nt._current
 
 
-async def test_status_verb_shape_when_idle(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent)
+async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "status", "client_id": "alice"})
     assert r["generating"] is False
     assert r["current"] is None
@@ -874,8 +880,8 @@ async def test_status_verb_shape_when_idle(seeded_kernel, file_agent):
     assert r["client_id"] == "alice"
 
 
-async def test_status_verb_shape_during_inflight_mine(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     captured: list[dict] = []
 
     class _SlowProvider:
@@ -900,8 +906,8 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, file_agent)
     assert snap["current"]["text"] == "hello there"
 
 
-async def test_status_verb_privacy_filter(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     snapshots: dict[str, dict] = {}
 
     class _PrivacyProvider:
@@ -951,8 +957,8 @@ async def test_status_verb_privacy_filter(seeded_kernel, file_agent):
     assert b["others_pending"] == 1
 
 
-async def test_status_verb_no_client_id_redacts_text(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     holder: list[dict] = []
 
     class _RedactProvider:
@@ -975,8 +981,8 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, file_agent):
     assert "text_so_far" not in snap["current"]
 
 
-async def test_status_done_emits_with_reason_interrupt(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _SlowProvider:
         async def chat(self, messages, tools=None):
@@ -1007,9 +1013,9 @@ async def test_status_done_emits_with_reason_interrupt(seeded_kernel, file_agent
 
 
 async def test_status_done_emits_with_reason_timeout(
-    seeded_kernel, file_agent, monkeypatch
+    seeded_kernel, store_agent, monkeypatch
 ):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     monkeypatch.setattr(nt, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
@@ -1035,8 +1041,8 @@ async def test_status_done_emits_with_reason_timeout(
         nt._providers.pop(nid, None)
 
 
-async def test_status_event_includes_send_id(seeded_kernel, file_agent):
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+async def test_status_event_includes_send_id(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["ok"]])
     nt._providers[nid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
@@ -1052,9 +1058,9 @@ async def test_status_event_includes_send_id(seeded_kernel, file_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_status_thinking_during_429_wait(seeded_kernel, file_agent):
+async def test_status_thinking_during_429_wait(seeded_kernel, store_agent):
     """The 429 retry path emits status(thinking, waiting_on='rate_limit')."""
-    nid = await _make_nvidia(seeded_kernel, file_agent, with_key="nvapi-x")
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _RLThenOk:
         def __init__(self):

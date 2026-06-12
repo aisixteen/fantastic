@@ -23,7 +23,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, DIST_DIR, writeServedDist } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -94,7 +94,7 @@ test("js_kernel.zip bundle revives: inlined css + xterm render against the host"
   try {
     host = await bootHost(8934, { webLoader: true, serveDist: true });
     seedCanvas(host.tmp);
-    writeFileSync(MOUNT_FILE, MOUNT_HTML);
+    writeServedDist(host, "_bundle_revive.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
     await browser.goto(`${host.httpOrigin}/ts_dist/file/_bundle_revive.html`);
 

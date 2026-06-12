@@ -35,7 +35,7 @@ async def assert_watch_remote_streams(
 
     `server_root` is B's LITERAL root agent id — `watch`/`emit` do a
     literal id lookup (no `kernel` alias), so this must be the real
-    root (`fs_loader` for python, `core` for rust/swift)."""
+    root (`kernel_state` for python, `core` for rust/swift)."""
     nonce = uuid.uuid4().hex[:12]
 
     async with ws_session(port_a, bridge_id) as sess:

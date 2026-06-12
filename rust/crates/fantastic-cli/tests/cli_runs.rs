@@ -71,16 +71,51 @@ fn reflect_bundles_all_lists_catalog() {
     );
 }
 
+/// Wire the persistence provider: a `file_bridge` store rooted at the loader's
+/// own `.fantastic`, opened (`ingress_rule=allow_all`). Persistence is now
+/// provider-routed — without a store, records stay in RAM (lost on a one-shot's
+/// exit). The store persists ITSELF through itself, so it survives to the next
+/// one-shot, after which other agents persist through it.
+fn create_store(dir: &std::path::Path) {
+    let out = Command::new(fantastic_bin())
+        .args([
+            "core",
+            "create_agent",
+            "handler_module=file_bridge.tools",
+            "id=store",
+            "root=.fantastic",
+            "ingress_rule=allow_all",
+        ])
+        .current_dir(dir)
+        .output()
+        .expect("create store");
+    assert!(
+        out.status.success(),
+        "create store failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn one_shot_create_agent_persists_record() {
     let tmp = tempfile::TempDir::new().unwrap();
+    // Wire the store first — it self-persists, so .fantastic/agents/store
+    // survives this process and the NEXT one-shot loads it as the provider.
+    create_store(tmp.path());
+    assert!(
+        tmp.path()
+            .join(".fantastic/agents/store/agent.json")
+            .exists(),
+        "the store must persist itself through itself"
+    );
     let output = Command::new(fantastic_bin())
         .args([
             "core",
             "create_agent",
-            "handler_module=file.tools",
+            "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",
+            "ingress_rule=allow_all",
         ])
         .current_dir(tmp.path())
         .output()
@@ -91,28 +126,33 @@ fn one_shot_create_agent_persists_record() {
         String::from_utf8_lossy(&output.stderr),
     );
     let path = tmp.path().join(".fantastic/agents/ff/agent.json");
-    assert!(path.exists(), "agent.json not written");
+    assert!(
+        path.exists(),
+        "agent.json not written (through the provider)"
+    );
     let content = std::fs::read_to_string(&path).unwrap();
-    assert!(content.contains("file.tools"));
+    assert!(content.contains("file_bridge.tools"));
     assert!(content.contains("/tmp"));
 }
 
 #[test]
 fn one_shot_dispatch_returns_json_reply() {
     let tmp = tempfile::TempDir::new().unwrap();
-    // First create a file agent.
+    // Wire the provider, then create a file agent that persists through it.
+    create_store(tmp.path());
     Command::new(fantastic_bin())
         .args([
             "core",
             "create_agent",
-            "handler_module=file.tools",
+            "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",
+            "ingress_rule=allow_all",
         ])
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    // Now dispatch reflect on it.
+    // Now dispatch reflect on it (rehydrated from the persisted record).
     let output = Command::new(fantastic_bin())
         .args(["ff", "reflect"])
         .current_dir(tmp.path())

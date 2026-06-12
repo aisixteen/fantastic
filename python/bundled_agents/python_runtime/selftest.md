@@ -24,9 +24,9 @@ rm -rf .fantastic
 ### Test 1: reflect lists the job verbs + 0 running
 
 ```bash
-PR=$(uv run --active fantastic call fs_loader create_agent handler_module=python_runtime.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+PR=$(uv run --active fantastic kernel_state create_agent handler_module=python_runtime.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 echo "PR=$PR"
-uv run --active fantastic call $PR reflect | python -c "
+uv run --active fantastic $PR reflect | python -c "
 import json, sys
 d = json.loads(sys.stdin.read(), strict=False)
 need = {'start','status','stop','interrupt','clear','reflect','boot'}
@@ -38,7 +38,7 @@ print('PASS' if ok else f'FAIL d={d}')
 ### Test 2: start returns a job_id (non-blocking)
 
 ```bash
-uv run --active fantastic call $PR start code='print(2*21)' | python -c "
+uv run --active fantastic $PR start code='print(2*21)' | python -c "
 import json, sys
 d = json.loads(sys.stdin.read(), strict=False)
 ok = d.get('status') == 'running' and bool(d.get('job_id'))
@@ -51,13 +51,13 @@ exits before the pump runs.)
 ### Test 3: start rejects empty code
 
 ```bash
-uv run --active fantastic call $PR start code='' | grep -qF "code (str) required" && echo "PASS" || echo "FAIL"
+uv run --active fantastic $PR start code='' | grep -qF "code (str) required" && echo "PASS" || echo "FAIL"
 ```
 
 ### Test 4: unknown verb errors
 
 ```bash
-uv run --active fantastic call $PR garbage | grep -qF "unknown type" && echo "PASS" || echo "FAIL"
+uv run --active fantastic $PR garbage | grep -qF "unknown type" && echo "PASS" || echo "FAIL"
 ```
 
 ## Cleanup

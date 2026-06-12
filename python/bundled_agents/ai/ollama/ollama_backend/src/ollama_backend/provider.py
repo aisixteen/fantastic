@@ -15,6 +15,7 @@ class OllamaProvider:
         endpoint: str = DEFAULT_ENDPOINT,
         model: str = DEFAULT_MODEL,
         num_ctx: int | None = None,
+        temperature: float | None = None,
     ):
         self._endpoint = endpoint
         self._model = model
@@ -22,6 +23,12 @@ class OllamaProvider:
         # for the agentic menu + tool results + history of a multi-step run; the
         # record's `num_ctx` lifts it (e.g. 32768; gemma4 supports up to 262144).
         self._num_ctx = num_ctx
+        # Sampling temperature. ollama defaults to 0.8 (creative) — wrong for an
+        # AGENTIC tool-calling backend, where the model must emit EXACT tool-call
+        # JSON + (for view-authoring) precise connector code, not improvise. We
+        # default LOW (0.3 — precise, with a touch of variety); `temperature`
+        # on the record overrides.
+        self._temperature = 0.3 if temperature is None else float(temperature)
         self._client = None
 
     def _get_client(self):
@@ -40,9 +47,10 @@ class OllamaProvider:
             {"tool_call": {"id":..., "name":..., "arguments":{...}}}
         """
         client = self._get_client()
-        kwargs: dict = {}
+        options: dict = {"temperature": self._temperature}
         if self._num_ctx:
-            kwargs["options"] = {"num_ctx": self._num_ctx}
+            options["num_ctx"] = self._num_ctx
+        kwargs = {"options": options}
         stream = await client.chat(
             model=self._model,
             messages=messages,

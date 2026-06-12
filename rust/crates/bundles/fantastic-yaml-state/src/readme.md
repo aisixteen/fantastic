@@ -22,6 +22,15 @@ discipline (same verbs either way):
 - `replace {doc}` — overwrite the whole store (`{}` clears).
 - `state_yaml {}` — the whole store as YAML (the block injected on boot).
 
+## Persistence — wired, not automatic
+This agent owns NO disk of its own. It persists `state.yaml` THROUGH a `file_bridge`
+named by its `file_bridge_id` meta, at the store-relative path `agents/<id>/state.yaml`
+(wire `file_bridge_id` to the `.fantastic` store, so the sidecar lands next to the
+agent's own `agent.json` — one store, no `.fantastic/.fantastic/…` double-nest).
+`set` / `delete` / `replace` **failfast with `file_bridge_id required`** until it's
+wired — never a silent drop to RAM. `read` / `keys` / `state_yaml` degrade to empty
+when unwired. Disk-is-truth: read fresh each call (an external edit is seen next read).
+
 ## Recipes
 - Remember a fact → `set {key:"user.name", value:"Ada"}`.
 - Save state → `set {key:"view.zoom", value:1.5}`.

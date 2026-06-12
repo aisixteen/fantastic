@@ -121,7 +121,7 @@ async def test_chat_aggregates_streamed_tool_call_args():
         # First delta carries id + name + first arg fragment.
         '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"send","arguments":"{\\"tar"}}]}}]}',
         # Second carries another fragment.
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"get_id\\":\\"fs_loader\\",\\"payload\\":{\\"type\\":\\""}}]}}]}',
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"get_id\\":\\"kernel_state\\",\\"payload\\":{\\"type\\":\\""}}]}}]}',
         # Third closes it out.
         '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"list_agents\\"}}"}}]}}]}',
         "[DONE]",
@@ -137,7 +137,7 @@ async def test_chat_aggregates_streamed_tool_call_args():
     assert tc["id"] == "call_x"
     assert tc["name"] == "send"
     assert tc["arguments"] == {
-        "target_id": "fs_loader",
+        "target_id": "kernel_state",
         "payload": {"type": "list_agents"},
     }
 
@@ -147,7 +147,7 @@ async def test_chat_yields_text_then_tool_call():
     stream ends (provider aggregates them per index)."""
     body = _sse(
         '{"choices":[{"delta":{"content":"thinking..."}}]}',
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"send","arguments":"{\\"target_id\\":\\"fs_loader\\",\\"payload\\":{}}"}}]}}]}',
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"send","arguments":"{\\"target_id\\":\\"kernel_state\\",\\"payload\\":{}}"}}]}}]}',
         "[DONE]",
     )
     p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
@@ -160,14 +160,14 @@ async def test_chat_yields_text_then_tool_call():
     assert isinstance(out[1], dict)
     tc = out[1]["tool_call"]
     assert tc["name"] == "send"
-    assert tc["arguments"] == {"target_id": "fs_loader", "payload": {}}
+    assert tc["arguments"] == {"target_id": "kernel_state", "payload": {}}
 
 
 async def test_chat_aggregates_two_independent_tool_calls():
     """Two indices in parallel → two tool_call yields, in index order
     isn't guaranteed by the provider but both must show up."""
     body = _sse(
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"send","arguments":"{\\"target_id\\":\\"fs_loader\\",\\"payload\\":{}}"}}]}}]}',
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"send","arguments":"{\\"target_id\\":\\"kernel_state\\",\\"payload\\":{}}"}}]}}]}',
         '{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"send","arguments":"{\\"target_id\\":\\"cli\\",\\"payload\\":{}}"}}]}}]}',
         "[DONE]",
     )
@@ -178,7 +178,7 @@ async def test_chat_aggregates_two_independent_tool_calls():
         await p.aclose()
     assert len(out) == 2
     targets = sorted(o["tool_call"]["arguments"]["target_id"] for o in out)
-    assert targets == ["cli", "fs_loader"]
+    assert targets == ["cli", "kernel_state"]
 
 
 async def test_chat_skips_tool_call_without_name():

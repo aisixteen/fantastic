@@ -17,7 +17,7 @@ rm -rf /tmp/ff_test /tmp/ff_root
 mkdir -p /tmp/ff_test /tmp/ff_root
 cd /tmp/ff_test
 FANTASTIC=/path/to/rust/target/release/fantastic
-$FANTASTIC core create_agent handler_module=file.tools id=ff root=/tmp/ff_root
+$FANTASTIC core create_agent handler_module=file_bridge.tools id=ff root=/tmp/ff_root
 ```
 
 ## Tests

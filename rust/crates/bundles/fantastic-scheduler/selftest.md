@@ -19,7 +19,7 @@ All test state lives under `/tmp/sc_test/`.
 rm -rf /tmp/sc_test && mkdir -p /tmp/sc_test && cd /tmp/sc_test
 FANTASTIC=/path/to/rust/target/release/fantastic
 SC=$($FANTASTIC core create_agent handler_module=scheduler.tools | jq -r .id)
-FA=$($FANTASTIC core create_agent handler_module=file.tools root=/tmp/sc_test | jq -r .id)
+FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/sc_test | jq -r .id)
 ```
 
 ## Tests

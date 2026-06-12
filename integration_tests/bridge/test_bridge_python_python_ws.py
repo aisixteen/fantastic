@@ -1,10 +1,10 @@
 """Bridge integration test — Python ↔ Python over WS, forward (request/reply).
 
-Proves the WS-only kernel_bridge FORWARD path: A sends a call frame over WS
+Proves the WS-only ws_bridge FORWARD path: A sends a call frame over WS
 and gets a synchronous reply. This is the request/reply matrix; see the stream
 sibling for the watch/emit surface.
 
-Baseline harness validator for the WS-only kernel_bridge. A's bridge opens a
+Baseline harness validator for the WS-only ws_bridge. A's bridge opens a
 WS to B's `web_ws` surface and ships raw call frames; B's `web_ws` dispatches
 `kernel.send(target, payload)` exactly like a browser frame.
 **No B-side bridge agent needed.**
@@ -13,7 +13,7 @@ Topology:
 
     Workdir A (client)           Workdir B (server)
     ─────────────────────        ──────────────────────────────
-    fs_loader (root)             fs_loader (root)
+    kernel_state (root)             kernel_state (root)
     web (port_a)                 web (port_b)
     web_ws                       web_ws           ← serves /<id>/ws
     bridge (transport=ws) ──ws──▶ ws://127.0.0.1:port_b/kernel/ws
@@ -21,12 +21,12 @@ Topology:
           → {type:call, target:"kernel", payload}
                                        ↓
                               B.web_ws._on_call → kernel.send("kernel", payload)
-                                       ↓ kernel alias resolves to B's root (fs_loader)
+                                       ↓ kernel alias resolves to B's root (kernel_state)
                               reply rides back over the same socket
 
 The bridge dials the `kernel` ALIAS path (`ws://B/kernel/ws`) — not a
 hardcoded `core` path. On both kernels `kernel` is a universal alias that
-resolves to the runtime's actual root: `fs_loader` on Python, `core` on
+resolves to the runtime's actual root: `kernel_state` on Python, `core` on
 Swift/Rust. Forwarded call frames also target `"kernel"`, which B resolves
 locally. This means the test is runtime-agnostic and never hard-codes a
 root id.
@@ -46,6 +46,17 @@ import pytest
 
 from helpers.seeding import seed_bridge_ws, seed_web, seed_web_ws
 from helpers.kernel_proc import KernelProc
+
+import os as _os
+
+# Local-loopback (127.0.0.1) bridge addressing — meaningless INSIDE a container
+# (that's the container's own loopback, not the host). The cross-CONTAINER bridge
+# is covered by test_bridge_container_to_container (host.containers.internal +
+# all-interface publish), so skip this local matrix under the container target.
+pytestmark = pytest.mark.skipif(
+    _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
+    reason="local-loopback bridge; container path = test_bridge_container_to_container",
+)
 
 
 async def _bring_up(
@@ -70,7 +81,7 @@ async def _bring_up(
         seed_web_ws(python_binary, wd)
 
     # Only A gets a bridge. peer_id="kernel" → dial ws://B/kernel/ws.
-    # On Python, the "kernel" alias resolves to B's root ("fs_loader").
+    # On Python, the "kernel" alias resolves to B's root ("kernel_state").
     seed_bridge_ws(
         python_binary,
         workdir_a,

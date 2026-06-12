@@ -42,11 +42,12 @@ import logging
 import os
 import pty
 import secrets
-import shutil
 import signal as signal_mod
 import struct
 import tempfile
 import termios
+
+from file_bridge import fs
 
 logger = logging.getLogger(__name__)
 
@@ -287,10 +288,14 @@ def _cleanup(agent_id: str) -> None:
         os.waitpid(state["pid"], 0)
     except (OSError, ChildProcessError):
         pass
-    # Drop the per-agent pasted-image scratch dir, if one was created.
+    # Drop the per-agent pasted-image scratch dir, if one was created (system
+    # temp dir → fs's external surface; ignore if already gone — idempotency).
     paste_dir = state.get("paste_dir")
     if paste_dir:
-        shutil.rmtree(paste_dir, ignore_errors=True)
+        try:
+            fs.remove(paste_dir, "", recursive=True, external=True)
+        except (OSError, ValueError):
+            pass
 
 
 def _scrollback_text(agent_id: str) -> str:
@@ -382,12 +387,14 @@ async def _paste_image(id, payload, kernel):
     if not paste_dir:
         paste_dir = tempfile.mkdtemp(prefix=f"fantastic_paste_{id}_")
         state["paste_dir"] = paste_dir
-    path = os.path.join(paste_dir, f"paste_{secrets.token_hex(4)}.{ext}")
+    fname = f"paste_{secrets.token_hex(4)}.{ext}"
+    # The scratch dir is a system temp dir (outside cwd by design) — write through
+    # fs's external surface (the single disk module) rather than a bare open().
     try:
-        with open(path, "wb") as f:
-            f.write(data)
-    except OSError as e:
+        fs.write_bytes(paste_dir, fname, bytes(data), atomic=False, external=True)
+    except (OSError, ValueError) as e:
         return {"error": str(e)}
+    path = os.path.join(paste_dir, fname)
     # Type the path at the PTY cursor with a trailing space (no
     # newline — pasting an image must not submit; it mirrors a
     # drag-drop, leaving the user to type their prompt and hit enter).

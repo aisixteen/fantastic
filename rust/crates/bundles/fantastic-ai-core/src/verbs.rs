@@ -1,5 +1,5 @@
 //! Verb entrypoints the backends dispatch through. A backend's `Bundle`
-//! does only its own pre-checks (file_agent_id, api_key) + provider
+//! does only its own pre-checks (file_bridge_id, api_key) + provider
 //! build, then calls these. The provider is the per-backend seam,
 //! constructed by the backend and passed in per `send`.
 
@@ -44,8 +44,8 @@ pub async fn history(
     kernel: &Arc<Kernel>,
     name: &str,
 ) -> Value {
-    if crate::helpers::file_agent_id(agent_id, kernel).is_none() {
-        return json!({"error": format!("{name}: file_agent_id required")});
+    if crate::helpers::file_bridge_id(agent_id, kernel).is_none() {
+        return json!({"error": format!("{name}: file_bridge_id required")});
     }
     let client_id = safe_client(
         payload
@@ -62,7 +62,7 @@ pub const SEND_TIMEOUT_SECS: u64 = 180;
 
 /// The shared `send` flow: enqueue → FIFO lock → spawn the agentic loop
 /// → wait with timeout → clean up. The backend supplies a built
-/// `provider` (it has already failfast-checked file_agent_id / api_key)
+/// `provider` (it has already failfast-checked file_bridge_id / api_key)
 /// and its `cfg`.
 pub async fn send(
     provider: Arc<dyn Provider>,

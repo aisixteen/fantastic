@@ -1,2 +1,2 @@
-# file — filesystem as an agent
-Verbs: read, write, list, delete, rename, mkdir. Rooted at the `root` field; path-safety refuses anything escaping it. Serve files over HTTP via `/<file_id>/file/<path>`.
+# file_bridge — the gated filesystem edge of the io family
+Verbs: read, write, list, delete, rename, mkdir, read_stream, write_stream, pump. Rooted at the `root` field; path-safety refuses anything escaping it (running-dir law). **SEALED BY DEFAULT** — an io_bridge leg: every verb except `reflect` denies until opened (`update_agent <id> ingress_rule=allow_all`). `read_stream`/`write_stream` carry RAW BYTES on the binary channel (never base64); `pump` is a server-side SOURCE→SINK copy. Serve files over HTTP via `/<file_id>/file/<path>`.

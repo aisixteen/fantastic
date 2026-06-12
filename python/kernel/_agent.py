@@ -149,7 +149,7 @@ class Agent:
         # `Kernel.load()` rehydrates from records the loader read back.
         # Wire into parent's children dict + publish lifecycle event.
         # `parent.create(...)` is the indirect path; this one supports
-        # direct construction (`Cli(kernel, parent=fs_loader)`).
+        # direct construction (`Cli(kernel, parent=kernel_state)`).
         if self.parent is not None:
             self.parent._children[self.id] = self
             self.ctx.publish_state(
@@ -301,6 +301,20 @@ class Agent:
             reply["runtime"] = "python"
             reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
             reply["version"] = os.environ.get("FANTASTIC_VERSION")
+            # Duck-typed root extension: the root's handler_module (the loader) may
+            # contribute root-only fields the substrate can't compute without coupling
+            # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
+            # loader auto-persists THROUGH, or null = RAM). No bundle import: if the
+            # module exposes `reflect_root_extra(agent) -> dict`, merge it.
+            if target.handler_module:
+                try:
+                    extra = importlib.import_module(
+                        target.handler_module
+                    ).reflect_root_extra(target)
+                    if isinstance(extra, dict):
+                        reply.update(extra)
+                except Exception:
+                    pass
         tree = payload.get("tree", "all")
         if tree == "all":
             reply["tree"] = target._tree(depth=None, details=False, current_depth=0)
@@ -822,6 +836,15 @@ class Agent:
             node = node.parent
         return node
 
+    # Wiring/posture meta surfaced inline in the DISTILLED tree (not only the full
+    # `details` node), so a client reads the IO landscape from ONE root reflect: which
+    # legs are open vs sealed-by-default, what a consumer is wired to. The substrate
+    # only exposes its own record fields (no rule interpretation, no bundle import) —
+    # the LLM reads `ingress_rule: deny_inbound` (sealed) / `allow_all` (open) /
+    # `password` (gated) and acts per the keystone readme (read-key == write-key);
+    # ABSENT on an io leg ⇒ sealed-by-default. `root`/`file_bridge_id` show the binding.
+    _POSTURE_KEYS = ("ingress_rule", "egress_rule", "auth", "root", "file_bridge_id")
+
     def _node_summary(self, *, details: bool) -> dict:
         node: dict[str, Any] = {
             "id": self.id,
@@ -832,6 +855,9 @@ class Agent:
         if self.description is not None:
             node["description"] = self.description
         if not details:
+            for k in self._POSTURE_KEYS:
+                if k in self._meta:
+                    node[k] = self._meta[k]
             return node
         node.update(self._meta)
         if self.handler_module:

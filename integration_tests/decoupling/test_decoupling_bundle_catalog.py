@@ -56,7 +56,9 @@ async def _catalog_has_no_views(
     leaked = REMOVED & modules
     assert not leaked, f"{tag}: removed view bundles still registered: {sorted(leaked)}"
     # sanity — the host still exposes its core surface
-    assert "file.tools" in modules, f"{tag}: file.tools missing from catalog: {sorted(modules)}"
+    assert "file_bridge.tools" in modules, (
+        f"{tag}: file_bridge.tools missing from catalog: {sorted(modules)}"
+    )
 
 
 @pytest.mark.asyncio
@@ -72,7 +74,7 @@ async def test_swift_catalog_drops_views(swift_binary, swift_kernel, parity_tmp,
 @pytest.mark.asyncio
 async def test_python_catalog_drops_views(python_binary, python_kernel, parity_tmp, free_port):
     # The 'kernel' alias passed to ws_call resolves to the root agent on every
-    # runtime regardless of its literal id — python's root is `fs_loader`,
+    # runtime regardless of its literal id — python's root is `kernel_state`,
     # rust/swift use `core`. The same helper covers all three runtimes because
     # dispatch goes through the alias, never a hardcoded literal id.
     await _catalog_has_no_views(

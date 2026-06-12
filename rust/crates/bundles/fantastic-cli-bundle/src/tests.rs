@@ -59,10 +59,10 @@ fn format_created_event_with_handler_module() {
         "type": "created",
         "id": "kid_1",
         "parent_id": "core",
-        "handler_module": "file.tools",
+        "handler_module": "file_bridge.tools",
     });
     let line = format_event(&v);
-    assert_eq!(line, "created  kid_1 (file.tools)");
+    assert_eq!(line, "created  kid_1 (file_bridge.tools)");
 }
 
 #[test]

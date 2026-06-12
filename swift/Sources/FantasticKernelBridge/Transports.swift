@@ -13,6 +13,7 @@
 //     bridge agent's inbox so local watchers see remote streams via
 //     standard `kernel.watch(<bridge_id>, ...)`.
 
+import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -27,6 +28,11 @@ public actor WebSocketTransport {
     /// Outstanding requests keyed by id; resumed when the remote
     /// echoes the reply back with the same id.
     private var pending: [String: CheckedContinuation<JSON, Never>] = [:]
+    /// Binary forwards in flight — resolved with `(reply, body)` when the
+    /// remote echoes a `reply` (a `read_stream` reply arrives as a codec
+    /// binary frame carrying raw bytes; a `write_stream` status arrives as a
+    /// plain text `reply` with an empty body).
+    private var binaryPending: [String: CheckedContinuation<(JSON, Data), Never>] = [:]
     private var nextId: UInt64 = 1
 
     /// Per-forward timeout — a forward whose reply/error never arrives
@@ -75,6 +81,16 @@ public actor WebSocketTransport {
                 ]))
         }
         pending.removeAll()
+        for (_, cont) in binaryPending {
+            cont.resume(
+                returning: (
+                    .object([
+                        "error": .string("websocket closed"),
+                        "reason": .string("transport_closed"),
+                    ]), Data()
+                ))
+        }
+        binaryPending.removeAll()
     }
 
     public func forward(target: AgentId, payload: JSON) async -> JSON {
@@ -119,6 +135,58 @@ public actor WebSocketTransport {
                         "kernel_bridge.forward: timeout after \(Int(forwardTimeoutSeconds))s"),
                     "reason": .string("timeout"),
                 ]))
+        }
+    }
+
+    /// Binary forward over the WIRE — a `read_stream`/`write_stream` chunk
+    /// carried cross-kernel as a codec binary frame `[4B len | header | body]`.
+    /// The header is the inner call (`{type:read_stream,…}`) with `target`/`id`
+    /// stamped on so the remote `web_ws` can route + correlate; the trailing
+    /// bytes are the raw body (never base64). The reply arrives either as a
+    /// codec binary frame (read_stream → raw bytes) or a plain text `reply`
+    /// (write_stream status → empty body) — both resolve `binaryPending[id]`.
+    public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
+        guard let task = task else {
+            return (
+                .object([
+                    "error": .string("websocket not connected"),
+                    "reason": .string("not_connected"),
+                ]), Data()
+            )
+        }
+        let id = mintId()
+        var wire = header
+        wire["target"] = .string(target.value)
+        wire["id"] = .string(id)
+        let frame = Codec.encodeBinaryFrame(header: wire, body: blob)
+        do {
+            try await task.send(.data(frame))
+        } catch {
+            return (
+                .object([
+                    "error": .string("send failed: \(error)"),
+                    "reason": .string("transport_error"),
+                ]), Data()
+            )
+        }
+        return await withCheckedContinuation { cont in
+            binaryPending[id] = cont
+            Task { await self.timeoutBinaryPending(id: id) }
+        }
+    }
+
+    private func timeoutBinaryPending(id: String) async {
+        try? await Task.sleep(nanoseconds: UInt64(forwardTimeoutSeconds * 1_000_000_000))
+        if let cont = binaryPending.removeValue(forKey: id) {
+            cont.resume(
+                returning: (
+                    .object([
+                        "error": .string(
+                            "kernel_bridge.binaryForward: timeout after \(Int(forwardTimeoutSeconds))s"
+                        ),
+                        "reason": .string("timeout"),
+                    ]), Data()
+                ))
         }
     }
 
@@ -183,46 +251,30 @@ public actor WebSocketTransport {
         while true {
             do {
                 let msg = try await task.receive()
-                let text: String
                 switch msg {
-                case .string(let s): text = s
-                case .data(let d): text = String(data: d, encoding: .utf8) ?? ""
+                case .string(let s):
+                    if let parsed = try? JSON.parse(s) {
+                        await handleInboundFrame(parsed, body: Data())
+                    }
+                case .data(let d):
+                    // A codec binary frame (`[4B len|header|body]`) carries a
+                    // read_stream reply's raw bytes. Plain JSON delivered as
+                    // `.data` fails decodeBinaryFrame (its length prefix is
+                    // garbage), so fall back to a UTF-8 parse.
+                    if let (header, body) = Codec.decodeBinaryFrame(d) {
+                        await handleInboundFrame(header, body: body)
+                    } else if let text = String(data: d, encoding: .utf8),
+                        let parsed = try? JSON.parse(text)
+                    {
+                        await handleInboundFrame(parsed, body: Data())
+                    }
                 @unknown default: continue
-                }
-                guard let parsed = try? JSON.parse(text) else { continue }
-                let ftype = parsed["type"].asString
-                if ftype == "reply", let id = parsed["id"].asString {
-                    if let cont = pending.removeValue(forKey: id) {
-                        // Reply envelope is `{type:"reply", id, data}` —
-                        // matches Python's web/_proxy.py (reference
-                        // template) and the Swift web server itself
-                        // (FantasticWeb/WebSocket.swift).
-                        cont.resume(returning: parsed["data"])
-                    }
-                } else if ftype == "error", let id = parsed["id"].asString {
-                    // The remote's web_ws emits `{type:"error", id, error}`
-                    // when its dispatch RAISES. Fail the pending forward
-                    // promptly instead of hanging. Matches Python/Rust.
-                    if let cont = pending.removeValue(forKey: id) {
-                        cont.resume(
-                            returning: .object([
-                                "error": .string(
-                                    "remote error: \(parsed["error"].asString ?? "unknown")")
-                            ]))
-                    }
-                } else if ftype == "event" {
-                    // Re-emit on the bridge's local inbox so
-                    // local watchers (`kernel.watch(bridge_id, ...)`)
-                    // see the remote stream.
-                    if let sink = eventSink, let kernel = kernel {
-                        await kernel.emit(sink, parsed["payload"])
-                    }
                 }
             } catch {
                 break
             }
         }
-        // Connection died; wake any pending.
+        // Connection died; wake any pending (text + binary).
         for (_, cont) in pending {
             cont.resume(
                 returning: .object([
@@ -231,6 +283,52 @@ public actor WebSocketTransport {
                 ]))
         }
         pending.removeAll()
+        for (_, cont) in binaryPending {
+            cont.resume(
+                returning: (
+                    .object([
+                        "error": .string("websocket connection dropped"),
+                        "reason": .string("transport_dropped"),
+                    ]), Data()
+                ))
+        }
+        binaryPending.removeAll()
+    }
+
+    /// Route one decoded inbound frame to a pending forward (text or binary)
+    /// or the event sink. `body` is the raw trailing bytes of a binary frame
+    /// (empty for text frames).
+    private func handleInboundFrame(_ parsed: JSON, body: Data) async {
+        let ftype = parsed["type"].asString
+        if ftype == "reply", let id = parsed["id"].asString {
+            // Reply envelope is `{type:"reply", id, data}` — matches Python's
+            // web/_proxy.py and the Swift web server (FantasticWeb/WebSocket).
+            if let cont = pending.removeValue(forKey: id) {
+                cont.resume(returning: parsed["data"])
+            } else if let cont = binaryPending.removeValue(forKey: id) {
+                // read_stream → body carries raw bytes; write_stream status →
+                // text reply with an empty body.
+                cont.resume(returning: (parsed["data"], body))
+            }
+        } else if ftype == "error", let id = parsed["id"].asString {
+            // The remote's web_ws emits `{type:"error", id, error}` when its
+            // dispatch RAISES. Fail the pending forward promptly. Matches
+            // Python/Rust.
+            let err: JSON = .object([
+                "error": .string("remote error: \(parsed["error"].asString ?? "unknown")")
+            ])
+            if let cont = pending.removeValue(forKey: id) {
+                cont.resume(returning: err)
+            } else if let cont = binaryPending.removeValue(forKey: id) {
+                cont.resume(returning: (err, Data()))
+            }
+        } else if ftype == "event" {
+            // Re-emit on the bridge's local inbox so local watchers
+            // (`kernel.watch(bridge_id, ...)`) see the remote stream.
+            if let sink = eventSink, let kernel = kernel {
+                await kernel.emit(sink, parsed["payload"])
+            }
+        }
     }
 
     private func mintId() -> String {
@@ -246,8 +344,7 @@ extension KernelBridgeBundle {
     /// established eagerly. The transport's event sink is wired so
     /// inbound `{type:"event"}` frames re-emit on the bridge's local
     /// inbox via `kernel.emit(agentId, payload)`.
-    public func attachWebSocket(agentId: AgentId, endpoint: URL, kernel: Kernel) async
-    {
+    public func attachWebSocket(agentId: AgentId, endpoint: URL, kernel: Kernel) async {
         let ws = WebSocketTransport(endpoint: endpoint)
         await ws.setEventSink(agentId: agentId, kernel: kernel)
         await ws.connect()

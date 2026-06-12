@@ -26,7 +26,7 @@ Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps remote
               control intentional)
-  shutdown  — alias for `stop`; called by fs_loader.delete_agent's
+  shutdown  — alias for `stop`; called by kernel_state.delete_agent's
               universal lifecycle hook
   start     — SSH → `cd <remote_path> && nohup <remote_cmd> --port <port>
               --port <remote_port> &`. Polls remote
@@ -112,7 +112,7 @@ async def _open_tunnel(
 ) -> subprocess.Popen:
     """Open `ssh -L local:localhost:remote -N <host>` in a fresh
     process group, poll the local port until it accepts. Same
-    options as kernel_bridge — ExitOnForwardFailure makes ssh exit
+    options as ws_bridge — ExitOnForwardFailure makes ssh exit
     immediately on local-port collision; ServerAliveInterval keeps
     stateful firewalls from silently dropping the tunnel."""
     cmd = [
@@ -307,7 +307,7 @@ class SSHTransport(Transport):
         web_module = rec.get("web_module", "web.tools")
 
         # Two-step bootstrap on the remote:
-        #   1. one-shot `fantastic fs_loader create_agent handler_module=web.tools port=N`
+        #   1. one-shot `fantastic kernel_state create_agent handler_module=web.tools port=N`
         #      persists the web record (uvicorn task dies with the process,
         #      but the record stays on disk).
         #   2. nohup `fantastic` spawns the daemon — `_default` rehydrates
@@ -316,7 +316,7 @@ class SSHTransport(Transport):
         cmd_q = shlex.quote(cmd)
         remote = (
             f"cd {rp_q} && mkdir -p .fantastic && "
-            f"{cmd_q} fs_loader create_agent handler_module={shlex.quote(web_module)} port={rport} "
+            f"{cmd_q} kernel_state create_agent handler_module={shlex.quote(web_module)} port={rport} "
             f">/dev/null 2>&1 && "
             f"nohup {cmd_q} > .fantastic/serve.log 2>&1 &"
         )
@@ -474,7 +474,7 @@ async def _restart(id, payload, kernel):
 async def _status(id, payload, kernel):
     """No args. {tunnel_alive, remote_alive, ws_ok, remote_pid}. ws_ok
     is a 2s probe over the WS verb channel (`ws://localhost:<local_port>
-    /fs_loader/ws`, reflect frame → reply) through the SSH tunnel — proves
+    /kernel_state/ws`, reflect frame → reply) through the SSH tunnel — proves
     end-to-end liveness."""
     return await core.status(id, _transport(id, kernel), kernel)
 

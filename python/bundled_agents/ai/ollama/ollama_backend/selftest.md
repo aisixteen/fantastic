@@ -8,7 +8,7 @@
 > out-of-scope: HTTP routes (covered by webapp selftest), browser
 
 Reflect-driven LLM agent. Tests prompt assembly, native tool-calls,
-file_agent persistence.
+file_bridge persistence.
 
 **Why a running serve is required:** ollama_backend caches the
 `OllamaProvider` HTTP client and in-flight `_run` tasks in
@@ -33,9 +33,9 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18911
 pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
-uv run --active python fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active python fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all >/dev/null
 uv run --active python fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
@@ -65,20 +65,20 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 
 ## Tests
 
-### Test 1: send without file_agent_id → failfast
+### Test 1: send without file_bridge_id → failfast
 
 ```bash
-OB=$(call fs_loader '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OB=$(call kernel_state '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $OB '{"type":"send","text":"hi"}'
 ```
-Expected: `{"error":"ollama_backend: file_agent_id required"}`.
+Expected: `{"error":"ollama_backend: file_bridge_id required"}`.
 
-### Test 2: configure file_agent_id, reflect shows it
+### Test 2: configure file_bridge_id, reflect shows it
 
 ```bash
-FA=$(call fs_loader '{"type":"create_agent","handler_module":"file.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call fs_loader "{\"type\":\"update_agent\",\"id\":\"$OB\",\"file_agent_id\":\"$FA\"}"
-call $OB '{"type":"reflect"}' | python -m json.tool | grep -F "\"file_agent_id\": \"$FA\""
+FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":".fantastic","ingress_rule":"allow_all"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+call kernel_state "{\"type\":\"update_agent\",\"id\":\"$OB\",\"file_bridge_id\":\"$FA\"}"
+call $OB '{"type":"reflect"}' | python -m json.tool | grep -F "\"file_bridge_id\": \"$FA\""
 ```
 Expected: matches.
 
@@ -103,7 +103,7 @@ Expected: messages ≥ 2; last message contains "ok" (case-insensitive).
 ```bash
 call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
 ```
-Expected: model emits a tool_call to `fs_loader` with `list_agents`, reads
+Expected: model emits a tool_call to `kernel_state` with `list_agents`, reads
 the reply, summarizes. Final answer mentions a number.
 Regression signal: model just says "I cannot check" without emitting
 tool_calls → either model lacks tool support or SEND_TOOL definition broke.
@@ -138,7 +138,7 @@ Regression signal: PASS missing → `_run` reverted to lossy persistence
 call $OB '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/null
 call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
-Expected: response mentions "teal" — proves chat_cli.json round-trip via file agent.
+Expected: response mentions "teal" — proves chat_cli.json round-trip via file_bridge agent.
 
 ### Test 6: history verb returns messages
 
@@ -175,7 +175,7 @@ async def main():
         await ws.send(json.dumps({'type':'watch','src':'$OB'}))
         await ws.send(json.dumps({
             'type':'call','target':'$OB',
-            'payload':{'type':'send','text':'use the send tool to call list_agents on fs_loader, then summarize in one sentence','client_id':'alice'},
+            'payload':{'type':'send','text':'use the send tool to call list_agents on kernel_state, then summarize in one sentence','client_id':'alice'},
             'id':'1',
         }))
         phases = []
@@ -306,8 +306,8 @@ Expected: `PASS`. The terminal `status` carries `detail.reason='interrupted'`.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | send fails without file_agent_id | |
-| 2 | reflect shows file_agent_id | |
+| 1 | send fails without file_bridge_id | |
+| 2 | reflect shows file_bridge_id | |
 | 3 | send streams + persists chat_<client_id>.json | |
 | 4 | tool-call round-trip + lossless tool history on disk | |
 | 5 | history persists across calls | |

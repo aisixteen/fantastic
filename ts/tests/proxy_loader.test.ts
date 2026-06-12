@@ -7,8 +7,8 @@ import type { Bridge } from "../src/kernel/kernel.ts";
 import type { Json, Payload } from "../src/kernel/json.ts";
 
 // A headless fake bridge: records every forwarded call + returns a canned
-// load_tree reply. The host session fs_loader is exercised separately in
-// python (test_fs_loader.py::test_session_loader_serves_sub_namespace).
+// load_tree reply. The host session kernel_state is exercised separately in
+// python (test_kernel_state.py::test_session_loader_serves_sub_namespace).
 class FakeBridge implements Bridge {
   calls: { target: string; payload: Payload }[] = [];
   loadTreeReply: Json = { version: 1, records: [] };
@@ -43,7 +43,7 @@ test("loadTree drops the host anchor and re-roots the JS root", async () => {
   fake.loadTreeReply = {
     version: 1,
     records: [
-      { id: "sess1", handler_module: "fs_loader.tools" }, // namespace anchor
+      { id: "sess1", handler_module: "kernel_state.tools" }, // namespace anchor
       { id: "canvas", handler_module: "canvas.ts", parent_id: "sess1" },
       { id: "term1", handler_module: "terminal_view.ts", parent_id: "canvas" },
     ],

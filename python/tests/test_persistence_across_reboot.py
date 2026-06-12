@@ -23,7 +23,7 @@ async def test_top_level_agent_rehydrates(tmp_path, monkeypatch):
     k1 = boot_root()
     rec = await k1.send(
         k1.id,
-        {"type": "create_agent", "handler_module": "file.tools", "x": 7},
+        {"type": "create_agent", "handler_module": "file_bridge.tools", "x": 7},
     )
     aid = rec["id"]
     assert aid in k1.ctx.agents
@@ -41,11 +41,11 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
     parent = await k1.send(
-        k1.id, {"type": "create_agent", "handler_module": "file.tools"}
+        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
     )
     parent_id = parent["id"]
     child = await k1.send(
-        parent_id, {"type": "create_agent", "handler_module": "file.tools"}
+        parent_id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
     )
     child_id = child["id"]
     persist(k1)
@@ -63,7 +63,9 @@ async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
     other agents in the same dir hydrate fine."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(k1.id, {"type": "create_agent", "handler_module": "file.tools"})
+    rec = await k1.send(
+        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
+    )
     good_id = rec["id"]
     persist(k1)
     # Plant a corrupt sibling.
@@ -81,7 +83,9 @@ async def test_reboot_resets_in_flight_counters(tmp_path, monkeypatch):
     NOT persist. Only records do."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(k1.id, {"type": "create_agent", "handler_module": "file.tools"})
+    rec = await k1.send(
+        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
+    )
     aid = rec["id"]
     persist(k1)
     # Bump in_flight artificially then reboot.
@@ -96,12 +100,12 @@ def test_agent_record_roundtrip_on_disk(tmp_path, monkeypatch):
     arbitrary meta. The exact JSON shape is the contract."""
     monkeypatch.chdir(tmp_path)
     k = boot_root()
-    k.create("file.tools", id="ondisk", x=1, y=2, display_name="d")
+    k.create("file_bridge.tools", id="ondisk", x=1, y=2, display_name="d")
     persist(k)
     af = tmp_path / ".fantastic" / "agents" / "ondisk" / "agent.json"
     rec = json.loads(af.read_text())
     assert rec["id"] == "ondisk"
-    assert rec["handler_module"] == "file.tools"
-    assert rec["parent_id"] == "fs_loader"
+    assert rec["handler_module"] == "file_bridge.tools"
+    assert rec["parent_id"] == "kernel_state"
     assert rec["x"] == 1 and rec["y"] == 2
     assert rec["display_name"] == "d"

@@ -2,7 +2,7 @@
 
 Both local_runner and ssh_runner prove a spawned kernel is alive AND
 answering by opening the kernel's WS verb channel
-(`ws://localhost:<port>/fs_loader/ws`), sending a `reflect` call frame,
+(`ws://localhost:<port>/kernel_state/ws`), sending a `reflect` call frame,
 and expecting a `reply` within ~2s. WS is the verb channel — a reply
 proves the kernel is up and dispatching, not merely that something is
 bound to the port.
@@ -20,11 +20,11 @@ import websockets
 
 
 async def _ws_health(port: int) -> bool:
-    """Connect to `ws://localhost:<port>/fs_loader/ws`, send a reflect
+    """Connect to `ws://localhost:<port>/kernel_state/ws`, send a reflect
     frame, expect a reply within 2s. WS is the verb channel — this proves
     the kernel is alive AND answering, not just that something is bound to
     the port."""
-    url = f"ws://localhost:{port}/fs_loader/ws"
+    url = f"ws://localhost:{port}/kernel_state/ws"
     try:
         async with asyncio.timeout(2):
             async with websockets.connect(url) as ws:
@@ -32,7 +32,7 @@ async def _ws_health(port: int) -> bool:
                     json.dumps(
                         {
                             "type": "call",
-                            "target": "fs_loader",
+                            "target": "kernel_state",
                             "payload": {"type": "reflect"},
                             "id": "h",
                         }

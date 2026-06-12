@@ -39,9 +39,9 @@ Strict rules:
   `Sources/FantasticWeb/` to figure out a transport URL — that belongs
   in the root readme. Stop and flag it.
 
-The Swift root agent id is **`core`** (not `fs_loader`, not `kernel`) —
+The Swift root agent id is **`core`** (not `kernel_state`, not `kernel`) —
 the native runtime keeps the userland-orchestrator root id. Substitute
-`core` anywhere a cross-runtime Python spec writes `fs_loader` as the
+`core` anywhere a cross-runtime Python spec writes `kernel_state` as the
 create/list target.
 
 ## Stateful bundles need a running `fantastic` daemon
@@ -83,7 +83,7 @@ which fantastic    # → .../swift/.build/debug/fantastic
 
 # Drive each Python per-bundle spec as written, but:
 #   • point `fantastic` at the Swift binary (above)
-#   • replace the create/list root target `fs_loader` → `core`
+#   • replace the create/list root target `kernel_state` → `core`
 cat ../python/bundled_agents/file/selftest.md       # ← read; run the bash blocks
 cat ../python/bundled_agents/web/host/selftest.md
 # ...etc, for every bundle you want to exercise
@@ -100,10 +100,10 @@ Surviving bundles that run cross-runtime against the Swift binary
 | tools | covered by `reflect` across the per-bundle specs |
 | scheduler | [`scheduler/selftest.md`](../python/bundled_agents/scheduler/selftest.md) |
 | cli | [`cli/selftest.md`](../python/bundled_agents/cli/selftest.md) |
-| kernel_bridge | [`kernel_bridge/selftest.md`](../python/bundled_agents/bridge/kernel_bridge/selftest.md) |
+| kernel_bridge | [`kernel_bridge/selftest.md`](../python/bundled_agents/io/ws_bridge/selftest.md) |
 | web | [`web/host/selftest.md`](../python/bundled_agents/web/host/selftest.md) |
-| web_ws | [`web/web_ws/selftest.md`](../python/bundled_agents/web/web_ws/selftest.md) |
-| web_rest | [`web/web_rest/selftest.md`](../python/bundled_agents/web/web_rest/selftest.md) |
+| web_ws | [`io/web_ws/selftest.md`](../python/bundled_agents/io/web_ws/selftest.md) |
+| web_rest | [`io/web_rest/selftest.md`](../python/bundled_agents/io/web_rest/selftest.md) |
 | ollama_backend | [`ai/ollama/ollama_backend/selftest.md`](../python/bundled_agents/ai/ollama/ollama_backend/selftest.md) (needs running ollama) |
 | nvidia_nim_backend | [`ai/nvidia/nvidia_nim_backend/selftest.md`](../python/bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md) (needs `NVAPI_KEY`) |
 | foundation_models_backend | native overlay (no Python equivalent) — see below |

@@ -27,7 +27,7 @@ free deterministic suite. Run it manually:
 
 FINDING (documented, not fixed here): the Python backends (ollama/anthropic/nim)
 carry conversational history ONLY as the per-client chat transcript keyed by
-`file_agent_id`. They do NOT auto-mount or auto-inject `yaml_state` into the
+`file_bridge_id`. They do NOT auto-mount or auto-inject `yaml_state` into the
 prompt. The Swift Apple-FM backend already does (mountMemoryAgents +
 always-inject). This test exercises the on-demand tool-call path — the AI
 explicitly sends `{"type":"set"|"read"|"delete", ...}` to the `mem` agent — and
@@ -106,7 +106,7 @@ async def _say(port: int, ai: str, text: str, client_id: str, mem: str) -> dict:
     """One full AI turn over WS; waits until the model's reply lands
     (after any tool-calls it chooses to make).
 
-    `client_id` is forwarded to the `file_agent_id` transcript store so
+    `client_id` is forwarded to the `file_bridge_id` transcript store so
     separate client ids yield separate conversation histories — the
     recall test (turn 3) exploits this by using a fresh `client_id` that
     has no prior transcript, forcing the AI to read from `yaml_state`.
@@ -160,16 +160,17 @@ async def test_ai_uses_memory_when_needed_not_excessively(
     seed_create(
         python_binary,
         wd,
-        handler_module="file.tools",
+        handler_module="file_bridge.tools",
         agent_id="llm_files",
         root=".fantastic",
+        ingress_rule="allow_all",  # the fs edge seals by default - open the backing
     )
     seed_create(
         python_binary,
         wd,
         handler_module="anthropic_backend.tools",
         agent_id="ai",
-        file_agent_id="llm_files",
+        file_bridge_id="llm_files",
         model=_MODEL,
     )
     seed_create(
@@ -178,6 +179,9 @@ async def test_ai_uses_memory_when_needed_not_excessively(
         handler_module="yaml_state.tools",
         agent_id="mem",
         mode="mem",
+        # yaml_state persists THROUGH a gated file_bridge (deny-all by default) — wire
+        # the same opened provider the AI uses; read/write are symmetric through it.
+        file_bridge_id="llm_files",
     )
 
     await python_kernel(wd, port)

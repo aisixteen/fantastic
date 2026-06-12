@@ -115,13 +115,13 @@ async def test_subscriber_receives_emit_events(seeded_kernel):
 async def test_subscriber_sees_real_agent_watcher_fanout(seeded_kernel):
     """A real agent that watches B: when send hits B, tap fires for
     B AND for A's mirrored put. Both are real agents."""
-    seeded_kernel.watch("cli", "fs_loader")  # fs_loader watches cli
+    seeded_kernel.watch("cli", "kernel_state")  # kernel_state watches cli
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     await seeded_kernel.send("cli", {"type": "noop"})
     targets = {e["agent_id"] for e in events if e["kind"] == "send"}
     assert "cli" in targets
-    assert "fs_loader" in targets, (
+    assert "kernel_state" in targets, (
         f"real-agent watcher's mirrored fanout should produce its own event; got {events}"
     )
 
@@ -181,7 +181,7 @@ async def test_callback_exception_does_not_break_fanout(seeded_kernel):
 async def test_state_snapshot_returns_all_agents(seeded_kernel):
     snap = seeded_kernel.state_snapshot()
     ids = {a["agent_id"] for a in snap}
-    assert "cli" in ids and "fs_loader" in ids
+    assert "cli" in ids and "kernel_state" in ids
     for a in snap:
         assert "name" in a and "backlog" in a
         assert isinstance(a["backlog"], int)
@@ -292,7 +292,7 @@ async def test_state_snapshot_reports_in_flight_not_qsize(seeded_kernel):
 async def test_lifecycle_added_fires_on_create(seeded_kernel):
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    seeded_kernel.create("file.tools", id="file_test1")
+    seeded_kernel.create("file_bridge.tools", id="file_test1")
     added = [
         e for e in events if e["kind"] == "added" and e["agent_id"] == "file_test1"
     ]
@@ -304,7 +304,7 @@ async def test_lifecycle_added_fires_on_ensure(kernel):
     """ensure() fires 'added' for first-time creation."""
     events: list[dict] = []
     kernel.add_state_subscriber(lambda e: events.append(e))
-    kernel.ensure("custom_singleton", "file.tools", display_name="custom")
+    kernel.ensure("custom_singleton", "file_bridge.tools", display_name="custom")
     added = [
         e
         for e in events
@@ -314,7 +314,7 @@ async def test_lifecycle_added_fires_on_ensure(kernel):
 
 
 async def test_lifecycle_updated_fires_on_update(seeded_kernel):
-    seeded_kernel.create("file.tools", id="file_test2")
+    seeded_kernel.create("file_bridge.tools", id="file_test2")
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     seeded_kernel.update("file_test2", display_name="renamed")
@@ -328,7 +328,7 @@ async def test_lifecycle_updated_fires_on_update(seeded_kernel):
 async def test_lifecycle_removed_fires_on_delete(seeded_kernel):
     """`removed` event fires AFTER the cascade has cleaned up — get(id)
     inside the callback already returns None."""
-    seeded_kernel.create("file.tools", id="file_test3")
+    seeded_kernel.create("file_bridge.tools", id="file_test3")
     observations: list[tuple[str, object]] = []
 
     def cb(e):
@@ -360,9 +360,11 @@ async def test_no_recursion_when_callback_creates_agent(seeded_kernel):
     def cb(e):
         if e["kind"] == "added" and counter["creates"] < 3:
             counter["creates"] += 1
-            seeded_kernel.create("file.tools", id=f"file_chain_{counter['creates']}")
+            seeded_kernel.create(
+                "file_bridge.tools", id=f"file_chain_{counter['creates']}"
+            )
 
     seeded_kernel.add_state_subscriber(cb)
-    seeded_kernel.create("file.tools", id="file_seed")
+    seeded_kernel.create("file_bridge.tools", id="file_seed")
     # Bounded chain (we cap at 3) — not an unbounded loop.
     assert counter["creates"] == 3

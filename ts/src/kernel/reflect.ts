@@ -69,6 +69,11 @@ export function applyReflectFlags(
     obj["runtime"] = "ts";
     obj["env"] = "host";
     obj["version"] = null;
+    // WHICH provider the frontend persists records THROUGH — for this browser
+    // kernel that's the host's loader (the `web_loader` alias), reached over the
+    // bridge by the proxy_loader (cross-kernel delegation). Mirrors py's root
+    // `persistence:{provider}`; `null` when no loader is wired.
+    obj["persistence"] = { provider: kernel.persistenceProvider };
   }
 
   const tree = flag(payload["tree"], "all");
@@ -99,6 +104,18 @@ function flag(v: Json | undefined, fallback: string): string {
   return typeof v === "string" ? v : fallback;
 }
 
+// Wiring/posture meta surfaced inline in the distilled tree (mirrors python's
+// `_POSTURE_KEYS` in kernel/_agent.py), so a client reads the IO landscape — which
+// legs are open vs sealed-by-default, what a consumer persists through — from ONE
+// root reflect. Same keys + order across runtimes.
+const POSTURE_KEYS = [
+  "ingress_rule",
+  "egress_rule",
+  "auth",
+  "root",
+  "file_bridge_id",
+] as const;
+
 function treeNode(agent: Agent): Payload {
   const obj: Payload = {
     id: agent.id,
@@ -107,6 +124,10 @@ function treeNode(agent: Agent): Payload {
     display_name: agent.displayName,
   };
   if (agent.description !== null) obj["description"] = agent.description;
+  for (const k of POSTURE_KEYS) {
+    const v = agent.meta[k];
+    if (v !== undefined) obj[k] = v;
+  }
   obj["children"] = sortedChildren(agent).map(treeNode);
   return obj;
 }

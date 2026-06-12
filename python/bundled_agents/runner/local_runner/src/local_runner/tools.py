@@ -3,7 +3,7 @@
 Each agent represents one project on this machine. Verbs spawn /
 signal a `fantastic` subprocess directly (no SSH, no tunnels). The
 spawned kernel rehydrates its persisted `web` agent at boot, so
-`start` works in two steps: (1) one-shot `fs_loader create_agent
+`start` works in two steps: (1) one-shot `kernel_state create_agent
 handler_module=web.tools port=<free>` to write the record to disk,
 then (2) `subprocess.Popen([cmd])` to spawn the long-running kernel.
 
@@ -29,7 +29,7 @@ from the agent record per-call and delegates to core.
 Verbs:
   reflect   — identity + every field above + live status
   boot      — no-op (no auto-start; explicit `start` keeps lifecycle intentional)
-  shutdown  — alias for `stop`; called by fs_loader.delete_agent's universal
+  shutdown  — alias for `stop`; called by kernel_state.delete_agent's universal
               lifecycle hook
   start     — pick a free port, pre-create the web record, spawn the
               daemon, poll until lock.json appears and the web record
@@ -53,6 +53,7 @@ import socket
 import subprocess
 from pathlib import Path
 
+from file_bridge import fs
 from runner_core import core
 from runner_core.health import _ws_health
 from runner_core.transport import Transport
@@ -77,13 +78,27 @@ def _free_port() -> int:
 
 
 def _read_lock(remote_path: str) -> dict | None:
-    p = Path(remote_path) / ".fantastic" / "lock.json"
-    if not p.exists():
+    # `remote_path` is a SIBLING project dir (outside this kernel's cwd by design),
+    # so the disk read funnels through fs's EXTERNAL surface — clamped within that
+    # project, not the running dir.
+    if not fs.exists(remote_path, ".fantastic/lock.json", external=True):
         return None
     try:
-        return json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+        return json.loads(
+            fs.read_text(remote_path, ".fantastic/lock.json", external=True)
+        )
+    except (json.JSONDecodeError, OSError, ValueError):
         return None
+
+
+def _sweep_lock(remote_path: str) -> None:
+    """Idempotently remove a stale `lock.json` in a sibling project (ignore if already
+    gone — that's idempotency, not a fallback). Routed through fs's external surface."""
+    try:
+        if fs.exists(remote_path, ".fantastic/lock.json", external=True):
+            fs.remove(remote_path, ".fantastic/lock.json", external=True)
+    except (OSError, ValueError):
+        pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -101,16 +116,15 @@ def _discover_web_port(remote_path: str) -> int | None:
     record carrying a `port` field (the serve agent, DUCK-TYPED — not by
     bundle name, so any HTTP bundle works); return its `port`. Port lives
     on the serve agent's record, not lock.json (which is PID-only)."""
-    agents_dir = Path(remote_path) / ".fantastic" / "agents"
-    if not agents_dir.is_dir():
+    if not fs.is_dir(remote_path, ".fantastic/agents", external=True):
         return None
-    for entry in sorted(agents_dir.iterdir()):
-        af = entry / "agent.json"
-        if not af.exists():
+    for entry in fs.list_dir(remote_path, ".fantastic/agents", external=True):
+        rel = f".fantastic/agents/{entry.name}/agent.json"
+        if not fs.exists(remote_path, rel, external=True):
             continue
         try:
-            rec = json.loads(af.read_text())
-        except (json.JSONDecodeError, OSError):
+            rec = json.loads(fs.read_text(remote_path, rel, external=True))
+        except (json.JSONDecodeError, OSError, ValueError):
             continue
         # Duck-type the serve agent by its `port` field (ANY HTTP bundle that
         # carries a port) rather than a hardcoded handler_module — local_runner
@@ -137,19 +151,18 @@ def _live_pid_port(remote_path: str) -> tuple[int | None, int | None]:
     return pid, port
 
 
-def _has_web_record(proj: Path) -> bool:
-    """True if any agent.json under `<proj>/.fantastic/agents/*/` carries a
+def _has_web_record(remote_path: str) -> bool:
+    """True if any agent.json under `<remote_path>/.fantastic/agents/*/` carries a
     `port` (a serve agent — duck-typed, not by bundle name)."""
-    agents_dir = proj / ".fantastic" / "agents"
-    if not agents_dir.is_dir():
+    if not fs.is_dir(remote_path, ".fantastic/agents", external=True):
         return False
-    for entry in agents_dir.iterdir():
-        af = entry / "agent.json"
-        if not af.exists():
+    for entry in fs.list_dir(remote_path, ".fantastic/agents", external=True):
+        rel = f".fantastic/agents/{entry.name}/agent.json"
+        if not fs.exists(remote_path, rel, external=True):
             continue
         try:
-            rec = json.loads(af.read_text())
-        except (json.JSONDecodeError, OSError):
+            rec = json.loads(fs.read_text(remote_path, rel, external=True))
+        except (json.JSONDecodeError, OSError, ValueError):
             continue
         if isinstance(rec.get("port"), int) and rec["port"] > 0:
             return True
@@ -218,7 +231,7 @@ class LocalTransport(Transport):
         rp = self.rec.get("remote_path")
         if not rp:
             return {"error": "local_runner.start: remote_path required"}
-        if not Path(rp).is_dir():
+        if not fs.is_dir(rp, "", external=True):
             return {"error": f"local_runner.start: not a directory: {rp}"}
         return None
 
@@ -234,23 +247,22 @@ class LocalTransport(Transport):
         return None
 
     async def bring_up(self) -> dict | None:
-        proj = Path(self.remote_path)
+        rp = self.remote_path
+        proj = Path(rp)
         cmd = self.remote_cmd
         port = _free_port()
         self._requested_port = port
-        fant_dir = proj / ".fantastic"
-        fant_dir.mkdir(parents=True, exist_ok=True)
-        log_path = fant_dir / "serve.log"
+        fs.mkdir(rp, ".fantastic", external=True)
 
         # Step 1: pre-create the web agent record at the chosen port
         # unless one already exists. One-shot subprocess; web's _boot
         # spawns uvicorn and the process exits before binding, but the
         # record persists for the daemon to rehydrate.
-        if not _has_web_record(proj):
+        if not _has_web_record(rp):
             subprocess.run(
                 [
                     cmd,
-                    "fs_loader",
+                    "kernel_state",
                     "create_agent",
                     "handler_module=web.tools",
                     f"port={port}",
@@ -264,7 +276,7 @@ class LocalTransport(Transport):
 
         # Step 2: spawn the daemon. `_default` rehydrates the web agent
         # from disk, acquires the lock, blocks while uvicorn serves.
-        log = log_path.open("ab", buffering=0)
+        log = fs.open_append(rp, ".fantastic/serve.log", external=True)
         try:
             subprocess.Popen(
                 [cmd],
@@ -296,25 +308,16 @@ class LocalTransport(Transport):
         if not rp:
             return {"error": "local_runner.stop: remote_path required"}
         lock = _read_lock(rp)
-        lock_path = Path(rp) / ".fantastic" / "lock.json"
         if not lock or not isinstance(lock.get("pid"), int):
             # Nothing to stop, ensure stale file gone.
-            if lock_path.exists():
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+            _sweep_lock(rp)
             return {"stopped": True, "pid": None}
         pid = lock["pid"]
         try:
             os.kill(pid, signal_mod.SIGTERM)
         except OSError:
             # Already gone.
-            if lock_path.exists():
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+            _sweep_lock(rp)
             return {"stopped": True, "pid": pid, "already_gone": True}
         # Wait for actual death.
         deadline = asyncio.get_event_loop().time() + STOP_POLL_TIMEOUT
@@ -331,11 +334,7 @@ class LocalTransport(Transport):
                 pass
             await asyncio.sleep(0.2)
         # Sweep stale lock file.
-        if lock_path.exists():
-            try:
-                lock_path.unlink()
-            except OSError:
-                pass
+        _sweep_lock(rp)
         return {"stopped": True, "pid": pid, "died_cleanly": died}
 
     # ─── status / get_webapp ─────────────────────────────────────
@@ -409,7 +408,7 @@ async def _restart(id, payload, kernel):
 
 async def _status(id, payload, kernel):
     """No args. {running, pid, port, ws_ok}. ws_ok is a 2s probe over
-    the WS verb channel (`ws://localhost:<port>/fs_loader/ws`, reflect frame
+    the WS verb channel (`ws://localhost:<port>/kernel_state/ws`, reflect frame
     → reply). Proves the kernel is alive AND answering, not just that
     lock.json exists."""
     return await core.status(id, _transport(id, kernel), kernel)

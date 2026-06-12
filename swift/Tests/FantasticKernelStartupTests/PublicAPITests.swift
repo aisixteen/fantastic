@@ -20,7 +20,7 @@ struct StartKernelInMemoryTests {
     @Test func registersDefaultBundleSet() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         // Spot-check key bundles are registered + dispatchable.
-        for hm in ["file.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"] {
+        for hm in ["file_bridge.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"] {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
             let r = await kernel.send(
                 AgentId("core"),
@@ -231,7 +231,7 @@ struct SaveLoadTests {
             AgentId("core"),
             .object([
                 "type": .string("create_agent"),
-                "handler_module": .string("file.tools"),
+                "handler_module": .string("file_bridge.tools"),
                 "id": .string("snap_target"),
             ]))
         let snap = kernel.save()

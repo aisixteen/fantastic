@@ -25,6 +25,7 @@ from typing import Any
 from .launcher import as_launcher
 
 _ROOT_ID_CACHE: dict[str, str] = {}
+_RUNTIME_CACHE: dict[str, str | None] = {}
 
 # Repo root: integration_tests/helpers -> integration_tests -> repo.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,7 +87,7 @@ def expected_bundle_sha(zip_path: Path) -> str:
 def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
     """Discover the runtime's ROOT agent id via a one-shot `reflect`.
 
-    Python's root is `fs_loader`; rust/swift use `core`. The harness must
+    Python's root is `kernel_state`; rust/swift use `core`. The harness must
     not hardcode either — seeds (and WS paths / reflect targets) that
     attach to the root resolve it here. Cached per (binary, workdir).
 
@@ -97,15 +98,27 @@ def root_id(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str:
     if key not in _ROOT_ID_CACHE:
         proc = as_launcher(binary).cli(workdir, ["reflect"], timeout=timeout)
         out = proc.stdout
-        rid = "core"
+        rid, rt = "core", None
         brace = out.find("{")
         if brace != -1:
             try:
-                rid = json.loads(out[brace:]).get("id") or "core"
+                obj = json.loads(out[brace:])
+                rid = obj.get("id") or "core"
+                rt = obj.get("runtime")
             except (json.JSONDecodeError, ValueError):
                 pass
         _ROOT_ID_CACHE[key] = rid
+        _RUNTIME_CACHE[key] = rt
     return _ROOT_ID_CACHE[key]
+
+
+def runtime(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str | None:
+    """Discover the runtime enum (`python`/`rust`/`swift`/`ts`) from the root
+    reflect. Cached alongside `root_id` (one reflect feeds both)."""
+    key = f"{binary}|{workdir}"
+    if key not in _RUNTIME_CACHE:
+        root_id(binary, workdir, timeout=timeout)
+    return _RUNTIME_CACHE.get(key)
 
 
 def seed_create(
@@ -174,11 +187,40 @@ def _render(v: Any) -> str:
     return str(v)
 
 
+def seed_store(binary: Path, workdir: Path) -> None:
+    """Persist the persistence PROVIDER — a `file_bridge` rooted at `.fantastic`
+    (id `store`, open). Must run BEFORE any other seed.
+
+    PYTHON + RUST + SWIFT. Under the no-fallback rule, every kernel auto-persists
+    records ONLY through a discovered `file_bridge@.fantastic`; with none wired the
+    one-shot seeds stay in RAM and never reach disk, so the spawned daemon would boot
+    empty. Seeding the store first (it self-persists, so it survives to the next
+    one-shot) makes every later seed persist. Idempotent (skips if a `store`
+    already exists)."""
+    proc = as_launcher(binary).cli(workdir, ["reflect", "tree=ids"], timeout=15.0)
+    if '"store"' in proc.stdout:
+        return  # already wired
+    reply = seed_create(
+        binary,
+        workdir,
+        handler_module="file_bridge.tools",
+        agent_id="store",
+        root=".fantastic",
+        ingress_rule="allow_all",
+    )
+    if "error" in reply:
+        raise RuntimeError(f"store seed failed: {reply}")
+
+
 def seed_web(binary: Path, workdir: Path, port: int) -> None:
     """Persist a `web` agent bound to `port`. Idempotent if the
     runtime's one-shot CLI handles "agent already exists" gracefully;
     otherwise call only once per workdir.
+
+    Ensures the persistence provider (`seed_store`) FIRST, so the seeded tree
+    actually reaches disk for the spawned daemon to load (python no-fallback rule).
     """
+    seed_store(binary, workdir)
     reply = seed_create(
         binary,
         workdir,
@@ -193,13 +235,21 @@ def seed_web(binary: Path, workdir: Path, port: int) -> None:
 def seed_web_ws(binary: Path, workdir: Path) -> None:
     """Persist a `web_ws` agent as a child of `web`. Required on BOTH
     kernels for WS — the host serves `/<id>/ws` only when a `web_ws`
-    child contributes the route (WS is opt-in, parity with Python)."""
+    child contributes the route (WS is opt-in, parity with Python).
+
+    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all`). IO legs now SEAL
+    by default (an absent rule ⇒ `deny_inbound`), so a bare `web_ws` would
+    refuse every forwarded reflect/call the harness dispatches through it.
+    This is a drivable test surface — open it consciously. A test that
+    means to exercise a SEALED or credentialed leg sets its own rule
+    explicitly on the agent it cares about (not on this serving surface)."""
     reply = seed_create(
         binary,
         workdir,
         handler_module="web_ws.tools",
         agent_id="web_ws",
         parent_id="web",
+        ingress_rule="allow_all",
     )
     if "error" in reply and "no bundle" not in str(reply.get("error", "")):
         raise RuntimeError(f"web_ws seed failed: {reply}")
@@ -209,17 +259,35 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
     """Persist a `web_rest` agent as a child of `web`. Contributes
     `POST /<self>/<target>` (verb in body) + `GET /<self>/_reflect`
     routes the host mounts at boot. Returns the agent id. Works on
-    both kernels (web_rest.tools is registered in each)."""
+    both kernels (web_rest.tools is registered in each).
+
+    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all`). IO legs now SEAL
+    by default (an absent rule ⇒ `deny_inbound`), so a bare `web_rest`
+    would answer every harness POST with `403 {reason:"unauthorized"}`.
+    This is a drivable diagnostic surface — open it consciously."""
     reply = seed_create(
         binary,
         workdir,
         handler_module="web_rest.tools",
         agent_id=agent_id,
         parent_id="web",
+        ingress_rule="allow_all",
     )
     if "error" in reply and "no bundle" not in str(reply.get("error", "")):
         raise RuntimeError(f"web_rest seed failed: {reply}")
     return reply.get("id", agent_id)
+
+
+# Per-runtime `handler_module` for the WS bridge agent. All three host runtimes
+# now ship the WS derivation as `ws_bridge.tools` (they split the combined
+# kernel_bridge into ws_bridge + cloud_bridge). Keyed by the RUNTIME enum from
+# the root reflect (the bridge is seeded on the DIALING kernel, so it matches
+# THAT runtime).
+_WS_BRIDGE_HANDLER_MODULE = {
+    "python": "ws_bridge.tools",
+    "rust": "ws_bridge.tools",
+    "swift": "ws_bridge.tools",
+}
 
 
 def seed_bridge_ws(
@@ -231,8 +299,8 @@ def seed_bridge_ws(
     peer_port: int,
     host: str = "127.0.0.1",
 ) -> dict[str, Any]:
-    """Persist a `kernel_bridge` agent for the WS transport
-    (asymmetric — no peer bridge needed).
+    """Persist a WS-transport bridge agent (asymmetric — no peer bridge
+    needed) on the DIALING kernel.
 
     - `agent_id`   local id for this bridge agent
     - `peer_id`    the WS path segment on the peer kernel —
@@ -251,11 +319,18 @@ def seed_bridge_ws(
     Note: `local_port` is the historical field name for "the port to
     dial" (shared with the ssh+ws tunnel path); here it carries
     `peer_port`.
+
+    The `handler_module` is resolved per the dialing runtime
+    (`_WS_BRIDGE_HANDLER_MODULE`): `ws_bridge.tools` on Python + Rust,
+    `kernel_bridge.tools` on Swift (its port is deferred).
     """
+    handler_module = _WS_BRIDGE_HANDLER_MODULE.get(
+        runtime(binary, workdir) or "", "kernel_bridge.tools"
+    )
     reply = seed_create(
         binary,
         workdir,
-        handler_module="kernel_bridge.tools",
+        handler_module=handler_module,
         agent_id=agent_id,
         transport="ws",
         peer_id=peer_id,

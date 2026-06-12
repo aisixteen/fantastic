@@ -74,10 +74,10 @@
     /// Run `fantastic reflect [<id>]` against the Python kernel's
     /// dedicated shorthand mode.
     private func pythonReflect(
-        binary: URL, workdir: URL, agentId: String = "fs_loader",
+        binary: URL, workdir: URL, agentId: String = "kernel_state",
         args: [String: String] = [:]
     ) throws -> JSON {
-        // Python's root id is `fs_loader` (Swift/Rust use `core`) — the
+        // Python's root id is `kernel_state` (Swift/Rust use `core`) — the
         // root-id asymmetry is BY DESIGN, so the default targets python's
         // actual root rather than a hardcoded `core`.
         let proc = Process()
@@ -157,9 +157,9 @@
                 AgentId("core"), .object(["type": .string("reflect")]))
 
             // Both must answer with an `id` field. Root ids differ BY
-            // DESIGN (python=fs_loader, swift=core), so assert each runtime's
+            // DESIGN (python=kernel_state, swift=core), so assert each runtime's
             // own root id rather than cross-runtime equality.
-            #expect(pyReply["id"].asString == "fs_loader", "python root id != fs_loader")
+            #expect(pyReply["id"].asString == "kernel_state", "python root id != kernel_state")
             #expect(swReply["id"].asString == "core", "swift root id != core")
         }
 
@@ -171,7 +171,7 @@
             // Python side.
             let pyReply = try pythonOneShot(
                 binary: binary, workdir: tmp,
-                agentId: "fs_loader", verb: "list_agents")
+                agentId: "kernel_state", verb: "list_agents")
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
@@ -212,7 +212,7 @@
                 "agent_count", "available_bundles",
             ]
             for (label, r, root, runtime) in [
-                ("python", pyReply, "fs_loader", "python"),
+                ("python", pyReply, "kernel_state", "python"),
                 ("swift", swReply, "core", "swift"),
             ] {
                 #expect(r["id"].asString == root, "\(label) reflect id != \(root)")
@@ -241,7 +241,7 @@
             let swIds = await kernel.send(
                 AgentId("core"),
                 .object(["type": .string("reflect"), "tree": .string("ids")]))
-            for (label, r, root) in [("python", pyIds, "fs_loader"), ("swift", swIds, "core")] {
+            for (label, r, root) in [("python", pyIds, "kernel_state"), ("swift", swIds, "core")] {
                 let arr = r["tree"].asArray
                 #expect(arr != nil, "\(label) tree=ids not an array")
                 #expect(arr?.first?.asString == root, "\(label) tree=ids root not first")

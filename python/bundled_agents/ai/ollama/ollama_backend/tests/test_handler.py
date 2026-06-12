@@ -1,4 +1,4 @@
-"""ollama_backend handler — verb dispatching, file_agent_id failfast, multi-step _run."""
+"""ollama_backend handler — verb dispatching, file_bridge_id failfast, multi-step _run."""
 
 from __future__ import annotations
 
@@ -29,45 +29,47 @@ class _FakeProvider:
             yield x
 
 
-async def _make_ollama(kernel, file_agent_id=None):
+async def _make_ollama(kernel, file_bridge_id=None):
     meta = {"handler_module": "ollama_backend.tools"}
-    if file_agent_id is not None:
-        meta["file_agent_id"] = file_agent_id
-    rec = await kernel.send("fs_loader", {"type": "create_agent", **meta})
+    if file_bridge_id is not None:
+        meta["file_bridge_id"] = file_bridge_id
+    rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
     return rec["id"]
 
 
-async def test_reflect_includes_file_agent_id_and_no_history(seeded_kernel, file_agent):
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_reflect_includes_file_bridge_id_and_no_history(
+    seeded_kernel, store_agent
+):
+    oid = await _make_ollama(seeded_kernel, store_agent)
     r = await seeded_kernel.send(oid, {"type": "reflect"})
-    assert r["file_agent_id"] == file_agent
+    assert r["file_bridge_id"] == store_agent
     assert "send" in r["verbs"]
 
 
-async def test_send_requires_file_agent_id(seeded_kernel):
+async def test_send_requires_file_bridge_id(seeded_kernel):
     oid = await _make_ollama(seeded_kernel)
     r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
     assert "error" in r
-    assert "file_agent_id" in r["error"]
+    assert "file_bridge_id" in r["error"]
 
 
-async def test_history_requires_file_agent_id(seeded_kernel):
+async def test_history_requires_file_bridge_id(seeded_kernel):
     oid = await _make_ollama(seeded_kernel)
     r = await seeded_kernel.send(oid, {"type": "history"})
     assert "error" in r
 
 
-async def test_history_returns_messages(seeded_kernel, file_agent, tmp_path):
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_history_returns_messages(seeded_kernel, store_agent, tmp_path):
+    oid = await _make_ollama(seeded_kernel, store_agent)
     # Pre-seed the default 'cli' client thread.
     chat = json.dumps(
         [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
     )
     await seeded_kernel.send(
-        file_agent,
+        store_agent,
         {
             "type": "write",
-            "path": f".fantastic/agents/{oid}/chat_cli.json",
+            "path": f"agents/{oid}/chat_cli.json",
             "content": chat,
         },
     )
@@ -76,9 +78,9 @@ async def test_history_returns_messages(seeded_kernel, file_agent, tmp_path):
     assert r["client_id"] == "cli"
 
 
-async def test_history_per_client(seeded_kernel, file_agent, tmp_path):
+async def test_history_per_client(seeded_kernel, store_agent, tmp_path):
     """Two clients = two separate threads; history reads only the asked-for one."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     # Seed two distinct chats.
     for cid, last in (("alice", "A-reply"), ("bob", "B-reply")):
         chat = json.dumps(
@@ -88,10 +90,10 @@ async def test_history_per_client(seeded_kernel, file_agent, tmp_path):
             ]
         )
         await seeded_kernel.send(
-            file_agent,
+            store_agent,
             {
                 "type": "write",
-                "path": f".fantastic/agents/{oid}/chat_{cid}.json",
+                "path": f"agents/{oid}/chat_{cid}.json",
                 "content": chat,
             },
         )
@@ -102,8 +104,8 @@ async def test_history_per_client(seeded_kernel, file_agent, tmp_path):
     assert a["client_id"] == "alice" and b["client_id"] == "bob"
 
 
-async def test_run_no_tool_calls_returns_content(seeded_kernel, file_agent):
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["Hello! ", "How are you?"]])
     ot._providers[oid] = fp
     try:
@@ -133,9 +135,9 @@ class _RecordProvider:
             yield x
 
 
-async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, file_agent):
+async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, store_agent):
     """A caller-supplied system_prompt REPLACES the auto-built substrate prompt."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     rp = _RecordProvider([["ok"]])
     ot._providers[oid] = rp
     try:
@@ -149,10 +151,10 @@ async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, file_a
         ot._providers.pop(oid, None)
 
 
-async def test_stateless_messages_override_needs_no_file_agent(seeded_kernel):
-    """messages + system_prompt in the payload → fully stateless: no file_agent_id
+async def test_stateless_messages_override_needs_no_file_bridge(seeded_kernel):
+    """messages + system_prompt in the payload → fully stateless: no file_bridge_id
     required, caller's history used verbatim, the new user turn appended."""
-    oid = await _make_ollama(seeded_kernel)  # NO file_agent_id
+    oid = await _make_ollama(seeded_kernel)  # NO file_bridge_id
     rp = _RecordProvider([["leaf-answer"]])
     ot._providers[oid] = rp
     try:
@@ -176,18 +178,18 @@ async def test_stateless_messages_override_needs_no_file_agent(seeded_kernel):
         ot._providers.pop(oid, None)
 
 
-async def test_send_refuses_cycle(seeded_kernel, file_agent):
+async def test_send_refuses_cycle(seeded_kernel, store_agent):
     """_call_stack containing self → immediate cycle refusal (before the lock)."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     r = await seeded_kernel.send(
         oid, {"type": "send", "text": "hi", "_call_stack": [oid]}
     )
     assert "error" in r and "cycle" in r["error"]
 
 
-async def test_send_refuses_over_depth(seeded_kernel, file_agent):
+async def test_send_refuses_over_depth(seeded_kernel, store_agent):
     """_call_stack at/over MAX_CALL_DEPTH → depth refusal (before the lock)."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     deep = [f"x{i}" for i in range(ot.MAX_CALL_DEPTH)]
     r = await seeded_kernel.send(
         oid, {"type": "send", "text": "hi", "_call_stack": deep}
@@ -195,11 +197,11 @@ async def test_send_refuses_over_depth(seeded_kernel, file_agent):
     assert "error" in r and "depth" in r["error"]
 
 
-async def test_tool_call_to_self_does_not_deadlock(seeded_kernel, file_agent):
+async def test_tool_call_to_self_does_not_deadlock(seeded_kernel, store_agent):
     """The keystone: a tool-call back to the SAME backend must NOT deadlock on its
     held FIFO lock. _exec_one injects _call_stack=[self] into the outgoing send, so
     the re-entry is refused as a cycle BEFORE the lock — the run completes fast."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider(
         [
             # iter 1: model tool-calls ITSELF
@@ -232,9 +234,9 @@ async def test_tool_call_to_self_does_not_deadlock(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
-    """Model emits a tool_call to fs_loader, gets reply, second iteration finishes."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
+    """Model emits a tool_call to kernel_state, gets reply, second iteration finishes."""
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider(
         [
             # iter 1: emit tool_call
@@ -244,7 +246,7 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -263,9 +265,11 @@ async def test_run_with_tool_call_iterates(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_run_persists_history_via_file_agent(seeded_kernel, file_agent, tmp_path):
+async def test_run_persists_history_via_file_bridge(
+    seeded_kernel, store_agent, tmp_path
+):
     """Default caller (no client_id) persists to chat_cli.json."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
@@ -283,7 +287,7 @@ async def test_run_persists_history_via_file_agent(seeded_kernel, file_agent, tm
 
 
 async def test_run_persists_full_tool_call_round_trip(
-    seeded_kernel, file_agent, tmp_path
+    seeded_kernel, store_agent, tmp_path
 ):
     """Lossless persistence of tool turns. The chat sidecar must keep:
       1. The assistant turn that emitted tool_calls (with the tool_call
@@ -296,17 +300,17 @@ async def test_run_persists_full_tool_call_round_trip(
     arguments-as-string vs dict). Without it, faulty calls evaporate
     after the turn and we can't diagnose them after the fact.
     """
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider(
         [
-            # Iter 1: tool_call to fs_loader.list_agents
+            # Iter 1: tool_call to kernel_state.list_agents
             [
                 {
                     "tool_call": {
                         "id": "call_X",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -331,7 +335,7 @@ async def test_run_persists_full_tool_call_round_trip(
         assert asst_tcs["tool_calls"], "tool_calls dropped from persistence"
         tc = asst_tcs["tool_calls"][0]
         assert tc["function"]["name"] == "send"
-        assert tc["function"]["arguments"]["target_id"] == "fs_loader"
+        assert tc["function"]["arguments"]["target_id"] == "kernel_state"
         # 2. tool reply linked by tool_call_id
         assert data[2]["tool_call_id"] == "call_X"
         assert data[2]["name"] == "send"
@@ -341,9 +345,9 @@ async def test_run_persists_full_tool_call_round_trip(
         ot._providers.pop(oid, None)
 
 
-async def test_run_persists_per_client_threads(seeded_kernel, file_agent, tmp_path):
+async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_path):
     """Two client_ids → two distinct chat files, each with its own turns."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:
@@ -364,11 +368,11 @@ async def test_run_persists_per_client_threads(seeded_kernel, file_agent, tmp_pa
         ot._providers.pop(oid, None)
 
 
-async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent):
+async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):
     """Loop continues as long as the model emits tool_calls; safety
     bounds are SEND_TIMEOUT (180s wall) and the user-callable
     `interrupt` verb. Verify a 7-step chain completes cleanly."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     scripts = [
         [
             {
@@ -376,7 +380,7 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
                     "id": f"call_{i}",
                     "name": "send",
                     "arguments": {
-                        "target_id": "fs_loader",
+                        "target_id": "kernel_state",
                         "payload": {"type": "list_agents"},
                     },
                 }
@@ -395,18 +399,18 @@ async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, file_agent
         ot._providers.pop(oid, None)
 
 
-async def test_unknown_verb_errors(seeded_kernel, file_agent):
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_unknown_verb_errors(seeded_kernel, store_agent):
+    oid = await _make_ollama(seeded_kernel, store_agent)
     r = await seeded_kernel.send(oid, {"type": "garbage"})
     assert "error" in r
 
 
-async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
+async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
     """Default caller (client_id='cli') has events dispatched via
     kernel.send('cli', …) so cli's stdout handler runs. No leak to the
     backend's own inbox (which would broadcast to unrelated WS subscribers).
     """
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["chunk1 ", "chunk2"]])
     ot._providers[oid] = fp
     events: list[dict] = []
@@ -439,11 +443,11 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent):
+async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agent):
     """Caller passes a non-cli client_id (e.g. browser uuid) → events
     emit to backend's own inbox tagged with client_id, NOT to cli.
     """
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["a", "b"]])
     ot._providers[oid] = fp
     events: list[dict] = []
@@ -477,19 +481,19 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, file_agent
         ot._providers.pop(oid, None)
 
 
-async def test_assemble_includes_agent_menu(seeded_kernel, file_agent):
+async def test_assemble_includes_agent_menu(seeded_kernel, store_agent):
     """System prompt carries a 'Available agents' menu built by reflecting
     on every running agent, plus a `send`-tool how-to. Each turn rebuilds
     the menu lazily; chat.json holds only user/assistant turns.
     """
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     # Force a fresh menu build.
     ot._invalidate_menu(oid)
     msgs = await ot._assemble(oid, "hello", seeded_kernel, "alice")
     sys_block = msgs[0]["content"]
     assert "Available agents" in sys_block
-    # File agent is in the menu (created by the file_agent fixture).
-    assert file_agent in sys_block
+    # File agent is in the menu (created by the store_agent fixture).
+    assert store_agent in sys_block
     # Verbs are listed alongside ids.
     assert "read" in sys_block
     # Send-tool guidance present.
@@ -499,19 +503,19 @@ async def test_assemble_includes_agent_menu(seeded_kernel, file_agent):
     assert oid in ot._menu_cache
 
 
-async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
+async def test_menu_invalidates_after_tool_call(seeded_kernel, store_agent):
     """Successful tool_call clears the menu so the next assemble rebuilds it."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider(
         [
-            # iter 1: emit a tool_call to fs_loader
+            # iter 1: emit a tool_call to kernel_state
             [
                 {
                     "tool_call": {
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -534,18 +538,18 @@ async def test_menu_invalidates_after_tool_call(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_refresh_menu_verb_invalidates(seeded_kernel, file_agent):
+async def test_refresh_menu_verb_invalidates(seeded_kernel, store_agent):
     """LLM can self-clear the menu via send(<self>, {type:'refresh_menu'})."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     ot._menu_cache[oid] = [{"id": "stale", "sentence": "", "verbs": []}]
     r = await seeded_kernel.send(oid, {"type": "refresh_menu"})
     assert r == {"refreshed": True}
     assert oid not in ot._menu_cache
 
 
-async def test_menu_not_persisted_to_chat_json(seeded_kernel, file_agent, tmp_path):
+async def test_menu_not_persisted_to_chat_json(seeded_kernel, store_agent, tmp_path):
     """Menu lives in the system block ONLY — never written to chat_<client>.json."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
@@ -564,12 +568,12 @@ async def test_menu_not_persisted_to_chat_json(seeded_kernel, file_agent, tmp_pa
     assert "Fantastic kernel" not in blob
 
 
-async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
+async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
     """Second concurrent send arrives while the first holds the lock →
     backend emits a `queued` event tagged with the second caller's
     client_id. UI uses this to mark the message as waiting; first
     `token` for the same client_id implicitly clears the marker."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
 
     # First provider call sleeps so the second `send` finds the lock held.
     class _SlowFirst:
@@ -645,12 +649,12 @@ async def test_contended_send_emits_queued_event(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_concurrent_sends_serialize_per_backend(seeded_kernel, file_agent):
+async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent):
     """Two concurrent _send calls on the same backend → run sequentially
     via the per-backend asyncio.Lock. Verified by the order of provider
     invocations vs the order tasks finish.
     """
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
 
     in_flight = 0
     max_in_flight = 0
@@ -728,9 +732,9 @@ def _statuses_for(events: list[dict], client_id: str) -> list[dict]:
     ]
 
 
-async def test_status_event_sequence_no_tool_calls(seeded_kernel, file_agent):
+async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
     """thinking → streaming → done(reason=ok). All carry the same send_id."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["hello"]])
     ot._providers[oid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
@@ -749,11 +753,11 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
+async def test_status_event_sequence_with_tool_call(seeded_kernel, store_agent):
     """thinking → streaming → tool_calling(entry) → tool_calling(exit) →
     thinking → streaming → done. Same call_id between tool entry/exit;
     same send_id across all phases."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider(
         [
             [
@@ -762,7 +766,7 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
                         "id": "call_a",
                         "name": "send",
                         "arguments": {
-                            "target_id": "fs_loader",
+                            "target_id": "kernel_state",
                             "payload": {"type": "list_agents"},
                         },
                     }
@@ -805,9 +809,9 @@ async def test_status_event_sequence_with_tool_call(seeded_kernel, file_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_queue_populated_and_drained_on_contention(seeded_kernel, file_agent):
+async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_agent):
     """Two concurrent sends; _queue grows, _current is set; both drain."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
 
     queue_sizes: list[int] = []
 
@@ -849,8 +853,8 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, file_age
     assert oid not in ot._current
 
 
-async def test_status_verb_shape_when_idle(seeded_kernel, file_agent):
-    oid = await _make_ollama(seeded_kernel, file_agent)
+async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
+    oid = await _make_ollama(seeded_kernel, store_agent)
     r = await seeded_kernel.send(oid, {"type": "status", "client_id": "alice"})
     assert r["generating"] is False
     assert r["current"] is None
@@ -859,10 +863,10 @@ async def test_status_verb_shape_when_idle(seeded_kernel, file_agent):
     assert r["client_id"] == "alice"
 
 
-async def test_status_verb_shape_during_inflight_mine(seeded_kernel, file_agent):
+async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent):
     """Mid-flight, the caller's status snapshot reflects current entry
     with is_mine=True and full text."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     captured_status: list[dict] = []
 
     class _SlowProvider:
@@ -887,11 +891,11 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, file_agent)
     assert snap["current"]["elapsed"] >= 0.0
 
 
-async def test_status_verb_privacy_filter(seeded_kernel, file_agent):
+async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
     """Bob's running, alice's queued. Alice's snapshot: is_mine=False,
     no text in current. Bob's snapshot: is_mine=True with text;
     alice's pending shows up as others_pending=1."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     snapshots: dict[str, dict] = {}
 
     class _PrivacyProvider:
@@ -943,9 +947,9 @@ async def test_status_verb_privacy_filter(seeded_kernel, file_agent):
     assert b["others_pending"] == 1  # alice's pending
 
 
-async def test_status_verb_no_client_id_redacts_text(seeded_kernel, file_agent):
+async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent):
     """Without client_id the snapshot redacts text everywhere."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     snap_holder: list[dict] = []
 
     class _RedactProvider:
@@ -969,9 +973,9 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, file_agent):
     assert snap["others_pending"] >= 0
 
 
-async def test_status_done_emits_with_reason_interrupt(seeded_kernel, file_agent):
+async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agent):
     """Interrupt mid-stream → final status carries reason='interrupted'."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
 
     class _SlowProvider:
         async def chat(self, messages, tools):
@@ -1002,10 +1006,10 @@ async def test_status_done_emits_with_reason_interrupt(seeded_kernel, file_agent
 
 
 async def test_status_done_emits_with_reason_timeout(
-    seeded_kernel, file_agent, monkeypatch
+    seeded_kernel, store_agent, monkeypatch
 ):
     """Patched low SEND_TIMEOUT → done with reason='timeout'."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     monkeypatch.setattr(ot, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
@@ -1032,9 +1036,9 @@ async def test_status_done_emits_with_reason_timeout(
         ot._providers.pop(oid, None)
 
 
-async def test_status_event_includes_send_id(seeded_kernel, file_agent):
+async def test_status_event_includes_send_id(seeded_kernel, store_agent):
     """Drift guard: every status event detail carries a send_id."""
-    oid = await _make_ollama(seeded_kernel, file_agent)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["ok"]])
     ot._providers[oid] = fp
     sends, emits, ctx = _capture(seeded_kernel)

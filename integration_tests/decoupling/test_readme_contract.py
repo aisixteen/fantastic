@@ -45,7 +45,7 @@ DENY = [
 
 # Root protocol docs legitimately describe the two-kernel / browser model.
 EXEMPT_SUBSTR = [
-    "loader/fs_loader/src/fs_loader/readme.md",  # python root
+    "loader/kernel_state/src/kernel_state/readme.md",  # python root
     "fantastic-core/src/readme.md",  # rust root
     "RootReadme",  # swift root readme source
 ]

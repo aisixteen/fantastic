@@ -5,8 +5,8 @@ pattern). Same surface as ollama_backend (send/history/interrupt/
 refresh_menu/reflect) PLUS the NIM-specific bits, all wired through
 `ai_core.build()`:
 
-- API key required, stored OUT-OF-BAND in `.fantastic/agents/<id>/api_key`
-  via `file_agent_id` (never in agent.json). Verbs `set_api_key` /
+- API key required, stored OUT-OF-BAND at the store-relative `agents/<id>/api_key`
+  via `file_bridge_id` (never in agent.json). Verbs `set_api_key` /
   `clear_api_key` (passed as `extra_verbs`); `reflect` reports
   `has_api_key:bool` only (via `reflect_extra`). The key/sidecar logic
   stays HERE — ai_core never sees it.
@@ -40,7 +40,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     _build_menu,
     _current,
     _emit_status,
-    _file_agent_id,
+    _file_bridge_id,
     _invalidate_menu,
     _locks,
     _menu_cache,
@@ -69,17 +69,18 @@ def _parse_retry_after(resp: "httpx.Response") -> int:
     return min(n, RATE_LIMIT_MAX_WAIT)
 
 
-# ─── api_key sidecar (nvidia-local; routed through file_agent_id) ──
+# ─── api_key sidecar (nvidia-local; routed through file_bridge_id) ──
 
 
 def _key_path(self_id: str) -> str:
-    """Sidecar file holding the API key. Kept out of agent.json so it
-    never leaks through `kernel.list()` or any reflect output."""
-    return f".fantastic/agents/{self_id}/api_key"
+    """Sidecar file holding the API key, STORE-RELATIVE (`agents/<id>/…`): wired to the
+    `.fantastic` store it lands next to the agent's own agent.json (no double-nest).
+    Kept out of agent.json so it never leaks through `kernel.list()` or any reflect."""
+    return f"agents/{self_id}/api_key"
 
 
 async def _read_api_key(self_id: str, kernel) -> str | None:
-    fid = _file_agent_id(self_id, kernel)
+    fid = _file_bridge_id(self_id, kernel)
     if not fid:
         return None
     r = await kernel.send(fid, {"type": "read", "path": _key_path(self_id)})
@@ -172,13 +173,13 @@ def _map_error(e: Exception) -> str | None:
 
 
 async def _set_api_key(id, payload, kernel):
-    """args: api_key:str (req). Persists the key to `.fantastic/agents/<id>/api_key` via file_agent_id. Drops the cached provider so the next send reads fresh. Failfast if file_agent_id unset or key empty."""
-    if not _file_agent_id(id, kernel):
-        return {"error": "nvidia_nim_backend: file_agent_id required"}
+    """args: api_key:str (req). Persists the key to `.fantastic/agents/<id>/api_key` via file_bridge_id. Drops the cached provider so the next send reads fresh. Failfast if file_bridge_id unset or key empty."""
+    if not _file_bridge_id(id, kernel):
+        return {"error": "nvidia_nim_backend: file_bridge_id required"}
     key = payload.get("api_key", "")
     if not isinstance(key, str) or not key.strip():
         return {"error": "set_api_key: api_key must be a non-empty string"}
-    fid = _file_agent_id(id, kernel)
+    fid = _file_bridge_id(id, kernel)
     r = await kernel.send(
         fid,
         {"type": "write", "path": _key_path(id), "content": key.strip()},
@@ -190,10 +191,10 @@ async def _set_api_key(id, payload, kernel):
 
 
 async def _clear_api_key(id, payload, kernel):
-    """No args. Deletes the api_key sidecar via file_agent_id and drops the cached provider. Returns {ok:true, deleted:bool}."""
-    if not _file_agent_id(id, kernel):
-        return {"error": "nvidia_nim_backend: file_agent_id required"}
-    fid = _file_agent_id(id, kernel)
+    """No args. Deletes the api_key sidecar via file_bridge_id and drops the cached provider. Returns {ok:true, deleted:bool}."""
+    if not _file_bridge_id(id, kernel):
+        return {"error": "nvidia_nim_backend: file_bridge_id required"}
+    fid = _file_bridge_id(id, kernel)
     r = await kernel.send(fid, {"type": "delete", "path": _key_path(id)})
     _providers.pop(id, None)
     return {"ok": True, "deleted": bool((r or {}).get("deleted", False))}

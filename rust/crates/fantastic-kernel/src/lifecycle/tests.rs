@@ -38,19 +38,25 @@ fn mk_kernel_with_storage(
     deletes: Arc<AtomicUsize>,
     storage: crate::storage::StorageMode,
 ) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(storage);
+    let mut kernel = Kernel::with_storage(storage.clone());
     kernel
         .bundles
         .register("counting.tools", CountingBundle { deletes });
+    // Disk mode persists THROUGH a provider — register the fake `file_bridge`
+    // store rooted at the workdir so a test can wire one (see `wire_fake_store`).
+    if let Some(wd) = storage.workdir() {
+        crate::test_support::register_fake_store(&mut kernel.bundles, wd);
+    }
     Arc::new(kernel)
 }
 
 #[tokio::test]
 async fn mint_id_format_is_bundle_underscore_hex6() {
-    let id = mint_id("file.tools");
-    assert!(id.starts_with("file_"));
-    // 6 hex chars after the underscore.
-    let suffix = &id["file_".len()..];
+    let id = mint_id("file_bridge.tools");
+    assert!(id.starts_with("file_bridge_"));
+    // 6 hex chars after the final underscore (the bundle name itself
+    // contains an underscore, so split off the trailing token).
+    let suffix = &id["file_bridge_".len()..];
     assert_eq!(suffix.len(), 6);
     assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -76,6 +82,9 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     );
     let _rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
+    // Wire the persistence provider (rooted at the workdir) so records land on
+    // disk — persistence is provider-routed now, RAM without one.
+    crate::test_support::wire_fake_store(&kernel, tmp.path()).await;
 
     // Create one child via the system verb.
     let v = kernel

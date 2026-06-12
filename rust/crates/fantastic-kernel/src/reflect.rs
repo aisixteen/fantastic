@@ -114,6 +114,14 @@ pub fn apply_reflect_flags(
             "version".to_string(),
             json!(std::env::var("FANTASTIC_VERSION").ok()),
         );
+        // WHICH file_bridge the loader auto-persists records THROUGH (the
+        // discovered store), or null = nothing wired (state in RAM). With the
+        // provider's posture inline in the tree, a client sees in one reflect
+        // whether persistence is wired AND whether the wired leg is open.
+        obj.insert(
+            "persistence".to_string(),
+            json!({ "provider": crate::persistence::find_store(kernel).map(|id| id.0) }),
+        );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
         "all" => {
@@ -187,6 +195,22 @@ pub fn tree_node(target: &Agent) -> Value {
     );
     if let Some(d) = target.description() {
         obj.insert("description".to_string(), json!(d));
+    }
+    // Wiring/posture meta surfaced inline (mirrors py _POSTURE_KEYS in kernel/_agent.py):
+    // a client reads the IO landscape — which legs are open vs sealed-by-default, what a
+    // consumer persists through — from ONE root reflect. Same keys + order across runtimes.
+    if let Ok(meta) = target.meta.read() {
+        for k in [
+            "ingress_rule",
+            "egress_rule",
+            "auth",
+            "root",
+            "file_bridge_id",
+        ] {
+            if let Some(v) = meta.get(k) {
+                obj.insert(k.to_string(), v.clone());
+            }
+        }
     }
     let mut children: Vec<Value> = target
         .children

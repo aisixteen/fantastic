@@ -9,7 +9,7 @@ Python's canonical ``web_ws`` server:
   payload}`` frames via ``kernel.send(target, payload)`` and replies over the
   same socket.  No bridge agent on B — it is a pure server.
 - A's bridge ``forward`` verb relays the payload to B, which dispatches it to
-  B's ``kernel`` alias (→ B's actual root, ``fs_loader`` on Python).
+  B's ``kernel`` alias (→ B's actual root, ``kernel_state`` on Python).
 - The test verifies that the reflect reply carries the uniform reflect fields
   (``id``, ``sentence``, ``tree``), confirming end-to-end dispatch.
 
@@ -36,7 +36,7 @@ async def test_swift_python_ws_forward_reflect(
 ) -> None:
     """Swift A forwards a ``reflect`` call through its WS bridge to Python B.
 
-    B's root id is ``fs_loader`` (Python runtime); both ``peer_id`` and
+    B's root id is ``kernel_state`` (Python runtime); both ``peer_id`` and
     ``target`` use the ``kernel`` alias so the test is runtime-agnostic and
     would survive a future root-id rename.
     """
@@ -58,7 +58,7 @@ async def test_swift_python_ws_forward_reflect(
         workdir_a,
         agent_id="bridge",
         # "kernel" is the runtime-neutral alias for the root agent on any kernel
-        # (Python root=fs_loader, Swift/Rust root=core).  Using the alias here
+        # (Python root=kernel_state, Swift/Rust root=core).  Using the alias here
         # means the WS path the bridge dials — /<peer_id>/ws — resolves
         # correctly on both runtimes without hardcoding a runtime-specific id.
         peer_id="kernel",
@@ -80,7 +80,7 @@ async def test_swift_python_ws_forward_reflect(
     await kernel_a.call("bridge", "boot")
 
     # Forward a reflect call through the bridge to B's kernel alias.
-    # B dispatches it to its root (fs_loader), which returns the uniform
+    # B dispatches it to its root (kernel_state), which returns the uniform
     # reflect payload.
     reply = await kernel_a.call(
         "bridge",
@@ -97,7 +97,7 @@ async def test_swift_python_ws_forward_reflect(
     missing = [f for f in ("id", "sentence", "tree") if f not in reply]
     assert not missing, f"reflect reply missing fields {missing}; got keys: {list(reply.keys())}"
 
-    # Sanity: B's root id is "fs_loader" on Python (not "core").
+    # Sanity: B's root id is "kernel_state" on Python (not "core").
     # Validate only that we got a non-empty string — the alias resolved correctly.
     assert isinstance(reply["id"], str) and reply["id"], (
         f"reflect 'id' should be a non-empty string, got: {reply['id']!r}"

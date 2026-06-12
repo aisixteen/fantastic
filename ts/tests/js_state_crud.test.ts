@@ -12,7 +12,7 @@ import type { Json, Payload } from "../src/kernel/json.ts";
 // The JS kernel runs content view-agents (html_agent / gl_agent) that hold
 // mutable content in their records; a ProxyLoader watches the local state
 // stream and persists/forgets over a fake bridge that stands in for the host
-// session fs_loader. We assert the loader sees exactly the right, coalesced
+// session kernel_state. We assert the loader sees exactly the right, coalesced
 // CRUD — no stale writes, create+delete nets to a forget.
 
 class MockLoaderBridge implements Bridge {

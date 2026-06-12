@@ -254,7 +254,7 @@ private enum FMError: Error, CustomStringConvertible {
             Create a new agent in the kernel. Returns the new \
             agent's auto-generated id on success, or {error:…} if \
             the handler_module is unknown. Common handler modules: \
-            file.tools, scheduler.tools, web.tools, \
+            file_bridge.tools, scheduler.tools, web.tools, \
             yaml_state.tools, ollama_backend.tools.
             """
         }
@@ -263,7 +263,7 @@ private enum FMError: Error, CustomStringConvertible {
         struct Arguments {
             @Guide(
                 description:
-                    "The handler_module string, e.g. 'file.tools' or 'scheduler.tools'.")
+                    "The handler_module string, e.g. 'file_bridge.tools' or 'scheduler.tools'.")
             let handlerModule: String
         }
 

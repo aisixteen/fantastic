@@ -3,10 +3,10 @@ import type { Payload } from "../../kernel/json.ts";
 import type { AgentRecord, StateEvent } from "../../kernel/state.ts";
 
 // proxy_loader — the frontend kernel's ONE auto-added loader: the JS runtime's
-// single autoagent (mirroring the host's root fs_loader; the lone exception to
+// single autoagent (mirroring the host's root kernel_state; the lone exception to
 // "no automation"). It owns NO storage — it PROXIES the loader contract
 // (`load_tree` / `persist_record` / `forget_record`) over the WS channel to the
-// host's `web_loader` (a `web/fs_loader` rooted at .fantastic/web/, reached by
+// host's `web_loader` (a `web/kernel_state` rooted at .fantastic/web/, reached by
 // that alias). Hydration flows: host disk → web_loader → channel → proxy_loader
 // → kernel.load. The browser kernel is a real STATEFUL peer whose view-agent
 // records persist on the host and rehydrate on reload. Registration (which

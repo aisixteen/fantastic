@@ -108,7 +108,7 @@ def _identity(ctx) -> str:
     context the root reflect carries, rendered for the terminal."""
     env = os.environ.get("FANTASTIC_ENV", "host")
     ver = os.environ.get("FANTASTIC_VERSION")
-    root = ctx.root.id if ctx.root is not None else "fs_loader"
+    root = ctx.root.id if ctx.root is not None else "kernel_state"
     parts = ["python", f"env={env}"]
     if ver:
         parts.append(ver)

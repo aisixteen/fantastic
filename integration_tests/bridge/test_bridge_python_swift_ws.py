@@ -2,14 +2,14 @@
 
 What is proved here
 -------------------
-Python's `kernel_bridge` (WS transport) can open a connection to Swift's
+Python's `ws_bridge` (WS transport) can open a connection to Swift's
 native WS server and round-trip a `forward` call. The response is a well-formed
 uniform-reflect payload (``id`` + ``tree`` keys present), confirming that:
 
   1. Python's ``{type:"call", target, payload}`` wire shape is accepted by
      Swift's WS dispatcher.
   2. The ``kernel`` *alias* resolves correctly on Swift B (Swift's literal root
-     id is ``core``; Python's is ``fs_loader`` — neither is hardcoded here).
+     id is ``core``; Python's is ``kernel_state`` — neither is hardcoded here).
   3. The reflect response shape is consistent across runtimes.
 
 This is the directed counterpart of ``test_bridge_swift_python_ws``. Together
@@ -17,7 +17,7 @@ the two tests prove the wire is symmetric regardless of which side initiates.
 
 Root-id note: ``peer_id='kernel'`` in ``seed_bridge_ws`` selects the WS path
 on Swift B (``/<peer_id>/ws``). The ``target='kernel'`` in the forwarded frame
-dispatches to the kernel alias on Swift. Neither Python's ``fs_loader`` nor
+dispatches to the kernel alias on Swift. Neither Python's ``kernel_state`` nor
 Swift's ``core`` is hardcoded — the ``kernel`` alias works on all runtimes.
 """
 

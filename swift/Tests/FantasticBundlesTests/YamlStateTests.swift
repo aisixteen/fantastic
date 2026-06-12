@@ -18,12 +18,23 @@ struct YamlStateTests {
         return u
     }
 
+    /// Wire the `.fantastic` store (an open file_bridge) — yaml_state persists
+    /// THROUGH it (sealed-by-default model; no own disk surface). Idempotent.
+    private func wireStore(_ kernel: Kernel) async {
+        _ = await kernel.send(
+            "core",
+            [
+                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+                "root": ".fantastic", "ingress_rule": "allow_all",
+            ])
+    }
+
     private func mkMemoryAgent(_ kernel: Kernel, mode: String) async -> AgentId {
         let rec = await kernel.send(
             "core",
             [
                 "type": "create_agent", "handler_module": "yaml_state.tools",
-                "mode": .string(mode),
+                "mode": .string(mode), "file_bridge_id": "store",
             ])
         return AgentId(rec["id"].asString ?? "")
     }
@@ -32,6 +43,7 @@ struct YamlStateTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
         _ = await kernel.send(cid, ["type": "set", "key": "user.name", "value": "Ada"])
         let r = await kernel.send(cid, ["type": "read", "key": "user.name"])
@@ -44,6 +56,7 @@ struct YamlStateTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
         _ = await kernel.send(cid, ["type": "set", "key": "z", "value": "hello"])
         _ = await kernel.send(cid, ["type": "set", "key": "a", "value": .integer(3)])
@@ -61,6 +74,7 @@ struct YamlStateTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
         _ = await kernel.send(cid, ["type": "set", "key": "old", "value": .integer(1)])
         _ = await kernel.send(cid, ["type": "replace", "doc": ["new": .integer(2)]])
@@ -75,6 +89,7 @@ struct YamlStateTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "mem")
         _ = await kernel.send(cid, ["type": "set", "key": "user.name", "value": "Ada"])
         let y = await kernel.send(cid, ["type": "state_yaml"])
@@ -89,6 +104,7 @@ struct YamlStateTests {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
+        await wireStore(kernel)
         let mem = await mkMemoryAgent(kernel, mode: "mem")
         let data = await mkMemoryAgent(kernel, mode: "data")
         let rmem = await kernel.send(mem, ["type": "reflect"])
@@ -98,5 +114,34 @@ struct YamlStateTests {
         #expect(rdata["mode"].asString == "data")
         #expect(rdata["sentence"].asString?.contains("scratch-state") == true)
         #expect(rmem["verbs"]["set"].asString != nil)
+        // reflect surfaces the provider binding.
+        #expect(rmem["file_bridge_id"].asString == "store")
+    }
+
+    @Test func mutatorsFailfastWithoutProvider() async throws {
+        // No file_bridge_id wired → set/delete/replace refuse (no silent loss);
+        // reads degrade to empty. Error text matches Python/Rust byte-for-byte.
+        let tmp = tmpDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let kernel = try await startKernel(workdir: tmp.path)
+        // NOTE: deliberately NO wireStore + NO file_bridge_id on the agent.
+        let rec = await kernel.send(
+            "core",
+            ["type": "create_agent", "handler_module": "yaml_state.tools", "mode": "data"])
+        let cid = AgentId(rec["id"].asString ?? "")
+        let s = await kernel.send(cid, ["type": "set", "key": "k", "value": "v"])
+        #expect(
+            s["error"].asString
+                == "yaml_state.set: file_bridge_id required — wire (and open) a file_bridge to persist"
+        )
+        let d = await kernel.send(cid, ["type": "delete", "key": "k"])
+        #expect(
+            d["error"].asString?.hasPrefix("yaml_state.delete: file_bridge_id required") == true)
+        let rp = await kernel.send(cid, ["type": "replace", "doc": [:]])
+        #expect(
+            rp["error"].asString?.hasPrefix("yaml_state.replace: file_bridge_id required") == true)
+        // reads degrade to empty, not error.
+        #expect((await kernel.send(cid, ["type": "read"]))["doc"].asObject?.isEmpty == true)
+        #expect((await kernel.send(cid, ["type": "state_yaml"]))["yaml"].asString == "")
     }
 }

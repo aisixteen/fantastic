@@ -36,7 +36,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
 
 
 def make_provider(id, kernel):
-    """Build an OllamaProvider from the agent record (endpoint/model/num_ctx)."""
+    """Build an OllamaProvider from the agent record (endpoint/model/num_ctx/temperature)."""
     from ollama_backend.provider import (
         DEFAULT_ENDPOINT,
         DEFAULT_MODEL,
@@ -45,10 +45,12 @@ def make_provider(id, kernel):
 
     rec = kernel.get(id) or {}
     num_ctx = rec.get("num_ctx")
+    temperature = rec.get("temperature")
     return OllamaProvider(
         endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
         model=rec.get("model", DEFAULT_MODEL),
         num_ctx=int(num_ctx) if num_ctx else None,
+        temperature=float(temperature) if temperature is not None else None,
     )
 
 

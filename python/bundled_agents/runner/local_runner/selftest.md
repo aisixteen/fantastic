@@ -38,7 +38,7 @@ PY
 
 ```bash
 mkdir -p /tmp/test_local_runner
-ID=$(call fs_loader '{"type":"create_agent","handler_module":"local_runner.tools",
+ID=$(call kernel_state '{"type":"create_agent","handler_module":"local_runner.tools",
        "remote_path":"/tmp/test_local_runner",
        "display_name":"trial"}' | python -m json.tool | grep '"id"' | awk -F'"' '{print $4}')
 call $ID '{"type":"reflect"}' | python -m json.tool
@@ -123,7 +123,7 @@ pid). Lock.json reflects the new pid+port.
 ## 9. cascade-delete fires `on_delete` — universal lifecycle hook
 
 ```bash
-call fs_loader "{\"type\":\"delete_agent\",\"id\":\"$ID\"}" | python -m json.tool
+call kernel_state "{\"type\":\"delete_agent\",\"id\":\"$ID\"}" | python -m json.tool
 ```
 
 Expected: agent record gone, the running serve killed (its pid no

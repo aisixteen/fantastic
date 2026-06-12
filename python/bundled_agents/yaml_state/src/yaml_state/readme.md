@@ -25,6 +25,20 @@ context (read it, don't re-fetch); otherwise `read` / `keys` it on demand.
 - `replace {doc}` — overwrite the whole store (`{}` clears).
 - `state_yaml {}` — the whole store as YAML (the block injected on boot).
 
+## Persistence — wire it (deny-all by default)
+yaml_state owns NO disk surface of its own; it persists `state.yaml` THROUGH a
+`file_bridge` agent (the gated fs edge, sealed by default), referenced by the
+`file_bridge_id` meta on its record. Wire it to the **`.fantastic` store** — the same
+file_bridge the loader persists records through, so ONE bridge serves both and the
+sidecar lands at `agents/<id>/state.yaml` next to its own `agent.json`. Until it's
+wired (and the bridge opened), `set`/`delete`/`replace` **fail fast** (`file_bridge_id
+required`) rather than silently dropping to RAM; a denied write is surfaced, not lost.
+
+```
+create_agent file_bridge.tools id=store root=.fantastic ingress_rule=allow_all
+create_agent yaml_state.tools  mode=mem  file_bridge_id=store
+```
+
 ## Recipes
 - Remember a fact → `set {key:"user.name", value:"Ada"}`.
 - Save state → `set {key:"view.zoom", value:1.5}`.

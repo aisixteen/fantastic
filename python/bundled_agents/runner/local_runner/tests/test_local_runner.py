@@ -166,7 +166,7 @@ async def test_start_two_step_bootstrap_then_spawn_daemon(k, proj, monkeypatch):
                 {
                     "id": "web_test",
                     "handler_module": "web.tools",
-                    "parent_id": "fs_loader",
+                    "parent_id": "kernel_state",
                     "port": chosen_port.get("port", 0),
                 }
             )
@@ -196,9 +196,9 @@ async def test_start_two_step_bootstrap_then_spawn_daemon(k, proj, monkeypatch):
     assert r["started"] is True
     assert r["pid"] == os.getpid()
     assert isinstance(r["port"], int)
-    # Pre-create step: one run with fs_loader create_agent web.tools
+    # Pre-create step: one run with kernel_state create_agent web.tools
     assert any(
-        "fs_loader" in a and "create_agent" in a and "handler_module=web.tools" in a
+        "kernel_state" in a and "create_agent" in a and "handler_module=web.tools" in a
         for a in runs
     ), f"expected create_agent call in runs={runs}"
     # Daemon spawn: just [cmd] (no flags)
@@ -222,7 +222,7 @@ async def test_start_lock_never_appears(k, proj, monkeypatch):
                 {
                     "id": "web_test",
                     "handler_module": "web.tools",
-                    "parent_id": "fs_loader",
+                    "parent_id": "kernel_state",
                     "port": 49000,
                 }
             )
@@ -257,7 +257,7 @@ async def test_start_uses_custom_remote_cmd(k, proj, monkeypatch):
                 {
                     "id": "web_test",
                     "handler_module": "web.tools",
-                    "parent_id": "fs_loader",
+                    "parent_id": "kernel_state",
                     "port": chosen_port.get("port", 0),
                 }
             )

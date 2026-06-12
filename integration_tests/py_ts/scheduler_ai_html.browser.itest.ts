@@ -20,7 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, ACTIVE_LLM, llmReachable, LLM_BACKEND, DIST_DIR, writeServedDist } from "./_host.ts";
 import type { BootOptions, Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -35,7 +35,6 @@ const MOUNT_HTML = `<!doctype html><html><head><meta charset="utf-8">
 </head><body>
 <script type="module" src="/ts_dist/file/main.js"></script>
 </body></html>`;
-const MOUNT_FILE = join(DIST_DIR, "_test_canvas.html");
 
 interface Panel {
   id: string;
@@ -77,7 +76,7 @@ async function scenario(
   try {
     host = await bootHost(port, opts);
     seed(host.tmp, host);
-    writeFileSync(MOUNT_FILE, MOUNT_HTML);
+    writeServedDist(host, "_test_canvas.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
     await browser.goto(`${host.httpOrigin}/ts_dist/file/_test_canvas.html`);
     await browser.waitFor(
@@ -190,7 +189,7 @@ test("C: AI tool-call → 3rd html panel (AI drives the UI by id)", async (t) =>
       const html = `<pre id="out">—</pre><script>
 const out = () => document.getElementById("out");
 (async () => {
-  await fantastic.send("fs_loader", { type: "create_agent", handler_module: "yaml_state.tools", id: "bus" });
+  await fantastic.send("kernel_state", { type: "create_agent", handler_module: "yaml_state.tools", id: "bus" });
   fantastic.watch("bus", (ev) => {
     if (ev && ev.type === "set" && ev.key === "display") out().textContent = String(ev.value);
   });
@@ -261,8 +260,8 @@ test("E: AI tool-call → another AI leaf (AI→AI, no recursion)", async (t) =>
 let buf = "";
 const out = () => document.getElementById("out");
 (async () => {
-  await fantastic.send("fs_loader", { type: "create_agent",
-    handler_module: "anthropic_backend.tools", file_agent_id: "llm_files", id: "aileaf" });
+  await fantastic.send("kernel_state", { type: "create_agent",
+    handler_module: "anthropic_backend.tools", file_bridge_id: "llm_files", id: "aileaf" });
   fantastic.watch(${J(ai)}, (ev) => {
     if (!ev || ev.client_id !== "main") return;
     if (ev.type === "token") buf += (ev.text || "");

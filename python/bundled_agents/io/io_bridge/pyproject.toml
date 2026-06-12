@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-io-bridge"
+version = "0.1.0"
+description = "Fantastic io_bridge — the IO channel base: every edge (ws / http / cloud / memory / cli) is a typed CHANNEL (direction · modality · transport · rule · extractor) gated by a pluggable authorization rule resolved from folder registries, PLUS the transport-agnostic bridge engine (read loop, forward/watch verbs, reply correlation, lifecycle) and the in-process MemoryTransport. The kernel interior is open; edges are sealed and opened consciously. A reflectable base bundle (ships the keystone readme) with NO wire/web deps — the bridge family and the web faces derive from it."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/io_bridge"]

@@ -9,6 +9,7 @@ description = "Filesystem-as-agent — read/write/list/delete/rename/mkdir roote
 [dependencies]
 fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 base64 = "0.22"

@@ -11,14 +11,14 @@ import pytest
 
 async def _make_terminal(kernel, command="/bin/sh"):
     rec = await kernel.send(
-        "fs_loader",
+        "kernel_state",
         {
             "type": "create_agent",
             "handler_module": "terminal_backend.tools",
             "command": command,
         },
     )
-    # fs_loader auto-boots; give the PTY a moment to spawn
+    # kernel_state auto-boots; give the PTY a moment to spawn
     await asyncio.sleep(0.3)
     return rec["id"]
 
@@ -248,10 +248,10 @@ async def test_resize(terminal):
 
 async def test_shell_without_boot_errors(seeded_kernel):
     rec = await seeded_kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "terminal_backend.tools"},
     )
-    # fs_loader auto-boots, so manually stop first
+    # kernel_state auto-boots, so manually stop first
     await seeded_kernel.send(rec["id"], {"type": "stop"})
     r = await seeded_kernel.send(rec["id"], {"type": "shell", "cmd": "echo x"})
     assert "error" in r
@@ -265,7 +265,7 @@ async def test_unknown_verb_errors(terminal):
 
 
 async def test_shutdown_kills_pty_via_delete_agent(seeded_kernel):
-    """End-to-end: when fs_loader.delete_agent runs, terminal_backend's
+    """End-to-end: when kernel_state.delete_agent runs, terminal_backend's
     `shutdown` verb must fire and tear down the PTY. Without this hook
     the subprocess outlives its agent record and keeps emitting output
     to a dead inbox (visible as ghost sprites in telemetry views).
@@ -284,14 +284,14 @@ async def test_shutdown_kills_pty_via_delete_agent(seeded_kernel):
     from terminal_backend.tools import _procs
 
     rec = await seeded_kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "terminal_backend.tools"},
     )
     tid = rec["id"]
     state = _procs.get(tid)
     assert state and state.get("pid"), "boot should spawn a PTY"
     pid = state["pid"]
-    r = await seeded_kernel.send("fs_loader", {"type": "delete_agent", "id": tid})
+    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": tid})
     assert r.get("deleted") is True
     assert tid not in _procs, "shutdown must drop the _procs entry"
     # Reap the child. waitpid returns (pid, status) once the child

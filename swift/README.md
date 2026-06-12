@@ -65,13 +65,13 @@ kernel modules.
 
 | bundle | target | tier | role |
 |---|---|---|---|
-| file | `FantasticFile` | both | sandboxed file storage |
-| yaml_state | `FantasticYamlState` | both | durable YAML key-value memory agent (`state.yaml`, disk-is-truth; `mem`/`data` modes) |
+| file_bridge | `FantasticFile` | both | the gated fs edge — sealed by default, running-dir clamp; read/write + read_stream/write_stream/pump (raw bytes) |
+| yaml_state | `FantasticYamlState` | both | durable YAML memory (`mem`/`data`); persists `state.yaml` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) — owns no disk of its own |
 | proxy_agent | `FantasticProxyAgent` | both | host-implemented agents (LanguageModel, etc.) |
 | tools | `FantasticTools` | both | LLM tool registry |
-| scheduler | `FantasticScheduler` | both | cron / interval triggers |
+| scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
-| kernel_bridge | `FantasticKernelBridge` | both | cross-kernel comms. Transports: in-memory + WS (asymmetric; WS targets remote `web_ws`) + `cloud_bridge` (peer↔peer TLS 1.3 mTLS through the zero-trust relay, pinned by Ed25519 pubkey) |
+| ws_bridge / cloud_bridge | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `cloud_bridge`: peer↔peer TLS 1.3 mTLS through the zero-trust relay, pinned by Ed25519 pubkey (1-byte text/binary tag on the TLS record) |
 | web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
@@ -157,7 +157,7 @@ breaking change to:
 - `ProxyAgent` protocol (`handle`, `onBoot`, `onDelete`)
 - HTTP routes (`/<agent_id>/`, `/<agent_id>/ws`, `/_assets/*`,
   `/_fantastic/transport.js`)
-- Bundle names: `proxy_agent.tools`, `tools.tools`, `file.tools`,
+- Bundle names: `proxy_agent.tools`, `tools.tools`, `file_bridge.tools`,
   `web.tools`, etc.
 
 ## Third-party dependencies

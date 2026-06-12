@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Fantastic terminal backend — PTY shell session as an agent."
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
-dependencies = []
+# file_bridge provides `fs` — the single disk surface (the clipboard-image paste
+# writes into a system temp scratch dir via fs's external surface).
+dependencies = ["fantastic-file-bridge"]
 
 [project.entry-points."fantastic.bundles"]
 terminal_backend = "terminal_backend.tools"

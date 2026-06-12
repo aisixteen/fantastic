@@ -257,14 +257,14 @@ SEND_TOOL = {
             "Universal verb on every agent: reflect (returns identity + state; "
             "add readme:true for the agent's full guide, and reflect the ROOT "
             "agent with readme:true for the whole-system guide). "
-            "Discover agents by sending list_agents to the fs_loader agent."
+            "Discover agents by sending list_agents to the kernel_state agent."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "target_id": {
                     "type": "string",
-                    "description": "Agent id to send the payload to (e.g. 'fs_loader', 'cli', 'terminal_xxx').",
+                    "description": "Agent id to send the payload to (e.g. 'kernel_state', 'cli', 'terminal_xxx').",
                 },
                 "payload": {
                     "type": "object",
@@ -277,7 +277,7 @@ SEND_TOOL = {
 }
 
 
-# ─── persistence (routed through file_agent_id) ────────────────
+# ─── persistence (routed through file_bridge_id) ────────────────
 
 
 def _safe_client(client_id: str) -> str:
@@ -288,17 +288,20 @@ def _safe_client(client_id: str) -> str:
 
 
 def _chat_path(self_id: str, client_id: str) -> str:
-    """Per-client chat thread. Two callers (cli, browser tab) → two files."""
-    return f".fantastic/agents/{self_id}/chat_{_safe_client(client_id)}.json"
+    """Per-client chat thread, STORE-RELATIVE (`agents/<id>/…`, not `.fantastic/…`):
+    wire `file_bridge_id` to the `.fantastic` store and the sidecar lands next to the
+    agent's own `agent.json` — one store, no `.fantastic/.fantastic/…` double-nest.
+    Two callers (cli, browser tab) → two files."""
+    return f"agents/{self_id}/chat_{_safe_client(client_id)}.json"
 
 
-def _file_agent_id(self_id: str, kernel) -> str | None:
+def _file_bridge_id(self_id: str, kernel) -> str | None:
     rec = kernel.get(self_id) or {}
-    return rec.get("file_agent_id")
+    return rec.get("file_bridge_id")
 
 
 async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
-    fid = _file_agent_id(self_id, kernel)
+    fid = _file_bridge_id(self_id, kernel)
     if not fid:
         return []
     r = await kernel.send(fid, {"type": "read", "path": _chat_path(self_id, client_id)})
@@ -313,7 +316,7 @@ async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
 async def _save_history(
     self_id: str, kernel, client_id: str, messages: list[dict]
 ) -> None:
-    fid = _file_agent_id(self_id, kernel)
+    fid = _file_bridge_id(self_id, kernel)
     if not fid:
         return
     await kernel.send(
@@ -358,7 +361,7 @@ async def _build_menu(self_id: str, kernel) -> list[dict]:
     one-line sentence + verb names. Used to grow the system prompt
     into a real "menu of capabilities" the model can see at a glance.
     """
-    online = await kernel.send("fs_loader", {"type": "list_agents"})
+    online = await kernel.send("kernel_state", {"type": "list_agents"})
     items: list[dict] = []
     for a in online.get("agents", []):
         if a["id"] == self_id:
@@ -384,7 +387,7 @@ async def _build_menu(self_id: str, kernel) -> list[dict]:
 def _render_menu(menu: list[dict]) -> str:
     """Format the menu as bullet lines for the system prompt."""
     if not menu:
-        return "## Available agents\n(none — only `fs_loader` and `self`)"
+        return "## Available agents\n(none — only `kernel_state` and `self`)"
     lines = [
         "## Available agents (reflect any for verb signatures; reflect the root"
         " agent with readme:true for the full system guide)"
@@ -401,7 +404,7 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
 - ORIENT FIRST. For anything beyond the menu's verb names — especially the
   browser frontend (panels/views), persistence, or how agents are wired — read
   the full system guide in ONE call BEFORE acting:
-  `send('fs_loader', {type:'reflect', readme:true})`. It explains the transports,
+  `send('kernel_state', {type:'reflect', readme:true})`. It explains the transports,
   how compute/memory/views are addressed, and how the browser frontend and
   persistence work. Don't guess the wiring — read it first.
 - To do something concrete (read a file, run python, list agents, etc.), pick
@@ -694,14 +697,14 @@ async def _run(
 
 def _make_reflect(cfg: Backend):
     async def _reflect(id, payload, kernel):
-        """Identity + model + endpoint + generating flag + file_agent_id binding. No args."""
+        """Identity + model + endpoint + generating flag + file_bridge_id binding. No args."""
         rec = kernel.get(id) or {}
         out = {
             "id": id,
             "sentence": cfg.sentence,
             "model": rec.get("model", cfg.default_model),
             "endpoint": rec.get("endpoint", cfg.default_endpoint),
-            "file_agent_id": rec.get("file_agent_id"),
+            "file_bridge_id": rec.get("file_bridge_id"),
             "verbs": {
                 n: (f.__doc__ or "").strip().splitlines()[0]
                 for n, f in cfg._verbs.items()
@@ -728,7 +731,7 @@ def _make_reflect(cfg: Backend):
 
 def _make_send(cfg: Backend):
     async def _send(id, payload, kernel):
-        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_agent_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}."""
+        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_bridge_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
         # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
@@ -751,9 +754,9 @@ def _make_send(cfg: Backend):
         system_prompt = payload.get("system_prompt")
         messages_override = payload.get("messages")
         stateless = isinstance(messages_override, list) and bool(messages_override)
-        # file_agent_id is only needed for the stateful path (load + persist history).
-        if not stateless and not _file_agent_id(id, kernel):
-            return {"error": f"{cfg.name}: file_agent_id required"}
+        # file_bridge_id is only needed for the stateful path (load + persist history).
+        if not stateless and not _file_bridge_id(id, kernel):
+            return {"error": f"{cfg.name}: file_bridge_id required"}
         # Backends that require a provider up front (nvidia: api_key) failfast here.
         if cfg.require_provider:
             provider = await _get_provider(id, kernel, cfg)
@@ -853,9 +856,9 @@ def _make_send(cfg: Backend):
 
 def _make_history(cfg: Backend):
     async def _history(id, payload, kernel):
-        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's persisted chat. Failfast if file_agent_id unset."""
-        if not _file_agent_id(id, kernel):
-            return {"error": f"{cfg.name}: file_agent_id required"}
+        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's persisted chat. Failfast if file_bridge_id unset."""
+        if not _file_bridge_id(id, kernel):
+            return {"error": f"{cfg.name}: file_bridge_id required"}
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         return {
             "messages": await _load_history(id, kernel, client_id),

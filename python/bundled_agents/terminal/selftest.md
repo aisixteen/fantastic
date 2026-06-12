@@ -9,7 +9,7 @@
 PTY shell agent. Done-token shell verb, timeout recovery, scrollback.
 
 **Why a running serve is required:** the PTY is a child process of the
-running kernel. `fantastic call …` spawns a fresh kernel for
+running kernel. A one-shot `fantastic <id> <verb> …` spawns a fresh kernel for
 each invocation; the PTY would be killed between calls. We use one
 persistent kernel via `serve` and drive it through a one-shot WS
 `call` frame.
@@ -21,10 +21,10 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18910
 pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
-uv run --active fantastic fs_loader create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
 # WS verb channel is now a sub-agent of web — spawn under web's id.
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools >/dev/null
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all >/dev/null
 uv run --active fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
@@ -57,7 +57,7 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 ### Test 1: spawn + reflect
 
 ```bash
-TB=$(call fs_loader '{"type":"create_agent","handler_module":"terminal_backend.tools","command":"/bin/sh"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+TB=$(call kernel_state '{"type":"create_agent","handler_module":"terminal_backend.tools","command":"/bin/sh"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 sleep 0.3
 call $TB '{"type":"reflect"}' | python -m json.tool | grep -F '"running": true'
 ```
@@ -122,9 +122,9 @@ live PTY emitting output to a dead inbox, ghost-spawning sprites in
 telemetry views.
 
 ```bash
-TB2=$(call fs_loader '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+TB2=$(call kernel_state '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 PID=$(call $TB2 '{"type":"reflect"}' | python -c "import json,sys;print(json.load(sys.stdin).get('pid',''))")
-call fs_loader "{\"type\":\"delete_agent\",\"id\":\"$TB2\"}" >/dev/null
+call kernel_state "{\"type\":\"delete_agent\",\"id\":\"$TB2\"}" >/dev/null
 sleep 0.5
 [ -n "$PID" ] && (kill -0 "$PID" 2>/dev/null && echo "FAIL pid $PID still alive" || echo "PASS pid $PID gone")
 ```

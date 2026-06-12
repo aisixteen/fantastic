@@ -1,0 +1,36 @@
+[package]
+publish = false
+name = "fantastic-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-kernel bridge — WS-only, asymmetric; ships raw call frames over memory/WS/SSH+WS transports."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
+which = { version = "6", optional = true }
+nix = { version = "0.29", features = ["signal"], optional = true }
+# cloud_bridge transport: end-to-end TLS 1.3 mTLS over the relay's opaque pipe.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+x509-parser = "0.16"
+base64 = "0.22"
+# cloud_bridge TokenSource: POST the relay's /issue control-plane endpoint.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[features]
+# `full` enables the SSH+WS transport (spawns the `ssh` binary as a
+# subprocess for the local port-forward). Disabled by default so the
+# embedded slice stays subprocess-free.
+full = ["dep:which", "dep:nix"]
+
+[dev-dependencies]
+fantastic-file = { path = "../fantastic-file" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

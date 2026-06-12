@@ -5,7 +5,7 @@
 # as a typo. Keep the list small — every entry weakens the gate.
 
 [default.extend-identifiers]
-# kernel_bridge's bidirectional in-process transport names its
+# io_bridge's bidirectional in-process transport names its
 # queues by direction: q_ab carries A→B, q_ba carries B→A. The
 # pair is symmetric; renaming half breaks the symmetry.
 q_ba = "q_ba"
@@ -19,7 +19,7 @@ close_a = "close_a"
 # under test" in test_integration.py.
 ot = "ot"
 # `ba`/`ab` appear as suffixes in queue names (see q_ba/q_ab above)
-# AND as part of `kernel_bridge` doc prose ("ba" = B-to-A direction
+# AND as part of `ws_bridge` doc prose ("ba" = B-to-A direction
 # marker). Whole-word allowance covers both.
 ba = "ba"
 ab = "ab"
@@ -36,6 +36,10 @@ unparseable = "unparseable"
 # python one-liner (`ags = json.load(...)['agents']`), same spirit as
 # `ot`/`hel` above.
 ags = "ags"
+# `mis` is the prefix in the auth comment "rather than silently mis-securing"
+# (io_bridge ingress rules, mirrored across py/rust/swift); the hyphen makes
+# typos read it as a standalone word. Intentional English prefix, not `miss`.
+mis = "mis"
 
 [files]
 # Skip vendored third-party JS / CSS assets — minified bundles

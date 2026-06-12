@@ -32,7 +32,7 @@ def runner_record():
 
 async def _make(kernel, **fields):
     rec = await kernel.send(
-        "fs_loader",
+        "kernel_state",
         {"type": "create_agent", "handler_module": "ssh_runner.tools", **fields},
     )
     return rec["id"]
@@ -101,7 +101,7 @@ async def test_start_requires_all_four_fields(seeded_kernel):
 async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
     """Verifies the SSH command we build: a two-step compound shell
     command — first persists the web agent record via
-    `fantastic fs_loader create_agent handler_module=web.tools port=N`,
+    `fantastic kernel_state create_agent handler_module=web.tools port=N`,
     then nohup-spawns the daemon. Plus the lock-poll + tunnel."""
     calls = []
 
@@ -145,7 +145,7 @@ async def test_start_command_shape(seeded_kernel, runner_record, monkeypatch):
     assert "mkdir -p .fantastic" in boot_cmd
     assert "/home/me/.venv/bin/fantastic" in boot_cmd
     # Step 1: create web record at the chosen port.
-    assert "fs_loader create_agent handler_module=web.tools port=8888" in boot_cmd
+    assert "kernel_state create_agent handler_module=web.tools port=8888" in boot_cmd
     # Step 2: nohup the daemon (no flags — boots from disk).
     assert "nohup" in boot_cmd
     assert "> .fantastic/serve.log 2>&1 &" in boot_cmd
@@ -251,7 +251,7 @@ async def test_status_when_nothing_running(seeded_kernel, runner_record, monkeyp
 
 
 async def test_on_delete_via_cascade(seeded_kernel, runner_record, monkeypatch):
-    """fs_loader.delete_agent's cascade calls ssh_runner.on_delete (== stop).
+    """kernel_state.delete_agent's cascade calls ssh_runner.on_delete (== stop).
     The runner should clean up silently — no exception even if nothing
     is running."""
     calls = []
@@ -263,7 +263,7 @@ async def test_on_delete_via_cascade(seeded_kernel, runner_record, monkeypatch):
     monkeypatch.setattr(sr, "_ssh_exec", fake_ssh_exec)
 
     rid = await _make(seeded_kernel, **runner_record)
-    r = await seeded_kernel.send("fs_loader", {"type": "delete_agent", "id": rid})
+    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": rid})
     assert r.get("deleted") is True
     # The on_delete hook fired: at least one ssh_exec call to read lock.
     assert any("lock.json" in c for c in calls)

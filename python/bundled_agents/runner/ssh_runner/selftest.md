@@ -3,7 +3,7 @@
 > scopes: kernel, ssh
 > requires: `uv sync`. Manual tests need a remote host with
 > `fantastic` installed + SSH key access (passwordless).
-> out-of-scope: cross-kernel comms (that's `kernel_bridge`).
+> out-of-scope: cross-kernel comms (that's `ws_bridge`).
 
 Each `ssh_runner` agent is one project on one remote host. Verbs:
 `start` / `stop` / `restart` / `status` over SSH-as-subprocess,
@@ -18,7 +18,7 @@ asserts the bundle invokes them with correctly-shaped arguments
 (quoted paths, ports, log redirection, lock.json polling).
 
 ```bash
-uv run pytest bundled_agents/ssh_runner/tests/ -v
+uv run pytest bundled_agents/runner/ssh_runner/tests/ -v
 ```
 Expected: 11 tests pass.
 
@@ -65,7 +65,7 @@ PY
 }
 
 # Provision the runner
-RID=$(call fs_loader "{
+RID=$(call kernel_state "{
   \"type\":\"create_agent\",
   \"handler_module\":\"ssh_runner.tools\",
   \"display_name\":\"$HOST\",
@@ -93,7 +93,7 @@ uv run --active python - "$LOCAL_PORT" <<'PY'
 import asyncio, json, sys, websockets
 port = sys.argv[1]
 async def main():
-  async with websockets.connect(f"ws://localhost:{port}/fs_loader/ws") as ws:
+  async with websockets.connect(f"ws://localhost:{port}/kernel_state/ws") as ws:
     await ws.send(json.dumps({"type":"call","target":"kernel","payload":{"type":"reflect"},"id":"1"}))
     while True:
       m = json.loads(await ws.recv())
@@ -114,7 +114,7 @@ call $RID '{"type":"stop"}' | python3 -m json.tool
 
 # Cleanup — cascade-delete fires the on_delete hook which stops the
 # tunnel + remote serve.
-call fs_loader "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"
+call kernel_state "{\"type\":\"delete_agent\",\"id\":\"$RID\"}"
 kill -9 $SPID
 rm -rf /tmp/sr_test /tmp/sr.log
 ```
@@ -122,7 +122,7 @@ Expected:
 - `start`: `{started: true, remote_pid: <int>, tunnel_pid: <int>}`
 - `status` after start: all four flags true (`tunnel_alive`,
   `remote_alive`, `ws_ok`, `remote_pid`)
-- WS round-trip to `localhost:$LOCAL_PORT/fs_loader/ws` returns the
+- WS round-trip to `localhost:$LOCAL_PORT/kernel_state/ws` returns the
   remote kernel's reflect (id + tree)
 - `stop`: tunnel + remote process gone (`status` flags all false)
 

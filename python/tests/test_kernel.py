@@ -14,13 +14,13 @@ from kernel import INBOX_BOUND
 
 
 def test_create_assigns_id_with_bundle_prefix(kernel):
-    rec = kernel.create("file.tools")
+    rec = kernel.create("file_bridge.tools")
     assert rec["id"].startswith("file_")
-    assert rec["handler_module"] == "file.tools"
+    assert rec["handler_module"] == "file_bridge.tools"
 
 
 def test_create_persists_to_disk(kernel, tmp_path):
-    rec = kernel.create("file.tools", model="gemma4")
+    rec = kernel.create("file_bridge.tools", model="gemma4")
     # Agent itself never writes; the loader does. persist() is a
     # synchronous full flush (mirrors the live debounced flush).
     persist(kernel)
@@ -32,27 +32,27 @@ def test_create_persists_to_disk(kernel, tmp_path):
 
 
 def test_create_rejects_existing_id(kernel):
-    kernel.create("file.tools", id="dup")
-    r = kernel.create("file.tools", id="dup")
+    kernel.create("file_bridge.tools", id="dup")
+    r = kernel.create("file_bridge.tools", id="dup")
     assert "error" in r
 
 
 def test_ensure_idempotent(kernel):
-    a = kernel.ensure("singleton", "file.tools", display_name="x")
-    b = kernel.ensure("singleton", "file.tools", display_name="y")
+    a = kernel.ensure("singleton", "file_bridge.tools", display_name="x")
+    b = kernel.ensure("singleton", "file_bridge.tools", display_name="y")
     assert a["id"] == b["id"]
     # ensure does NOT overwrite existing meta.
     assert b["display_name"] == "x"
 
 
 def test_get_returns_record_or_none(kernel):
-    kernel.create("file.tools", id="agent1")
+    kernel.create("file_bridge.tools", id="agent1")
     assert kernel.get("agent1")["id"] == "agent1"
     assert kernel.get("missing") is None
 
 
 def test_update_merges_meta(kernel):
-    kernel.create("file.tools", id="a")
+    kernel.create("file_bridge.tools", id="a")
     rec = kernel.update("a", model="x", endpoint="http://localhost")
     assert rec["model"] == "x"
     assert rec["endpoint"] == "http://localhost"
@@ -65,8 +65,8 @@ def test_update_returns_none_for_missing(kernel):
 async def test_delete_removes(kernel):
     """Cascade-delete detaches the record from the live tree. Disk
     cleanup (rmtree) is the loader's job via the `removed` event —
-    covered in the fs_loader tests."""
-    kernel.create("file.tools", id="del_me")
+    covered in the kernel_state tests."""
+    kernel.create("file_bridge.tools", id="del_me")
     r = await kernel.delete("del_me")
     assert r["deleted"] is True
     assert kernel.get("del_me") is None
@@ -76,7 +76,7 @@ async def test_delete_removes(kernel):
 async def test_delete_refuses_locked(kernel):
     """`delete_lock` on a record refuses delete (any agent can
     self-protect via update_agent)."""
-    kernel.create("file.tools", id="locked", delete_lock=True)
+    kernel.create("file_bridge.tools", id="locked", delete_lock=True)
     r = await kernel.delete("locked")
     assert r.get("locked") is True
     assert kernel.get("locked") is not None
@@ -85,12 +85,12 @@ async def test_delete_refuses_locked(kernel):
 def test_list_returns_all_records(kernel):
     """`agent.list()` returns flat all records across the whole tree —
     own id, all descendants."""
-    kernel.create("file.tools", id="a")
-    kernel.create("file.tools", id="b")
+    kernel.create("file_bridge.tools", id="a")
+    kernel.create("file_bridge.tools", id="b")
     ids = {a["id"] for a in kernel.list()}
-    # Root is id "fs_loader" — included in flat list along with its children.
+    # Root is id "kernel_state" — included in flat list along with its children.
     assert {"a", "b"}.issubset(ids)
-    assert "fs_loader" in ids
+    assert "kernel_state" in ids
 
 
 def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
@@ -99,7 +99,7 @@ def test_load_all_reads_existing_agents(tmp_path, monkeypatch):
     `kernel.load` recursively. Same ids, same parent-child links."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    k1.create("file.tools", id="persisted", x=42)
+    k1.create("file_bridge.tools", id="persisted", x=42)
     persist(k1)
     # Simulate restart — drop k1, bootstrap again from same dir.
     del k1
@@ -113,7 +113,7 @@ def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # Seed a real tree first, then corrupt a sibling under agents/.
     k1 = boot_root()
-    k1.create("file.tools", id="good")
+    k1.create("file_bridge.tools", id="good")
     persist(k1)
     del k1
     bad_dir = tmp_path / ".fantastic" / "agents" / "broken"
@@ -141,7 +141,7 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
     # Seed a real agent + persist, then plant a ghost: a handler_module
     # pointing at a bundle not installed here.
     k = boot_root()
-    k.create("file.tools", id="real_agent", x=42)
+    k.create("file_bridge.tools", id="real_agent", x=42)
     persist(k)
     del k
     ghost = tmp_path / ".fantastic" / "agents" / "ghost_42"
@@ -151,7 +151,7 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
             {
                 "id": "ghost_42",
                 "handler_module": "ghost_bundle_that_does_not_exist.tools",
-                "parent_id": "fs_loader",
+                "parent_id": "kernel_state",
             }
         )
     )
@@ -175,23 +175,23 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
 
 async def test_reflect_kernel_returns_uniform_identity(seeded_kernel):
     """`send("kernel", {reflect})` returns the root's uniform identity +
-    tree (default all). The alias "kernel" and the real id "fs_loader" give
+    tree (default all). The alias "kernel" and the real id "kernel_state" give
     the same reply. Old primer keys (transports etc.) are gone — they
     live in the root readme now."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert r["id"] == "fs_loader"
+    assert r["id"] == "kernel_state"
     assert r["sentence"].startswith("Fantastic kernel")
-    assert r["tree"]["id"] == "fs_loader"
+    assert r["tree"]["id"] == "kernel_state"
     assert "transports" not in r
     assert "available_bundles" not in r
-    assert r == await seeded_kernel.send("fs_loader", {"type": "reflect"})
+    assert r == await seeded_kernel.send("kernel_state", {"type": "reflect"})
 
 
 async def test_inbox_bounded_drops_oldest(kernel):
     """Inbox queue is bounded by INBOX_BOUND and drops oldest on
     overflow (so a slow consumer doesn't block the whole substrate)."""
     target = "x"
-    kernel.create("file.tools", id=target)
+    kernel.create("file_bridge.tools", id=target)
     for i in range(INBOX_BOUND + 50):
         await kernel.emit(target, {"type": "spam", "n": i})
     q = kernel.ctx.inboxes[target]

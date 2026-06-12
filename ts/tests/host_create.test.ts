@@ -1,7 +1,7 @@
 // Part-3: the canvas creates host peers on the HOST ROOT without naming a
 // host-specific id. `kernel.callHost("kernel", …)` must forward the LITERAL
 // target over the bridge (the host resolves `kernel` to its own root —
-// fs_loader/core), NOT resolve locally to the frontend canvas root.
+// kernel_state/core), NOT resolve locally to the frontend canvas root.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

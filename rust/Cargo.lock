@@ -381,6 +381,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-bridge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "fantastic-file",
+ "fantastic-io-bridge",
+ "fantastic-kernel",
+ "futures-util",
+ "nix 0.29.0",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "which",
+ "x509-parser",
+]
+
+[[package]]
 name = "fantastic-bundle"
 version = "0.1.0"
 
@@ -388,11 +410,11 @@ version = "0.1.0"
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
+ "fantastic-bridge",
  "fantastic-cli-bundle",
  "fantastic-core",
  "fantastic-file",
  "fantastic-kernel",
- "fantastic-kernel-bridge",
  "fantastic-local-runner",
  "fantastic-nvidia-nim-backend",
  "fantastic-ollama-backend",
@@ -436,9 +458,17 @@ dependencies = [
  "async-trait",
  "base64",
  "fantastic-bundle",
+ "fantastic-io-bridge",
  "fantastic-kernel",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "fantastic-io-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -456,27 +486,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "fantastic-kernel-bridge"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "fantastic-file",
- "fantastic-kernel",
- "futures-util",
- "nix 0.29.0",
- "rcgen",
- "reqwest",
- "rustls",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite",
- "which",
- "x509-parser",
 ]
 
 [[package]]
@@ -625,6 +634,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "fantastic-io-bridge",
  "fantastic-kernel",
  "fantastic-web-rest",
  "fantastic-web-ws",

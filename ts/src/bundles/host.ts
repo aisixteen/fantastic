@@ -25,7 +25,7 @@ export class Host {
 
   /** Call the HOST ROOT (or any host id) over the bridge, bypassing local
    *  resolution — pass `"kernel"` and the host resolves it to its own root
-   *  (`fs_loader`/`core`). Used to read the host bundle catalog + create host
+   *  (`kernel_state`/`core`). Used to read the host bundle catalog + create host
    *  peers without naming a host-specific id. */
   callHost(target: string, payload: Payload): Promise<Json> {
     return this.kernel.callHost(target, payload);

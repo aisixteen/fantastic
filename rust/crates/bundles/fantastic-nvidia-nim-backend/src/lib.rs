@@ -121,7 +121,9 @@ fn drop_cached_client(self_id: &AgentId) {
 // ── NIM-local: api_key sidecar ──────────────────────────────────────
 
 fn key_path(self_id: &AgentId) -> String {
-    format!(".fantastic/agents/{}/api_key", self_id)
+    // Store-relative (`agents/<id>/…`) — wire `file_bridge_id` to the `.fantastic`
+    // store; lands next to the agent's agent.json. Matches Python.
+    format!("agents/{}/api_key", self_id)
 }
 
 async fn read_api_key(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
@@ -139,8 +141,8 @@ async fn has_api_key(self_id: &AgentId, kernel: &Arc<Kernel>) -> bool {
 }
 
 async fn set_api_key_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_agent_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_agent_id required"});
+    if helpers::file_bridge_id(agent_id, kernel).is_none() {
+        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
     }
     let key = payload.get("api_key").and_then(Value::as_str).unwrap_or("");
     let trimmed = key.trim();
@@ -155,8 +157,8 @@ async fn set_api_key_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Ker
 }
 
 async fn clear_api_key_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_agent_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_agent_id required"});
+    if helpers::file_bridge_id(agent_id, kernel).is_none() {
+        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
     }
     let deleted = helpers::file_delete(agent_id, kernel, &key_path(agent_id)).await;
     drop_cached_client(agent_id);
@@ -431,8 +433,8 @@ impl Bundle for NvidiaNimBundle {
 }
 
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_agent_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_agent_id required"});
+    if helpers::file_bridge_id(agent_id, kernel).is_none() {
+        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
     }
     if !has_api_key(agent_id, kernel).await {
         return json!({"error": "nvidia_nim_backend: api_key not set; call set_api_key first"});
@@ -456,7 +458,7 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
 async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
     let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
-    let file_agent_id_v = helpers::meta_string(agent_id, kernel, "file_agent_id");
+    let file_bridge_id_v = helpers::meta_string(agent_id, kernel, "file_bridge_id");
     let has_key = has_api_key(agent_id, kernel).await;
     let generating = state::is_generating(agent_id);
     json!({
@@ -464,13 +466,13 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "sentence": "NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling).",
         "model": model,
         "endpoint": endpoint,
-        "file_agent_id": file_agent_id_v,
+        "file_bridge_id": file_bridge_id_v,
         "has_api_key": has_key,
         "generating": generating,
         "verbs": {
-            "reflect": "Identity + model + endpoint + has_api_key + generating + file_agent_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
+            "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
             "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Failfast if file_agent_id unset OR api_key not set.",
+            "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Failfast if file_bridge_id unset OR api_key not set.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "interrupt": "No args. Cancels any in-flight `send`. Returns {interrupted:bool}.",
             "refresh_menu": "No args. Drops the cached agent menu.",

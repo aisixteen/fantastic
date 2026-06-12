@@ -38,11 +38,25 @@ fn registry_with_noop() -> BundleRegistry {
     r
 }
 
+/// Registry with noop + the fake `file_bridge` persistence provider rooted at
+/// `store_root` — persistence is provider-routed, so disk tests must wire one.
+fn registry_with_store(store_root: &std::path::Path) -> BundleRegistry {
+    let mut r = registry_with_noop();
+    fantastic_kernel::test_support::register_fake_store(&mut r, store_root);
+    r
+}
+
 #[tokio::test]
 async fn save_is_pure_in_ram_no_state_json_on_disk() {
     let tmp = TempDir::new().unwrap();
-    let booted = bootstrap(registry_with_noop(), BootstrapOptions::daemon(tmp.path())).unwrap();
+    let store_root = tmp.path().join(".fantastic");
+    let booted = bootstrap(
+        registry_with_store(&store_root),
+        BootstrapOptions::daemon(tmp.path()),
+    )
+    .unwrap();
     let kernel = Arc::clone(&booted.kernel);
+    fantastic_kernel::test_support::wire_fake_store(&kernel, &store_root).await;
     kernel
         .send(
             &AgentId::from("core"),
@@ -51,7 +65,8 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
         .await;
 
     // KernelState lives only in RAM. No `state.json` file is ever
-    // created — the on-disk medium is the per-agent agent.json tree.
+    // created — the on-disk medium is the per-agent agent.json tree
+    // (written THROUGH the provider).
     assert!(!tmp.path().join(".fantastic/state.json").exists());
     assert!(tmp
         .path()
@@ -204,8 +219,14 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     // custom one's still there.
     use serde_json::Map;
     let tmp = TempDir::new().unwrap();
-    let booted = bootstrap(registry_with_noop(), BootstrapOptions::daemon(tmp.path())).unwrap();
+    let store_root = tmp.path().join(".fantastic");
+    let booted = bootstrap(
+        registry_with_store(&store_root),
+        BootstrapOptions::daemon(tmp.path()),
+    )
+    .unwrap();
     let kernel = Arc::clone(&booted.kernel);
+    fantastic_kernel::test_support::wire_fake_store(&kernel, &store_root).await;
 
     // Create the agent normally.
     kernel

@@ -102,7 +102,7 @@ embedded # iOS Lite, iPadOS, visionOS, sandboxed macOS
 
 **`full`** includes every ported bundle. Subprocess-spawning bundles
 (`terminal_backend`, `python_runtime`, `local_runner`, `ssh_runner`)
-and the SSH transport in `kernel_bridge` are gated to this feature.
+and the SSH transport in `ws_bridge` are gated to this feature.
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
@@ -130,11 +130,11 @@ iOS-safe bundles (compile under either tier):
 | `fantastic-core`            | root orchestrator (id="core")                                 |
 | `fantastic-cli-bundle`      | stdout renderer (ephemeral, tty-only)                         |
 | `fantastic-file`            | filesystem-as-agent                                           |
-| `fantastic-yaml-state`      | durable YAML key-value memory agent (`state.yaml`; mem/data modes) |
+| `fantastic-yaml-state`      | durable YAML memory agent (`state.yaml`; mem/data); persists THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
-| `fantastic-web-ws`          | WS verb-channel routes (mounted onto parent web)              |
-| `fantastic-web-rest`        | REST verb-channel routes (mounted onto parent web)            |
-| `fantastic-scheduler`       | tokio-tick recurring tasks via file_agent_id persistence      |
+| `fantastic-web-ws`          | WS verb-channel routes (mounted onto parent web); sealed by default |
+| `fantastic-web-rest`        | REST verb-channel routes (mounted onto parent web); sealed by default |
+| `fantastic-scheduler`       | tokio-tick recurring tasks; persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | `fantastic-ollama-backend`  | local LLM via ollama; LLM contract reference impl             |
 | `fantastic-nvidia-nim-backend` | NVIDIA NIM LLM (OpenAI-compatible, api_key sidecar, 429 retry) |
 | `fantastic-kernel-bridge`   | cross-kernel comms over memory / WS (asymmetric, WS-only)      |

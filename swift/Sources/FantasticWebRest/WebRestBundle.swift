@@ -14,6 +14,7 @@
 // coexist. Opt-in: create with
 //   <web_id> create_agent handler_module=web_rest.tools
 
+import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -78,7 +79,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
                 ])
             ])
         case "handle_route":
-            return await handleRoute(payload: payload, kernel: kernel)
+            return await handleRoute(agentId: agentId, payload: payload, kernel: kernel)
         case "boot", "shutdown", "stop":
             return .object(["ok": .bool(true)])
         default:
@@ -88,7 +89,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
 
     /// Serve a matched HTTP request. Returns `{status, content_type,
     /// body}` for the host to translate into an HTTPResponse.
-    private func handleRoute(payload: JSON, kernel: Kernel) async -> JSON {
+    private func handleRoute(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
         let method = payload["method"].asString ?? "GET"
         let target = payload["params"]["target"].asString
         let body = payload["body"].asString ?? ""
@@ -102,6 +103,16 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
                 return jsonResponse(
                     400,
                     .object(["error": .string("web_rest: body must be a JSON object")]))
+            }
+            // GATE — web_rest is an io_bridge inbound (http) derivation: SEALED by
+            // default. Gate the inbound call with THIS leg's ingress_rule (the
+            // credential rides the X-Fantastic-Auth header in py/rust; threading
+            // request headers here is a follow-on, so password legs need it).
+            if let denied = gateWebLeg(
+                kernel: kernel, legId: agentId, target: target,
+                verb: parsed["type"].asString ?? "", token: payload["auth_token"].asString)
+            {
+                return jsonResponse(403, denied)
             }
             let reply = await kernel.send(AgentId(target), parsed)
             if case .null = reply {

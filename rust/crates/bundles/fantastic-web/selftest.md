@@ -59,12 +59,15 @@ echo "SKIP: requires fantastic-html-agent (Phase 2)"
 ```bash
 mkdir -p /tmp/fw_root
 echo "file content" > /tmp/fw_root/test.txt
-$FANTASTIC core create_agent handler_module=file.tools id=fw_f root=/tmp/fw_root
+# The fs edge is an io_bridge leg — SEALED by default. Open it (ingress_rule=allow_all)
+# or the /file/ route's read_stream is denied and the proxy returns 404.
+$FANTASTIC core create_agent handler_module=file_bridge.tools id=fw_f root=/tmp/fw_root ingress_rule=allow_all
 # Daemon needs to be aware of the new agent — restart cycle:
 kill $DAEMON_PID; sleep 1
 $FANTASTIC &
 DAEMON_PID=$!
 sleep 2
+# /file/ now pipes via read_stream (raw bytes, chunked) — content rides verbatim.
 curl -sf http://localhost:$PORT/fw_f/file/test.txt | grep -q "file content"
 ```
 

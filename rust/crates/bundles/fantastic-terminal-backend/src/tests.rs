@@ -505,11 +505,11 @@ async fn paste_image_binary_path_skips_base64() {
     let bundle = TerminalBackendBundle;
     let png_signature: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     let header = json!({"type": "paste_image", "mime": "image/png"});
-    let reply = bundle
+    let (reply, _body) = bundle
         .handle_binary(&term, header, png_signature.clone(), &kernel)
         .await
-        .expect("handle_binary should not error")
-        .expect("handle_binary returned None");
+        .expect("handle_binary should not error");
+    let reply = reply.expect("handle_binary returned None");
     let path = reply["path"]
         .as_str()
         .unwrap_or_else(|| panic!("binary paste reply missing path: {reply:?}"))

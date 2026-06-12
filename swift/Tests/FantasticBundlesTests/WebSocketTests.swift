@@ -21,6 +21,8 @@ struct WebSocketTests {
                 "type": .string("create_agent"),
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
+                // The web_ws leg SEALS by default — open it for the inbound call.
+                "ingress_rule": .string("allow_all"),
             ]))
         let wsId = rec["id"].asString ?? "web_ws"
         _ = await kernel.send(

@@ -1,0 +1,233 @@
+"""web_rest — HTTP/REST verb-invocation surface as a sub-agent of `web`.
+
+Diagnostic-friendly: any curl-able client can POST a verb payload to
+`/<self_id>/<target_id>` and get the kernel.send reply back as JSON.
+Multiple instances coexist with different ids (and, later, different
+auth/logging knobs on the record).
+
+Routes mounted on the parent web's FastAPI app:
+
+    POST /<self_id>/<target_id>       body: JSON payload (must contain `type`)
+                                      → JSON reply from kernel.send
+    GET  /<self_id>/_reflect          → kernel.reflect (substrate primer)
+    GET  /<self_id>/_reflect/<target> → reflect on a specific agent
+
+The GET routes are browser-pastable shortcuts for the universal
+discovery verb. They're typed (single verb, no body, idempotent) so
+they don't slide into a generic HTTP call channel — POST is still the
+only path for arbitrary verbs.
+
+The `self_id` is baked into the path literal so several `web_rest`
+agents under the same `web` parent don't collide.
+
+Verbs:
+  reflect       -> identity + URL patterns
+  boot          -> no-op (web mounts the route by pulling get_routes)
+  get_routes    -> the duck-typed call surface used by `web._boot`
+"""
+
+from __future__ import annotations
+
+import json
+
+from fastapi import Request
+from fastapi.responses import JSONResponse, Response
+
+from kernel import sender_context
+
+from io_bridge import describe as _describe
+from io_bridge import gate_inbound, resolve_ingress
+
+
+# ─── auth gate (the io_bridge ingress rule on THIS leg) ─────────
+# The REST face is a CHANNEL. The credential rides the `X-Fantastic-Auth`
+# request header (the http modality's envelope) — mapped onto the frame so the
+# shared `gate_inbound` path (EnvelopeExtractor) is reused, and the dispatched
+# target never sees it. Absent rule ⇒ DenyInbound (SEALED by default — a bare leg
+# refuses every request). A sealed leg denies AND teaches (reason/hint/see); open it
+# consciously with `ingress_rule=allow_all`/`password`.
+
+
+def _gate(self_id: str, kernel, target_id: str, payload: dict, request: Request):
+    rec = kernel.get(self_id) or {}
+    frame = {
+        "target": target_id,
+        "payload": payload if isinstance(payload, dict) else {},
+        "auth_token": request.headers.get("X-Fantastic-Auth"),
+    }
+    return gate_inbound(resolve_ingress(rec), "call", frame)
+
+
+def _deny(decision) -> JSONResponse:
+    data = {"error": decision.reason, "reason": "unauthorized"}
+    if decision.hint:
+        data["hint"] = decision.hint
+    if decision.see:
+        data["see"] = decision.see
+    return JSONResponse(data, status_code=403)
+
+
+# ─── route endpoints ────────────────────────────────────────────
+
+
+def _make_post_endpoint(self_id: str, kernel):
+    async def _rest_call(request: Request, target_id: str):
+        body = await request.body()
+        try:
+            payload = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            # Don't echo the parser exception back — generic message
+            # only (CodeQL: information exposure through an exception).
+            return JSONResponse(
+                {"error": "web_rest: request body is not valid JSON"},
+                status_code=400,
+            )
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": "web_rest: body must be a JSON object"}, status_code=400
+            )
+        decision = _gate(self_id, kernel, target_id, payload, request)
+        if not decision.allowed:
+            return _deny(decision)
+        # Tag the dispatch with this surface's id so telemetry rays
+        # originate visually from this sprite. Without this an external
+        # HTTP caller has no agent context and rays drop.
+        with sender_context(self_id):
+            reply = await kernel.send(target_id, payload)
+        if reply is None:
+            return Response(status_code=204)
+        return JSONResponse(reply)
+
+    return _rest_call
+
+
+def _reflect_payload(request: Request) -> dict:
+    """Reflect payload, composing the reply from query flags so the
+    browser-pastable GET shortcuts work: `?readme=1` attaches the
+    readme; `?tree=all|ids|none` and `?bundles=all|ids|none` pick the
+    tiers (defaults: tree=all, bundles omitted)."""
+    payload: dict = {"type": "reflect"}
+    if request.query_params.get("readme") in ("1", "true", "yes"):
+        payload["readme"] = True
+    tree = request.query_params.get("tree")
+    if tree in ("all", "ids", "none"):
+        payload["tree"] = tree
+    bundles = request.query_params.get("bundles")
+    if bundles in ("all", "ids", "none"):
+        payload["bundles"] = bundles
+    return payload
+
+
+def _make_reflect_get(self_id: str, kernel):
+    async def _reflect_target(request: Request, target_id: str):
+        payload = _reflect_payload(request)
+        decision = _gate(self_id, kernel, target_id, payload, request)
+        if not decision.allowed:
+            return _deny(decision)
+        with sender_context(self_id):
+            reply = await kernel.send(target_id, payload)
+        if reply is None:
+            return Response(status_code=404)
+        return JSONResponse(reply)
+
+    return _reflect_target
+
+
+def _make_reflect_root(self_id: str, kernel):
+    async def _reflect_kernel(request: Request):
+        payload = _reflect_payload(request)
+        decision = _gate(self_id, kernel, "kernel", payload, request)
+        if not decision.allowed:
+            return _deny(decision)
+        with sender_context(self_id):
+            reply = await kernel.send("kernel", payload)
+        if reply is None:
+            return Response(status_code=404)
+        return JSONResponse(reply)
+
+    return _reflect_kernel
+
+
+# ─── verbs ──────────────────────────────────────────────────────
+
+
+async def _reflect(id, payload, kernel):
+    """Identity + URL patterns + curl examples + this leg's auth posture
+    (`ingress`/`egress`/`sealed`/`see`). No args. The credential rides the
+    `X-Fantastic-Auth` header; a sealed leg surfaces the `see` pointer so a denied
+    client learns how to open the edge."""
+    return {
+        "id": id,
+        "sentence": "REST verb-invocation surface; POST /<self>/<target_id> body=payload.",
+        "path_pattern": f"/{id}/{{target_id}}",
+        "method": "POST",
+        "reflect_url": f"/{id}/_reflect",
+        "reflect_pattern": f"/{id}/_reflect/{{target_id}}",
+        "auth_header": "X-Fantastic-Auth",
+        "curl_post": (
+            f'curl -X POST -H "content-type: application/json" '
+            f'-d \'{{"type":"reflect"}}\' http://<host>/{id}/<target_id>'
+        ),
+        "curl_reflect": f"curl http://<host>/{id}/_reflect           # root reflect (tree)",
+        "curl_reflect_target": f"curl http://<host>/{id}/_reflect/<target_id>  # any agent",
+        # The REST face is a CHANNEL — surface its auth posture so a denied client
+        # can find the door (discovery-through-denial).
+        **_describe(kernel.get(id) or {}),
+        "verbs": {
+            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
+        },
+    }
+
+
+async def _boot(id, payload, kernel):
+    """No-op. The parent `web` agent calls `get_routes` on this bundle during its own boot and mounts the HTTP endpoint onto its FastAPI app."""
+    return None
+
+
+async def _get_routes(id, payload, kernel):
+    """Declares this surface's HTTP routes. Returns
+    {routes:[…]}. Each spec is `(request, target_id) -> Response` shape
+    that FastAPI expects for `app.add_api_route` / `add_api_websocket_route`."""
+    return {
+        "routes": [
+            {
+                "kind": "http",
+                "method": "POST",
+                "path": f"/{id}/{{target_id}}",
+                "endpoint": _make_post_endpoint(id, kernel),
+            },
+            # GET shortcut: reflect kernel (substrate primer). No target
+            # in URL — default. Browser-pastable.
+            {
+                "kind": "http",
+                "method": "GET",
+                "path": f"/{id}/_reflect",
+                "endpoint": _make_reflect_root(id, kernel),
+            },
+            # GET shortcut: reflect a specific agent. Browser-pastable.
+            {
+                "kind": "http",
+                "method": "GET",
+                "path": f"/{id}/_reflect/{{target_id}}",
+                "endpoint": _make_reflect_get(id, kernel),
+            },
+        ]
+    }
+
+
+# ─── dispatch ───────────────────────────────────────────────────
+
+
+VERBS = {
+    "reflect": _reflect,
+    "boot": _boot,
+    "get_routes": _get_routes,
+}
+
+
+async def handler(id: str, payload: dict, kernel) -> dict | None:
+    t = payload.get("type")
+    fn = VERBS.get(t)
+    if fn is None:
+        return {"error": f"web_rest: unknown type {t!r}"}
+    return await fn(id, payload, kernel)

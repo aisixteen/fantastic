@@ -1,5 +1,5 @@
 # ssh_runner — remote fantastic lifecycle over SSH
-Drives a `fantastic` daemon on a remote machine using subprocess SSH and opens a local `ssh -L` tunnel so the remote daemon's HTTP port is reachable locally. Each agent represents one remote project. Composes with `kernel_bridge` for messaging.
+Drives a `fantastic` daemon on a remote machine using subprocess SSH and opens a local `ssh -L` tunnel so the remote daemon's HTTP port is reachable locally. Each agent represents one remote project. Composes with `ws_bridge` for messaging.
 
 ## Implementation
 This bundle is a thin transport over the shared `runner_core` lib. `SSHTransport` implements the ssh/tunnel seam (`ssh` exec for remote commands, `ssh -L` for the port-forward tunnel); the shared lifecycle bodies (`reflect`, `boot`, `start`, `stop`, `status`, `get_webapp`) live in `runner_core.core`. Each verb handler builds an `SSHTransport` from the agent record per-call and delegates to core.
@@ -14,7 +14,7 @@ Authentication is whatever `ssh <host>` resolves in the user's shell — keys, s
 - `restart` — stop + start. Returns the start reply.
 - `status` — `{tunnel_alive, remote_alive, remote_pid, ws_ok}`. `ws_ok` is a 2s WS probe through the SSH tunnel (reflect frame → reply) proving end-to-end liveness.
 - `get_webapp` — `{url, default_width, default_height, title}`. The url points at the LOCAL tunnel (`http://localhost:<local_port>/<entry_path>`) so the agent is reachable transparently.
-- `shutdown` — alias for `stop`; called automatically by `fs_loader.delete_agent`'s universal lifecycle hook when the agent record is deleted.
+- `shutdown` — alias for `stop`; called automatically by `kernel_state.delete_agent`'s universal lifecycle hook when the agent record is deleted.
 
 ## Record fields
 - `host` — ssh alias or hostname (passed to `ssh <host>`)

@@ -7,14 +7,14 @@ import { registerHtmlAgent } from "./bundles/html_agent/html_agent.ts";
 import { mountCanvas } from "./bundles/canvas/canvas.ts";
 
 // The frontend kernel boots as a PEER of the host. It dials the host's
-// `web_loader` alias over the bridge (a host-side `fs_loader` rooted at
+// `web_loader` alias over the bridge (a host-side `kernel_state` rooted at
 // `.fantastic/web/`, which the operator created — no automation), hydrates its
 // OWN agent tree from there (`load_tree`), and persists every local change back
 // (`proxy_loader`). The canvas renders the LOCAL member tree; host backends are
 // weak peers referenced by id. One shared frontend tree, addressed by alias —
 // no per-session id.
 
-const LOADER = "web_loader"; // the host-side web/fs_loader alias
+const LOADER = "web_loader"; // the host-side web/kernel_state alias
 const origin =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 
@@ -59,6 +59,9 @@ new WsBridge(kernel, { origin, controlEndpoint: LOADER });
 // The ONE auto-added agent in the JS runtime — its single autoagent (the loader),
 // mirroring the host root loader. Everything else below is explicit.
 const loader = new ProxyLoader(kernel, LOADER);
+// Surface the persistence provider on the root reflect (`persistence:{provider}`):
+// the frontend persists records THROUGH the host loader it proxies to.
+kernel.persistenceProvider = LOADER;
 
 const records = await loader.loadTree();
 if (records.length === 0) {

@@ -113,7 +113,7 @@ impl Bundle for MockBundle {
                     "id": agent_id.as_str(),
                     "sentence": "Mock LLM agent.",
                     "model": helpers::meta_string_or(agent_id, kernel, "model", "test-model"),
-                    "file_agent_id": helpers::file_agent_id(agent_id, kernel),
+                    "file_bridge_id": helpers::file_bridge_id(agent_id, kernel),
                     "generating": crate::state::is_generating(agent_id),
                     "verbs": {"send": "send", "history": "history"},
                     "emits": {"token": "t"},
@@ -121,8 +121,8 @@ impl Bundle for MockBundle {
             }
             "boot" => Value::Null,
             "send" => {
-                if helpers::file_agent_id(agent_id, kernel).is_none() {
-                    json!({"error": "mock_backend: file_agent_id required"})
+                if helpers::file_bridge_id(agent_id, kernel).is_none() {
+                    json!({"error": "mock_backend: file_bridge_id required"})
                 } else {
                     let (passes, delay) = scripts()
                         .get(agent_id.as_str())
@@ -159,7 +159,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     kernel.bundles.register(HANDLER_MODULE, MockBundle);
     kernel
         .bundles
-        .register("file.tools", fantastic_file::FileBundle);
+        .register("file_bridge.tools", fantastic_file::FileBundle);
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -179,9 +179,11 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
             &AgentId::from("core"),
             json!({
                 "type": "create_agent",
-                "handler_module": "file.tools",
+                "handler_module": "file_bridge.tools",
                 "id": file_id,
-                "root": tmp.path().to_string_lossy(),
+                "root": tmp.path().join(".fantastic").to_string_lossy(),
+                // the fs edge seals by default — open it so history persists through it
+                "ingress_rule": "allow_all",
             }),
         )
         .await;
@@ -192,7 +194,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 "type": "create_agent",
                 "handler_module": HANDLER_MODULE,
                 "id": backend_id,
-                "file_agent_id": file_id,
+                "file_bridge_id": file_id,
                 "model": "test-model",
             }),
         )
@@ -236,7 +238,7 @@ async fn reflect_reports_state_shape() {
         "id",
         "sentence",
         "model",
-        "file_agent_id",
+        "file_bridge_id",
         "generating",
         "verbs",
     ] {
@@ -258,7 +260,7 @@ async fn boot_is_noop() {
 }
 
 #[tokio::test]
-async fn send_without_file_agent_id_returns_error() {
+async fn send_without_file_bridge_id_returns_error() {
     let tmp = TempDir::new().unwrap();
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, MockBundle);
@@ -286,8 +288,8 @@ async fn send_without_file_agent_id_returns_error() {
         )
         .await;
     assert!(
-        r["error"].as_str().unwrap_or("").contains("file_agent_id"),
-        "expected file_agent_id error, got {r:?}",
+        r["error"].as_str().unwrap_or("").contains("file_bridge_id"),
+        "expected file_bridge_id error, got {r:?}",
     );
 }
 

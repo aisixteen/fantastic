@@ -14,16 +14,16 @@ dependencies = [
   "fantastic-web-ws",
   "fantastic-web-rest",
   "fantastic-scheduler",
-  "fantastic-file",
+  "fantastic-file-bridge",
   "fantastic-yaml-state",
-  "fantastic-fs-loader",
+  "fantastic-kernel-state",
   "fantastic-terminal-backend",
   "fantastic-ollama-backend",
   "fantastic-nvidia-nim-backend",
   "fantastic-anthropic-backend",
   "fantastic-python-runtime",
-  "fantastic-bridge-core",
-  "fantastic-kernel-bridge",
+  "fantastic-io-bridge",
+  "fantastic-ws-bridge",
   "fantastic-cloud-bridge",
   "fantastic-ssh-runner",
   "fantastic-local-runner",
@@ -52,18 +52,18 @@ testpaths = [
   "tests",
   "bundled_agents/cli/tests",
   "bundled_agents/web/host/tests",
-  "bundled_agents/web/web_ws/tests",
-  "bundled_agents/web/web_rest/tests",
+  "bundled_agents/io/web_ws/tests",
+  "bundled_agents/io/web_rest/tests",
   "bundled_agents/scheduler/tests",
-  "bundled_agents/file/tests",
+  "bundled_agents/io/file_bridge/tests",
   "bundled_agents/yaml_state/tests",
-  "bundled_agents/loader/fs_loader/tests",
+  "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/terminal/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
-  "bundled_agents/bridge/bridge_core/tests",
-  "bundled_agents/bridge/kernel_bridge/tests",
-  "bundled_agents/bridge/cloud_bridge/tests",
+  "bundled_agents/io/io_bridge/tests",
+  "bundled_agents/io/ws_bridge/tests",
+  "bundled_agents/io/cloud_bridge/tests",
   "bundled_agents/runner/ssh_runner/tests",
   "bundled_agents/runner/local_runner/tests",
   "bundled_agents/python_runtime/tests",
@@ -74,24 +74,24 @@ addopts = "-q"
 members = [
   "bundled_agents/cli",
   "bundled_agents/web/host",
-  "bundled_agents/web/web_ws",
-  "bundled_agents/web/web_rest",
+  "bundled_agents/io/web_ws",
+  "bundled_agents/io/web_rest",
   "bundled_agents/scheduler",
-  "bundled_agents/file",
+  "bundled_agents/io/file_bridge",
   "bundled_agents/terminal",
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/nvidia/nvidia_nim_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
-  "bundled_agents/bridge/bridge_core",
-  "bundled_agents/bridge/kernel_bridge",
-  "bundled_agents/bridge/cloud_bridge",
+  "bundled_agents/io/io_bridge",
+  "bundled_agents/io/ws_bridge",
+  "bundled_agents/io/cloud_bridge",
   "bundled_agents/runner/ssh_runner",
   "bundled_agents/runner/local_runner",
   "bundled_agents/runner/runner_core",
   "bundled_agents/python_runtime",
   "bundled_agents/yaml_state",
-  "bundled_agents/loader/fs_loader",
+  "bundled_agents/loader/kernel_state",
   "installed_agents/*",
 ]
 
@@ -101,18 +101,18 @@ fantastic-web = { workspace = true }
 fantastic-web-ws = { workspace = true }
 fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
-fantastic-file = { workspace = true }
+fantastic-file-bridge = { workspace = true }
 fantastic-yaml-state = { workspace = true }
 fantastic-terminal-backend = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-nvidia-nim-backend = { workspace = true }
 fantastic-anthropic-backend = { workspace = true }
-fantastic-bridge-core = { workspace = true }
-fantastic-kernel-bridge = { workspace = true }
+fantastic-io-bridge = { workspace = true }
+fantastic-ws-bridge = { workspace = true }
 fantastic-cloud-bridge = { workspace = true }
 fantastic-ssh-runner = { workspace = true }
 fantastic-local-runner = { workspace = true }
 fantastic-runner-core = { workspace = true }
 fantastic-ai-core = { workspace = true }
 fantastic-python-runtime = { workspace = true }
-fantastic-fs-loader = { workspace = true }
+fantastic-kernel-state = { workspace = true }

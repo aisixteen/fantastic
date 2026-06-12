@@ -21,11 +21,33 @@
 //   - shutdown : same as detach (substrate lifecycle hook)
 //   - reflect  : identity + connectivity + verb docs
 
+@_exported import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
 
-public let HANDLER_MODULE = "kernel_bridge.tools"
+/// `handler_module` of the WS derivation (ws / memory transports).
+public let WS_HANDLER_MODULE = "ws_bridge.tools"
+/// `handler_module` of the CLOUD derivation (the zero-trust relay transport).
+public let CLOUD_HANDLER_MODULE = "cloud_bridge.tools"
+
+/// Which transport family a bundle admits — the only behavioural difference
+/// between the two derivations (they share one engine, mirroring py's separate
+/// `ws_bridge` + `cloud_bridge` bundles and rust's `Family`).
+public enum BridgeFamily: Sendable {
+    /// ws / memory (the `ws_bridge` derivation).
+    case ws
+    /// the relay (`cloud_bridge` derivation).
+    case cloud
+
+    var label: String { self == .ws ? "ws_bridge" : "cloud_bridge" }
+    func admits(_ transportKind: String) -> Bool {
+        switch self {
+        case .ws: return transportKind == "ws" || transportKind == "memory"
+        case .cloud: return transportKind == "cloud_bridge"
+        }
+    }
+}
 
 // ── Transport enum ─────────────────────────────────────────────────
 
@@ -44,6 +66,24 @@ enum BridgeTransport {
             return await transport.forward(target: target, payload: payload)
         case .cloud(let transport):
             return await transport.forward(target: target, payload: payload)
+        }
+    }
+
+    /// Binary forward — a `read_stream`/`write_stream` carried cross-kernel.
+    func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
+        switch self {
+        case .memory(let bridge):
+            return await bridge.binaryForward(target: target, header: header, blob: blob)
+        case .ws(let transport):
+            // Over-the-wire binary forward: a codec frame `[4B len|header|body]`
+            // shipped as a binary WS message (mirrors rust's 4b). The remote
+            // `web_ws.handleBinaryFrame` decodes it, gates, and replies with a
+            // codec binary frame (read_stream) or a text reply (write_stream).
+            return await transport.binaryForward(target: target, header: header, blob: blob)
+        case .cloud(let transport):
+            // Cloud tunnels the codec frame as a tag-1 binary record `[4B len|
+            // tag(1B)|wire]` over the mTLS relay (mirrors rust's cloud wire).
+            return await transport.binaryForward(target: target, header: header, blob: blob)
         }
     }
 
@@ -108,6 +148,15 @@ public actor InMemoryBridge {
             return .object(["error": .string("remote kernel gone")])
         }
         return await remote.send(target, payload)
+    }
+
+    /// Binary forward — ships a raw chunk to the remote on the symmetric binary
+    /// channel + returns `(reply, body)`. In-process, a direct `sendWithBinary`.
+    public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
+        guard let remote = remoteKernel else {
+            return (.object(["error": .string("remote kernel gone")]), Data())
+        }
+        return await remote.sendWithBinary(target, header, blob)
     }
 
     /// Wire up a watch on the remote kernel: every emit on
@@ -175,11 +224,17 @@ public actor InMemoryBridge {
 // ── Bundle ─────────────────────────────────────────────────────────
 
 public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
-    public let name = "kernel_bridge"
+    /// Which io_bridge derivation this instance is — the only difference between
+    /// `ws_bridge.tools` and `cloud_bridge.tools` (one engine, two registrations).
+    public let family: BridgeFamily
+    public var name: String { family.label }
     private let lock = NSLock()
     private var bridges: [AgentId: BridgeTransport] = [:]
 
-    public init() {}
+    /// Default `.ws` keeps the in-memory test seam (`attachInMemory`) ergonomic.
+    public init(family: BridgeFamily = .ws) {
+        self.family = family
+    }
 
     /// Attach an in-memory bridge for `agentId` pointing at `remote`.
     /// The app calls this after creating a `kernel_bridge.tools` agent.
@@ -319,12 +374,25 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         } catch {
             return .object(["error": .string("cloud_bridge: cert: \(error)")])
         }
+        // Resolve the per-leg ingress + egress rules from the record (`ingress_rule`
+        // / `egress_rule`, else the legacy `auth` shorthand). A bad rule fails loudly.
+        let ingress: IngressRule
+        let egress: EgressRule
+        do {
+            let auth = agent.metaValue(forKey: "auth")
+            ingress = try resolveIngress(
+                ingressRule: agent.metaValue(forKey: "ingress_rule"), auth: auth)
+            egress = try resolveEgress(
+                egressRule: agent.metaValue(forKey: "egress_rule"), auth: auth)
+        } catch {
+            return .object(["error": .string("cloud_bridge: bad auth rule: \(error)")])
+        }
         let wsChannel = WSByteChannel(relayURL: relayURL, token: token)
         do {
             let transport = try await CloudBridgeTransport.connect(
                 channel: wsChannel, server: server,
                 certDER: certDER, keyPKCS8: keyPKCS8, approvedPeerPEMs: approved,
-                localAgentId: agentId, localKernel: kernel)
+                localAgentId: agentId, localKernel: kernel, ingress: ingress, egress: egress)
             attachTransport(agentId: agentId, transport: .cloud(transport))
             return .object([
                 "booted": .bool(true),
@@ -352,6 +420,16 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         id_key (b64url Ed25519), approved_peer_certs (PEM list), a token source \
         (token | issue_url+password+provider — POST the relay's /issue), \
         tls_role|initiator|partner_peer_id.
+        Authorization: two symmetric, typed per-leg rules — `ingress_rule` (the \
+        inbound FILTER) and `egress_rule` (the outbound DECORATOR), each \
+        {type, env}; a legacy `auth` shorthand sets both. Types: allow_all \
+        (default) | deny_inbound (refuse inbound calls, reply \
+        {reason:"unauthorized"}) | password (kernel-GROUP shared secret: ingress \
+        checks the envelope auth_token against the group token from an env var, \
+        default FANTASTIC_GROUP_TOKEN; egress presents it). Resolved by name from \
+        the IngressRules/EgressRules registries. Swift enforces ingress on the \
+        cloud_bridge leg only — its sole inbound-call path (ws is an asymmetric \
+        client; in-memory forward is a direct kernel call).
         """
     }
 
@@ -364,9 +442,20 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         switch verb {
         case "reflect":
             let attached = bridgeFor(agentId) != nil
+            // The per-leg rule TYPE names (config like a `token_env` is never
+            // surfaced). `ingress` = inbound filter (default allow_all), `egress` =
+            // outbound decorator (default silent); `auth` is the ingress alias. Swift
+            // gates only the cloud_bridge inbound-call path.
+            let a = kernel.agent(agentId)
+            let authMeta = a?.metaValue(forKey: "auth")
+            // SEALED BY DEFAULT — an io leg with no rule reflects as deny_inbound.
+            let ingressName = ruleName(
+                a?.metaValue(forKey: "ingress_rule") ?? authMeta, default: "deny_inbound")
+            let egressName = ruleName(
+                a?.metaValue(forKey: "egress_rule") ?? authMeta, default: "silent")
             return [
                 "id": .string(agentId.value),
-                "kind": .string("kernel_bridge"),
+                "kind": .string(family.label),
                 "sentence": .string(
                     "Cross-kernel transport (WS-only, asymmetric; in-memory test backbone)."
                 ),
@@ -375,6 +464,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 // attachment. `attached` kept as a swift-side alias.
                 "connected": .bool(attached),
                 "attached": .bool(attached),
+                "ingress": .string(ingressName),
+                "egress": .string(egressName),
+                "auth": .string(ingressName),
                 "verbs": [
                     "forward":
                         "args: target, payload. Ships a raw `{type:'call', target, payload}` frame over the transport and returns the reply.",
@@ -400,7 +492,22 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             guard let agent = kernel.agent(agentId) else {
                 return .object(["error": .string("no agent")])
             }
-            let kind = agent.metaValue(forKey: "transport")?.asString ?? "ws"
+            let kind =
+                agent.metaValue(forKey: "transport")?.asString
+                ?? (family == .cloud ? "cloud_bridge" : "ws")
+            // The derivation only opens transports in its own family — a
+            // cloud_bridge can't open a ws socket and vice-versa (the split).
+            guard family.admits(kind) else {
+                return .object([
+                    "error": .string(
+                        "\(family.label): transport \"\(kind)\" not in this derivation")
+                ])
+            }
+            // NOTE: the `auth` policy (deny_inbound) is enforced only on the
+            // cloud_bridge leg below — Swift's sole inbound-`call` dispatcher. The
+            // ws transport is an asymmetric client (no inbound calls) and the
+            // in-memory forward is a direct kernel call, so there is no inbound
+            // frame to gate on those paths (matches the relay e2e coverage).
             switch kind {
             case "ws":
                 guard let host = agent.metaValue(forKey: "host")?.asString,
@@ -409,14 +516,14 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 else {
                     return .object([
                         "error": .string(
-                            "kernel_bridge: ws transport requires host + local_port + peer_id meta"
+                            "bridge: ws transport requires host + local_port + peer_id meta"
                         )
                     ])
                 }
                 let url = URL(string: "ws://\(host):\(port)/\(peerId)/ws")
                 guard let url else {
                     return .object([
-                        "error": .string("kernel_bridge: malformed ws url")
+                        "error": .string("bridge: malformed ws url")
                     ])
                 }
                 await attachWebSocket(agentId: agentId, endpoint: url, kernel: kernel)
@@ -427,13 +534,13 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             case "memory":
                 return .object([
                     "error": .string(
-                        "kernel_bridge: memory transport requires explicit attachInMemory")
+                        "bridge: memory transport requires explicit attachInMemory")
                 ])
             case "cloud_bridge":
                 return await bootCloudBridge(agentId: agentId, agent: agent, kernel: kernel)
             default:
                 return .object([
-                    "error": .string("kernel_bridge: unknown transport \(kind)")
+                    "error": .string("bridge: unknown transport \(kind)")
                 ])
             }
         case "shutdown":
@@ -448,7 +555,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             guard let targetStr else {
                 return .object([
                     "error": .string(
-                        "kernel_bridge.forward: target (str) + payload (dict) required"
+                        "bridge.forward: target (str) + payload (dict) required"
                     )
                 ])
             }
@@ -465,7 +572,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             let targetStr = payload["target"].asString
             guard let targetStr else {
                 return .object([
-                    "error": .string("kernel_bridge.watch_remote: target (str) required")
+                    "error": .string("bridge.watch_remote: target (str) required")
                 ])
             }
             guard let transport = bridgeFor(agentId) else {
@@ -479,7 +586,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             let targetStr = payload["target"].asString
             guard let targetStr else {
                 return .object([
-                    "error": .string("kernel_bridge.unwatch_remote: target (str) required")
+                    "error": .string("bridge.unwatch_remote: target (str) required")
                 ])
             }
             guard let transport = bridgeFor(agentId) else {
@@ -492,5 +599,34 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }
+    }
+
+    /// Binary forward — `forward` carrying a raw request chunk (write_stream over
+    /// the wire) / returning a raw reply chunk (read_stream). The local caller
+    /// does `sendWithBinary(<bridge>, {type:forward, target, payload}, blob)`;
+    /// in-process this streams cross-kernel directly. Non-`forward` binary verbs
+    /// route through the text `handle` (the blob is unused).
+    public func handleBinary(
+        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+    ) async throws -> (JSON?, Data) {
+        let verb = header["type"].asString ?? ""
+        guard verb == "forward" else {
+            let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
+            return (reply, Data())
+        }
+        guard let target = header["target"].asString, case .object = header["payload"] else {
+            return (
+                .object(["error": .string("bridge.forward: target + payload (object) required")]),
+                Data()
+            )
+        }
+        guard let transport = bridgeFor(agentId) else {
+            return (
+                .object(["error": .string("bridge.forward: not connected (call boot first)")]),
+                Data()
+            )
+        }
+        return await transport.binaryForward(
+            target: AgentId(target), header: header["payload"], blob: blob)
     }
 }

@@ -29,6 +29,7 @@
 // `watch`/`unwatch` are ignored, matching the Python/Rust read loops.)
 
 import Crypto
+import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -169,6 +170,13 @@ final class HandshakeWaiter: ChannelInboundHandler, @unchecked Sendable {
 
 // ── the transport ──────────────────────────────────────────────────
 
+/// One decoded inbound TLS record: a text JSON frame, or a binary frame
+/// (header + raw body). Mirrors rust's `transport::Frame`.
+private enum CloudRecord {
+    case text(JSON)
+    case binary(JSON, Data)
+}
+
 /// A `cloud_bridge` leg: a `CloudByteChannel` to the relay + an mTLS session
 /// over it, tunnelling length-delimited kernel-bridge JSON frames.
 public actor CloudBridgeTransport {
@@ -194,12 +202,24 @@ public actor CloudBridgeTransport {
 
     /// Outstanding forwards keyed by id; resumed when the peer echoes the reply.
     private var pending: [String: CheckedContinuation<JSON, Never>] = [:]
+    /// Outstanding BINARY forwards (read_stream/write_stream) keyed by id;
+    /// resumed with `(reply, body)` — read_stream replies arrive as a binary
+    /// record (raw bytes), write_stream status as a plain text reply (empty body).
+    private var binaryPending: [String: CheckedContinuation<(JSON, Data), Never>] = [:]
     private var nextId: UInt64 = 1
     private let forwardTimeoutSeconds: Double = 30.0
 
     /// Local sink for inbound `event` re-emit + inbound `call` dispatch.
     private var eventSink: AgentId?
     private weak var kernel: Kernel?
+
+    /// The per-leg INGRESS rule (default AllowAll); consulted in `dispatch` before an
+    /// inbound `call` reaches the kernel — the single auth choke point. In Swift this
+    /// is the ONLY inbound-call path, so the gate lives here.
+    private var ingress: IngressRule = IngressRules.AllowAll()
+    /// The per-leg EGRESS rule (default Silent); `forward` stamps its credential on
+    /// the outbound frame envelope.
+    private var egress: EgressRule = EgressRules.Silent()
 
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -223,23 +243,33 @@ public actor CloudBridgeTransport {
         keyPKCS8: [UInt8],
         approvedPeerPEMs: [String],
         localAgentId: AgentId? = nil,
-        localKernel: Kernel? = nil
+        localKernel: Kernel? = nil,
+        ingress: IngressRule = IngressRules.AllowAll(),
+        egress: EgressRule = EgressRules.Silent()
     ) async throws -> CloudBridgeTransport {
         let t = CloudBridgeTransport(channel: channel)
         try await t.handshake(
             server: server, certDER: certDER, keyPKCS8: keyPKCS8,
             approvedPeerPEMs: approvedPeerPEMs)
-        await t.finishBoot(localAgentId: localAgentId, localKernel: localKernel)
+        await t.finishBoot(
+            localAgentId: localAgentId, localKernel: localKernel,
+            ingress: ingress, egress: egress)
         return t
     }
 
-    /// Wire the local kernel sink (if any) then start the receive + heartbeat
-    /// loops — one atomic actor hop so the sink is live before any frame lands.
-    private func finishBoot(localAgentId: AgentId?, localKernel: Kernel?) {
+    /// Wire the local kernel sink + auth rules (if any) then start the receive +
+    /// heartbeat loops — one atomic actor hop so the sink + gates are live before
+    /// any frame lands.
+    private func finishBoot(
+        localAgentId: AgentId?, localKernel: Kernel?,
+        ingress: IngressRule, egress: EgressRule
+    ) {
         if let localAgentId, let localKernel {
             self.eventSink = localAgentId
             self.kernel = localKernel
         }
+        self.ingress = ingress
+        self.egress = egress
         startLoops()
     }
 
@@ -430,43 +460,138 @@ public actor CloudBridgeTransport {
     }
 
     private func dispatchFrames() async {
-        while let frame = popFrame() {
-            await dispatch(frame)
+        while let rec = popFrame() {
+            switch rec {
+            case .text(let frame): await dispatch(frame)
+            case .binary(let header, let body): await dispatchBinary(header: header, body: body)
+            }
         }
         rbuf.discardReadBytes()
     }
 
-    /// Pop one complete length-delimited frame from `rbuf`, skipping keepalives.
-    /// Returns nil when no complete frame is buffered yet.
-    private func popFrame() -> JSON? {
+    /// Pop one complete length-delimited record from `rbuf`, skipping keepalives.
+    /// A record is `[4B len | tag(1B) | wire]` — tag 0 = text JSON, 1 = a binary
+    /// codec frame. Returns nil when no complete record is buffered yet.
+    private func popFrame() -> CloudRecord? {
         while rbuf.readableBytes >= HDR {
-            let n = Int(rbuf.getInteger(at: rbuf.readerIndex, endianness: .big, as: UInt32.self) ?? 0)
+            let n = Int(
+                rbuf.getInteger(at: rbuf.readerIndex, endianness: .big, as: UInt32.self) ?? 0)
             if n > MAX_FRAME {
                 Task { await self.close() }
                 return nil
             }
             if rbuf.readableBytes < HDR + n { return nil }
             rbuf.moveReaderIndex(forwardBy: HDR)
-            let body = rbuf.readBytes(length: n) ?? []
-            guard let frame = try? JSON.parse(String(decoding: body, as: UTF8.self)) else { continue }
+            let rec = rbuf.readBytes(length: n) ?? []
+            // First byte is the text/binary tag; the rest is the wire.
+            guard let tag = rec.first else { continue }
+            let wire = Array(rec.dropFirst())
+            if tag == 1 {
+                guard let (header, body) = Codec.decodeBinaryFrame(Data(wire)) else { continue }
+                return .binary(header, body)
+            }
+            guard let frame = try? JSON.parse(String(decoding: wire, as: UTF8.self)) else {
+                continue
+            }
             if frame["type"].asString == KEEPALIVE_TYPE { continue }
-            return frame
+            return .text(frame)
         }
         return nil
+    }
+
+    /// Handle one inbound BINARY record — a binary `reply`/`error` resolving a
+    /// pending `binaryForward`, or an inbound binary `call` (a peer streaming a
+    /// read_stream/write_stream to us) gated + dispatched via `sendWithBinary`.
+    /// Mirrors `FantasticWeb/WebSocket.handleBinaryFrame` + the text `dispatch`.
+    private func dispatchBinary(header: JSON, body: Data) async {
+        switch header["type"].asString {
+        case "reply":
+            if let id = header["id"].asString, let cont = binaryPending.removeValue(forKey: id) {
+                cont.resume(returning: (header["data"], body))
+            }
+        case "error":
+            guard let id = header["id"].asString else { return }
+            let err: JSON = .object([
+                "error": .string("remote error: \(header["error"].asString ?? "unknown")")
+            ])
+            if let cont = binaryPending.removeValue(forKey: id) {
+                cont.resume(returning: (err, Data()))
+            } else if let cont = pending.removeValue(forKey: id) {
+                cont.resume(returning: err)
+            }
+        default:
+            // Inbound binary call — the symmetric peer streaming to us. AUTH GATE
+            // first (same choke point as the text `call`), then sendWithBinary.
+            let id = header["id"]
+            let target = header["target"].asString ?? ""
+            let verb = header["type"].asString ?? ""
+            let decision = ingress.authorize(
+                AuthAction(
+                    kind: "call", target: target, verb: verb,
+                    token: header["auth_token"].asString))
+            if target.isEmpty {
+                _ = await sendFrame(
+                    .object([
+                        "type": .string("reply"), "id": id,
+                        "data": .object(["error": .string("cloud_bridge: empty call target")]),
+                    ]))
+                return
+            }
+            if case .deny(let reason) = decision {
+                _ = await sendFrame(
+                    .object([
+                        "type": .string("reply"), "id": id,
+                        "data": .object([
+                            "error": .string(reason), "reason": .string("unauthorized"),
+                        ]),
+                    ]))
+                return
+            }
+            guard let kernel = kernel else {
+                _ = await sendFrame(
+                    .object([
+                        "type": .string("reply"), "id": id,
+                        "data": .object(["error": .string("cloud_bridge: no local kernel")]),
+                    ]))
+                return
+            }
+            let (reply, replyBody) = await kernel.sendWithBinary(AgentId(target), header, body)
+            if replyBody.isEmpty {
+                // write_stream status → plain text reply.
+                _ = await sendFrame(
+                    .object(["type": .string("reply"), "id": id, "data": reply]))
+            } else {
+                // read_stream reply → a binary record, body raw at `data.bytes`.
+                var env: JSON = .object([
+                    "type": .string("reply"), "id": id, "data": reply,
+                ])
+                env["_binary_path"] = .string("data.bytes")
+                _ = await sendBinaryRecord(header: env, body: replyBody)
+            }
+        }
     }
 
     private func dispatch(_ frame: JSON) async {
         switch frame["type"].asString {
         case "reply":
-            if let id = frame["id"].asString, let cont = pending.removeValue(forKey: id) {
+            // A reply may settle a text forward OR a binary forward whose result
+            // carried no bytes (a write_stream status arrives as a tag-0 text
+            // reply). Check both pending maps (mirrors the WS receive loop).
+            guard let id = frame["id"].asString else { break }
+            if let cont = pending.removeValue(forKey: id) {
                 cont.resume(returning: frame["data"])
+            } else if let cont = binaryPending.removeValue(forKey: id) {
+                cont.resume(returning: (frame["data"], Data()))
             }
         case "error":
-            if let id = frame["id"].asString, let cont = pending.removeValue(forKey: id) {
-                cont.resume(
-                    returning: .object([
-                        "error": .string("remote error: \(frame["error"].asString ?? "unknown")")
-                    ]))
+            guard let id = frame["id"].asString else { break }
+            let err: JSON = .object([
+                "error": .string("remote error: \(frame["error"].asString ?? "unknown")")
+            ])
+            if let cont = pending.removeValue(forKey: id) {
+                cont.resume(returning: err)
+            } else if let cont = binaryPending.removeValue(forKey: id) {
+                cont.resume(returning: (err, Data()))
             }
         case "event":
             if let sink = eventSink, let kernel = kernel {
@@ -477,9 +602,22 @@ public actor CloudBridgeTransport {
             // ship the reply back (mirrors the Rust/Python read loop).
             let id = frame["id"]
             let target = frame["target"].asString ?? ""
+            // AUTH GATE — the single (cloud-only) choke point in Swift. The leg's
+            // policy decides whether this inbound call dispatches; on deny we reply
+            // {error, reason:"unauthorized"} (fail-fast, not a silent drop). The
+            // `auth_token` rides the frame envelope, not the dispatched payload.
+            let verb = frame["payload"]["type"].asString ?? ""
+            let decision = ingress.authorize(
+                AuthAction(
+                    kind: "call", target: target, verb: verb,
+                    token: frame["auth_token"].asString))
             let reply: JSON
             if target.isEmpty {
                 reply = .object(["error": .string("cloud_bridge: empty call target")])
+            } else if case .deny(let reason) = decision {
+                reply = .object([
+                    "error": .string(reason), "reason": .string("unauthorized"),
+                ])
             } else if let kernel = kernel {
                 reply = await kernel.send(AgentId(target), frame["payload"])
             } else {
@@ -496,14 +634,18 @@ public actor CloudBridgeTransport {
 
     // ── send path ──────────────────────────────────────────────────
 
-    /// Encrypt + length-frame `frame` and ship it as relay ciphertext frames.
-    private func sendFrame(_ frame: JSON) async -> Bool {
+    /// Encrypt + frame a record `[4B len | tag(1B) | wire]` (len covers
+    /// `tag + wire`) and ship it as relay ciphertext frames. tag 0 = text JSON,
+    /// 1 = a binary codec frame. Byte-identical to py cloud_bridge `_send_frame`
+    /// + rust `write_record`, so a swift leg interops with a py/rust peer.
+    private func writeRecord(tag: UInt8, wire: [UInt8]) async -> Bool {
         guard open else { return false }
-        let json = Array(frame.serialize().utf8)
-        guard json.count <= MAX_FRAME else { return false }
-        var plain = embedded.allocator.buffer(capacity: HDR + json.count)
-        plain.writeInteger(UInt32(json.count), endianness: .big)
-        plain.writeBytes(json)
+        let recLen = 1 + wire.count
+        guard recLen <= MAX_FRAME else { return false }
+        var plain = embedded.allocator.buffer(capacity: HDR + recLen)
+        plain.writeInteger(UInt32(recLen), endianness: .big)
+        plain.writeInteger(tag)  // single byte
+        plain.writeBytes(wire)
         do {
             try embedded.writeOutbound(plain)  // NIOSSL encrypts → outbound
             embedded.embeddedEventLoop.run()
@@ -514,6 +656,17 @@ public actor CloudBridgeTransport {
         return true
     }
 
+    /// Encrypt + ship a text JSON frame (tag 0).
+    private func sendFrame(_ frame: JSON) async -> Bool {
+        await writeRecord(tag: 0, wire: Array(frame.serialize().utf8))
+    }
+
+    /// Encrypt + ship a binary frame (tag 1) — `[4B len|header|body]` raw bytes.
+    private func sendBinaryRecord(header: JSON, body: Data) async -> Bool {
+        await writeRecord(
+            tag: 1, wire: [UInt8](Codec.encodeBinaryFrame(header: header, body: body)))
+    }
+
     public func forward(target: AgentId, payload: JSON) async -> JSON {
         guard open else {
             return .object([
@@ -522,12 +675,18 @@ public actor CloudBridgeTransport {
             ])
         }
         let id = mintId()
-        let frame: JSON = .object([
+        var frame: JSON = .object([
             "type": .string("call"),
             "id": .string(id),
             "target": .string(target.value),
             "payload": payload,
         ])
+        // Stamp this leg's EGRESS credential on the envelope, if its rule presents one
+        // (password ⇒ the group token; silent ⇒ nil ⇒ no field, wire unchanged). The
+        // dispatched `payload` stays clean — the target never sees the token.
+        if let token = egress.credential() {
+            frame["auth_token"] = .string(token)
+        }
         let sent = await sendFrame(frame)
         if !sent {
             return .object([
@@ -538,6 +697,59 @@ public actor CloudBridgeTransport {
         return await withCheckedContinuation { cont in
             pending[id] = cont
             Task { await self.timeoutPending(id: id) }
+        }
+    }
+
+    /// Binary forward over the relay tunnel — a read_stream/write_stream chunk
+    /// shipped as a tag-1 binary record. The header is the inner call with
+    /// `target`/`id` (+ egress credential) stamped on; the trailing bytes are the
+    /// raw body. The reply arrives as a binary record (read_stream → raw bytes)
+    /// or a plain text reply (write_stream status → empty body). Mirrors the WS
+    /// `binaryForward`.
+    public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
+        guard open else {
+            return (
+                .object([
+                    "error": .string("cloud_bridge: not connected"),
+                    "reason": .string("not_connected"),
+                ]), Data()
+            )
+        }
+        let id = mintId()
+        var wire = header
+        wire["target"] = .string(target.value)
+        wire["id"] = .string(id)
+        // Stamp this leg's egress credential on the envelope (target never sees it).
+        if let token = egress.credential() {
+            wire["auth_token"] = .string(token)
+        }
+        let sent = await sendBinaryRecord(header: wire, body: blob)
+        if !sent {
+            return (
+                .object([
+                    "error": .string("cloud_bridge.binaryForward: send failed"),
+                    "reason": .string("transport_error"),
+                ]), Data()
+            )
+        }
+        return await withCheckedContinuation { cont in
+            binaryPending[id] = cont
+            Task { await self.timeoutBinaryPending(id: id) }
+        }
+    }
+
+    private func timeoutBinaryPending(id: String) async {
+        try? await Task.sleep(nanoseconds: UInt64(forwardTimeoutSeconds * 1_000_000_000))
+        if let cont = binaryPending.removeValue(forKey: id) {
+            cont.resume(
+                returning: (
+                    .object([
+                        "error": .string(
+                            "cloud_bridge.binaryForward: timeout after \(Int(forwardTimeoutSeconds))s"
+                        ),
+                        "reason": .string("timeout"),
+                    ]), Data()
+                ))
         }
     }
 
@@ -608,6 +820,17 @@ public actor CloudBridgeTransport {
                     "error": .string(reason),
                     "reason": .string("transport_dropped"),
                 ]))
+        }
+        let bwaiters = binaryPending
+        binaryPending.removeAll()
+        for (_, cont) in bwaiters {
+            cont.resume(
+                returning: (
+                    .object([
+                        "error": .string(reason),
+                        "reason": .string("transport_dropped"),
+                    ]), Data()
+                ))
         }
     }
 

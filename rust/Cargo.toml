@@ -7,6 +7,7 @@
 resolver = "2"
 members = [
     "crates/fantastic-kernel",
+    "crates/fantastic-io-bridge",
     "crates/fantastic-bundle",
     "crates/fantastic-cli",
     "crates/bundles/fantastic-core",
@@ -19,7 +20,7 @@ members = [
     "crates/bundles/fantastic-scheduler",
     "crates/bundles/fantastic-ai-core",
     "crates/bundles/fantastic-ollama-backend",
-    "crates/bundles/fantastic-kernel-bridge",
+    "crates/bundles/fantastic-bridge",
     "crates/bundles/fantastic-nvidia-nim-backend",
     "crates/bundles/fantastic-terminal-backend",
     "crates/bundles/fantastic-python-runtime",

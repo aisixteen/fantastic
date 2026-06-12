@@ -1,7 +1,7 @@
 // The canonical root readme — the single substrate doc.
 //
 // `Resources/root_readme.md` is a byte-identical copy of the canonical
-// `python/bundled_agents/loader/fs_loader/src/fs_loader/readme.md`.
+// `python/bundled_agents/loader/kernel_state/src/kernel_state/readme.md`.
 // It is the one source that
 // feeds BOTH the on-disk `.fantastic/readme.md` (seeded at boot) and
 // `reflect readme=true` on the root — they must be identical. The

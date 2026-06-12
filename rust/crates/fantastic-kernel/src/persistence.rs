@@ -32,54 +32,140 @@ use crate::agent::{Agent, AgentId, AgentRecord};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
-use crate::storage::StorageMode;
 use serde_json::{Map, Value};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Sync an agent's record onto its per-agent `agent.json` ("dirty
-/// binding"): the in-RAM agent and the on-disk file aren't strictly
-/// coupled; this fn brings the file up-to-date for the kernel-managed
-/// fields, leaving every other field on disk alone.
+/// DISCOVER the persistence provider — mirrors Python `kernel_state._find_store`:
+/// the first `file_bridge.tools` CHILD of the root whose `root` resolves to the
+/// root loader's own store dir (its `.fantastic`). Bound by MATCH, not a fixed id
+/// and **not kernel-composed** — an operator/LLM creates it (the one allowed
+/// autoagent is the loader; the store is wired consciously). Returns its id, or
+/// `None` when none is wired — in which case the live tree stays in RAM. **No
+/// fallback** (the substrate never writes around a missing/sealed provider).
+pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
+    let root = kernel.root()?;
+    let base = std::env::current_dir().unwrap_or_default();
+    // The loader's own dir is the store root (`.fantastic`). Resolve LEXICALLY
+    // (absolutize + fold `.`/`..`) — no filesystem touch, so discovery works
+    // before the dir exists (and stays a single deterministic path, no fallback).
+    let want = normalize_lexical(&base, &root.root_path);
+    for cid in root.child_ids() {
+        let child = match kernel.agents.get(&cid) {
+            Some(e) => Arc::clone(&e),
+            None => continue,
+        };
+        if child.handler_module.as_deref() != Some("file_bridge.tools") {
+            continue;
+        }
+        let r = child
+            .meta
+            .read()
+            .ok()
+            .and_then(|m| m.get("root").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        if normalize_lexical(&base, Path::new(&r)) == want {
+            return Some(cid);
+        }
+    }
+    None
+}
+
+/// Absolutize `p` against `base` and fold `.`/`..` lexically (no filesystem
+/// access). Both sides of the store match go through this so a relative
+/// `.fantastic` and an absolute workdir compare equal deterministically.
+fn normalize_lexical(base: &Path, p: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    let mut out: Vec<Component> = Vec::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir => {
+                if matches!(out.last(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(c);
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
+}
+
+/// An agent's dir RELATIVE to the loader's store root (`.fantastic`). The root
+/// loader itself → `""` (its `agent.json` sits at the provider root); a child →
+/// `agents/<id>` (recursively). Both paths share the same base, so this is a
+/// plain prefix-strip (no canonicalization).
+fn store_reldir(store_root: &Path, agent_root: &Path) -> String {
+    match agent_root.strip_prefix(store_root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => agent_root.to_string_lossy().into_owned(),
+    }
+}
+
+/// `read_stream` an agent.json-relative path through the provider, returning the
+/// raw bytes (empty on any error / missing file). One chunk — records are small
+/// (well under the default stream length), matching Python's single read.
+async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str) -> Vec<u8> {
+    // Box::pin breaks the async TYPE-recursion cycle: a persist (reached from
+    // `send`'s dispatch) sends to the provider, whose dispatch could re-enter
+    // `send`. Boxing erases the future type at this hop.
+    let (meta, body) = Box::pin(kernel.send_with_binary(
+        store_id,
+        serde_json::json!({"type": "read_stream", "path": path}),
+        Vec::new(),
+    ))
+    .await;
+    if meta.get("error").is_some() {
+        return Vec::new();
+    }
+    body
+}
+
+/// Persist an agent's record onto its per-agent `agent.json` ("dirty binding"):
+/// the in-RAM agent and the on-disk file aren't strictly coupled; this brings the
+/// file up to date for the kernel-managed fields, leaving every other field
+/// alone. The write goes **THROUGH the discovered `file_bridge` provider's
+/// `write_stream`** — the substrate owns no `fs` surface of its own here.
 ///
 /// Behaviour:
 /// - **InMemory mode** → no-op (no filesystem at all)
 /// - **Ephemeral agent** → no-op (per-process composition; never persists)
-/// - **Disk mode** → create the agent's dir if missing, read the
-///   existing `agent.json` if any, MERGE the agent's current
-///   `record()` fields into it (overwriting only those keys, leaving
-///   unknown keys + sidecar files untouched), and write the merged
-///   JSON back. NEVER wholesale-overwrites: if a bundle or user has
-///   added fields to `agent.json` that the kernel doesn't manage,
-///   they survive each persist call.
-pub fn persist(agent: &Agent, storage: &StorageMode) -> KernelResult<()> {
-    if storage.is_in_memory() || agent.ephemeral {
+/// - **No provider wired** → no-op (RAM; lost on restart until a store is wired)
+/// - **Provider wired** → `read_stream` the existing JSON, MERGE the agent's
+///   `record()` fields over it (overwriting only those keys, leaving unknown
+///   keys + sidecars untouched), and `write_stream` the merged JSON back
+///   (`truncate`). If the provider is sealed it refuses and the write doesn't
+///   land — NO fallback; gating the store is the operator's choice.
+pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
+    if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
-    fs::create_dir_all(&agent.root_path).map_err(|e| KernelError::Persistence {
-        path: agent.root_path.clone(),
-        source: e,
-    })?;
-    let path = agent.agent_file();
-    // Read existing JSON (if any) and merge — never wholesale
-    // overwrite. Matches the "dirty binding" contract: the disk is
-    // canonical for fields we don't manage; we update only what we
-    // do.
-    let mut on_disk: Map<String, Value> = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| KernelError::Persistence {
-            path: path.clone(),
-            source: e,
-        })?;
-        match serde_json::from_str::<Value>(&raw) {
-            Ok(Value::Object(m)) => m,
-            // Anything else (corrupt, top-level array, etc.) — start
-            // from scratch rather than refusing.
-            _ => Map::new(),
-        }
-    } else {
-        Map::new()
+    let Some(store_id) = find_store(kernel) else {
+        return Ok(()); // RAM — nothing wired.
     };
+    let Some(root) = kernel.root() else {
+        return Ok(());
+    };
+    let reldir = store_reldir(&root.root_path, &agent.root_path);
+    let af = if reldir.is_empty() {
+        "agent.json".to_string()
+    } else {
+        format!("{reldir}/agent.json")
+    };
+    // Merge: read existing bytes through the provider, overlay kernel-managed keys.
+    let mut on_disk: Map<String, Value> =
+        match serde_json::from_slice::<Value>(&read_via_store(kernel, &store_id, &af).await) {
+            Ok(Value::Object(m)) => m,
+            _ => Map::new(),
+        };
     let record_json =
         serde_json::to_value(agent.record()).expect("AgentRecord is always JSON-serializable");
     if let Value::Object(record_map) = record_json {
@@ -89,27 +175,70 @@ pub fn persist(agent: &Agent, storage: &StorageMode) -> KernelResult<()> {
     }
     let json = serde_json::to_string_pretty(&Value::Object(on_disk))
         .expect("merged record is JSON-serializable");
-    fs::write(&path, json).map_err(|e| KernelError::Persistence { path, source: e })?;
+    Box::pin(kernel.send_with_binary(
+        &store_id,
+        serde_json::json!({"type": "write_stream", "path": af, "truncate": true}),
+        json.into_bytes(),
+    ))
+    .await;
     Ok(())
 }
 
-/// Seed a `readme.md` file from a `&str` source (the bundle ships
-/// it via `include_str!`). No-op if the file already exists — we
-/// preserve any user-edited content across reboots. No-op in
-/// [`StorageMode::InMemory`] (no filesystem).
-pub fn seed_readme(agent: &Agent, readme: &str, storage: &StorageMode) -> KernelResult<()> {
-    if storage.is_in_memory() || agent.ephemeral {
+/// Seed a `readme.md` (the bundle ships it via `Bundle::readme()`) into the
+/// agent's dir THROUGH the discovered provider. Copy-if-missing — never clobber
+/// operator edits. No-op in InMemory / ephemeral / no-provider-wired.
+pub async fn seed_readme(kernel: &Arc<Kernel>, agent: &Agent, readme: &str) -> KernelResult<()> {
+    if kernel.storage.is_in_memory() || agent.ephemeral {
         return Ok(());
     }
-    let path = agent.readme_file();
-    if path.exists() {
+    let Some(store_id) = find_store(kernel) else {
+        return Ok(());
+    };
+    let Some(root) = kernel.root() else {
+        return Ok(());
+    };
+    let reldir = store_reldir(&root.root_path, &agent.root_path);
+    let path = if reldir.is_empty() {
+        "readme.md".to_string()
+    } else {
+        format!("{reldir}/readme.md")
+    };
+    // Already present (any bytes) → leave it.
+    if !read_via_store(kernel, &store_id, &path).await.is_empty() {
         return Ok(());
     }
-    fs::create_dir_all(&agent.root_path).map_err(|e| KernelError::Persistence {
-        path: agent.root_path.clone(),
-        source: e,
-    })?;
-    fs::write(&path, readme).map_err(|e| KernelError::Persistence { path, source: e })?;
+    Box::pin(kernel.send_with_binary(
+        &store_id,
+        serde_json::json!({"type": "write_stream", "path": path, "truncate": true}),
+        readme.as_bytes().to_vec(),
+    ))
+    .await;
+    Ok(())
+}
+
+/// Remove an agent's dir THROUGH the discovered provider (the `delete` verb is
+/// recursive). Never removes the root (`reldir == ""`). No-op without a provider
+/// (the dir, if any, was never the substrate's to remove). Mirrors Python's
+/// `_forget_via_store`.
+pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
+    if kernel.storage.is_in_memory() || agent.ephemeral {
+        return Ok(());
+    }
+    let Some(store_id) = find_store(kernel) else {
+        return Ok(());
+    };
+    let Some(root) = kernel.root() else {
+        return Ok(());
+    };
+    let reldir = store_reldir(&root.root_path, &agent.root_path);
+    if reldir.is_empty() {
+        return Ok(()); // never remove the root
+    }
+    let _ = Box::pin(kernel.send(
+        &store_id,
+        serde_json::json!({"type": "delete", "path": reldir}),
+    ))
+    .await;
     Ok(())
 }
 

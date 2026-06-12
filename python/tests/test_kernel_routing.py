@@ -22,16 +22,16 @@ async def test_send_with_bad_handler_module_returns_error(kernel):
 
 async def test_send_system_verb_answered_natively(seeded_kernel):
     """`list_agents` is a system verb every Agent answers natively
-    (used to live on the `fs_loader` bundle). Returns flat all-records."""
-    r = await seeded_kernel.send("fs_loader", {"type": "list_agents"})
+    (used to live on the `kernel_state` bundle). Returns flat all-records."""
+    r = await seeded_kernel.send("kernel_state", {"type": "list_agents"})
     assert "agents" in r
     ids = {a["id"] for a in r["agents"]}
-    assert "fs_loader" in ids
+    assert "kernel_state" in ids
     assert "cli" in ids
 
 
 async def test_emit_puts_on_inbox(kernel):
-    kernel.create("file.tools", id="t")
+    kernel.create("file_bridge.tools", id="t")
     await kernel.emit("t", {"type": "hello", "n": 1})
     q = kernel.ctx.inboxes["t"]
     msg = q.get_nowait()
@@ -39,8 +39,8 @@ async def test_emit_puts_on_inbox(kernel):
 
 
 async def test_emit_fans_out_to_watchers(kernel):
-    kernel.create("file.tools", id="src")
-    kernel.create("file.tools", id="watcher")
+    kernel.create("file_bridge.tools", id="src")
+    kernel.create("file_bridge.tools", id="watcher")
     kernel.watch("src", "watcher")
     await kernel.emit("src", {"type": "x", "n": 42})
     # watcher's inbox got the mirror.
@@ -48,8 +48,8 @@ async def test_emit_fans_out_to_watchers(kernel):
 
 
 async def test_unwatch_stops_routing(kernel):
-    kernel.create("file.tools", id="src")
-    kernel.create("file.tools", id="w")
+    kernel.create("file_bridge.tools", id="src")
+    kernel.create("file_bridge.tools", id="w")
     kernel.watch("src", "w")
     kernel.unwatch("src", "w")
     await kernel.emit("src", {"type": "x"})
@@ -59,7 +59,7 @@ async def test_unwatch_stops_routing(kernel):
 async def test_send_also_fanouts_to_inbox(seeded_kernel):
     """`send` fans the payload out (drops on inbox) before invoking
     the handler — so watchers / state subscribers see traffic events."""
-    await seeded_kernel.send("fs_loader", {"type": "list_agents"})
-    q = seeded_kernel.ctx.inboxes["fs_loader"]
+    await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    q = seeded_kernel.ctx.inboxes["kernel_state"]
     msg = q.get_nowait()
     assert msg["type"] == "list_agents"

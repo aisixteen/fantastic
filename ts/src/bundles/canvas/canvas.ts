@@ -25,7 +25,7 @@ function viewFor(handlerModule: unknown): ViewBundle | undefined {
 
 // The canvas names NO host bundle id or type. To spawn a host peer it calls the
 // HOST ROOT via `host.callHost("kernel", …)` — the host resolves `kernel` to its
-// OWN root (`fs_loader`/`core`) — and it DISCOVERS which bundle provides a
+// OWN root (`kernel_state`/`core`) — and it DISCOVERS which bundle provides a
 // capability from the live host catalog (`reflect bundles=all`) by matching a
 // capability name, instead of hardcoding a handler_module. (An LLM does the same
 // from the host + view readmes; this dblclick is just the deterministic shortcut.)
@@ -202,7 +202,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   const persistRect = (aid: string, x?: number, y?: number, w?: number, h?: number): void => {
     // Geometry is FRONTEND state — patch the LOCAL record; the proxy_loader
-    // debounce-persists it to the host web/fs_loader.
+    // debounce-persists it to the host web/kernel_state.
     const patch: Payload = {};
     if (x !== undefined) {
       patch["x"] = Math.round(x);
@@ -406,7 +406,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   const refresh = async (): Promise<void> => {
     // Members are this canvas's OWN children in the LOCAL tree (hydrated from
-    // web/fs_loader, persisted back via proxy_loader). No host membership read.
+    // web/kernel_state, persisted back via proxy_loader). No host membership read.
     const root = kernel.rootId !== null ? kernel.get(kernel.rootId) : undefined;
     const members: Rec[] =
       root !== undefined

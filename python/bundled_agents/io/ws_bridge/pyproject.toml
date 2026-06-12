@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-ws-bridge"
+version = "0.1.0"
+description = "Fantastic ws_bridge — cross-kernel agent comms over WS. A thin WS (+ SSH+WS) transport derivation of `io_bridge`: a bridge agent dials a remote kernel's `web_ws` and ships raw `forward` envelopes over a transport (memory / WS / SSH+WS) so a local agent can reach a remote agent without merging their address spaces. Weak proxies: local→local stays direct; the bridge inserts itself only when the destination is on the other side."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = [
+  "fantastic-io-bridge",
+  "websockets>=12,<17",
+]
+
+[project.entry-points."fantastic.bundles"]
+ws_bridge = "ws_bridge.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ws_bridge"]

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-kernel-state"
+version = "0.1.0"
+description = "Fantastic kernel_state — the durable-state root agent (tree root); a weak-bound stream consumer."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+# Depends on file_bridge for `fs` — the single clamped disk surface (all disk IO
+# funnels through it; nothing here touches the disk directly).
+dependencies = ["fantastic-file-bridge"]
+
+[project.entry-points."fantastic.bundles"]
+kernel_state = "kernel_state.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kernel_state"]

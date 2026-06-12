@@ -66,21 +66,23 @@ on the critical path.
    (`unzip -p` copies one member byte-for-byte to stdout; the archive is never
    extracted and the fat bundle is never *read*, only copied):
    ```sh
-   mkdir -p /ABS/PATH/serve
-   unzip -p js_kernel.zip bundle.min.js      > /ABS/PATH/serve/bundle.min.js
-   unzip -p js_kernel.zip bundle.min.js.map  > /ABS/PATH/serve/bundle.min.js.map  # optional: debuggable stack traces
+   mkdir -p serve            # INSIDE the kernel's running dir — file_bridge
+                             # clamps every root to the dir the kernel runs in
+   unzip -p js_kernel.zip bundle.min.js      > serve/bundle.min.js
+   unzip -p js_kernel.zip bundle.min.js.map  > serve/bundle.min.js.map  # optional: debuggable stack traces
    ```
    That's it — no `unzip -d`, no extracted tree, nothing on disk you didn't ask for.
-3. **Serve that dir through the host's generic `file` agent** — the host stays
-   ignorant of the frontend; it just serves bytes:
+3. **Serve that dir through the host's generic `file_bridge` agent** — the host
+   stays ignorant of the frontend; it just serves bytes. The fs edge is SEALED
+   by default — open it consciously:
    ```sh
-   fantastic fs_loader create_agent handler_module=file.tools id=js_kernel \
-     root=/ABS/PATH/serve
+   fantastic kernel_state create_agent handler_module=file_bridge.tools id=js_kernel \
+     root=serve ingress_rule=allow_all
    # → GET /js_kernel/file/bundle.min.js now serves the kernel
    ```
 4. **Prereq (operator, one-time)** — the host must expose HTTP + a WS surface +
    the loader the frontend federates to: a `web` agent (HTTP), a `web_ws` child
-   (the WS verb surface), and an `fs_loader` rooted at `.fantastic/web` aliased
+   (the WS verb surface), and an `kernel_state` rooted at `.fantastic/web` aliased
    `web_loader`. (See the host root readme — `reflect readme=true`.)
 5. **Provide a trivial mount page** and serve it from the same file root. Because
    the CSS and all vendors are inlined, the page needs **NO import map and NO
@@ -100,7 +102,7 @@ on the critical path.
 - The frontend federates to the host's **`web_loader`** alias over the WS bridge;
   it persists every local change back through that loader. No per-page session id.
 - Direction is **frontend → host**: a view knows it fronts a host capability; the
-  host never references the frontend. Same rule as `kernel_bridge` — addressed by
+  host never references the frontend. Same rule as `ws_bridge` — addressed by
   URL + id only, no shared types.
 
 ## Integrity (verify before serving — it runs in a browser)

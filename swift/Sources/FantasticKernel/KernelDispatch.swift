@@ -60,6 +60,55 @@ extension Kernel {
         return reply
     }
 
+    /// Send a binary-framed verb — the symmetric binary channel (raw bytes BOTH
+    /// ways, never base64; mirrors py/rust). `header` carries the verb envelope,
+    /// `blob` the raw request body; returns `(reply, body)` where `body` is the
+    /// raw reply chunk (empty for a text-shaped reply, e.g. `write_stream`).
+    public func sendWithBinary(
+        _ targetId: AgentId, _ header: JSON, _ blob: Data
+    ) async -> (JSON, Data) {
+        let target: Agent? = targetId.value == "kernel" ? root : agent(targetId)
+        guard let target = target else {
+            return (.object(["error": .string("no agent \(targetId)")]), Data())
+        }
+        let verb = header["type"].asString ?? ""
+        let (reply, body): (JSON?, Data) = await KernelTaskLocals.$currentSender.withValue(
+            target.id
+        ) {
+            await dispatchBinary(target: target, header: header, blob: blob)
+        }
+        // Telemetry parity with text dispatch.
+        publishState(
+            .object([
+                "type": .string("send_binary"),
+                "sender": .string((KernelTaskLocals.currentSender ?? target.id).value),
+                "target": .string(target.id.value),
+                "verb": .string(verb),
+                "bytes": .integer(Int64(max(blob.count, body.count))),
+            ]))
+        fanoutToWatchers(target, header)
+        return (reply ?? .null, body)
+    }
+
+    private func dispatchBinary(target: Agent, header: JSON, blob: Data) async -> (JSON?, Data) {
+        guard let hm = target.handlerModule else {
+            return (
+                .object([
+                    "error": .string("agent \(target.id) has no handler_module; cannot answer binary")
+                ]), Data()
+            )
+        }
+        guard let bundle = bundles.get(hm) else {
+            return (.object(["error": .string("no bundle for handler_module \"\(hm)\"")]), Data())
+        }
+        do {
+            return try await bundle.handleBinary(
+                agentId: target.id, header: header, blob: blob, kernel: self)
+        } catch {
+            return (.object(["error": .string("\(error)")]), Data())
+        }
+    }
+
     /// Send WITH explicit sender attribution. State events tag this
     /// dispatch as originating from `senderId`. Mirrors the
     /// `send_json_as` UniFFI helper used by web_ws / proxy_agent.
@@ -116,6 +165,13 @@ extension Kernel {
             obj["version"] =
                 ProcessInfo.processInfo.environment["FANTASTIC_VERSION"].map { JSON.string($0) }
                 ?? .null
+            // WHICH file_bridge the loader auto-persists records THROUGH (the
+            // discovered store), or null = nothing wired (state in RAM). With the
+            // provider's posture inline in the tree, a client sees whether
+            // persistence is wired AND whether the wired leg is open.
+            obj["persistence"] = .object([
+                "provider": findStore().map { JSON.string($0.value) } ?? .null
+            ])
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)

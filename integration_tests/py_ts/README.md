@@ -1,7 +1,7 @@
 # Python ↔ TS integration tests
 
 Cross-runtime tests that pair a **real python `fantastic` host** with the **TS
-frontend kernel in a real browser**, over the `kernel_bridge`. They're the
+frontend kernel in a real browser**, over the `ws_bridge`. They're the
 node-driven sibling of the pytest bridge suite in [`../`](../README.md): same
 intent — exercise the interop surface *between* kernels end-to-end — but a
 different driver (`node --test` + a headless Chrome over CDP), because the TS
@@ -48,8 +48,9 @@ FANTASTIC_IMAGE=fantastic:latest FANTASTIC_TARGET=container npm run test:integra
 
 Container target: needs the image built (`sh container/build.sh`, **host arch**)
 and podman/docker; the daemon runs the python runtime with `-p 127.0.0.1:port:port`
-and `FANTASTIC_HEAD=off`, seeding one-shots run inside the image, and the frontend
-`dist/` is bind-mounted in so the `ts_dist` file agent serves it. Everything is
+(its `/` is the dynamic agent index), seeding one-shots run inside the image, and the frontend
+`dist/` is bind-mounted at `/work/dist` (inside the workdir — file_bridge
+clamps roots to the running dir) so the `ts_dist` file_bridge agent serves it. Everything is
 host/browser → container (no container↔container), so it works over `-p`. The
 workdir lives under `py_ts/tmp/` (a VM-mounted path) since the OS tmpdir may not
 be mounted in the podman/docker VM.
@@ -82,7 +83,7 @@ live-LLM cases — is missing; nothing hangs or silently "passes".
 - `llm_e2e.browser.itest.ts` — a live-LLM browser round-trip.
 - `bundle_revive.browser.itest.ts` — revives the sovereign artifact
   (`ts/dist/js_kernel.zip`) in a real browser: serves the single
-  `bundle.min.js` through a `file` agent (no import map, no external
+  `bundle.min.js` through a `file_bridge` agent (no import map, no external
   stylesheet) and proves `three` + xterm + xterm.css are inlined, and
   that bridge + terminal pairing work through the rolled-up bundle.
 

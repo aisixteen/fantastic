@@ -1,2 +1,2 @@
 # web_ws — WebSocket verb channel
-Child of a web agent. Mounts `ws://host/<agent_id>/ws`. Full duplex: call / emit / watch / state_subscribe frames. The streaming surface.
+Child of a web agent. Mounts `ws://host/<agent_id>/ws`. Full duplex: call / emit / watch / state_subscribe frames. The streaming surface. **Sealed by default** — a bare leg refuses every frame; open it with `update_agent <id> ingress_rule=allow_all` (or `password`). The credential rides the frame envelope (`auth_token`). Binary frames carry the raw-bytes codec `[4B len | JSON header | raw body]` (read_stream/write_stream chunks — never base64).

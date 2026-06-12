@@ -1,14 +1,14 @@
 """scheduler bundle — recurring tasks as an agent.
 
-State (sidecars in `.fantastic/agents/{id}/`, written through file agent):
+State (sidecars in `.fantastic/agents/{id}/`, written through file_bridge agent):
   schedules.json   — list of {id, target, payload, interval_seconds, next_run, paused, run_count}
   history.jsonl    — append-only schedule_fired events, ring-trimmed to HISTORY_MAX
 
-All persistence routes through `file_agent_id` configured on the
+All persistence routes through `file_bridge_id` configured on the
 scheduler agent's record. Unset → loud error at first I/O.
 
 Verbs:
-  reflect      -> {sentence, tick_sec, paused, schedule_count, file_agent_id, ...}
+  reflect      -> {sentence, tick_sec, paused, schedule_count, file_bridge_id, ...}
   boot         -> start tick loop (idempotent)
   schedule     args: target, payload, interval_seconds  -> {schedule_id}
   unschedule   args: schedule_id                        -> {removed: bool}
@@ -41,21 +41,23 @@ _cache: dict[str, list[dict]] = {}  # in-process schedules cache
 # ─── file routing ────────────────────────────────────────────────
 
 
+# STORE-RELATIVE paths (`agents/<id>/…`): wire `file_bridge_id` to the `.fantastic`
+# store and the sidecars land next to the agent's own agent.json — one store, no nest.
 def _sched_path(sid: str) -> str:
-    return f".fantastic/agents/{sid}/schedules.json"
+    return f"agents/{sid}/schedules.json"
 
 
 def _history_path(sid: str) -> str:
-    return f".fantastic/agents/{sid}/history.jsonl"
+    return f"agents/{sid}/history.jsonl"
 
 
-def _file_agent_id(sid: str, kernel) -> str | None:
+def _file_bridge_id(sid: str, kernel) -> str | None:
     rec = kernel.get(sid) or {}
-    return rec.get("file_agent_id")
+    return rec.get("file_bridge_id")
 
 
 async def _file_read(sid: str, kernel, path: str) -> str | None:
-    fid = _file_agent_id(sid, kernel)
+    fid = _file_bridge_id(sid, kernel)
     if not fid:
         return None
     r = await kernel.send(fid, {"type": "read", "path": path})
@@ -65,13 +67,13 @@ async def _file_read(sid: str, kernel, path: str) -> str | None:
 
 
 async def _file_write(sid: str, kernel, path: str, content: str) -> None:
-    fid = _file_agent_id(sid, kernel)
+    fid = _file_bridge_id(sid, kernel)
     if not fid:
         return
     await kernel.send(fid, {"type": "write", "path": path, "content": content})
 
 
-# ─── schedules persistence (through file agent) ─────────────────
+# ─── schedules persistence (through file_bridge agent) ─────────────────
 
 
 async def _load(sid: str, kernel) -> list[dict]:
@@ -94,7 +96,7 @@ async def _save(sid: str, kernel) -> None:
     )
 
 
-# ─── history persistence (through file agent — read-modify-write) ──
+# ─── history persistence (through file_bridge agent — read-modify-write) ──
 
 
 async def _append_history(sid: str, kernel, event: dict) -> None:
@@ -185,14 +187,14 @@ async def _fire(sid: str, sch: dict, kernel) -> None:
 
 
 async def _reflect(id, payload, kernel):
-    """Identity + tick state + file_agent_id. No args."""
+    """Identity + tick state + file_bridge_id. No args."""
     rec = kernel.get(id) or {}
     return {
         "id": id,
         "sentence": "Recurring-task scheduler.",
         "tick_sec": float(rec.get("tick_sec") or 1.0),
         "paused": bool(rec.get("paused")),
-        "file_agent_id": rec.get("file_agent_id"),
+        "file_bridge_id": rec.get("file_bridge_id"),
         "running": id in _tick_tasks and not _tick_tasks[id].done(),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
@@ -204,18 +206,18 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. Starts the tick loop. Requires file_agent_id."""
-    if not _file_agent_id(id, kernel):
-        return {"error": "scheduler: file_agent_id required"}
+    """Idempotent. Starts the tick loop. Requires file_bridge_id."""
+    if not _file_bridge_id(id, kernel):
+        return {"error": "scheduler: file_bridge_id required"}
     if id not in _tick_tasks or _tick_tasks[id].done():
         _tick_tasks[id] = asyncio.create_task(_tick_loop(id, kernel))
     return {"running": True}
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60). Returns {schedule_id, schedule}. Persisted via file_agent_id."""
-    if not _file_agent_id(id, kernel):
-        return {"error": "scheduler: file_agent_id required"}
+    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60). Returns {schedule_id, schedule}. Persisted via file_bridge_id."""
+    if not _file_bridge_id(id, kernel):
+        return {"error": "scheduler: file_bridge_id required"}
     target = payload.get("target", "")
     sched_payload = payload.get("payload") or {}
     interval = max(1, int(payload.get("interval_seconds", 60)))

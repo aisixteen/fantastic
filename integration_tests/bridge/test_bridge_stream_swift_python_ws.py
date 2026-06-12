@@ -5,11 +5,11 @@ and receive events forwarded over the WS transport.
 
 Flow:
   1. Seed Python B with web + web_ws; resolve B's literal root id via
-     `root_id(python_binary, workdir_b)` — this yields `'fs_loader'`, NOT
+     `root_id(python_binary, workdir_b)` — this yields `'kernel_state'`, NOT
      `'core'` (the root-id asymmetry: rust/swift use `core`, python uses
-     `fs_loader`). Hardcoding `'core'` here would be WRONG.
+     `kernel_state`). Hardcoding `'core'` here would be WRONG.
   2. Seed Swift A with web + web_ws + a `kernel_bridge` agent whose
-     `peer_id` is set to `server_root` (`'fs_loader'`). The bridge dials
+     `peer_id` is set to `server_root` (`'kernel_state'`). The bridge dials
      `ws://127.0.0.1:<port_b>/<server_root>/ws` and auto-watches that inbox.
   3. Spawn B first (peer must be reachable before A's bridge dials in),
      then A.
@@ -40,7 +40,7 @@ async def test_swift_python_ws_watch_remote_streams_event(
 ) -> None:
     """Swift A subscribes to Python B's root via watch_remote and receives a
     nonced probe event — proving cross-runtime WS bridge streaming works with
-    Python's `fs_loader` root id (not `core`).
+    Python's `kernel_state` root id (not `core`).
     """
     base = parity_tmp("sw_py_ws_stream")
     workdir_a = base / "A_swift"
@@ -55,7 +55,7 @@ async def test_swift_python_ws_watch_remote_streams_event(
     seed_web(python_binary, workdir_b, port_b)
     seed_web_ws(python_binary, workdir_b)
 
-    # Resolve B's LITERAL root id — `'fs_loader'` for python, `'core'` for
+    # Resolve B's LITERAL root id — `'kernel_state'` for python, `'core'` for
     # rust/swift. `watch_remote` + `ws_emit` both do a literal id lookup (the
     # `kernel` alias is only valid for dispatch, not for watch/emit targets).
     server_root: str = root_id(python_binary, workdir_b)
@@ -69,7 +69,7 @@ async def test_swift_python_ws_watch_remote_streams_event(
         swift_binary,
         workdir_a,
         agent_id="bridge",
-        peer_id=server_root,  # 'fs_loader' — not 'core'
+        peer_id=server_root,  # 'kernel_state' — not 'core'
         peer_port=port_b,
     )
 

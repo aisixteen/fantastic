@@ -1,8 +1,9 @@
 # Fantastic integration tests
 
 Cross-runtime tests that spawn real `fantastic` kernels as subprocesses,
-pair them via the `kernel_bridge` bundle, and exercise the canonical
-verb surface (send / reflect / streams) across the wire.
+pair them via the WS bridge bundle (`ws_bridge` on python · rust · swift — all
+three split the combined `kernel_bridge` into `ws_bridge` + `cloud_bridge`), and
+exercise the canonical verb surface (send / reflect / streams) across the wire.
 
 These are **integration** tests — heavyweight, slow, real network I/O.
 They live outside the per-runtime unit-test trees on purpose. Each
@@ -36,7 +37,7 @@ integration_tests/
                       frontend artifact without a full unzip)
     streaming.py      assert_watch_remote_streams — the shared watch_remote driver
     ws.py             minimal WS client: ws_call, ws_emit, ws_session
-  bridge/             cross-runtime kernel_bridge tests (WS-only) — the
+  bridge/             cross-runtime WS bridge tests (WS-only) — the
                       python/swift/rust forward + watch_remote matrix
   decoupling/         decoupling guards — part-1 (bundle catalog drops the
                       view bundles; a host serves the ts/ frontend generically)
@@ -102,12 +103,12 @@ Container target notes:
   tests skip cleanly otherwise. The image must be the **host arch** (native) —
   a cross-arch image runs under emulation and is slow.
 - Seeding one-shots run **inside** the container too (a rootless container's uid
-  can't write a host-seeded `.fantastic/`), and the daemon runs with
-  `FANTASTIC_HEAD=off` so `/` is the dynamic readiness signal.
+  can't write a host-seeded `.fantastic/`); `/` is the dynamic agent index on
+  every runtime, so a 200 on `/` is the readiness signal.
 - **Swift** has no Linux container (Network.framework HTTP) → swift tests skip
   under `container`.
 - **Bridge across containers — each container is a unit at `host:port`, NO shared
-  network.** The kernel_bridge is weak-binding by URL, so it just dials the peer's
+  network.** The WS bridge is weak-binding by URL, so it just dials the peer's
   PUBLISHED address:
   - **same host:** publish the peer on all interfaces (`-p port:port`) and dial it
     via the built-in host gateway `host.containers.internal:port` — the host
@@ -153,7 +154,7 @@ state + `lock.json` to see what the kernel had).
 3. Seed with `helpers.seeding`: `seed_web` + `seed_web_ws` (Python
    server) and `seed_bridge_ws(..., peer_id=<root>, peer_port=<server>)`
    on the client. Don't hardcode `peer_id` — root ids differ by runtime
-   (`fs_loader` for python, `core` for rust/swift), so resolve the
+   (`kernel_state` for python, `core` for rust/swift), so resolve the
    server's literal root with `root_id(server_binary, server_workdir)`.
    Then call `kernel.call("bridge", "boot")` once as an idempotent
    connect guard.

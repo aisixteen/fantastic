@@ -24,9 +24,9 @@ Verbs: `send` · `history` · `interrupt` · `status` · `refresh_menu` ·
 
 Extras beyond the contract:
 
-- `set_api_key {api_key}` — persists `api_key` to
-  `<file_agent.root>/.fantastic/agents/{id}/api_key` via the file
-  agent. Drops the cached HTTP client so the next `send` reads fresh.
+- `set_api_key {api_key}` — persists `api_key` to the store-relative
+  `agents/{id}/api_key` (wire `file_bridge_id` to the `.fantastic` store) via the
+  file agent. Drops the cached HTTP client so the next `send` reads fresh.
 - `clear_api_key` — deletes the sidecar via the file agent.
 - `reflect` reports `has_api_key: bool` only — never the value.
 

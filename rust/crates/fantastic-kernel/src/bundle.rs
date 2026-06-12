@@ -43,7 +43,7 @@ pub type BundleError = Box<dyn std::error::Error + Send + Sync>;
 #[async_trait]
 pub trait Bundle: Send + Sync {
     /// Stable bundle name. Matches what's stored in agent.json's
-    /// `handler_module` (e.g. `"file.tools"`, `"web.tools"`).
+    /// `handler_module` (e.g. `"file_bridge.tools"`, `"web.tools"`).
     fn name(&self) -> &str;
 
     /// Dispatch a verb. `payload["type"]` names the verb. Substrate
@@ -64,22 +64,29 @@ pub trait Bundle: Send + Sync {
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError>;
 
-    /// Dispatch a binary-framed verb. `header` is the JSON header
+    /// Dispatch a binary-framed verb. The binary channel is **symmetric**:
+    /// a request carries `(header, blob)` and the reply carries
+    /// `(Reply, body)` — raw bytes flow in BOTH directions, never base64
+    /// (mirrors Python's `read_stream`/`write_stream`, where `bytes` is a
+    /// native `bytes` value in the dict). `header` is the JSON header
     /// object from the framed WS message (carries `target`, `type`,
-    /// optional `id`, etc.); `blob` is the raw byte payload that
-    /// followed the header in the same frame.
+    /// optional `id`, etc.); `blob` is the raw request body. The returned
+    /// `Vec<u8>` is the raw reply body (empty when the verb returns no
+    /// bytes, e.g. `write_stream`'s status reply).
     ///
-    /// Default impl: base64-encode `blob` into `header["data"]` and
-    /// route through [`Self::handle`]. Bundles that need raw bytes
-    /// (e.g. `terminal_backend.paste_image`) override this method
-    /// to skip the base64 round-trip.
+    /// Default impl: a verb with no binary surface gets its request `blob`
+    /// base64-decoded into `header["data"]` and routed through
+    /// [`Self::handle`] (the legacy text-handler bridge for verbs like a
+    /// generic upload), returning an empty reply body. Bundles that carry
+    /// raw bytes either way (`file_bridge.read_stream`/`write_stream`,
+    /// `terminal_backend.paste_image`) override this to skip base64.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
+    ) -> Result<(Reply, Vec<u8>), BundleError> {
         let mut payload = header;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
         if let Some(obj) = payload.as_object_mut() {
@@ -93,7 +100,8 @@ pub trait Bundle: Send + Sync {
             map.insert("data".to_string(), Value::String(encoded));
             payload = Value::Object(map);
         }
-        self.handle(agent_id, &payload, kernel).await
+        let reply = self.handle(agent_id, &payload, kernel).await?;
+        Ok((reply, Vec::new()))
     }
 
     /// Pre-detach hook. Default: noop.
@@ -140,7 +148,7 @@ impl BundleRegistry {
 
     /// Register a bundle under its `handler_module` key.
     ///
-    /// The key is what appears in `agent.json` — e.g. `"file.tools"`
+    /// The key is what appears in `agent.json` — e.g. `"file_bridge.tools"`
     /// for the file bundle. Bundle authors choose this string; the
     /// substrate doesn't enforce a naming scheme.
     pub fn register<B: Bundle + 'static>(&mut self, handler_module: &str, bundle: B) {

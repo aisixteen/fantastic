@@ -25,12 +25,12 @@ Fantastic is **two cooperating kernels**, and recipes always split across them:
 ```text
 HOST kernel (this container: python or rust)         FRONTEND kernel (browser, ts/)
   data · compute · transport · memory                  the VIEW lives here
-  fs_loader(root) web web_ws web_rest file             canvas · *_view · *content
+  kernel_state(root) web web_ws web_rest file_bridge             canvas · *_view · *content
   python_runtime terminal_backend ai_* yaml_state      (federates to the host over
-  scheduler kernel_bridge local_runner ssh_runner       the SAME web_ws WS wire)
+  scheduler ws_bridge local_runner ssh_runner          the SAME web_ws WS wire)
 ```
 
-The host **serves** the frontend (a static `file` agent) and **relays** the WS
+The host **serves** the frontend (a static `file_bridge` agent) and **relays** the WS
 bus — it renders no UI itself. Every panel/tile is a **frontend** agent that the
 canvas iframes. Binding is **weak**: agents reference peers by **id** + duck-typed
 verbs (`get_webapp`, `render_html`, `reload_html`), never by concrete type — so a
@@ -41,7 +41,7 @@ Three view contracts the canvas/host already understand:
 - `get_webapp → {url, default_width, default_height, title}` — canvas iframes it as a tile.
 - `render_html → {html}` — duck-typed panel body.
 - `reload_html` event — any agent emits it to reload its connected view.
-- static assets: any `file` agent serves `GET /<file_id>/file/<path>`.
+- static assets: any `file_bridge` agent serves `GET /<file_id>/file/<path>`.
 
 > **Ported status.** The host bundles below all ship in this image. The frontend
 > bundles (`canvas`, `terminal_view`, `html_agent`, `gl_agent`, `ai_view`,
@@ -57,9 +57,9 @@ Three view contracts the canvas/host already understand:
 position, persist.
 
 ```text
-HOST:      fs_loader(root) → web(:PORT) → web_ws, web_rest
-                           → file "ts_dist"   (serves the frontend bundle)
-                           → fs_loader root=.fantastic/web   (frontend's store)
+HOST:      kernel_state(root) → web(:PORT) → web_ws, web_rest
+                           → file_bridge "ts_dist"   (serves the frontend bundle)
+                           → kernel_state root=.fantastic/web   (frontend's store)
 FRONTEND:  canvas compositor + whatever content/view agents you add
 ```
 
@@ -105,14 +105,14 @@ agents as tools** and routes its own output.
 
 ```text
 HOST:      ai backend (anthropic_backend | ollama_backend | nvidia_nim_backend)
-             + file agent (chat history sidecar; file_agent_id=…)
+             + file_bridge (chat history sidecar; file_bridge_id=…)
 FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 ```
 
 **Wiring:** send a prompt to the backend; it streams `token`/`done` **on its own
 id**; the prompt *names who listens* and the system prompt carries the `send()`
 signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
-falls out). Tell it the ids of a `python_runtime`, a `file`, a `yaml_state` and it
+falls out). Tell it the ids of a `python_runtime`, a `file_bridge`, a `yaml_state` and it
 calls them as tools. A recursion guard keeps AI→AI chains safe.
 
 **Hand to an LLM:** *"Create an `anthropic_backend` (key from env); attach an
@@ -134,9 +134,9 @@ boards.)*
 
 ```text
 HOST:      python_runtime  (cwd = project)   ── start → job_id; streams progress/job_done
-             + file agent  (serves the job's own UI / artifacts)
+             + file_bridge agent  (serves the job's own UI / artifacts)
 FRONTEND:  an html panel (or ai_view) subscribing to progress — or the job's
-           own training_ui.html served via the file agent
+           own training_ui.html served via the file_bridge agent
 ```
 
 **Wiring:** `python_runtime.start` runs `python -u …` in the background (many in
@@ -147,7 +147,7 @@ push frames to a panel, call an AI, or read memory — by id.
 
 **Hand to an LLM:** *"Create a `python_runtime` at my project; start `train.py` as
 a job; render its `progress` stream into an html panel and serve `training_ui.html`
-via a file agent."*
+via a file_bridge agent."*
 
 **⚠ Today:** runner ported. **GPU is the host's** — this image is CPU-only by
 design, so heavy training runs on a GPU host (native or a GPU-base image), with the
@@ -163,7 +163,7 @@ diffusion-transformer visualization: a looping point-cloud → Gaussian → coll
 motif beside a manim animation.)*
 
 ```text
-HOST:      python_runtime (computes frames/point-clouds) + file agent (serves js/assets)
+HOST:      python_runtime (computes frames/point-clouds) + file_bridge agent (serves js/assets)
 FRONTEND:  gl_agent (WebGL content)  ── fed by the host job; iframed by canvas
 ```
 
@@ -187,7 +187,7 @@ audio-capture/playback tool, driven by a Python media backend. *(distilled from 
 generative "trance" panel and audio + geo-data boards.)*
 
 ```text
-HOST:      python_runtime (audio gen/processing; writes wavs/geojson) + file agent (serves media)
+HOST:      python_runtime (audio gen/processing; writes wavs/geojson) + file_bridge agent (serves media)
            [+ a HOST "bus" agent if multiple panels must talk]
 FRONTEND:  html_agent / gl_agent panel (WebAudio + canvas/WebGL)
 ```
@@ -196,7 +196,7 @@ FRONTEND:  html_agent / gl_agent panel (WebAudio + canvas/WebGL)
 (`/<file>/file/audio/…`). The panel plays generated audio and reacts.
 
 **Hand to an LLM:** *"Create an html panel with my WebAudio synth; serve its
-generated audio via a file agent; if a second panel needs to sync, route their
+generated audio via a file_bridge agent; if a second panel needs to sync, route their
 messages through a host bus agent."*
 
 **⚠ Today (the gotchas):** WebAudio autoplay needs the iframe `allow="autoplay"`
@@ -214,13 +214,13 @@ is yours to supply.
 original setup: a canvas of `local_runner` tiles, one per project folder.)*
 
 ```text
-HOST (brain): fs_loader → web ;  per project: local_runner (local dir) or
-              ssh_runner (remote host) ;  kernel_bridge per peer
+HOST (brain): kernel_state → web ;  per project: local_runner (local dir) or
+              ssh_runner (remote host) ;  ws_bridge per peer
 FRONTEND:     canvas — one tile per project, iframing that project's own webapp
 ```
 
 **Wiring:** `local_runner` start/stop/status a project's own `fantastic` (truth from
-its `.fantastic/lock.json` pid+port); `kernel_bridge` dials a peer **by URL** (weak
+its `.fantastic/lock.json` pid+port); `ws_bridge` dials a peer **by URL** (weak
 binding — memory / ws / ssh+ws transports); from **either** kernel a routine reads
 memory anywhere + spawns ai/py **by id**. Each project can also be a **container** —
 **a unit at `host:port`** (no shared network): the bridge dials
@@ -231,7 +231,7 @@ memory anywhere + spawns ai/py **by id**. Each project can also be a **container
 container); bridge to it; iframe its webapp as a canvas tile. To reach a project on
 another machine, bridge to its `ip:port`."*
 
-**⚠ Today:** fully ported (`local_runner`, `ssh_runner`, `kernel_bridge`) — and the
+**⚠ Today:** fully ported (`local_runner`, `ssh_runner`, `ws_bridge`) — and the
 container unit-model is the distribution shape: one self-describing image-with-head
 per project, federated by URL.
 

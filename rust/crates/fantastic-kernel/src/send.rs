@@ -153,7 +153,7 @@ impl Kernel {
         target_id: &AgentId,
         header: Value,
         blob: Vec<u8>,
-    ) -> Value {
+    ) -> (Value, Vec<u8>) {
         // Resolve target. Special id `"kernel"` aliases to the root.
         let resolved: Option<Arc<Agent>> = if target_id.as_str() == "kernel" {
             self.root()
@@ -161,7 +161,10 @@ impl Kernel {
             self.agents.get(target_id).map(|e| Arc::clone(&e))
         };
         let Some(target) = resolved else {
-            return json!({ "error": format!("no agent {target_id}") });
+            return (
+                json!({ "error": format!("no agent {target_id}") }),
+                Vec::new(),
+            );
         };
 
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
@@ -174,26 +177,27 @@ impl Kernel {
         let kernel = Arc::clone(self);
         let target_for_dispatch = Arc::clone(&target);
         let header_clone = header.clone();
-        let reply = with_sender(target.id.clone(), async move {
+        let (reply, body) = with_sender(target.id.clone(), async move {
             dispatch_binary(&kernel, target_for_dispatch, header_clone, blob).await
         })
         .await;
 
-        // State event + watcher fanout.
+        // State event + watcher fanout. `bytes` counts the larger of the
+        // request/reply body so telemetry reflects either direction.
         let event = json!({
             "type": "send_binary",
             "sender": sender.0,
             "target": target.id.0,
             "verb": verb,
             "summary": summary,
-            "bytes": blob_len,
+            "bytes": blob_len.max(body.len()),
         });
         self.publish_state(&event);
         // Watchers get the raw header (request envelope without the
         // blob). Mirrors Python's payload-to-watchers semantics.
         self.fanout_to_watchers(&target, &header).await;
 
-        reply
+        (reply, body)
     }
 
     /// Emit a payload to a target's inbox without dispatching. Returns
@@ -309,24 +313,28 @@ async fn dispatch_binary(
     target: Arc<Agent>,
     header: Value,
     blob: Vec<u8>,
-) -> Value {
+) -> (Value, Vec<u8>) {
     let Some(hm) = target.handler_module.as_deref() else {
-        return json!({
-            "error": format!(
-                "agent {:?} has no handler_module; cannot answer binary frame",
-                target.id.0
-            ),
-        });
+        return (
+            json!({
+                "error": format!(
+                    "agent {:?} has no handler_module; cannot answer binary frame",
+                    target.id.0
+                ),
+            }),
+            Vec::new(),
+        );
     };
     let Some(bundle) = kernel.bundles.get(hm) else {
-        return json!({
-            "error": format!("no bundle for handler_module {hm:?}"),
-        });
+        return (
+            json!({ "error": format!("no bundle for handler_module {hm:?}") }),
+            Vec::new(),
+        );
     };
     match bundle.handle_binary(&target.id, header, blob, kernel).await {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Null,
-        Err(e) => json!({ "error": e.to_string() }),
+        Ok((Some(v), body)) => (v, body),
+        Ok((None, body)) => (Value::Null, body),
+        Err(e) => (json!({ "error": e.to_string() }), Vec::new()),
     }
 }
 
@@ -436,11 +444,11 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
         }
     }
     let rec = target.update_meta(patch);
-    // Disk-mode persist of the updated record. Merge-only — the
-    // existing agent.json's other fields (bundle-specific, user
-    // additions) survive. InMemory mode no-ops. See
+    // Persist the updated record THROUGH the discovered provider. Merge-only —
+    // the existing agent.json's other fields (bundle-specific, user additions)
+    // survive. No-op in InMemory mode or when no provider is wired (RAM). See
     // `persistence::persist` for the dirty-binding semantics.
-    let _ = crate::persistence::persist(&target, &kernel.storage);
+    let _ = crate::persistence::persist(kernel, &target).await;
     let rec_value = serde_json::to_value(&rec).unwrap_or(Value::Null);
     // Telemetry state event — Python parity (`_agent.py:637-657`):
     // publish the full record + the list of changed fields, not just

@@ -65,12 +65,14 @@ async fn default_handle_binary_base64s_into_payload_data() {
     let kernel = Arc::new(Kernel::new());
     let header = json!({"type": "frob"});
     let blob = vec![0xCA, 0xFE, 0xBA, 0xBE];
-    let reply = b
+    let (reply, body) = b
         .handle_binary(&AgentId::from("x"), header, blob.clone(), &kernel)
         .await
-        .unwrap()
         .unwrap();
+    let reply = reply.unwrap();
     assert_eq!(reply["type"], "frob");
     // Base64 of CAFEBABE is "yv66vg==".
     assert_eq!(reply["data"], "yv66vg==");
+    // Default impl returns no reply body (request bytes only).
+    assert!(body.is_empty());
 }

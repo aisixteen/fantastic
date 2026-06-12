@@ -9,7 +9,7 @@ and mounts:
 Two assertions per runtime:
 1. POST /<rest>/kernel {type:list_agents} returns agents that include
    the seeded `web` agent. The `kernel` alias resolves to the root on
-   all runtimes (python root = `fs_loader`; rust/swift root = `core`).
+   all runtimes (python root = `kernel_state`; rust/swift root = `core`).
 2. GET  /<rest>/_reflect/web returns a dict. We reflect `web` (not
    `core`) because `web` is guaranteed present after seeding on every
    runtime, making the assertion portable across python/swift/rust.
@@ -37,7 +37,7 @@ async def _rest_roundtrip(binary, kernel_factory, parity_tmp, free_port, tag: st
     async with httpx.AsyncClient(timeout=5.0) as client:
         # POST /<rest>/kernel  body={type:list_agents}  (verb in body).
         # "kernel" is a universal dispatch alias that resolves to the root
-        # agent on all three runtimes (python root is `fs_loader`, not `core`).
+        # agent on all three runtimes (python root is `kernel_state`, not `core`).
         r = await client.post(
             f"http://127.0.0.1:{port}/{rest_id}/kernel",
             json={"type": "list_agents"},

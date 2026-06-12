@@ -72,6 +72,11 @@ fn mk_kernel(storage: StorageMode) -> Arc<Kernel> {
     kernel
         .bundles
         .register(HANDLER_MODULE, ProxyAgentBundle::new());
+    // Persistence is provider-routed — register the fake `file_bridge` store
+    // (rooted at the loader's `.fantastic`) so a disk test can wire one.
+    if let Some(wd) = kernel.storage.workdir().map(|p| p.join(".fantastic")) {
+        fantastic_kernel::test_support::register_fake_store(&mut kernel.bundles, &wd);
+    }
     let kernel = Arc::new(kernel);
     let workdir = kernel.storage.workdir().map(|p| p.to_path_buf());
     let root_path = workdir
@@ -275,6 +280,8 @@ async fn disk_mode_persists_record() {
     let _g = test_lock();
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(StorageMode::Disk(tmp.path().to_path_buf()));
+    // Wire the persistence provider — records land on disk THROUGH it.
+    fantastic_kernel::test_support::wire_fake_store(&kernel, &tmp.path().join(".fantastic")).await;
     let _ = create_proxy_agent(&kernel, "ui").await;
     let agent_json = tmp.path().join(".fantastic/agents/ui/agent.json");
     assert!(agent_json.exists(), "proxy_agent record on disk");

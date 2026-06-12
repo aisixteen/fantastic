@@ -8,6 +8,7 @@ description = "axum HTTP host — serves /, /<id>/, transport.js, and proxies fi
 
 [dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel" }
+fantastic-io-bridge = { path = "../../fantastic-io-bridge" }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

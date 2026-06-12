@@ -23,6 +23,11 @@ cover the user surface (CLI, HTTP, WS, PTY, browser).
 
 Strict rules:
 
+- **io legs SEAL by default — a denial is expected, not a failure.** A freshly-created
+  `web_ws` / `web_rest` / `file_bridge` denies every inbound frame/verb
+  (`{reason:"unauthorized"}`, REST `403`) until opened with `ingress_rule=allow_all`
+  (or `password`). Selftest pre-flights open the leg they exercise; if you compose your
+  own, open it too. Reading a seal as a test failure is the misread to avoid.
 - Never silently fake a skip.
 - Never run destructive ops without user confirmation if state exists.
 - If a regression signal in a test triggers, **STOP** that file's
@@ -41,7 +46,7 @@ Strict rules:
 ## Stateful bundles need a running `serve`
 
 Some bundles hold state in process-memory that doesn't survive
-separate `fantastic call …` invocations:
+separate `fantastic <id> <verb> …` invocations:
 
 - `terminal_backend` — PTY child process; dies with the kernel.
 - `ollama_backend` — cached HTTP client + in-flight `_run` tasks.
@@ -79,13 +84,13 @@ PY
 Usage: `call <id> '{"type":"<verb>", ...}'` — prints the reply (or
 error) data as JSON on stdout. Same I/O shape as the old curl helper.
 
-**Stateless bundles** (`cli`, `file`, `scheduler`) keep state on disk
-only and run fine via `fantastic call`. Admin
+**Stateless bundles** (`cli`, `file_bridge`, `scheduler`) keep state on disk
+only and run fine via `fantastic <id> <verb>`. Admin
 verbs (`create_agent` / `delete_agent` / `update_agent` /
 `list_agents`) are baked into the `Agent` class itself — every
 agent answers them natively for its own children, so there's no
-`fs_loader` *bundle* to drive selftests against; the root agent (id
-`"fs_loader"`) IS what fs_loader was.
+`kernel_state` *bundle* to drive selftests against; the root agent (id
+`"kernel_state"`) IS what kernel_state was.
 
 ## Test-runner pitfalls (LLM agents read this)
 
@@ -107,14 +112,14 @@ agent answers them natively for its own children, so there's no
 |---|---|
 | `kernel` | in-process Agent tree only; no HTTP, no PTY |
 | `cli` | drives REPL via stdin |
-| `subprocess` | uses `fantastic call/reflect/serve` |
+| `subprocess` | uses `fantastic <id> <verb>` / `reflect` / `serve` |
 | `http` | needs running webapp (uvicorn) |
 | `ws` | exercises WebSocket proxy |
 | `web` | superset of http+ws (any browser-touching server flow) |
 | `webapp` | a TS frontend view (canvas compositor / terminal_view / ai_view / GL host — in `ts/`) |
 | `pty` | requires real PTY |
 | `ai` | needs live LLM provider |
-| `persistence` | exercises file-agent-routed I/O |
+| `persistence` | exercises file_bridge-routed I/O |
 | `binary` | bytes through WS binary protocol |
 | `cascade` | exercises substrate cascade-delete + lock semantics |
 
@@ -122,22 +127,22 @@ agent answers them natively for its own children, so there's no
 
 | file | scopes | description |
 |---|---|---|
-| `bundled_agents/fs_loader/selftest.md` | kernel, cli | system verbs (list/create/update/delete/reflect) + REPL parsing |
+| `bundled_agents/kernel_state/selftest.md` | kernel, cli | system verbs (list/create/update/delete/reflect) + REPL parsing |
 | `bundled_agents/cli/selftest.md` | cli | renderer verbs (token/done/say/error) |
 | `bundled_agents/web/host/selftest.md` | http, web, binary | uvicorn rendering host — index, file proxy, favicon, lock |
-| `bundled_agents/web/web_ws/selftest.md` | http, ws, web, web_ws | WS verb-invocation surface — mounts `/<host_id>/ws` on parent web |
-| `bundled_agents/web/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
-| `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, history.jsonl, file_agent_id failfast |
-| `bundled_agents/file/selftest.md` | kernel, persistence | read/write/list/delete/rename/mkdir, path safety |
+| `bundled_agents/io/web_ws/selftest.md` | http, ws, web, web_ws | WS verb-invocation surface — mounts `/<host_id>/ws` on parent web |
+| `bundled_agents/io/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
+| `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, history.jsonl, file_bridge_id failfast |
+| `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
 | `bundled_agents/yaml_state/selftest.md` | kernel, persistence | durable YAML memory agent — read/keys/set/delete/replace/state_yaml, mode (mem/data), disk-is-truth, cascade cleanup |
 | `bundled_agents/terminal/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
-| `bundled_agents/bridge/kernel_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
+| `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
 | `bundled_agents/ssh_runner/selftest.md` | kernel, ssh | remote `fantastic` lifecycle; SSH tunnel for canvas iframing |
 | `bundled_agents/python_runtime/selftest.md` | kernel | async Python JOB spawner — start/status/stop/interrupt/clear; progress/job_done events |
 
-The root selftest is the `fs_loader` one (id `"fs_loader"`) — the
+The root selftest is the `kernel_state` one (id `"kernel_state"`) — the
 persistence/hydration root that owns `.fantastic/`; there's no `core`
 selftest anymore. The view/content selftests (the canvas compositor and
 its view/content agents) live with the FRONTEND kernel in `ts/`, NOT
@@ -148,9 +153,9 @@ here — they're `*.ts` bundles, not host bundles.
 | user says | filter | files run |
 |---|---|---|
 | "all tests" | (all) | every file |
-| "non-web tests" / "no browser" | EXCLUDE {http, ws, web, webapp, bus} | fs_loader, cli, scheduler, file, terminal_backend, ollama_backend |
+| "non-web tests" / "no browser" | EXCLUDE {http, ws, web, webapp, bus} | kernel_state, cli, scheduler, file, terminal_backend, ollama_backend |
 | "in canvas, run view tests" | INCLUDE {web, webapp, bus} | (none here — the TS view-agents live in `ts/`) |
-| "kernel only" | INCLUDE {kernel}, EXCLUDE {pty, ai, web} | fs_loader, cli, scheduler, file |
+| "kernel only" | INCLUDE {kernel}, EXCLUDE {pty, ai, web} | kernel_state, cli, scheduler, file |
 | "I have ollama running" | + ai | adds ollama_backend AI tests |
 | "no PTY" | EXCLUDE {pty} | drops terminal_backend |
 | "binary protocol" | INCLUDE {binary} | web/host's binary subset |
@@ -165,7 +170,7 @@ files run: <N>   files skipped: <N>
 
 | file | test# | name | pass | notes |
 |---|---|---|---|---|
-| fs_loader/selftest.md | 1 | list_agents | ✓ | |
+| kernel_state/selftest.md | 1 | list_agents | ✓ | |
 | ...
 
 skipped:

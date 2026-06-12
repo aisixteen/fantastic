@@ -6,13 +6,12 @@ requires-python = ">=3.11"
 members = [
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
-    "fantastic-bridge-core",
     "fantastic-cli",
     "fantastic-cloud-bridge",
-    "fantastic-file",
-    "fantastic-fs-loader",
+    "fantastic-file-bridge",
+    "fantastic-io-bridge",
     "fantastic-kernel",
-    "fantastic-kernel-bridge",
+    "fantastic-kernel-state",
     "fantastic-local-runner",
     "fantastic-nvidia-nim-backend",
     "fantastic-ollama-backend",
@@ -24,6 +23,7 @@ members = [
     "fantastic-web",
     "fantastic-web-rest",
     "fantastic-web-ws",
+    "fantastic-ws-bridge",
     "fantastic-yaml-state",
 ]
 
@@ -351,11 +351,6 @@ requires-dist = [
 ]
 
 [[package]]
-name = "fantastic-bridge-core"
-version = "0.1.0"
-source = { editable = "bundled_agents/bridge/bridge_core" }
-
-[[package]]
 name = "fantastic-cli"
 version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
@@ -363,10 +358,10 @@ source = { editable = "bundled_agents/cli" }
 [[package]]
 name = "fantastic-cloud-bridge"
 version = "0.1.0"
-source = { editable = "bundled_agents/bridge/cloud_bridge" }
+source = { editable = "bundled_agents/io/cloud_bridge" }
 dependencies = [
     { name = "cryptography" },
-    { name = "fantastic-bridge-core" },
+    { name = "fantastic-io-bridge" },
     { name = "pyopenssl" },
     { name = "websockets" },
 ]
@@ -374,20 +369,26 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=42" },
-    { name = "fantastic-bridge-core", editable = "bundled_agents/bridge/bridge_core" },
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "pyopenssl", specifier = ">=24" },
     { name = "websockets", specifier = ">=12,<17" },
 ]
 
 [[package]]
-name = "fantastic-file"
+name = "fantastic-file-bridge"
 version = "0.1.0"
-source = { editable = "bundled_agents/file" }
+source = { editable = "bundled_agents/io/file_bridge" }
+dependencies = [
+    { name = "fantastic-io-bridge" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" }]
 
 [[package]]
-name = "fantastic-fs-loader"
+name = "fantastic-io-bridge"
 version = "0.1.0"
-source = { editable = "bundled_agents/loader/fs_loader" }
+source = { editable = "bundled_agents/io/io_bridge" }
 
 [[package]]
 name = "fantastic-kernel"
@@ -396,12 +397,11 @@ source = { editable = "." }
 dependencies = [
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
-    { name = "fantastic-bridge-core" },
     { name = "fantastic-cli" },
     { name = "fantastic-cloud-bridge" },
-    { name = "fantastic-file" },
-    { name = "fantastic-fs-loader" },
-    { name = "fantastic-kernel-bridge" },
+    { name = "fantastic-file-bridge" },
+    { name = "fantastic-io-bridge" },
+    { name = "fantastic-kernel-state" },
     { name = "fantastic-local-runner" },
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
@@ -413,6 +413,7 @@ dependencies = [
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
+    { name = "fantastic-ws-bridge" },
     { name = "fantastic-yaml-state" },
 ]
 
@@ -429,12 +430,11 @@ dev = [
 requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
-    { name = "fantastic-bridge-core", editable = "bundled_agents/bridge/bridge_core" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
-    { name = "fantastic-cloud-bridge", editable = "bundled_agents/bridge/cloud_bridge" },
-    { name = "fantastic-file", editable = "bundled_agents/file" },
-    { name = "fantastic-fs-loader", editable = "bundled_agents/loader/fs_loader" },
-    { name = "fantastic-kernel-bridge", editable = "bundled_agents/bridge/kernel_bridge" },
+    { name = "fantastic-cloud-bridge", editable = "bundled_agents/io/cloud_bridge" },
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
+    { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
     { name = "fantastic-local-runner", editable = "bundled_agents/runner/local_runner" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
@@ -444,8 +444,9 @@ requires-dist = [
     { name = "fantastic-ssh-runner", editable = "bundled_agents/runner/ssh_runner" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
-    { name = "fantastic-web-rest", editable = "bundled_agents/web/web_rest" },
-    { name = "fantastic-web-ws", editable = "bundled_agents/web/web_ws" },
+    { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
+    { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
+    { name = "fantastic-ws-bridge", editable = "bundled_agents/io/ws_bridge" },
     { name = "fantastic-yaml-state", editable = "bundled_agents/yaml_state" },
 ]
 
@@ -459,30 +460,30 @@ dev = [
 ]
 
 [[package]]
-name = "fantastic-kernel-bridge"
+name = "fantastic-kernel-state"
 version = "0.1.0"
-source = { editable = "bundled_agents/bridge/kernel_bridge" }
+source = { editable = "bundled_agents/loader/kernel_state" }
 dependencies = [
-    { name = "fantastic-bridge-core" },
-    { name = "websockets" },
+    { name = "fantastic-file-bridge" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "fantastic-bridge-core", editable = "bundled_agents/bridge/bridge_core" },
-    { name = "websockets", specifier = ">=12,<17" },
-]
+requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
 
 [[package]]
 name = "fantastic-local-runner"
 version = "0.1.0"
 source = { editable = "bundled_agents/runner/local_runner" }
 dependencies = [
+    { name = "fantastic-file-bridge" },
     { name = "fantastic-runner-core" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" }]
+requires-dist = [
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" },
+]
 
 [[package]]
 name = "fantastic-nvidia-nim-backend"
@@ -550,6 +551,12 @@ requires-dist = [{ name = "fantastic-runner-core", editable = "bundled_agents/ru
 name = "fantastic-terminal-backend"
 version = "0.1.0"
 source = { editable = "bundled_agents/terminal" }
+dependencies = [
+    { name = "fantastic-file-bridge" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
 
 [[package]]
 name = "fantastic-web"
@@ -571,19 +578,24 @@ requires-dist = [
 [[package]]
 name = "fantastic-web-rest"
 version = "0.1.0"
-source = { editable = "bundled_agents/web/web_rest" }
+source = { editable = "bundled_agents/io/web_rest" }
 dependencies = [
+    { name = "fantastic-io-bridge" },
     { name = "fastapi" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fastapi" }]
+requires-dist = [
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
+    { name = "fastapi" },
+]
 
 [[package]]
 name = "fantastic-web-ws"
 version = "0.1.0"
-source = { editable = "bundled_agents/web/web_ws" }
+source = { editable = "bundled_agents/io/web_ws" }
 dependencies = [
+    { name = "fantastic-io-bridge" },
     { name = "fantastic-web" },
     { name = "fastapi" },
     { name = "websockets" },
@@ -591,8 +603,24 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fastapi" },
+    { name = "websockets", specifier = ">=12,<17" },
+]
+
+[[package]]
+name = "fantastic-ws-bridge"
+version = "0.1.0"
+source = { editable = "bundled_agents/io/ws_bridge" }
+dependencies = [
+    { name = "fantastic-io-bridge" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "websockets", specifier = ">=12,<17" },
 ]
 

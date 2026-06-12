@@ -8,10 +8,10 @@ The substrate has two types:
     subscribers, bundle resolver cache). NOT an agent.
 
 Composition is explicit and lives in `main.py`: the ROOT is an
-`fs_loader` agent (`id="fs_loader"`) that owns `.fantastic/`:
+`kernel_state` agent (`id="kernel_state"`) that owns `.fantastic/`:
 
     kernel = Kernel()
-    kernel.load(read_tree(".fantastic"))   # root = fs_loader at id="fs_loader"
+    kernel.load(read_tree(".fantastic"))   # root = kernel_state at id="kernel_state"
     Cli(kernel, parent=kernel.root)         # stdout renderer (only if tty)
 
 The substrate (`kernel/`) knows nothing about specific bundles. Any

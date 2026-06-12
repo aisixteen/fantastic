@@ -22,7 +22,7 @@ _PRIMER_KEYS_GONE = (
 async def test_reflect_root_uniform_no_primer_keys(seeded_kernel):
     """Root reflect is the uniform identity — no special primer shape."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    assert r["id"] == "fs_loader"
+    assert r["id"] == "kernel_state"
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["parent_id"] is None
     for k in _PRIMER_KEYS_GONE:
@@ -55,9 +55,9 @@ async def test_reflect_root_env_version_from_environ(seeded_kernel, monkeypatch)
 
 
 async def test_kernel_alias_equals_core(seeded_kernel):
-    """`kernel` is an alias for the root; reflecting it == reflecting fs_loader."""
+    """`kernel` is an alias for the root; reflecting it == reflecting kernel_state."""
     via_alias = await seeded_kernel.send("kernel", {"type": "reflect"})
-    via_id = await seeded_kernel.send("fs_loader", {"type": "reflect"})
+    via_id = await seeded_kernel.send("kernel_state", {"type": "reflect"})
     assert via_alias == via_id
 
 
@@ -68,7 +68,7 @@ async def test_reflect_tree_all_default(seeded_kernel):
     """Default tree=all: nested distilled subtree rooted at the agent."""
     r = await seeded_kernel.send("kernel", {"type": "reflect"})
     tree = r["tree"]
-    assert tree["id"] == "fs_loader"
+    assert tree["id"] == "kernel_state"
     child_ids = {c["id"] for c in tree.get("children", [])}
     assert "cli" in child_ids
 
@@ -77,7 +77,7 @@ async def test_reflect_tree_ids(seeded_kernel):
     """tree=ids: a flat descendant-id list (self first)."""
     r = await seeded_kernel.send("kernel", {"type": "reflect", "tree": "ids"})
     assert isinstance(r["tree"], list)
-    assert r["tree"][0] == "fs_loader"
+    assert r["tree"][0] == "kernel_state"
     assert "cli" in r["tree"]
 
 
@@ -100,7 +100,7 @@ async def test_reflect_bundles_all(seeded_kernel):
     bundles = r["bundles"]
     assert isinstance(bundles, list)
     names = [b["name"] for b in bundles]
-    assert "cli" in names and "file" in names
+    assert "cli" in names and "file_bridge" in names
     assert names == sorted(names)
     for b in bundles:
         assert set(b.keys()) == {"name", "handler_module"}
@@ -111,7 +111,7 @@ async def test_reflect_bundles_ids(seeded_kernel):
     r = await seeded_kernel.send("kernel", {"type": "reflect", "bundles": "ids"})
     assert isinstance(r["bundles"], list)
     assert all(isinstance(n, str) for n in r["bundles"])
-    assert "file" in r["bundles"]
+    assert "file_bridge" in r["bundles"]
     assert r["bundles"] == sorted(r["bundles"])
 
 
@@ -137,10 +137,10 @@ async def test_reflect_description_surfaces_top_and_tree(seeded_kernel):
     """description set at create surfaces both at top-level reflect of the
     agent AND in its node inside a tree=all walk of the parent."""
     rec = await seeded_kernel.send(
-        "fs_loader",
+        "kernel_state",
         {
             "type": "create_agent",
-            "handler_module": "file.tools",
+            "handler_module": "file_bridge.tools",
             "description": "holds my notes",
         },
     )

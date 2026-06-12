@@ -15,7 +15,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { bootHost, teardownHost, DIST_DIR } from "./_host.ts";
+import { bootHost, teardownHost, DIST_DIR, writeServedDist } from "./_host.ts";
 import type { Host } from "./_host.ts";
 import { Browser, chromeAvailable } from "./_chrome.ts";
 
@@ -95,7 +95,7 @@ before(async () => {
   try {
     host = await bootHost(8915, { webLoader: true, serveDist: true, pythonRuntime: true });
     seedTree(host.tmp, host.pyId ?? "python_runtime");
-    writeFileSync(MOUNT_FILE, MOUNT_HTML);
+    writeServedDist(host, "_test_canvas.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
   } catch (e) {
     skipReason = `browser host unavailable: ${(e as Error).message}`;

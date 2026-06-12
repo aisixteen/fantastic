@@ -1,6 +1,6 @@
 """Bridge integration — Rust in the cross-runtime matrix (WS-only).
 
-Proves that the rust `kernel_bridge` agent interoperates correctly across all
+Proves that the rust `ws_bridge` agent interoperates correctly across all
 runtime pairs. Five forward/reflect test cases cover every directed edge where
 rust is involved:
 
@@ -14,7 +14,7 @@ boot), then `boot` is an idempotent connect guard.
 
 Root-id note: `_forward_reflect` dispatches via peer_id='kernel' and
 target='kernel' — the `kernel` alias resolves to the real root on any runtime
-(fs_loader for Python, core for rust/swift), so no forward test hardcodes a
+(kernel_state for Python, core for rust/swift), so no forward test hardcodes a
 runtime-specific root id.
 
 The stream test uses peer_id='core' literally because watch/emit do a literal
@@ -31,6 +31,16 @@ import pytest
 
 from helpers.seeding import seed_bridge_ws, seed_web, seed_web_ws
 from helpers.streaming import assert_watch_remote_streams
+
+import os as _os
+
+# Local-loopback (127.0.0.1) bridge addressing — meaningless inside a container.
+# The cross-container bridge is covered by test_bridge_container_to_container
+# (host.containers.internal); skip this local matrix under the container target.
+pytestmark = pytest.mark.skipif(
+    _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
+    reason="local-loopback bridge; container path = test_bridge_container_to_container",
+)
 
 
 async def _forward_reflect(
@@ -50,7 +60,7 @@ async def _forward_reflect(
     (id, sentence, tree).
 
     Both peer_id and target use the 'kernel' alias so the dispatch resolves
-    to the correct root id regardless of runtime (fs_loader or core).
+    to the correct root id regardless of runtime (kernel_state or core).
     """
     base = parity_tmp(tag)
     wa = base / "A_client"
@@ -63,7 +73,7 @@ async def _forward_reflect(
     seed_web(client_bin, wa, pa)
     seed_web_ws(client_bin, wa)
     # peer_id='kernel' selects the WS path on B using the runtime alias —
-    # resolves to 'fs_loader' (python) or 'core' (rust/swift) transparently.
+    # resolves to 'kernel_state' (python) or 'core' (rust/swift) transparently.
     seed_bridge_ws(client_bin, wa, agent_id="bridge", peer_id="kernel", peer_port=pb)
 
     seed_web(server_bin, wb, pb)

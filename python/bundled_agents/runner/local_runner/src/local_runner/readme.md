@@ -12,7 +12,7 @@ This bundle is a thin transport over the shared `runner_core` lib. `LocalTranspo
 - `restart` — stop + start. Returns the start reply.
 - `status` — `{running, pid, port, ws_ok}`. `ws_ok` is a 2s WS probe (reflect frame → reply) proving the kernel is alive and answering, not just that lock.json exists.
 - `get_webapp` — `{url, default_width, default_height, title}` when the project is running, `{error}` when not. The url points at `http://localhost:<port>/<entry_path>`.
-- `shutdown` — alias for `stop`; called automatically by `fs_loader.delete_agent`'s universal lifecycle hook when the agent record is deleted.
+- `shutdown` — alias for `stop`; called automatically by `kernel_state.delete_agent`'s universal lifecycle hook when the agent record is deleted.
 
 ## Record fields
 - `remote_path` — project root (absolute filesystem path; required)

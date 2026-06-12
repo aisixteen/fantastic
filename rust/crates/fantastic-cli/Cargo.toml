@@ -21,7 +21,7 @@ fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
 fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
 fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
-fantastic-kernel-bridge = { path = "../bundles/fantastic-kernel-bridge" }
+fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
 fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../bundles/fantastic-tools" }
@@ -51,7 +51,7 @@ full = [
     "dep:fantastic-python-runtime",
     "dep:fantastic-local-runner",
     "dep:fantastic-ssh-runner",
-    "fantastic-kernel-bridge/full",
+    "fantastic-bridge/full",
 ]
 
 # Sandboxed / embedded-library tier — must compile clean for iOS /

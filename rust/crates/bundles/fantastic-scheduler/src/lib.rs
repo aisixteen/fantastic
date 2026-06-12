@@ -1,16 +1,16 @@
 //! Recurring-task scheduler as an agent.
 //!
-//! State (sidecars under `<file_agent.root>/.fantastic/agents/{id}/`, routed
-//! through the file agent whose id sits in the scheduler's `file_agent_id`
-//! meta field — unset is a hard error at first I/O):
+//! State (store-relative sidecars `agents/{id}/…` — wire `file_bridge_id` to the
+//! `.fantastic` store, so they land next to the agent's own agent.json; routed
+//! through that file agent — unset is a hard error at first I/O):
 //!
 //! - `schedules.json` — `[{id, target, payload, interval_seconds, next_run, paused, run_count, created_at}, …]`
 //! - `history.jsonl`  — append-only, one event per fire, ring-trimmed to `HISTORY_MAX`.
 //!
 //! Verbs (mirror Python verb-for-verb):
 //!
-//! - `reflect` → `{id, sentence, tick_sec, paused, file_agent_id, running, verbs, emits}`
-//! - `boot`    → idempotent. Starts the tick task. Requires `file_agent_id`.
+//! - `reflect` → `{id, sentence, tick_sec, paused, file_bridge_id, running, verbs, emits}`
+//! - `boot`    → idempotent. Starts the tick task. Requires `file_bridge_id`.
 //! - `shutdown`→ idempotent. Cancels the tick task.
 //! - `schedule`     args `{target, payload, interval_seconds}` → mint + persist
 //! - `unschedule`   args `{schedule_id}`                       → remove + persist
@@ -112,7 +112,7 @@ impl Bundle for SchedulerBundle {
             "resume" => resume_reply(agent_id, payload, kernel).await,
             "tick_now" => tick_now_reply(agent_id, payload, kernel).await,
             "history" => history_reply(agent_id, payload, kernel).await,
-            other => json!({"error": format!("unknown verb {other:?}")}),
+            other => json!({"error": format!("scheduler: unknown type '{other}'")}),
         };
         Ok(Some(reply))
     }
@@ -152,28 +152,32 @@ fn meta_bool(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
     meta.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn update_meta(agent_id: &AgentId, kernel: &Kernel, key: &str, value: Value) {
+async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value: Value) {
     let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) else {
         return;
     };
     let mut patch = Map::new();
     patch.insert(key.to_string(), value);
     agent.update_meta(patch);
-    let _ = fantastic_kernel::persistence::persist(&agent, &kernel.storage);
+    // Persist the meta change THROUGH the discovered provider (no-op if none).
+    let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
 }
 
 // ── file-agent-routed persistence ───────────────────────────────────
 
+// STORE-RELATIVE paths (`agents/<id>/…`): wire `file_bridge_id` to the
+// `.fantastic` store and the sidecars land next to the agent's own agent.json —
+// one store, no `.fantastic/.fantastic/…` double-nest. Matches Python.
 fn schedules_path(agent_id: &AgentId) -> String {
-    format!(".fantastic/agents/{}/schedules.json", agent_id)
+    format!("agents/{}/schedules.json", agent_id)
 }
 
 fn history_path(agent_id: &AgentId) -> String {
-    format!(".fantastic/agents/{}/history.jsonl", agent_id)
+    format!("agents/{}/history.jsonl", agent_id)
 }
 
 async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> Option<String> {
-    let fid = meta_string(agent_id, kernel, "file_agent_id")?;
+    let fid = meta_string(agent_id, kernel, "file_bridge_id")?;
     let reply = kernel
         .send(
             &AgentId::from(fid.as_str()),
@@ -192,9 +196,9 @@ async fn file_write(
     path: &str,
     content: &str,
 ) -> Result<(), String> {
-    let fid = match meta_string(agent_id, kernel, "file_agent_id") {
+    let fid = match meta_string(agent_id, kernel, "file_bridge_id") {
         Some(s) => s,
-        None => return Err("file_agent_id unset".to_string()),
+        None => return Err("file_bridge_id unset".to_string()),
     };
     let reply = kernel
         .send(
@@ -397,7 +401,7 @@ fn mint_id() -> String {
 // ── verb implementations ────────────────────────────────────────────
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let file_agent_id = meta_string(agent_id, kernel, "file_agent_id");
+    let file_bridge_id = meta_string(agent_id, kernel, "file_bridge_id");
     let running = SCHEDULER_TASKS
         .lock()
         .get(agent_id)
@@ -408,11 +412,11 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "sentence": "Recurring-task scheduler.",
         "tick_sec": meta_f64(agent_id, kernel, "tick_sec", 1.0),
         "paused": meta_bool(agent_id, kernel, "paused"),
-        "file_agent_id": file_agent_id,
+        "file_bridge_id": file_bridge_id,
         "running": running,
         "verbs": {
-            "reflect": "Identity + tick state + file_agent_id. No args.",
-            "boot": "Idempotent. Starts the tick loop. Requires file_agent_id.",
+            "reflect": "Identity + tick state + file_bridge_id. No args.",
+            "boot": "Idempotent. Starts the tick loop. Requires file_bridge_id.",
             "shutdown": "Idempotent. Cancels the tick loop.",
             "schedule": "args: target:str, payload:dict, interval_seconds:int (default 60).",
             "unschedule": "args: schedule_id:str.",
@@ -429,8 +433,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
 }
 
 async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    if meta_string(agent_id, kernel, "file_agent_id").is_none() {
-        return json!({"error": "scheduler: file_agent_id required"});
+    if meta_string(agent_id, kernel, "file_bridge_id").is_none() {
+        return json!({"error": "scheduler: file_bridge_id required"});
     }
     let mut tasks = SCHEDULER_TASKS.lock();
     if let Some(existing) = tasks.get(agent_id) {
@@ -458,8 +462,8 @@ fn shutdown_reply(agent_id: &AgentId) -> Value {
 }
 
 async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if meta_string(agent_id, kernel, "file_agent_id").is_none() {
-        return json!({"error": "scheduler: file_agent_id required"});
+    if meta_string(agent_id, kernel, "file_bridge_id").is_none() {
+        return json!({"error": "scheduler: file_bridge_id required"});
     }
     let target = payload
         .get("target")
@@ -541,7 +545,7 @@ async fn pause_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         }
         return json!({"paused": touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(true));
+    update_meta(agent_id, kernel, "paused", json!(true)).await;
     json!({"paused": true, "scheduler_id": agent_id.as_str()})
 }
 
@@ -562,7 +566,7 @@ async fn resume_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>)
         }
         return json!({"resumed": touched > 0, "schedule_id": sid});
     }
-    update_meta(agent_id, kernel, "paused", json!(false));
+    update_meta(agent_id, kernel, "paused", json!(false)).await;
     json!({"resumed": true, "scheduler_id": agent_id.as_str()})
 }
 
@@ -583,7 +587,7 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
             return json!({"fired": true, "schedule_id": sid});
         }
     }
-    json!({"error": format!("schedule {sid:?} not found")})
+    json!({"error": format!("schedule '{sid}' not found")})
 }
 
 async fn history_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {

@@ -217,7 +217,7 @@ impl Bundle for TerminalBackendBundle {
         header: Value,
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
+    ) -> Result<(Reply, Vec<u8>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         if verb == "paste_image" {
             let mime = header
@@ -225,7 +225,10 @@ impl Bundle for TerminalBackendBundle {
                 .and_then(Value::as_str)
                 .unwrap_or("image/png")
                 .to_string();
-            return Ok(Some(paste_image_impl(agent_id, blob, mime).await));
+            return Ok((
+                Some(paste_image_impl(agent_id, blob, mime).await),
+                Vec::new(),
+            ));
         }
         // Anything else: fall back to base64+handle path (default).
         let mut payload = header;
@@ -237,7 +240,8 @@ impl Bundle for TerminalBackendBundle {
             map.insert("data".to_string(), Value::String(encoded));
             payload = Value::Object(map);
         }
-        self.handle(agent_id, &payload, kernel).await
+        let reply = self.handle(agent_id, &payload, kernel).await?;
+        Ok((reply, Vec::new()))
     }
 
     async fn on_delete(

@@ -1,5 +1,5 @@
 # anthropic_backend — Claude LLM agent
-Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, native tool-calls, menu cache. Persistence via `file_agent_id`.
+Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, native tool-calls, menu cache. Persistence via `file_bridge_id`.
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue/FIFO lock/menu cache, prompt assembly, the agentic `_run` loop, and all verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
@@ -11,7 +11,7 @@ lock) and returns `{response, final}`. It is a first-class peer of
 call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
 (caller-supplied role/context — read it from a state agent yourself; the AI has NO
 yaml coupling). Optional `messages:list` REPLACES persisted history (fully
-stateless — no `file_agent_id` needed).
+stateless — no `file_bridge_id` needed).
 
 ## Wiring your completion — routing is YOUR decision, not plumbed
 You are a workflow unit: you receive a call, think (calling other agents as tools

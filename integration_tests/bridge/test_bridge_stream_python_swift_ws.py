@@ -49,7 +49,7 @@ async def test_python_swift_ws_watch_remote_streams_event(
     seed_web_ws(swift_binary, workdir_b)
 
     # B is the watched/emitted kernel — resolve its LITERAL root id.
-    # Swift root = 'core'; Python root = 'fs_loader'. Never hardcode either.
+    # Swift root = 'core'; Python root = 'kernel_state'. Never hardcode either.
     server_root: str = root_id(swift_binary, workdir_b)
 
     # Python A (client): web + web_ws (drivable via WS) + bridge to B.

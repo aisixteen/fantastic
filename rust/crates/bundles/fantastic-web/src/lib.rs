@@ -8,7 +8,7 @@
 //! |--------------------------------|-----------------------------------------------|
 //! | `GET  /`                       | root index (link tree of served agents)       |
 //! | `GET  /<id>/`                  | dispatch `render_html` on agent + inject transport.js |
-//! | `GET  /<id>/file/<path>`       | proxy to the file agent's `read` verb         |
+//! | `GET  /<id>/file/<path>`       | pipe the agent's `read_stream` SOURCE (gated; chunked) |
 //! | `GET  /transport.js`           | the JS client embedded at compile-time        |
 //! | `GET  /favicon.ico`            | embedded favicon                              |
 //!
@@ -676,16 +676,11 @@ async fn serve_rest_reflect_dynamic(
 async fn serve_root_index_dynamic(State(state): State<AppState>) -> impl IntoResponse {
     let kernel = Arc::clone(&state.kernel);
 
-    // Optional custom landing: if FANTASTIC_WEB_INDEX points at a readable HTML
-    // file, serve it at `/` (the container serves the all-readmes "head" page
-    // this way by default). Falls back to the dynamic agent-tree index below.
-    if let Ok(path) = std::env::var("FANTASTIC_WEB_INDEX") {
-        if !path.is_empty() {
-            if let Ok(html) = std::fs::read_to_string(&path) {
-                return Html(html).into_response();
-            }
-        }
-    }
+    // `/` is ALWAYS the dynamic agent-tree index — no env-pointed disk read.
+    // The kernel's own web owns no `fs` surface (parity with Python's web,
+    // which dropped `FANTASTIC_WEB_INDEX`): a custom landing is served through
+    // the gated `/<file_bridge>/file/<path>` route, not a back-channel
+    // `std::fs::read`. Same on every runtime — what Python deleted, we delete.
 
     // Pull the root's reflect to get the tree (default tree=all).
     let primer = kernel
@@ -910,45 +905,96 @@ async fn serve_agent_render(
         .into_response()
 }
 
+/// Octet proxy `GET /<id>/file/<path>` — serves any agent answering the
+/// `read_stream` SOURCE verb as an HTTP file server, piping the file out
+/// **chunk by chunk** so a large file never lands whole in RAM. The
+/// allowance is the served agent's OWN gate: a sealed `file_bridge`
+/// denies `read_stream` → `404` (the denial never leaks file existence),
+/// path clamped to its root. Mirrors Python's `read_stream`-only octet
+/// route (whole-file image `read`→`image_base64` is NOT used here).
 async fn serve_file_proxy(
     State(state): State<AppState>,
     AxPath((agent_id, path)): AxPath<(String, String)>,
 ) -> Response {
     let target = AgentId::from(agent_id.as_str());
-    let reply = state
+    const CHUNK: u64 = 262144;
+    // Eager first chunk: decides status + mime BEFORE we commit headers
+    // (a stream can't change the status once the body starts flowing).
+    let (meta, first) = state
         .kernel
-        .send(&target, json!({"type": "read", "path": path}))
+        .send_with_binary(
+            &target,
+            json!({"type": "read_stream", "path": path, "offset": 0, "length": CHUNK}),
+            Vec::new(),
+        )
         .await;
-    if let Some(content) = reply.get("content").and_then(Value::as_str) {
-        let mime = guess_mime(&path);
+    if let Some(err) = meta.get("error").and_then(Value::as_str) {
+        // Sealed bridge, missing file, escape attempt — all 404 (uniform,
+        // leaks nothing about which it was beyond the error string).
         return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, mime)],
-            content.to_string(),
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain")],
+            err.to_string(),
         )
             .into_response();
     }
-    if let Some(img) = reply.get("image_base64").and_then(Value::as_str) {
-        let mime = reply
-            .get("mime")
-            .and_then(Value::as_str)
-            .unwrap_or("application/octet-stream");
-        use base64::Engine;
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(img) {
-            return (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response();
+    let mime = guess_mime(&path);
+    let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
+    let size = meta.get("size").and_then(Value::as_u64);
+    let next = meta
+        .get("next_offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(first.len() as u64);
+
+    // Stream state: (kernel, target, path, next_offset, done?). `done`
+    // starts true when the first chunk already hit EOF.
+    let kernel = Arc::clone(&state.kernel);
+    let stream = futures_util::stream::unfold(
+        (Some(first), kernel, target, path, next, eof),
+        move |(pending, kernel, target, path, offset, done)| async move {
+            // Emit the eagerly-read first chunk on the first poll.
+            if let Some(buf) = pending {
+                return Some((
+                    Ok::<Vec<u8>, std::io::Error>(buf),
+                    (None, kernel, target, path, offset, done),
+                ));
+            }
+            if done {
+                return None;
+            }
+            let (m, body) = kernel
+                .send_with_binary(
+                    &target,
+                    json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
+                    Vec::new(),
+                )
+                .await;
+            // Mid-stream error (file shrank/vanished): end the body. The
+            // 200 status already went out; truncation is the honest signal.
+            if m.get("error").is_some() {
+                return None;
+            }
+            let eof = m.get("eof").and_then(Value::as_bool).unwrap_or(true);
+            let next = m
+                .get("next_offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(offset + body.len() as u64);
+            Some((Ok(body), (None, kernel, target, path, next, eof)))
+        },
+    );
+
+    // Content-Length when the size is known (parity with Python's header);
+    // omit it otherwise rather than guess.
+    let mut headers = header::HeaderMap::new();
+    if let Ok(v) = header::HeaderValue::from_str(mime) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    if let Some(sz) = size {
+        if let Ok(v) = header::HeaderValue::from_str(&sz.to_string()) {
+            headers.insert(header::CONTENT_LENGTH, v);
         }
     }
-    let msg = reply
-        .get("error")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("agent {agent_id}: no file content"));
-    (
-        StatusCode::NOT_FOUND,
-        [(header::CONTENT_TYPE, "text/plain")],
-        msg,
-    )
-        .into_response()
+    (StatusCode::OK, headers, Body::from_stream(stream)).into_response()
 }
 
 /// Inject `<script src="/transport.js"></script>` + the favicon
@@ -1052,6 +1098,11 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
     // We need a separate channel because axum's split sink is single-
     // consumer; the inbox receiver lives in the kernel.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(state.kernel.inbox_bound);
+    // Parallel BINARY out-channel — a `read_stream` reply carries raw bytes that
+    // can't ride the text channel; the sink writer drains both (text →
+    // Message::Text, binary → Message::Binary, the `[4B len|header|body]` codec
+    // frame). Mirrors py web_ws, which sends binary reply frames the same way.
+    let (bin_tx, mut bin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(state.kernel.inbox_bound);
     // Hook the synthetic client inbox into the kernel.
     let (inbox_tx, mut inbox_rx) = tokio::sync::mpsc::channel::<Value>(state.kernel.inbox_bound);
     state.kernel.inboxes.insert(client_id.clone(), inbox_tx);
@@ -1094,11 +1145,27 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
         }
     });
 
-    // Outbound forwarder: anything written to out_tx hits the socket.
+    // Outbound forwarder: text frames (out_tx) AND binary frames (bin_tx) hit
+    // the one single-consumer sink. Select across both so neither starves.
     let send_task = tokio::spawn(async move {
-        while let Some(line) = out_rx.recv().await {
-            if sink.send(Message::Text(line)).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                line = out_rx.recv() => match line {
+                    Some(line) => {
+                        if sink.send(Message::Text(line)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                blob = bin_rx.recv() => match blob {
+                    Some(blob) => {
+                        if sink.send(Message::Binary(blob)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
     });
@@ -1113,7 +1180,15 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
         let text = match msg {
             Ok(Message::Text(t)) => t,
             Ok(Message::Binary(bytes)) => {
-                handle_binary_frame(&state, &client_id, &out_tx, &pending_uploads, bytes).await;
+                handle_binary_frame(
+                    &state,
+                    &client_id,
+                    &out_tx,
+                    &bin_tx,
+                    &pending_uploads,
+                    bytes,
+                )
+                .await;
                 continue;
             }
             Ok(Message::Close(_)) | Err(_) => break,
@@ -1351,10 +1426,34 @@ struct ChunkBuffer {
 /// On any decode error the frame is dropped silently (we log a debug
 /// trace) — the WS stays open. The shape is documented + a single
 /// malformed frame from a JS client shouldn't kill the channel.
+/// Send a binary-dispatch reply on the correct WS channel. An empty `body` is a
+/// plain `{type:reply, id, data}` TEXT frame; a non-empty body (e.g.
+/// `file_bridge.read_stream` bytes) is a BINARY frame `[4B len|header|body]` (the
+/// codec) sent on `bin_tx` — raw bytes, never base64. Mirrors py web_ws.
+async fn send_binary_reply(
+    out_tx: &tokio::sync::mpsc::Sender<String>,
+    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    id: Option<Value>,
+    reply: Value,
+    body: Vec<u8>,
+) {
+    if body.is_empty() {
+        let frame = json!({ "type": "reply", "id": id, "data": reply }).to_string();
+        let _ = out_tx.send(frame).await;
+        return;
+    }
+    // Binary reply: the body rides raw at `data.bytes`.
+    let mut header = json!({ "type": "reply", "id": id, "data": reply });
+    header["_binary_path"] = json!("data.bytes");
+    let wire = fantastic_io_bridge::codec::encode_binary_frame(&header, &body);
+    let _ = bin_tx.send(wire).await;
+}
+
 async fn handle_binary_frame(
     state: &AppState,
     client_id: &AgentId,
     out_tx: &tokio::sync::mpsc::Sender<String>,
+    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
     bytes: Vec<u8>,
 ) {
@@ -1422,6 +1521,7 @@ async fn handle_binary_frame(
             state,
             client_id,
             out_tx,
+            bin_tx,
             pending_uploads,
             upload_id,
             header,
@@ -1442,21 +1542,16 @@ async fn handle_binary_frame(
     let kernel = Arc::clone(&state.kernel);
     let sender_for_scope = client_id.clone();
     let out = out_tx.clone();
+    let bin = bin_tx.clone();
     let header_for_dispatch = header.clone();
     tokio::spawn(async move {
-        let reply = fantastic_kernel::send::with_sender(sender_for_scope, async {
+        let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
             kernel
                 .send_with_binary(&target, header_for_dispatch, blob)
                 .await
         })
         .await;
-        // Verb-level errors live inside `data.error` (Python wire shape).
-        let frame = json!({
-            "type": "reply",
-            "id": id,
-            "data": reply,
-        });
-        let _ = out.send(frame.to_string()).await;
+        send_binary_reply(&out, &bin, id, reply, body).await;
     });
 }
 
@@ -1536,6 +1631,7 @@ async fn handle_chunked_frame(
     state: &AppState,
     client_id: &AgentId,
     out_tx: &tokio::sync::mpsc::Sender<String>,
+    bin_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
     pending_uploads: &Arc<std::sync::Mutex<std::collections::HashMap<String, ChunkBuffer>>>,
     upload_id: String,
     mut header: Value,
@@ -1655,20 +1751,15 @@ async fn handle_chunked_frame(
             let kernel = Arc::clone(&state.kernel);
             let sender_for_scope = client_id.clone();
             let out = out_tx.clone();
+            let bin = bin_tx.clone();
             tokio::spawn(async move {
-                let reply = fantastic_kernel::send::with_sender(sender_for_scope, async {
+                let (reply, body) = fantastic_kernel::send::with_sender(sender_for_scope, async {
                     kernel
                         .send_with_binary(&target, base_header, full_blob)
                         .await
                 })
                 .await;
-                // Verb-level errors live inside `data.error` (Python wire shape).
-                let frame = json!({
-                    "type": "reply",
-                    "id": id,
-                    "data": reply,
-                });
-                let _ = out.send(frame.to_string()).await;
+                send_binary_reply(&out, &bin, Some(id), reply, body).await;
             });
         }
         None => {

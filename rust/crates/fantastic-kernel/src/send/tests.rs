@@ -120,7 +120,7 @@ async fn unwatch_stops_fanout() {
 #[tokio::test]
 async fn send_with_binary_missing_target_returns_error() {
     let kernel = Arc::new(Kernel::new());
-    let v = kernel
+    let (v, body) = kernel
         .send_with_binary(
             &AgentId::from("nope"),
             json!({"type": "frob"}),
@@ -128,6 +128,7 @@ async fn send_with_binary_missing_target_returns_error() {
         )
         .await;
     assert!(v["error"].as_str().unwrap_or("").contains("no agent"));
+    assert!(body.is_empty());
 }
 
 #[tokio::test]
@@ -153,8 +154,10 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
             _header: Value,
             blob: Vec<u8>,
             _kernel: &Arc<Kernel>,
-        ) -> Result<Reply, BundleError> {
-            Ok(Some(json!({"ok": true, "len": blob.len()})))
+        ) -> Result<(Reply, Vec<u8>), BundleError> {
+            // Echo the bytes back as the reply BODY (symmetric channel).
+            let len = blob.len();
+            Ok((Some(json!({"ok": true, "len": len})), blob))
         }
     }
     let mut kernel = Kernel::new();
@@ -171,7 +174,7 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
         true,
     );
     let _rx = kernel.register(Arc::clone(&agent));
-    let reply = kernel
+    let (reply, body) = kernel
         .send_with_binary(
             &AgentId::from("eb"),
             json!({"type": "ingest"}),
@@ -180,6 +183,8 @@ async fn send_with_binary_routes_through_bundle_handle_binary() {
         .await;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["len"], 64);
+    // Symmetric channel: bytes flow back as the reply body too.
+    assert_eq!(body.len(), 64);
 }
 
 #[tokio::test]

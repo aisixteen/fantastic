@@ -9,7 +9,7 @@ already proves the decoupling on the rust binary without a browser:
 - `../decoupling/test_decoupling_bundle_catalog.py` — the rust catalog no longer
   registers the 7 view bundles.
 - `../decoupling/test_serve_frontend.py` — the rust binary serves a static `dist/`
-  generically through a `file` agent (`GET /<id>/file/<path>`).
+  generically through a `file_bridge` agent (`GET /<id>/file/<path>`).
 
 The browser layer (headless Chrome loading the rust-served frontend +
 asserting panels hydrate) reuses the existing `py_ts/` harness verbatim —
@@ -19,10 +19,10 @@ weight. To wire it:
 1. Copy `py_ts/_host.ts` → `rust_ts/_host.ts` and change two things:
    - `FANTASTIC` → the rust binary (`rust/target/{release,debug}/fantastic`,
      newest by mtime — see `../conftest.py:rust_binary`).
-   - the seed root id `fs_loader` → **`core`** (rust's root id; python uses
-     `fs_loader`). This is the only non-trivial port.
+   - the seed root id `kernel_state` → **`core`** (rust's root id; python uses
+     `kernel_state`). This is the only non-trivial port.
 2. Copy `py_ts/_chrome.ts` → `rust_ts/_chrome.ts` (unchanged).
-3. Add `serve_dist.browser.itest.ts`: boot the rust host with a `file`
+3. Add `serve_dist.browser.itest.ts`: boot the rust host with a `file_bridge`
    agent (`id=ts_dist root=<repo>/ts/dist`) under `web`, open
    `/ts_dist/file/<mount>.html` in Chrome, assert the canvas mounts.
 4. Copy `py_ts/package.json` (`"type":"module"`).

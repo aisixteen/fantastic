@@ -106,8 +106,12 @@ struct HTTPServerTests {
         // TS frontend's dist/). Prove the generic /<id>/file/<path> route
         // returns a file agent's bytes.
         let kernel = try await startKernelInMemory(portHint: 0)
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "fantastic-serve-\(UUID().uuidString)")
+        // The fs edge clamps every root INSIDE the running dir (here the process
+        // cwd, since the kernel is in-memory). Serve from a cwd-relative dir —
+        // an absolute /tmp root would now refuse (the running-dir law).
+        let rel = "fantastic-serve-\(UUID().uuidString)"
+        let tmp = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(rel)
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
         try "<h1>Hello</h1>".write(
@@ -116,9 +120,11 @@ struct HTTPServerTests {
             AgentId("core"),
             .object([
                 "type": .string("create_agent"),
-                "handler_module": .string("file.tools"),
+                "handler_module": .string("file_bridge.tools"),
                 "id": .string("assets"),
-                "root": .string(tmp.path),
+                "root": .string(rel),
+                // The fs edge SEALS by default — open it for the /file/ proxy.
+                "ingress_rule": .string("allow_all"),
             ]))
         _ = await kernel.send(
             AgentId("web"), .object(["type": .string("boot")]))
@@ -150,6 +156,8 @@ struct HTTPServerTests {
                 "type": .string("create_agent"),
                 "handler_module": .string("web_rest.tools"),
                 "id": .string("rest"),
+                // The web_rest leg SEALS by default — open it for the POST.
+                "ingress_rule": .string("allow_all"),
             ]))
         let restId = rec["id"].asString ?? "rest"
         _ = await kernel.send(

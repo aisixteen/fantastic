@@ -31,13 +31,30 @@ freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0))
 
 # The image performs NO agent autocreation — the OPERATOR composes the web stack.
 # These one-shots (entrypoint bypassed) seed web+web_ws+rest into a workdir, the
-# way a project/LLM would, before the daemon boots it. $1=workdir $2=bin $3=root $4=port
+# way a project/LLM would, before the daemon boots it. The call legs (web_ws,
+# web_rest) are io_bridge derivations — SEALED by default — so we open them with
+# ingress_rule=allow_all, exactly as the operator must. $1=workdir $2=bin $3=root $4=port
 PYBIN=/opt/fantastic/venv/bin/fantastic
 RUSTBIN=/opt/fantastic/bin/fantastic-rust
 compose_web() {
+  # Wire the persistence PROVIDER first — a file_bridge@.fantastic (open). Python
+  # AND rust auto-persist records ONLY through a discovered store now (RAM if
+  # unwired), so without this the web/web_ws/rest one-shots would never reach disk
+  # and the daemon would boot empty. The store self-persists (survives to the next
+  # one-shot). Idempotent across the calls below.
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all >/dev/null 2>&1
   $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=web.tools id=web "port=$4" >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws ingress_rule=allow_all >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest ingress_rule=allow_all >/dev/null 2>&1
+}
+
+# Serve the head page the ONE gated way — `/head/file/index.html` via read_stream,
+# no FANTASTIC_WEB_INDEX env. The file_bridge clamps every root INSIDE the running
+# dir (=/work), so the baked head is first COPIED into the workdir, then served by
+# a read-only file_bridge rooted at the relative `head`. $1=workdir $2=bin $3=root
+compose_head() {
+  $ENGINE run --rm -v "$1:/work" --entrypoint sh "$TAG" -c 'mkdir -p /work/head && cp /opt/fantastic/head/index.html /work/head/index.html' >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=head root=head readonly=true ingress_rule=allow_all >/dev/null 2>&1
 }
 
 # ── build ──────────────────────────────────────────────────────────────────
@@ -63,7 +80,7 @@ echo "== serve (bind 0.0.0.0 + -p mapping + workdir) =="
 for rt in python rust; do
   P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-$rt-$$"
   CONTAINERS="$CONTAINERS $c"
-  case "$rt" in python) bin=$PYBIN; root=fs_loader ;; rust) bin=$RUSTBIN; root=core ;; esac
+  case "$rt" in python) bin=$PYBIN; root=kernel_state ;; rust) bin=$RUSTBIN; root=core ;; esac
   compose_web "$tmp" "$bin" "$root" "$P"   # explicit composition (image autocreates nothing)
   $ENGINE run -d --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
     -e FANTASTIC_RUNTIME="$rt" -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
@@ -105,7 +122,7 @@ done
 echo "== shutdown_kernel (--rm container stops + auto-removes; workdir persists) =="
 P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-shutdown-$$"
 CONTAINERS="$CONTAINERS $c"
-compose_web "$tmp" "$PYBIN" fs_loader "$P"
+compose_web "$tmp" "$PYBIN" kernel_state "$P"
 $ENGINE run -d --rm --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
   -e FANTASTIC_RUNTIME=python -e FANTASTIC_PORT="$P" "$TAG" >/dev/null
 up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
@@ -160,57 +177,36 @@ else
   ok "no node/bun/deno/cargo/go/rustc/gcc in the final image"
 fi
 
-# ── head: a composed web serves the all-readmes page at / (head on by default) ─
-# The image autocreates nothing, so compose a python web on :8088 first; with
-# head on (default) its / serves the head page.
-echo "== head served by a composed web (default on) + FANTASTIC_HEAD=off fallback =="
-P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$$"
-CONTAINERS="$CONTAINERS $c"
-compose_web "$tmp" "$PYBIN" fs_loader 8088
-$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" "$TAG" >/dev/null
-up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
-page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
-if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD" \
-   && printf '%s' "$page" | grep -q "Aisixteen Fantastic"; then
-  ok "default run serves the all-readmes head at / (no flags; host :$P → :8088)"
-else
-  bad "default head page missing/incomplete ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
-fi
-hr=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$P/rest/kernel" -d '{"type":"reflect"}' 2>/dev/null || true)
-printf '%s' "$hr" | grep -Eq '"runtime"[[:space:]]*:[[:space:]]*"python"' \
-  && ok "head endpoint is also a live kernel (reflect over REST → python)" \
-  || bad "head reflect-over-REST failed"
-$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
-
-# FANTASTIC_HEAD=off → / falls back to the plain agent-tree index (no head page).
-P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-nohead-$$"
-CONTAINERS="$CONTAINERS $c"
-compose_web "$tmp" "$PYBIN" fs_loader 8088
-$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
-  -e FANTASTIC_HEAD=off "$TAG" >/dev/null
-up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
-page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
-if [ -n "$up" ] && ! printf '%s' "$page" | grep -q "KERNEL HEAD"; then
-  ok "FANTASTIC_HEAD=off drops the head → plain agent index at /"
-else
-  bad "FANTASTIC_HEAD=off still served the head page (flag ignored?)"
-fi
-$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
-
-# rust also honours the head hook (FANTASTIC_WEB_INDEX in axum) for a composed web.
-P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-rusthead-$$"
-CONTAINERS="$CONTAINERS $c"
-compose_web "$tmp" "$RUSTBIN" core 8088
-$ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" \
-  -e FANTASTIC_RUNTIME=rust "$TAG" >/dev/null
-up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
-page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
-if [ -n "$up" ] && printf '%s' "$page" | grep -q "KERNEL HEAD"; then
-  ok "rust runtime also serves the head at / by default"
-else
-  bad "rust head page missing ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
-fi
-$ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
+# ── `/` is the agent-tree index (both runtimes); the head rides the gated route ─
+# No FANTASTIC_WEB_INDEX env: `/` is ALWAYS the live agent-tree index. The
+# all-readmes head page is served the one gated way — a read-only file_bridge
+# over /opt/fantastic/head, reached at /head/file/index.html (read_stream).
+echo "== / is the agent index; head served via /head/file/index.html (gated) =="
+for spec in "python:$PYBIN:kernel_state:" "rust:$RUSTBIN:core:-e FANTASTIC_RUNTIME=rust"; do
+  rt=${spec%%:*}; rest=${spec#*:}; bin=${rest%%:*}; rest=${rest#*:}; root=${rest%%:*}; envflag=${rest#*:}
+  P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-head-$rt-$$"
+  CONTAINERS="$CONTAINERS $c"
+  compose_web  "$tmp" "$bin" "$root" 8088
+  compose_head "$tmp" "$bin" "$root"
+  # shellcheck disable=SC2086
+  $ENGINE run -d --name "$c" -p "127.0.0.1:$P:8088" -v "$tmp:/work" $envflag "$TAG" >/dev/null
+  up=""; i=0; while [ $i -lt 100 ]; do curl -sf -o /dev/null "http://127.0.0.1:$P/" && { up=1; break; }; sleep 0.5; i=$((i+1)); done
+  page=$(curl -s "http://127.0.0.1:$P/" 2>/dev/null || true)
+  # `/` must be the agent index (NOT the head page).
+  if [ -n "$up" ] && ! printf '%s' "$page" | grep -q "KERNEL HEAD"; then
+    ok "$rt: / serves the plain agent-tree index (no head back-channel)"
+  else
+    bad "$rt: / unexpectedly served the head page or never came up ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+  fi
+  # The head page is reachable through the gated file_bridge route.
+  hp=$(curl -s "http://127.0.0.1:$P/head/file/index.html" 2>/dev/null || true)
+  if printf '%s' "$hp" | grep -q "KERNEL HEAD" && printf '%s' "$hp" | grep -q "Aisixteen Fantastic"; then
+    ok "$rt: head page served via /head/file/index.html (read_stream, gated)"
+  else
+    bad "$rt: head not served through the file_bridge route ($($ENGINE logs "$c" 2>&1 | tail -2 | tr '\n' '|'))"
+  fi
+  $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
+done
 
 # ── no agent autocreation: a BLANK workdir gets nothing composed ────────────
 echo "== no agent autocreation (blank workdir) =="
@@ -222,7 +218,7 @@ printf '%s' "$out" | grep -q "composes nothing" \
 if grep -rqs '"handler_module"[[:space:]]*:[[:space:]]*"web.tools"' "$tmp/.fantastic/agents" 2>/dev/null; then
   bad "a web.tools agent was AUTOCREATED in a blank workdir (autocreation not removed!)"
 else
-  ok "no web/web_ws/rest agent autocreated in the blank workdir"
+  ok "no web agent autocreated in the blank workdir"
 fi
 $ENGINE rm -f "$c" >/dev/null 2>&1 || true; rm -rf "$tmp"
 

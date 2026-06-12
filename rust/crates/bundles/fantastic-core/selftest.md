@@ -38,7 +38,7 @@ grep -q "send(target_id, payload)" .fantastic/readme.md
 ### Test 3: list_agents enumerates everything
 
 ```bash
-$FANTASTIC core create_agent handler_module=file.tools id=t_file
+$FANTASTIC core create_agent handler_module=file_bridge.tools id=t_file
 $FANTASTIC core list_agents | jq -e '.agents | length >= 2'
 $FANTASTIC core list_agents | jq -e '[.agents[].id] | contains(["core","t_file"])'
 ```

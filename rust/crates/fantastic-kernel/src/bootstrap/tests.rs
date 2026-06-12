@@ -38,14 +38,18 @@ fn bootstrap_creates_root_on_virgin_workdir() {
 #[test]
 fn bootstrap_hydrates_persisted_children() {
     let tmp = TempDir::new().unwrap();
-    // Boot once + create a child.
+    let store_root = tmp.path().join(".fantastic");
+    // Boot once + wire a persistence provider + create a child. Persistence is
+    // provider-routed now, so the child only lands on disk through the store.
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", Noop);
+    crate::test_support::register_fake_store(&mut reg, &store_root);
     {
         let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
         let kernel = Arc::clone(&booted.kernel);
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
+            crate::test_support::wire_fake_store(&kernel, &store_root).await;
             kernel
                 .send(
                     &AgentId::from("core"),
@@ -55,15 +59,18 @@ fn bootstrap_hydrates_persisted_children() {
         });
         shutdown(tmp.path()).unwrap();
     }
-    // Boot again — child must rehydrate.
+    // Boot again — child + store must rehydrate (the store re-discovers itself).
     let mut reg2 = BundleRegistry::new();
     reg2.register("noop.tools", Noop);
+    crate::test_support::register_fake_store(&mut reg2, &store_root);
     let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
     assert!(booted2
         .kernel
         .agents
         .contains_key(&AgentId::from("child_a")));
-    assert_eq!(booted2.loaded, vec![AgentId::from("child_a")]);
+    // Both the child AND the persisted store provider rehydrate.
+    assert!(booted2.loaded.contains(&AgentId::from("child_a")));
+    assert!(booted2.loaded.contains(&AgentId::from("store")));
     shutdown(tmp.path()).unwrap();
 }
 

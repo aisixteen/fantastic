@@ -20,6 +20,18 @@ exists, it manages durable memory with judgment (saves salient facts, recalls
 them on a fresh turn, prunes the rest), entirely through `send`. Proof:
 [`integration_tests/memory/`](integration_tests/memory/test_ai_memory_judgment.py).
 
+**Every edge is sealed.** All IO — kernel↔kernel, kernel↔disk, kernel↔browser —
+crosses through a **gated bridge that is deny-all by default**, opened on demand
+(`ingress_rule=allow_all` / `password`). Disk is just another gated edge: a
+`file_bridge` agent is the single surface, and persistence routes through ONE
+`.fantastic` store — no provider wired ⇒ state stays in RAM (a kernel has **no silent
+fallbacks**, one path or none). And the whole lock/wiring landscape is **readable from
+one `reflect`**: each tree node carries its posture (`ingress_rule` / `root` /
+`file_bridge_id`), the root carries `persistence:{provider}`. So the same
+self-description that lets an AI *build* also lets it *see what's open* — and wire
+access **correctly and granularly** (one store reused for shared state; a separate
+narrow read-only bridge for public assets), not one blanket-open surface.
+
 ## Run it now — one container, driven by an AI
 
 The container ships as **two separate per-architecture images** (podman **and**
@@ -62,7 +74,7 @@ curl -s -X POST -H 'Content-Type: application/json' \
 reads `reflect` over `web_ws` (`/web/ws`) / `rest` (`POST /rest/<target>`) — **no
 client library, the protocol IS the API** — and then **builds** by composing
 agents (`create_agent` + wiring them with `send`) against the folder you mounted
-at **`/work`** (the `file` / `terminal` / `python_runtime` agents act on it). Hand
+at **`/work`** (the `file_bridge` / `terminal` / `python_runtime` agents act on it). Hand
 it a [recipe](container/recipes.md) and it assembles a working app — capability
 emerges from self-description, no bespoke glue. Full run contract + 7 recipes:
 [`container/README.md`](container/README.md) · [`container/recipes.md`](container/recipes.md).
@@ -75,7 +87,7 @@ three interchangeable **hosts** (python, swift, rust) plus the browser
 — **one host active per workdir at a time** (the `lock.json` PID guard).
 The ts frontend is the fourth kernel: it runs in the browser, federates to
 whichever host is up over the WS bridge, and any host serves it generically
-(a `file` agent over `ts/dist`) while knowing nothing about it.
+(a `file_bridge` agent over a workdir copy of `ts/dist`) while knowing nothing about it.
 
 ```
 fantastic_canvas/
@@ -117,13 +129,14 @@ fantastic_canvas/
 The host kernels render no UI of their own. The browser frontend lives
 in `ts/` (its own kernel — views are agents: `canvas`, `html_agent`,
 `gl_agent`, the `ai` and `terminal` views) and is served by **any** host
-through a generic `file` agent rooted at the built `ts/dist`. The host
+through a generic `file_bridge` agent rooted at a workdir copy of the
+built `ts/dist` (its root is clamped to the running dir). The host
 never imports, names, or knows about the frontend (weak binding); it
 persists frontend records opaquely and weak-loads past them. The same
 recipe serves any view package. The sovereign distribution artifact is
 `ts/dist/js_kernel.zip` (`cd ts && sh scripts/pack.sh`): one inlined
 `bundle.min.js` + `readme.md` + map, pulled on demand and served via a
-`file` agent — no import map, no CSS link (vendors + CSS are inlined).
+`file_bridge` agent — no import map, no CSS link (vendors + CSS are inlined).
 See [`ts/readme.md`](ts/readme.md) and [`ts/SERVE.md`](ts/SERVE.md).
 
 ## One runtime active per workdir
@@ -132,7 +145,7 @@ See [`ts/readme.md`](ts/readme.md) and [`ts/SERVE.md`](ts/SERVE.md).
 `.fantastic/lock.json` PID guard enforces it — no concurrent mode for a
 single dir. Switching is a reboot: stop one daemon, start another
 against the same dir. (Distinct kernels *do* talk across the WS
-`kernel_bridge` — that's separate, explicit wiring, not shared-dir
+`ws_bridge` — that's separate, explicit wiring, not shared-dir
 concurrency.)
 
 **Weak loading** keeps switching safe. If a persisted agent's
@@ -191,6 +204,12 @@ bundle scoreboard.
 | substrate                        | ✓ | ✓ | ✓ |
 | HTTP / WS / REST surfaces        | ✓ | ✓ | ✓ |
 | WS binary frames (incl. chunked) | ✓ | ✓ | ✓ |
+| io legs sealed-by-default (ingress rules) | ✓ | ✓ | ✓ |
+| all IO via gated `file_bridge` (`file_bridge_id`) | ✓ | ✓ | ✓ |
+| raw-bytes stream verbs (`read_stream`/`write_stream`) | ✓ | ✓ | ✓ |
+| binary forward over the bridge wire (WS + cloud) | ✓ | ✓ | ✓ |
+| reflect posture + `persistence.provider` | ✓ | ✓ | ✓ |
+| consumers persist via `file_bridge_id` (yaml_state · scheduler · ai) | ✓ | ✓ | ✓ |
 | LLM backend bundles              | ollama / NIM / Anthropic | ollama / NIM / Apple FM | ollama / NIM |
 | terminal_backend (PTY)           | ✓ | ✓ (macOS only) | ✓ (full tier) |
 | serves the `ts/` frontend        | ✓ | ✓ | ✓ |

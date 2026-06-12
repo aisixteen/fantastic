@@ -44,12 +44,12 @@ async def dispatch_argv(kernel, argv: list[str]) -> Any:
 
 async def call(kernel, target: str, rest: list[str]) -> None:
     """One-shot RPC. Always acquires the PID lock + dispatches in-
-    process. Fails if another fantastic owns the dir (use kernel_bridge
+    process. Fails if another fantastic owns the dir (use ws_bridge
     to forward to it over WS instead).
 
     The kernel does NOT speak HTTP for substrate calls. Browsers /
     cross-kernel callers go through the WS frame protocol exposed by
-    `web` (and reused by `kernel_bridge` for in-process bridges)."""
+    `web` (and reused by `ws_bridge` for in-process bridges)."""
     if not rest:
         print(
             "usage: fantastic <target_id> <verb> [k=v ...]",
@@ -63,7 +63,7 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         print(
             f"[call] another fantastic owns this dir (pid={cur.get('pid')}). "
             "Stop it, or forward your call over the WS bridge "
-            "(see kernel_bridge bundle).",
+            "(see ws_bridge bundle).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -77,7 +77,7 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         print(json.dumps(reply, indent=2, default=str))
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:
-            loop.flush()
+            await loop.aflush()
     return None
 
 

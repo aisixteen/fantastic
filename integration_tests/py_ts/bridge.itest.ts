@@ -1,4 +1,4 @@
-// kernel_bridge integration — the WsBridge against a LIVE python host.
+// ws_bridge integration — the WsBridge against a LIVE python host.
 // Boots web + nested web_ws, then round-trips real frames over a real socket.
 // Run: npm run test:integration   (skips cleanly if the python env is absent).
 
@@ -27,10 +27,10 @@ after(() => {
 
 function freshBridge(h: Host): { kernel: Kernel; bridge: WsBridge } {
   const kernel = new Kernel();
-  kernel.setRoot(new Agent({ id: "fs_loader" }));
+  kernel.setRoot(new Agent({ id: "kernel_state" }));
   const bridge = new WsBridge(kernel, {
     origin: h.origin,
-    controlEndpoint: "fs_loader",
+    controlEndpoint: "kernel_state",
   });
   return { kernel, bridge };
 }
@@ -44,7 +44,7 @@ test("reflect kernel over the live wire returns the canonical shape", async (t) 
       tree: "ids",
       bundles: "ids",
     })) as Record<string, unknown>;
-    assert.equal(r["id"], "fs_loader");
+    assert.equal(r["id"], "kernel_state");
     assert.match(String(r["sentence"]), /^Fantastic kernel/);
     const tree = r["tree"] as string[];
     assert.ok(Array.isArray(tree) && tree.includes(host.webId), "tree includes web id");
@@ -55,11 +55,11 @@ test("reflect kernel over the live wire returns the canonical shape", async (t) 
   }
 });
 
-test("forward a call to fs_loader (list_agents), and reflect a non-root leaf", async (t) => {
+test("forward a call to kernel_state (list_agents), and reflect a non-root leaf", async (t) => {
   if (host === null) return t.skip(skipReason);
   const { bridge } = freshBridge(host);
   try {
-    const listed = (await bridge.forward("fs_loader", { type: "list_agents" })) as {
+    const listed = (await bridge.forward("kernel_state", { type: "list_agents" })) as {
       agents: Array<{ id: string }>;
     };
     const ids = listed.agents.map((a) => a.id);
@@ -84,7 +84,7 @@ test("watchRemote streams a host agent's inbox events to a local watcher", async
   const { kernel, bridge } = freshBridge(host);
   try {
     // a local view-agent that watches the web agent's inbox
-    kernel.register(new Agent({ id: "viewer", parentId: "fs_loader" }));
+    kernel.register(new Agent({ id: "viewer", parentId: "kernel_state" }));
     const events: Array<Record<string, unknown>> = [];
     kernel.onInbox("viewer", (p) => events.push(p));
     kernel.watch(host.webId, "viewer"); // remote → bridge.watchRemote(web)

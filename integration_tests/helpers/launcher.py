@@ -137,12 +137,11 @@ class ContainerLauncher:
         wd = Path(workdir).resolve()  # absolute → real bind mount (not a named volume)
         # Clear any stale container with this name (best effort).
         subprocess.run([self.engine, "rm", "-f", name], capture_output=True, text=True)
-        # Integration daemons run with the head OFF: tests exercise the call
-        # surface, not the descriptive page, and with head off `/` is the
-        # DYNAMIC agent index (it dispatches a kernel reflect to render) — so a
-        # 200 on `/` is a real "kernel is up + serving" signal for wait_ready,
-        # not a static file served the instant uvicorn binds.
-        env: dict[str, str] = {"FANTASTIC_HEAD": "off"}
+        # `/` is the DYNAMIC agent index on every runtime (it dispatches a kernel
+        # reflect to render) — so a 200 on `/` is a real "kernel is up + serving"
+        # signal for wait_ready, not a static file served the instant the server
+        # binds. (There is no head env any more — `/` is never a static page.)
+        env: dict[str, str] = {}
         env.update(extra_env or {})
         cmd = [
             self.engine,

@@ -5,7 +5,7 @@ run in parallel via pytest-xdist (-n auto). Multiple roots in the
 same Python process get separate Kernel ctx objects (no cross-test
 state leakage).
 
-The root is an `fs_loader` agent (`id="fs_loader"`) built the way the real
+The root is an `kernel_state` agent (`id="kernel_state"`) built the way the real
 bootstrap builds it (see `_testkit.boot_root`). The loader's flush loop
 is NOT started — logic tests stay pure in-memory; disk-lifecycle tests
 call `_testkit.persist(root)` for deterministic on-disk state.
@@ -22,18 +22,18 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import pytest
+import pytest  # noqa: E402
 
-from cli import Cli
+from cli import Cli  # noqa: E402
 
-from _testkit import boot_root
+from _testkit import boot_root  # noqa: E402
 
 
 @pytest.fixture
 def kernel(tmp_path, monkeypatch):
     """Fresh root Agent rooted in tmp_path.
 
-    Returns the root Agent — an `fs_loader` at `id="fs_loader"`. It answers
+    Returns the root Agent — an `kernel_state` at `id="kernel_state"`. It answers
     the standard Agent surface (send / emit / get / update / create /
     delete / list / watch / ...); tests interact via `kernel.send`,
     `kernel.create`, ... directly.
@@ -51,11 +51,37 @@ async def seeded_kernel(kernel):
 
 
 @pytest.fixture
-async def file_agent(seeded_kernel):
-    """A real file agent rooted at cwd, ready to use as file_agent_id."""
+async def file_bridge(seeded_kernel):
+    """A real file_bridge agent rooted at cwd, OPENED (the fs edge is sealed by
+    default) — a GENERIC file surface (file_bridge's own tests use it directly)."""
     rec = await seeded_kernel.send(
         seeded_kernel.id,
-        {"type": "create_agent", "handler_module": "file.tools"},
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "ingress_rule": "allow_all",
+        },
     )
-    assert "id" in rec, f"file agent creation failed: {rec!r}"
+    assert "id" in rec, f"file_bridge agent creation failed: {rec!r}"
+    return rec["id"]
+
+
+@pytest.fixture
+async def store_agent(seeded_kernel):
+    """The canonical persistence STORE: a file_bridge rooted at `.fantastic`, OPENED.
+    Persistence consumers (yaml_state, scheduler, ai backends) wire `file_bridge_id` to
+    THIS and write STORE-RELATIVE paths (`agents/<id>/…`), so sidecars land under
+    `.fantastic/agents/<id>/` next to their agent.json — one shared store, no nest. The
+    loader also discovers it as its record-persistence provider (root resolves to
+    `.fantastic`), so ONE bridge serves both roles — mirrors production wiring."""
+    rec = await seeded_kernel.send(
+        seeded_kernel.id,
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "root": ".fantastic",
+            "ingress_rule": "allow_all",
+        },
+    )
+    assert "id" in rec, f"store agent creation failed: {rec!r}"
     return rec["id"]

@@ -10,45 +10,49 @@ def test_load_builds_tree_in_memory():
     k = Kernel()
     k.load(
         [
-            {"id": "fs_loader"},
+            {"id": "kernel_state"},
             {
                 "id": "web",
                 "handler_module": "web.tools",
-                "parent_id": "fs_loader",
+                "parent_id": "kernel_state",
                 "port": 8888,
             },
-            {"id": "f", "handler_module": "file.tools", "parent_id": "fs_loader"},
+            {
+                "id": "f",
+                "handler_module": "file_bridge.tools",
+                "parent_id": "kernel_state",
+            },
         ]
     )
-    assert set(k.agents) == {"fs_loader", "web", "f"}
-    assert k.root is not None and k.root.id == "fs_loader"
+    assert set(k.agents) == {"kernel_state", "web", "f"}
+    assert k.root is not None and k.root.id == "kernel_state"
     assert k.get("web")["port"] == 8888
-    assert k.get("web")["parent_id"] == "fs_loader"
+    assert k.get("web")["parent_id"] == "kernel_state"
 
 
 def test_save_load_roundtrip():
     k = Kernel()
     k.load(
         [
-            {"id": "fs_loader"},
+            {"id": "kernel_state"},
             {
                 "id": "web",
                 "handler_module": "web.tools",
-                "parent_id": "fs_loader",
+                "parent_id": "kernel_state",
                 "port": 9,
             },
-            {"id": "f", "handler_module": "file.tools", "parent_id": "web"},
+            {"id": "f", "handler_module": "file_bridge.tools", "parent_id": "web"},
         ]
     )
     snap = k.save()
     assert snap["version"] == CURRENT_VERSION
-    assert {r["id"] for r in snap["records"]} == {"fs_loader", "web", "f"}
+    assert {r["id"] for r in snap["records"]} == {"kernel_state", "web", "f"}
     # deterministic id-sorted order
-    assert [r["id"] for r in snap["records"]] == ["f", "fs_loader", "web"]
+    assert [r["id"] for r in snap["records"]] == ["f", "kernel_state", "web"]
 
     k2 = Kernel()
     k2.load(snap)  # accepts the {version, records} envelope
-    assert set(k2.agents) == {"fs_loader", "web", "f"}
+    assert set(k2.agents) == {"kernel_state", "web", "f"}
     assert k2.get("f")["parent_id"] == "web"
 
 
@@ -56,18 +60,26 @@ def test_weak_load_skips_unknown_bundle_and_subtree():
     k = Kernel()
     k.load(
         [
-            {"id": "fs_loader"},
+            {"id": "kernel_state"},
             {
                 "id": "x",
                 "handler_module": "totally_not_a_bundle.tools",
-                "parent_id": "fs_loader",
+                "parent_id": "kernel_state",
             },
-            {"id": "y", "handler_module": "file.tools", "parent_id": "x"},  # child of x
-            {"id": "z", "handler_module": "file.tools", "parent_id": "fs_loader"},
+            {
+                "id": "y",
+                "handler_module": "file_bridge.tools",
+                "parent_id": "x",
+            },  # child of x
+            {
+                "id": "z",
+                "handler_module": "file_bridge.tools",
+                "parent_id": "kernel_state",
+            },
         ]
     )
-    # x (unregistered handler) + its child y are skipped; fs_loader + z survive.
-    assert set(k.agents) == {"fs_loader", "z"}
+    # x (unregistered handler) + its child y are skipped; kernel_state + z survive.
+    assert set(k.agents) == {"kernel_state", "z"}
 
 
 def test_save_skips_ephemeral():
@@ -76,11 +88,11 @@ def test_save_skips_ephemeral():
         ephemeral = True
 
     k = Kernel()
-    k.load([{"id": "fs_loader"}])
+    k.load([{"id": "kernel_state"}])
     Eph("eph1", ctx=k, parent=k.root)  # composed in-memory, not persisted
     assert "eph1" in k.agents
     ids = {r["id"] for r in k.save()["records"]}
-    assert ids == {"fs_loader"}  # the ephemeral child is excluded
+    assert ids == {"kernel_state"}  # the ephemeral child is excluded
 
 
 def test_validate_rejects_bad_snapshots():

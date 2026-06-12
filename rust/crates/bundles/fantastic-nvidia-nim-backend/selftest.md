@@ -21,7 +21,7 @@ All test state lives under `/tmp/nim_test/`.
 ```bash
 rm -rf /tmp/nim_test && mkdir -p /tmp/nim_test && cd /tmp/nim_test
 FANTASTIC=/path/to/rust/target/release/fantastic
-FA=$($FANTASTIC core create_agent handler_module=file.tools root=/tmp/nim_test | jq -r .id)
+FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/nim_test | jq -r .id)
 NB=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools file_agent_id=$FA | jq -r .id)
 NB2=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools | jq -r .id)
 ```

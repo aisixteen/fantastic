@@ -1,6 +1,6 @@
 """Two-tree integration — host kernel ⇄ frontend kernel, full round-trip.
 
-Wires a HOST kernel (root `fs_loader`) + a real `web_loader` (an `fs_loader`
+Wires a HOST kernel (root `kernel_state`) + a real `web_loader` (an `kernel_state`
 child with `root=.fantastic/web watch=false alias=web_loader`) + a FRONTEND
 stand-in `Kernel`. Faithful because the JS kernel is the SAME kernel — a second
 `Kernel` is a true stand-in for the browser. The frontend persists its tree
@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from _testkit import boot_root
-from fs_loader.tools import read_tree
+from kernel_state.tools import read_tree
 from kernel import Kernel
 
 
@@ -50,7 +50,7 @@ async def _host_with_web_loader():
         host.id,
         {
             "type": "create_agent",
-            "handler_module": "fs_loader.tools",
+            "handler_module": "kernel_state.tools",
             "root": ".fantastic/web",
             "watch": False,
             "alias": "web_loader",

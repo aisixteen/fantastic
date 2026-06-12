@@ -4,9 +4,10 @@ readmes (main -> kernels -> containers) + the GitHub URL + how to drive the
 kernel. Plain (readmes in <pre> sections) + a tiny inline-JS table of contents;
 NO vendored markdown lib, no external assets.
 
-Every container runtime serves this at `/` on :8088 BY DEFAULT (the kernel is also
-live there — reflect / web_ws / web_rest — so :8088 is BOTH the human-readable head
-AND a reflectable/bridgeable brain kernel). `FANTASTIC_HEAD=off` drops it.
+The kernel's `/` is the live agent-tree index (reflect / web_ws / web_rest — :8088
+is a reflectable/bridgeable brain kernel). This head page is served the one gated
+way: a read-only `file_bridge` over /opt/fantastic/head, reached at
+`/head/file/index.html` (read_stream). No env back-channel reads it off disk.
 
 Run from the repo root:  python3 container/head/gen_head.py > container/head/index.html
 """

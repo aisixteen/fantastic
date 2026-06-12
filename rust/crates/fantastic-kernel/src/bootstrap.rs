@@ -137,17 +137,16 @@ fn boot_disk(
                 parent_id: None,
                 meta: Map::new(),
             };
-            // Use the merge-persist path so a pre-existing `.fantastic/agent.json`
-            // with extra fields (some other tool's keys) is preserved.
-            let temp_root = Agent::new(
-                AgentId(rec.id.clone()),
-                None,
-                None,
-                rec.meta.clone(),
-                fantastic_dir.clone(),
-                false,
-            );
-            persistence::persist(&temp_root, &opts.storage)?;
+            // COLD primitive: seed the root record directly. This is the
+            // chicken-egg bring-up — it runs BEFORE any agent (and thus any
+            // `file_bridge` store provider) exists, so it cannot route through a
+            // provider. The file is absent here (we're in the `None` branch), so
+            // a plain write is correct (nothing to merge). Ongoing persistence
+            // (after boot) flows through the discovered provider — see
+            // `persistence::persist`.
+            if opts.storage.is_disk() {
+                persistence::write_record_at(&root_record_path, &rec)?;
+            }
             rec
         }
     };
