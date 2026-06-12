@@ -615,11 +615,12 @@ async fn deny_inbound_refuses_inbound_call() {
     let _ = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
         .await;
-    // reflect surfaces the policy back.
+    // reflect surfaces the policy back (read-key == write-key, py parity).
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["auth"], "deny_inbound");
+    assert_eq!(reflect["ingress_rule"], "deny_inbound");
+    assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
         "type": "call",
@@ -730,7 +731,8 @@ async fn deny_inbound_default_refuses_inbound_call() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["auth"], "deny_inbound");
+    assert_eq!(reflect["ingress_rule"], "deny_inbound");
+    assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
         "type": "call",
@@ -781,7 +783,8 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["auth"], "password");
+    assert_eq!(reflect["ingress_rule"], "password");
+    assert_eq!(reflect["sealed"], true);
 
     // (1) inbound call WITH the matching envelope token dispatches.
     peer.send_frame(json!({
@@ -874,9 +877,11 @@ async fn asymmetric_ingress_egress_via_engine() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["ingress"], "deny_inbound");
-    assert_eq!(reflect["egress"], "password");
-    assert_eq!(reflect["auth"], "deny_inbound"); // back-compat alias = ingress
+    assert_eq!(reflect["ingress_rule"], "deny_inbound");
+    assert_eq!(reflect["egress_rule"], "password");
+    // no `auth` in reflect — a legacy WRITE shorthand only (py parity)
+    assert!(reflect.get("auth").is_none());
+    assert_eq!(reflect["sealed"], true);
 
     // inbound is refused even with a token (ingress = deny_inbound, not password)
     peer.send_frame(json!({

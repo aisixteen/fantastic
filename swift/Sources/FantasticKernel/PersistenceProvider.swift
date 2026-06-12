@@ -16,8 +16,11 @@ extension Kernel {
     /// normalize the macOS `/private/var` ≡ `/var` alias. Temp dirs resolve to
     /// one form and constructed agent rootPaths to the other, so a raw prefix
     /// check fails and records land doubly-nested under the absolute path. No-op
-    /// for ordinary paths (`/Users/…`, Linux).
-    static func canonPath(_ path: String) -> String {
+    /// for ordinary paths (`/Users/…`, Linux). THE one path-comparison helper —
+    /// every containment check (store discovery, store-relative sidecar dirs,
+    /// the file_bridge running-dir clamp) goes through it; never compare raw
+    /// `.path` strings across differently-derived URLs.
+    public static func canonPath(_ path: String) -> String {
         let resolved = (path as NSString).resolvingSymlinksInPath
         return resolved.hasPrefix("/private/") ? String(resolved.dropFirst(8)) : resolved
     }

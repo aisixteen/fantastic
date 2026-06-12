@@ -168,9 +168,10 @@ public struct FileBundle: AgentBundle {
             return .object(["error": .string("path escapes root")])
         }
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: target, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-            options: [.skipsHiddenFiles])
+        guard
+            let entries = try? fm.contentsOfDirectory(
+                at: target, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles])
         else {
             return .object([
                 "error": .string("cannot list \(relative)"),
@@ -363,8 +364,14 @@ public struct FileBundle: AgentBundle {
             // No root meta ⇒ the agent's own dir (already inside the workdir).
             candidate = agent.rootPath.standardizedFileURL
         }
-        // Must lie inside the running dir.
-        if candidate.path == base.path || candidate.path.hasPrefix(base.path + "/") {
+        // Must lie inside the running dir. Compare CANONICALIZED paths
+        // (Kernel.canonPath: symlinks + the macOS `/private/var` ≡ `/var` alias)
+        // — `agent.rootPath` is often the `/private`-resolved form while the
+        // workdir base is not, and a raw string compare would wrongly refuse a
+        // root that IS inside (the sibling of the storeReldir double-nest bug).
+        let c = Kernel.canonPath(candidate.path)
+        let b = Kernel.canonPath(base.path)
+        if c == b || c.hasPrefix(b + "/") {
             return candidate
         }
         return nil

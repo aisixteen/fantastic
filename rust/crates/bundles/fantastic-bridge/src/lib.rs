@@ -403,9 +403,13 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "peer_id": meta_string(agent_id, kernel, "peer_id"),
         "local_port": meta_u64(agent_id, kernel, "local_port"),
         "remote_port": meta_u64(agent_id, kernel, "remote_port"),
-        "ingress": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound"),
-        "egress": authorizer::rule_name(rule_spec(agent_id, kernel, "egress_rule").as_ref(), "silent"),
-        "auth": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound"),
+        // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
+        // `reflect` → `update_agent` edit is a direct mirror. No `auth` alias in
+        // the reflect (it's a legacy WRITE shorthand only). `sealed` = the leg
+        // still denies inbound (the conscious-open signal).
+        "ingress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound"),
+        "egress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "egress_rule").as_ref(), "silent"),
+        "sealed": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound") != "allow_all",
         "pending_count": pending,
         "verbs": {
             "reflect": "Identity + transport + connectivity. No args.",

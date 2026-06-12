@@ -443,9 +443,10 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         case "reflect":
             let attached = bridgeFor(agentId) != nil
             // The per-leg rule TYPE names (config like a `token_env` is never
-            // surfaced). `ingress` = inbound filter (default allow_all), `egress` =
-            // outbound decorator (default silent); `auth` is the ingress alias. Swift
-            // gates only the cloud_bridge inbound-call path.
+            // surfaced). Read-key == write-key (py parity): `ingress_rule` (inbound
+            // FILTER, default deny_inbound — the SEAL) / `egress_rule` (outbound
+            // DECORATOR, default silent); `auth` is a legacy WRITE shorthand only,
+            // never reflected. Swift gates only the cloud_bridge inbound-call path.
             let a = kernel.agent(agentId)
             let authMeta = a?.metaValue(forKey: "auth")
             // SEALED BY DEFAULT — an io leg with no rule reflects as deny_inbound.
@@ -464,9 +465,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 // attachment. `attached` kept as a swift-side alias.
                 "connected": .bool(attached),
                 "attached": .bool(attached),
-                "ingress": .string(ingressName),
-                "egress": .string(egressName),
-                "auth": .string(ingressName),
+                "ingress_rule": .string(ingressName),
+                "egress_rule": .string(egressName),
+                "sealed": .bool(ingressName != "allow_all"),
                 "verbs": [
                     "forward":
                         "args: target, payload. Ships a raw `{type:'call', target, payload}` frame over the transport and returns the reply.",

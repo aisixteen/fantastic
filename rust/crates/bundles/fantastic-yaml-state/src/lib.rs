@@ -139,9 +139,15 @@ async fn persist(
         }
     });
     if let Some(reason) = reason {
-        return Some(json!({
+        let mut out = json!({
             "error": format!("yaml_state.{verb}: provider refused write — {reason}")
-        }));
+        });
+        // Pass the provider's `hint` through (py parity) — e.g. the sealed-edge
+        // denial carries the open-it recipe.
+        if let Some(hint) = w.get("hint") {
+            out["hint"] = hint.clone();
+        }
+        return Some(out);
     }
     None
 }

@@ -198,9 +198,15 @@ public struct YamlStateBundle: AgentBundle {
         let reason =
             w["error"].asString ?? (w["reason"].asString == "unauthorized" ? "unauthorized" : nil)
         if let reason {
-            return .object([
+            var out: JSON = .object([
                 "error": .string("yaml_state.\(verb): provider refused write — \(reason)")
             ])
+            // Pass the provider's `hint` through (py parity) — e.g. the sealed-edge
+            // denial carries the open-it recipe.
+            if case .object = w, !w["hint"].isNull {
+                out["hint"] = w["hint"]
+            }
+            return out
         }
         return nil
     }

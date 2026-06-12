@@ -260,6 +260,56 @@ struct BundleSmokeTests {
         #expect((after["schedules"].asArray ?? []).isEmpty)
     }
 
+    @Test func schedulerTickNowFiresAndHistory() async throws {
+        // The FIRE path: tick_now dispatches the schedule's payload to its
+        // target, bumps run_count, appends a `schedule_fired` event to the
+        // history.jsonl sidecar (through the provider), and `history` reads it
+        // back. Mirrors the py/rust contract.
+        let kernel = makeKernelWithAll()
+        let fm = FileManager.default
+        let rel = "fantastic-schedfire-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        _ = await kernel.send(
+            "core",
+            [
+                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+                "root": .string(rel), "ingress_rule": "allow_all",
+            ])
+        _ = await kernel.send(
+            "core",
+            [
+                "type": "create_agent", "handler_module": "scheduler.tools", "id": "sched",
+                "file_bridge_id": "store",
+            ])
+        let r = await kernel.send(
+            "sched",
+            [
+                "type": "schedule", "target": "core", "interval_seconds": .integer(3600),
+                "payload": ["type": "list_agents"] as JSON,
+            ])
+        let sid = try #require(r["schedule_id"].asString)
+        // Fire it NOW (no tick-loop wait).
+        let fired = await kernel.send("sched", ["type": "tick_now", "schedule_id": .string(sid)])
+        #expect(fired["fired"].asBool == true, "\(fired)")
+        // run_count bumped + persisted.
+        let list = await kernel.send("sched", ["type": "list"])
+        #expect(list["schedules"][0]["run_count"].asInt == 1, "\(list)")
+        // history returns the schedule_fired event with the dispatch RESULT
+        // (list_agents reply) — proving the target was actually called.
+        let h = await kernel.send("sched", ["type": "history", "schedule_id": .string(sid)])
+        #expect((h["count"].asInt ?? 0) >= 1, "\(h)")
+        let ev = h["history"][0]
+        #expect(ev["type"].asString == "schedule_fired")
+        #expect(ev["scheduler_id"].asString == "sched")
+        #expect(ev["error"].isNull, "\(ev)")
+        #expect(!ev["result"]["agents"].isNull, "fire must carry the target's reply: \(ev)")
+        // The history sidecar landed store-relative, next to schedules.json.
+        #expect(
+            fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/history.jsonl").path))
+    }
+
     @Test func kernelBridgeForwardInMemory() async {
         let kernel1 = makeKernelWithAll()
         let kernel2 = makeKernelWithAll()
