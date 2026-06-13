@@ -246,12 +246,18 @@ private func handleBinaryFrame(
     payload: Data, connection: NWConnection, agentId: AgentId, kernel: Kernel, legId: AgentId
 ) async {
     guard let (header, blob) = Codec.decodeBinaryFrame(payload) else { return }
+    // The frame is the STANDARD call envelope (py/rust/browser parity):
+    // `{type:"call", id, target, payload:{…}}` with the raw body trailing —
+    // dispatch the INNER `payload`, exactly like a text call. (A flattened
+    // inner-call header was swift-only dialect and broke cross-runtime streams.)
     let target = header["target"].asString ?? agentId.value
     let id = header["id"].asString ?? ""
-    // GATE — same sealed-by-default web-leg choke point as a text call.
+    let inner = header["payload"]
+    // GATE — same sealed-by-default web-leg choke point as a text call; the
+    // verb is the INNER call's type, the credential rides the envelope.
     if let denied = gateWebLeg(
         kernel: kernel, legId: legId, target: target,
-        verb: header["type"].asString ?? "", token: header["auth_token"].asString)
+        verb: inner["type"].asString ?? "", token: header["auth_token"].asString)
     {
         let frame: JSON = .object([
             "type": .string("reply"), "id": .string(id), "data": denied,
@@ -259,7 +265,7 @@ private func handleBinaryFrame(
         sendTextFrame(connection: connection, text: frame.serialize())
         return
     }
-    let (reply, body) = await kernel.sendWithBinary(AgentId(target), header, blob)
+    let (reply, body) = await kernel.sendWithBinary(AgentId(target), inner, blob)
     if body.isEmpty {
         // No reply bytes (e.g. write_stream status) → plain text reply frame.
         let frame: JSON = .object([

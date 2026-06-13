@@ -155,9 +155,17 @@ public actor WebSocketTransport {
             )
         }
         let id = mintId()
-        var wire = header
-        wire["target"] = .string(target.value)
-        wire["id"] = .string(id)
+        // The STANDARD call envelope (py/rust parity) — the inner call rides in
+        // `payload`, exactly like a text forward; `_binary_path` tells a py/rust
+        // receiver where the trailing raw body belongs. A flattened inner-call
+        // header is swift-only dialect and breaks cross-runtime streams.
+        let wire: JSON = .object([
+            "type": .string("call"),
+            "id": .string(id),
+            "target": .string(target.value),
+            "payload": header,
+            "_binary_path": .string("payload.bytes"),
+        ])
         let frame = Codec.encodeBinaryFrame(header: wire, body: blob)
         do {
             try await task.send(.data(frame))

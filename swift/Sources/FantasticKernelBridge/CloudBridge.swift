@@ -520,11 +520,16 @@ public actor CloudBridgeTransport {
                 cont.resume(returning: err)
             }
         default:
-            // Inbound binary call — the symmetric peer streaming to us. AUTH GATE
-            // first (same choke point as the text `call`), then sendWithBinary.
+            // Inbound binary call — the symmetric peer streaming to us. The frame
+            // is the STANDARD call envelope (py/rust parity): the inner call rides
+            // in `payload` and the trailing raw body is its bytes. AUTH GATE first
+            // (same choke point as the text `call`), then sendWithBinary on the
+            // INNER call — dispatching the envelope itself would hand the target
+            // a bogus `call` verb.
             let id = header["id"]
             let target = header["target"].asString ?? ""
-            let verb = header["type"].asString ?? ""
+            let inner = header["payload"]
+            let verb = inner["type"].asString ?? ""
             let decision = ingress.authorize(
                 AuthAction(
                     kind: "call", target: target, verb: verb,
@@ -555,7 +560,7 @@ public actor CloudBridgeTransport {
                     ]))
                 return
             }
-            let (reply, replyBody) = await kernel.sendWithBinary(AgentId(target), header, body)
+            let (reply, replyBody) = await kernel.sendWithBinary(AgentId(target), inner, body)
             if replyBody.isEmpty {
                 // write_stream status → plain text reply.
                 _ = await sendFrame(
@@ -716,9 +721,15 @@ public actor CloudBridgeTransport {
             )
         }
         let id = mintId()
-        var wire = header
-        wire["target"] = .string(target.value)
-        wire["id"] = .string(id)
+        // The STANDARD call envelope (py/rust parity) — inner call in `payload`,
+        // `_binary_path` naming where the raw body belongs for a py/rust peer.
+        var wire: JSON = .object([
+            "type": .string("call"),
+            "id": .string(id),
+            "target": .string(target.value),
+            "payload": header,
+            "_binary_path": .string("payload.bytes"),
+        ])
         // Stamp this leg's egress credential on the envelope (target never sees it).
         if let token = egress.credential() {
             wire["auth_token"] = .string(token)
