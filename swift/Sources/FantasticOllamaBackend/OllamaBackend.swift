@@ -30,6 +30,8 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                     "send": "args: text, client_id?. Streams a response.",
                     "history": "args: client_id?. Returns prior turns.",
                     "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "status":
+                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
                 ] as JSON,
                 reflectExtra: { agent in
@@ -79,8 +81,11 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// Ollama `/api/chat` streaming provider — one `.token` per NDJSON
-/// chunk carrying `message.content`. No tool-call surface today.
+/// Ollama `/api/chat` streaming provider — `.token` per NDJSON chunk
+/// carrying `message.content`, plus a finalized `.toolCall` per
+/// `message.tool_calls` entry (arguments already a parsed object).
+/// Mirrors Rust's ollama provider so the shared agentic loop drives it
+/// identically.
 struct OllamaProvider: AIProvider {
     let host: String
     let model: String
@@ -97,6 +102,7 @@ struct OllamaProvider: AIProvider {
                 let body: JSON = .object([
                     "model": .string(model),
                     "messages": .array(messages),
+                    "tools": .array(tools),
                     "stream": .bool(true),
                 ])
                 req.httpBody = body.serialize().data(using: .utf8)
@@ -106,8 +112,33 @@ struct OllamaProvider: AIProvider {
                         guard let data = line.data(using: .utf8),
                             let parsed = try? JSON.parse(data)
                         else { continue }
-                        if let delta = parsed["message"]["content"].asString {
+                        let msg = parsed["message"]
+                        if let delta = msg["content"].asString, !delta.isEmpty {
                             continuation.yield(.token(delta))
+                        }
+                        // ollama's `arguments` is already a parsed object;
+                        // ids are absent, so mint one. Shape the chunk as
+                        // the OpenAI-style `{id, function:{name, arguments}}`
+                        // the shared loop expects.
+                        if let calls = msg["tool_calls"].asArray {
+                            for call in calls {
+                                let fn = call["function"]
+                                let name = fn["name"].asString ?? "send"
+                                let args = fn["arguments"]
+                                let id =
+                                    call["id"].asString
+                                    ?? "call_\(UUID().uuidString.prefix(8))"
+                                continuation.yield(
+                                    .toolCall(
+                                        .object([
+                                            "id": .string(id),
+                                            "type": .string("function"),
+                                            "function": .object([
+                                                "name": .string(name),
+                                                "arguments": args,
+                                            ]),
+                                        ])))
+                            }
                         }
                         if parsed["done"].asBool == true {
                             break

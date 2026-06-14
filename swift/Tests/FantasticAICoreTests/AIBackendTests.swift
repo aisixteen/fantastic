@@ -14,42 +14,74 @@ import Testing
 
 // MARK: - Mock provider + bundle
 
-/// Deterministic provider: yields a fixed token sequence, then an
-/// optional finalized tool-call. `chat` can also be told to throw.
-private struct MockProvider: AIProvider {
+/// Deterministic provider replaying a SCRIPT of passes — one per
+/// `chat()` call (the agentic loop calls `chat` once per turn). Each
+/// pass is a sequence of chunks (tokens + finalized tool-calls). Once
+/// the script is exhausted, `chat` yields an empty pass, which the loop
+/// reads as "no more tools" and terminates. `chat` can also be told to
+/// throw. Mirrors the Rust `MockProvider` (scripted passes).
+private final class MockProvider: AIProvider, @unchecked Sendable {
     let model: String
-    let tokens: [String]
-    let toolCalls: [JSON]
+    private let lock = NSLock()
+    private var passes: [[AIChunk]]
     let throwsError: Bool
+    /// Per-chunk delay (ns) so a generation can be observed in-flight.
+    let chunkDelayNanos: UInt64
 
+    /// Single-pass convenience: tokens only, no tool-calls.
     init(
-        model: String = "mock-1",
-        tokens: [String] = ["Hel", "lo"],
-        toolCalls: [JSON] = [],
-        throwsError: Bool = false
+        model: String = "mock-1", tokens: [String] = ["Hel", "lo"],
+        throwsError: Bool = false, chunkDelayNanos: UInt64 = 0
     ) {
         self.model = model
-        self.tokens = tokens
-        self.toolCalls = toolCalls
+        self.passes = [tokens.map { .token($0) }]
         self.throwsError = throwsError
+        self.chunkDelayNanos = chunkDelayNanos
+    }
+
+    /// Multi-pass: drive the agentic loop with scripted tool-calls.
+    init(model: String = "mock-1", passes: [[AIChunk]], chunkDelayNanos: UInt64 = 0) {
+        self.model = model
+        self.passes = passes
+        self.throwsError = false
+        self.chunkDelayNanos = chunkDelayNanos
     }
 
     func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
-        let tokens = tokens
-        let toolCalls = toolCalls
         let throwsError = throwsError
+        let chunkDelayNanos = chunkDelayNanos
+        lock.lock()
+        let pass = passes.isEmpty ? [] : passes.removeFirst()
+        lock.unlock()
         return AsyncThrowingStream { continuation in
             Task {
                 if throwsError {
                     continuation.finish(throwing: MockError.boom)
                     return
                 }
-                for t in tokens { continuation.yield(.token(t)) }
-                for c in toolCalls { continuation.yield(.toolCall(c)) }
+                for c in pass {
+                    if chunkDelayNanos > 0 { try? await Task.sleep(nanoseconds: chunkDelayNanos) }
+                    continuation.yield(c)
+                }
                 continuation.finish()
             }
         }
     }
+}
+
+/// Build a finalized `send` tool-call chunk in the OpenAI shape the
+/// shared loop dispatches.
+private func sendCall(id: String, target: String, verb: String) -> AIChunk {
+    .toolCall(
+        .object([
+            "id": .string(id),
+            "type": .string("function"),
+            "function": .object([
+                "name": .string("send"),
+                "arguments": .string(
+                    "{\"target_id\":\"\(target)\",\"payload\":{\"type\":\"\(verb)\"}}"),
+            ]),
+        ]))
 }
 
 private enum MockError: Error, CustomStringConvertible {
@@ -68,6 +100,47 @@ private final class MockBundle: AgentBundle, @unchecked Sendable {
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+    }
+}
+
+/// In-memory file_bridge stand-in: dict-backed `read`/`write` so the AI
+/// backend's real `file_bridge_id` persistence path is exercised without
+/// touching disk (a real file_bridge is integration-tested elsewhere).
+private final class MockFileBridge: AgentBundle, @unchecked Sendable {
+    let name = "mock_file_bridge"
+    private let lock = NSLock()
+    private var files: [String: String] = [:]
+
+    private func get(_ path: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return files[path]
+    }
+    private func put(_ path: String, _ content: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        files[path] = content
+    }
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value), "sentence": .string("mock fs"),
+                "kind": .string("file_bridge"), "verbs": .object([:]),
+            ])
+        case "read":
+            let path = payload["path"].asString ?? ""
+            return get(path).map { .object(["content": .string($0)]) }
+                ?? .object(["error": .string("not found")])
+        case "write":
+            let path = payload["path"].asString ?? ""
+            let content = payload["content"].asString ?? ""
+            put(path, content)
+            return .object(["written": .integer(Int64(content.utf8.count))])
+        default:
+            return .object(["error": .string("unknown verb")])
+        }
     }
 }
 
@@ -101,16 +174,26 @@ private func baseConfig(
 private func freshMockKernel(config: AIBackendConfig) async throws -> (Kernel, AgentId) {
     let registry = BundleRegistry()
     registry.register("mock_backend.tools", MockBundle(config: config))
+    registry.register("mock_file_bridge.tools", MockFileBridge())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
+    // A file_bridge store so chat history persists through file_bridge_id.
+    _ = await kernel.send(
+        AgentId("core"),
+        .object([
+            "type": .string("create_agent"),
+            "handler_module": .string("mock_file_bridge.tools"),
+            "id": .string("store"),
+        ]))
     let r = await kernel.send(
         AgentId("core"),
         .object([
             "type": .string("create_agent"),
             "handler_module": .string("mock_backend.tools"),
             "id": .string("mock"),
+            "file_bridge_id": .string("store"),
         ]))
     return (kernel, AgentId(r["id"].asString ?? "mock"))
 }
@@ -218,36 +301,17 @@ struct AIBackendTests {
         #expect(msgs[1]["id"].asString != nil)
     }
 
-    @Test func toolCallsPersistedSortedByIdWhenEnabled() async throws {
-        let calls: [JSON] = [
-            .object(["id": .string("b"), "function": .object(["name": .string("x")])]),
-            .object(["id": .string("a"), "function": .object(["name": .string("y")])]),
-        ]
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig(persistToolCalls: true) {
-                .provider(MockProvider(tokens: ["t"], toolCalls: calls))
-            })
-        _ = await kernel.send(
-            id,
-            .object([
-                "type": .string("send"), "text": .string("go"),
-                "client_id": .string("c"),
-            ]))
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c")]))
-        let assistant = (h["messages"].asArray ?? [])[1]
-        let tc = assistant["tool_calls"].asArray ?? []
-        #expect(tc.count == 2)
-        #expect(tc[0]["id"].asString == "a")  // sorted by id
-        #expect(tc[1]["id"].asString == "b")
-    }
-
-    @Test func toolCallsDroppedWhenPersistDisabled() async throws {
-        let calls: [JSON] = [.object(["id": .string("a")])]
+    @Test func agenticLoopExecutesToolCallThenFinishes() async throws {
+        // Pass 1: a `send` tool-call (reflect `core`). Pass 2: the final
+        // answer. The loop must dispatch the call through the kernel,
+        // feed the reply back, and stop when no more tools come.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["t"], toolCalls: calls))
+                .provider(
+                    MockProvider(passes: [
+                        [.token("checking…"), sendCall(id: "a", target: "core", verb: "reflect")],
+                        [.token("all set")],
+                    ]))
             })
         _ = await kernel.send(
             id,
@@ -255,11 +319,61 @@ struct AIBackendTests {
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("c"),
             ]))
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c")]))
-        let assistant = (h["messages"].asArray ?? [])[1]
-        #expect(assistant["tool_calls"].asArray == nil)
+        // user, assistant(tool_calls), tool result, final assistant.
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        let msgs =
+            (await kernel.send(
+                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+                "messages"
+            ].asArray ?? []
+        #expect(msgs.count == 4)
+        #expect(msgs[0]["role"].asString == "user")
+        // The assistant turn that triggered the tool carries its call.
+        #expect(msgs[1]["role"].asString == "assistant")
+        let tc = msgs[1]["tool_calls"].asArray ?? []
+        #expect(tc.count == 1)
+        #expect(tc[0]["id"].asString == "a")
+        // The kernel reply rides back as a role:tool message.
+        #expect(msgs[2]["role"].asString == "tool")
+        #expect(msgs[2]["tool_call_id"].asString == "a")
+        #expect(msgs[2]["content"].asString?.contains("core") == true)
+        // The final no-tool pass is the answer.
+        #expect(msgs[3]["role"].asString == "assistant")
+        #expect(msgs[3]["content"].asString == "all set")
+        #expect(msgs[3]["tool_calls"].asArray == nil)
+    }
+
+    @Test func toolCallWithEmptyTargetErrorsButLoopContinues() async throws {
+        // A malformed call (no target_id) must not wedge the loop: the
+        // dispatch returns an error reply, the loop feeds it back and the
+        // next pass concludes.
+        let badCall: AIChunk = .toolCall(
+            .object([
+                "id": .string("z"),
+                "function": .object([
+                    "name": .string("send"),
+                    "arguments": .string("{\"payload\":{\"type\":\"reflect\"}}"),
+                ]),
+            ]))
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(passes: [[badCall], [.token("ok")]]))
+            })
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        let msgs =
+            (await kernel.send(
+                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+                "messages"
+            ].asArray ?? []
+        #expect(msgs[2]["role"].asString == "tool")
+        #expect(msgs[2]["content"].asString?.contains("empty target_id") == true)
+        #expect(msgs[3]["content"].asString == "ok")
     }
 
     @Test func errorStreamDoesNotPersistAssistantTurn() async throws {
@@ -301,6 +415,165 @@ struct AIBackendTests {
             id, .object(["type": .string("history"), "client_id": .string("c2")]))
         #expect((h2["messages"].asArray ?? []).isEmpty)
         #expect(h2["client_id"].asString == "c2")
+    }
+
+    @Test func historyPersistsAcrossTurnsThroughFileBridge() async throws {
+        // Two sends on one client: turn 2's persisted history must carry
+        // turn 1 (the load→save round-trip through file_bridge_id).
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["x"])) })
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("one"),
+                "client_id": .string("c"),
+            ]))
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("two"),
+                "client_id": .string("c"),
+            ]))
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        let msgs =
+            (await kernel.send(
+                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+                "messages"
+            ].asArray ?? []
+        #expect(msgs.count == 4)
+        #expect(msgs[0]["content"].asString == "one")
+        #expect(msgs[1]["role"].asString == "assistant")
+        #expect(msgs[2]["content"].asString == "two")
+        #expect(msgs[3]["role"].asString == "assistant")
+    }
+
+    @Test func historyStaysEmptyWithoutFileBridge() async throws {
+        // No file_bridge_id wired ⇒ no persistence (RAM-empty), NOT a
+        // silent fallback. The send still streams; history just doesn't
+        // accumulate.
+        let registry = BundleRegistry()
+        registry.register(
+            "mock_backend.tools", MockBundle(config: baseConfig { .provider(MockProvider()) }))
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+        kernel.register(root)
+        kernel.setRoot(root)
+        let r = await kernel.send(
+            AgentId("core"),
+            .object([
+                "type": .string("create_agent"),
+                "handler_module": .string("mock_backend.tools"), "id": .string("naked"),
+            ]))
+        let id = AgentId(r["id"].asString ?? "naked")
+        _ = await kernel.send(
+            id, .object(["type": .string("send"), "text": .string("hi")]))
+        // Give the stream a beat, then confirm history is still empty.
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        let h = await kernel.send(id, .object(["type": .string("history")]))
+        #expect((h["messages"].asArray ?? []).isEmpty)
+    }
+
+    @Test func statusIdleShapeWhenNothingInFlight() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider()) })
+        let s = await kernel.send(
+            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        #expect(s["source"].asString == id.value)
+        #expect(s["generating"].asBool == false)
+        #expect(s["current"].isNull)
+        #expect((s["mine_pending"].asArray ?? []).isEmpty)
+        #expect(s["others_pending"].asInt == 0)
+    }
+
+    @Test func statusReflectsInFlightForOwner() async throws {
+        // A slow stream stays in-flight long enough to observe `status`.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(
+                    MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+            })
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("hi there"),
+                "client_id": .string("c"),
+            ]))
+        // Poll until the generation is in-flight.
+        var snap: JSON = .null
+        for _ in 0..<50 {
+            let s = await kernel.send(
+                id, .object(["type": .string("status"), "client_id": .string("c")]))
+            if s["generating"].asBool == true {
+                snap = s
+                break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(snap["generating"].asBool == true)
+        let cur = snap["current"]
+        #expect(cur["is_mine"].asBool == true)
+        #expect(cur["text"].asString == "hi there")  // owner sees own text
+        #expect(["thinking", "streaming", "tool_calling"].contains(cur["phase"].asString ?? ""))
+    }
+
+    @Test func statusRedactsOtherClientsText() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000))
+            })
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("secret"),
+                "client_id": .string("owner"),
+            ]))
+        // A DIFFERENT client polls — must not see the owner's text.
+        var cur: JSON = .null
+        for _ in 0..<50 {
+            let s = await kernel.send(
+                id, .object(["type": .string("status"), "client_id": .string("nosy")]))
+            if s["generating"].asBool == true {
+                cur = s["current"]
+                break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(cur["is_mine"].asBool == false)
+        #expect(cur["text"].asString == nil)  // redacted
+        #expect(cur["phase"].asString != nil)  // phase still visible
+    }
+
+    @Test func fifoSerializesConcurrentSendsKeepingHistoryIntact() async throws {
+        // Two overlapping sends on one client. FIFO serialization keeps
+        // the load→save of chat history race-free: both turns survive.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(tokens: ["x"], chunkDelayNanos: 20_000_000))
+            })
+        async let a: JSON = kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
+            ]))
+        async let b: JSON = kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("two"), "client_id": .string("c"),
+            ]))
+        _ = await (a, b)
+        // Both generations: 2 turns each (user + assistant) = 4 rows.
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        let msgs =
+            (await kernel.send(
+                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+                "messages"
+            ].asArray ?? []
+        #expect(msgs.count == 4)
+        let texts = msgs.filter { $0["role"].asString == "user" }.compactMap {
+            $0["content"].asString
+        }
+        #expect(Set(texts) == ["one", "two"])  // neither turn was clobbered
     }
 }
 

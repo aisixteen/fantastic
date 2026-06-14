@@ -1,45 +1,37 @@
-"""scheduler bundle — recurring tasks."""
+"""scheduler bundle — recurring tasks (persists THROUGH the loader)."""
 
 from __future__ import annotations
 
 
-async def _make_scheduler(kernel, file_bridge_id):
+async def _make_scheduler(kernel):
+    """A scheduler — persists THROUGH the loader; nothing to wire. (Persistence tests
+    also depend on the `store_agent` fixture so the loader has a store.)"""
     rec = await kernel.send(
         "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "scheduler.tools",
-            "file_bridge_id": file_bridge_id,
-        },
+        {"type": "create_agent", "handler_module": "scheduler.tools"},
     )
     return rec["id"]
 
 
-async def test_reflect_includes_file_bridge_id(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+async def test_reflect_no_longer_carries_file_bridge_id(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(sid, {"type": "reflect"})
-    assert r["file_bridge_id"] == store_agent
+    assert "file_bridge_id" not in r  # persists through the loader, no per-agent wiring
     assert "schedule" in r["verbs"]
 
 
-async def test_boot_requires_file_bridge_id(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "scheduler.tools"},
-    )
-    # boot was auto-called by kernel_state; explicit reboot should still fail
-    r = await seeded_kernel.send(rec["id"], {"type": "boot"})
-    assert "error" in r
-    assert "file_bridge_id" in r["error"]
+async def test_boot_succeeds_without_store(seeded_kernel):
+    # boot no longer needs a store — it starts the tick loop; writes failfast lazily.
+    sid = await _make_scheduler(seeded_kernel)
+    r = await seeded_kernel.send(sid, {"type": "boot"})
+    assert r.get("running") is True
 
 
-async def test_schedule_requires_file_bridge_id(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "scheduler.tools"},
-    )
+async def test_schedule_failfasts_without_store(seeded_kernel):
+    # No store wired at the loader ⇒ the write (a schedule) failfasts, no phantom.
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
-        rec["id"],
+        sid,
         {
             "type": "schedule",
             "target": "cli",
@@ -47,12 +39,13 @@ async def test_schedule_requires_file_bridge_id(seeded_kernel):
             "interval_seconds": 1,
         },
     )
-    assert "error" in r
-    assert "file_bridge_id" in r["error"]
+    assert "error" in r and "no store" in r["error"]
+    # rolled back — nothing lingers
+    assert (await seeded_kernel.send(sid, {"type": "list"}))["schedules"] == []
 
 
-async def test_schedule_persists_via_file_bridge(seeded_kernel, store_agent, tmp_path):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+async def test_schedule_persists_through_loader(seeded_kernel, store_agent, tmp_path):
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -70,7 +63,7 @@ async def test_schedule_persists_via_file_bridge(seeded_kernel, store_agent, tmp
 
 
 async def test_schedule_validation(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     no_target = await seeded_kernel.send(
         sid,
         {"type": "schedule", "payload": {"type": "x"}, "interval_seconds": 5},
@@ -84,7 +77,7 @@ async def test_schedule_validation(seeded_kernel, store_agent):
 
 
 async def test_unschedule(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -100,7 +93,7 @@ async def test_unschedule(seeded_kernel, store_agent):
 
 
 async def test_list(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     await seeded_kernel.send(
         sid,
         {
@@ -115,7 +108,7 @@ async def test_list(seeded_kernel, store_agent):
 
 
 async def test_pause_resume_one(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -133,7 +126,7 @@ async def test_pause_resume_one(seeded_kernel, store_agent):
 
 
 async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -153,7 +146,7 @@ async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
 
 
 async def test_history(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -170,7 +163,7 @@ async def test_history(seeded_kernel, store_agent):
 
 
 async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(
         sid,
         {
@@ -193,6 +186,6 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):
-    sid = await _make_scheduler(seeded_kernel, store_agent)
+    sid = await _make_scheduler(seeded_kernel)
     r = await seeded_kernel.send(sid, {"type": "garbage"})
     assert "error" in r

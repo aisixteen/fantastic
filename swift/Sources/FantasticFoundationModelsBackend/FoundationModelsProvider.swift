@@ -22,17 +22,24 @@ import OrderedCollections
 #endif
 
 struct FoundationModelsProvider: AIProvider {
-    let instructions: String
     let temperature: Double
     let kernel: Kernel
 
     var model: String { "apple_system_language_model" }
 
     func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
-        // The shared core supplies the assembled messages; in stateless
-        // mode that's just the single user turn. Extract its content.
-        let userText = messages.last?["content"].asString ?? ""
-        let instructions = instructions
+        // The shared core supplies the assembled messages: a `system`
+        // turn (substrate primer + agent menu + send how-to + this
+        // backend's always-inject memory) and — in stateless mode — the
+        // single `user` turn. Map system → Apple session instructions,
+        // the last user message → the prompt.
+        let instructions =
+            messages
+            .filter { $0["role"].asString == "system" }
+            .compactMap { $0["content"].asString }
+            .joined(separator: "\n\n")
+        let userText =
+            messages.last(where: { $0["role"].asString == "user" })?["content"].asString ?? ""
         let temperature = temperature
         let kernel = kernel
 
@@ -80,13 +87,12 @@ struct FoundationModelsProvider: AIProvider {
             instructions inst: String,
             kernel: Kernel
         ) -> LanguageModelSession {
-            let tools: [any Tool] = [
-                KernelReflectTool(kernel: kernel),
-                KernelListAgentsTool(kernel: kernel),
-                KernelListProxyHostsTool(kernel: kernel),
-                KernelCreateAgentTool(kernel: kernel),
-                KernelDeleteAgentTool(kernel: kernel),
-            ]
+            // ONE universal tool, matching the Python/Rust `send` — it
+            // reaches EVERY agent + verb, so capability is discovered
+            // (via the assembled menu + reflect), not hardcoded. Apple's
+            // session runs the tool loop internally; each call routes
+            // through `kernel.send`.
+            let tools: [any Tool] = [KernelSendTool(kernel: kernel)]
             if inst.isEmpty {
                 return LanguageModelSession(tools: tools)
             }
@@ -109,211 +115,58 @@ private enum FMError: Error, CustomStringConvertible {
 
 #if canImport(FoundationModels)
 
-    /// Single canvas reflect tool wired into every Apple FM session.
-    /// The model calls this to inspect ANY kernel agent by id.
+    /// The ONE universal tool wired into every Apple FM session — the
+    /// native twin of the Python/Rust `send(target_id, payload)`. It
+    /// reaches EVERY agent and EVERY verb, so the model discovers
+    /// capability from the assembled menu + reflect instead of a fixed
+    /// toolset. `payload` is a JSON object string the model composes
+    /// (Apple `@Generable` can't express arbitrary nested objects, so
+    /// the verb + args ride as text, exactly like an OpenAI tool-call's
+    /// `arguments`).
     @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
-    private struct KernelReflectTool: Tool {
+    private struct KernelSendTool: Tool {
         let kernel: Kernel
 
-        var name: String { "reflect" }
+        var name: String { "send" }
         var description: String {
             """
-            Inspect the state of a kernel agent. Returns the agent's
-            identity, kind, and any verb-specific fields. Use this
-            before answering questions about the kernel — never
-            invent agent IDs.
+            Send a message to ANY agent in the kernel — the single \
+            universal action. Every agent answers reflect (identity + \
+            verbs). Discover agents by sending {"type":"list_agents"} to \
+            'core'; read the whole-system guide with \
+            {"type":"reflect","readme":true} to 'core'. NEVER invent \
+            agent ids — reflect first. NEVER claim "no access" without \
+            trying.
             """
         }
 
         @Generable
         struct Arguments {
+            @Guide(description: "Agent id to send to, e.g. 'core', 'cli', 'fm'.")
+            let targetId: String
             @Guide(
                 description:
-                    "The id of the agent to inspect, e.g. 'core', 'chat_ui', 'fm'.")
-            let agentId: String
-        }
-
-        func call(arguments: Arguments) async throws -> String {
-            let id = arguments.agentId.trimmingCharacters(in: .whitespaces)
-            if id.isEmpty {
-                return #"{"error":"empty agent id"}"#
-            }
-            let reply = await kernel.send(
-                AgentId(id),
-                .object(["type": .string("reflect")])
+                    "JSON object string with the verb + args, e.g. {\"type\":\"reflect\"} or {\"type\":\"list_agents\"}."
             )
-            return reply.serialize()
-        }
-    }
-
-    /// Aggregator: enumerate every agent in one call AND reflect-
-    /// fan-out under the hood so each entry carries `kind` and
-    /// `sentence` from its own reflect reply.
-    @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
-    private struct KernelListAgentsTool: Tool {
-        let kernel: Kernel
-
-        var name: String { "list_agents" }
-        var description: String {
-            """
-            Enumerate every agent in the kernel with its kind and \
-            short description in a single tool call. Returns \
-            {agents:[{id, handler_module, kind, sentence}]} where \
-            `sentence` is the agent's self-description (or null if \
-            the bundle doesn't expose one). Quote sentences \
-            verbatim — do NOT invent descriptions for entries \
-            whose sentence is null. Use this BEFORE answering any \
-            "what agents exist / what does X do" question.
-            """
-        }
-
-        @Generable
-        struct Arguments {}
-
-        func call(arguments: Arguments) async throws -> String {
-            let listReply = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("list_agents")])
-            )
-            guard let agents = listReply["agents"].asArray else {
-                return listReply.serialize()
-            }
-            var enriched: [JSON] = []
-            for entry in agents {
-                guard let id = entry["id"].asString else { continue }
-                let reflectReply = await kernel.send(
-                    AgentId(id),
-                    .object(["type": .string("reflect")])
-                )
-                var record: OrderedDictionary<String, JSON> = [:]
-                record["id"] = .string(id)
-                record["handler_module"] = entry["handler_module"]
-                record["kind"] = reflectReply["kind"]
-                record["sentence"] = reflectReply["sentence"]
-                enriched.append(.object(record))
-            }
-            return JSON.object(["agents": .array(enriched)]).serialize()
-        }
-    }
-
-    /// Aggregator: enumerate proxy_agent surfaces + host_registered.
-    @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
-    private struct KernelListProxyHostsTool: Tool {
-        let kernel: Kernel
-
-        var name: String { "list_proxy_hosts" }
-        var description: String {
-            """
-            Enumerate every proxy_agent surface in the kernel and \
-            report each one's host_registered status. Returns \
-            [{id, host_registered}]. Use this whenever the user \
-            asks about UI surface availability — it avoids the \
-            per-turn tool-call ceiling that would truncate a chain \
-            of reflect calls.
-            """
-        }
-
-        @Generable
-        struct Arguments {}
-
-        func call(arguments: Arguments) async throws -> String {
-            let listReply = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("list_agents")])
-            )
-            guard let agents = listReply["agents"].asArray else {
-                return #"{"error":"list_agents returned non-array"}"#
-            }
-            var results: [JSON] = []
-            for a in agents {
-                guard a["handler_module"].asString == "proxy_agent.tools",
-                    let id = a["id"].asString
-                else { continue }
-                let reflectReply = await kernel.send(
-                    AgentId(id),
-                    .object(["type": .string("reflect")])
-                )
-                results.append(
-                    .object([
-                        "id": .string(id),
-                        "host_registered": reflectReply["host_registered"],
-                    ]))
-            }
-            return JSON.object(["proxy_hosts": .array(results)]).serialize()
-        }
-    }
-
-    /// Write tool: create a new agent.
-    @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
-    private struct KernelCreateAgentTool: Tool {
-        let kernel: Kernel
-
-        var name: String { "create_agent" }
-        var description: String {
-            """
-            Create a new agent in the kernel. Returns the new \
-            agent's auto-generated id on success, or {error:…} if \
-            the handler_module is unknown. Common handler modules: \
-            file_bridge.tools, scheduler.tools, web.tools, \
-            yaml_state.tools, ollama_backend.tools.
-            """
-        }
-
-        @Generable
-        struct Arguments {
-            @Guide(
-                description:
-                    "The handler_module string, e.g. 'file_bridge.tools' or 'scheduler.tools'.")
-            let handlerModule: String
+            let payload: String
         }
 
         func call(arguments: Arguments) async throws -> String {
-            let hm = arguments.handlerModule.trimmingCharacters(in: .whitespaces)
-            if hm.isEmpty {
-                return #"{"error":"empty handler_module"}"#
+            let target = arguments.targetId.trimmingCharacters(in: .whitespaces)
+            if target.isEmpty {
+                return #"{"error":"empty target_id"}"#
             }
-            let reply = await kernel.send(
-                AgentId("core"),
-                .object([
-                    "type": .string("create_agent"),
-                    "handler_module": .string(hm),
-                ]))
-            return reply.serialize()
-        }
-    }
-
-    /// Write tool: delete an agent (cascade).
-    @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
-    private struct KernelDeleteAgentTool: Tool {
-        let kernel: Kernel
-
-        var name: String { "delete_agent" }
-        var description: String {
-            """
-            Delete an agent from the kernel by id. Cascade-deletes \
-            its children. Returns {ok:true} on success or \
-            {error:…, locked:true} if the agent has delete_lock \
-            set. Cannot be undone — use sparingly.
-            """
-        }
-
-        @Generable
-        struct Arguments {
-            @Guide(description: "The id of the agent to delete.")
-            let agentId: String
-        }
-
-        func call(arguments: Arguments) async throws -> String {
-            let id = arguments.agentId.trimmingCharacters(in: .whitespaces)
-            if id.isEmpty {
-                return #"{"error":"empty agent id"}"#
+            let raw = arguments.payload.trimmingCharacters(in: .whitespaces)
+            let payloadJSON: JSON
+            if raw.isEmpty {
+                payloadJSON = .object(["type": .string("reflect")])
+            } else if let parsed = try? JSON.parse(raw), parsed.asObject != nil {
+                payloadJSON = parsed
+            } else {
+                return
+                    #"{"error":"payload must be a JSON object string like {\"type\":\"reflect\"}"}"#
             }
-            let reply = await kernel.send(
-                AgentId("core"),
-                .object([
-                    "type": .string("delete_agent"),
-                    "id": .string(id),
-                ]))
+            let reply = await kernel.send(AgentId(target), payloadJSON)
             return reply.serialize()
         }
     }

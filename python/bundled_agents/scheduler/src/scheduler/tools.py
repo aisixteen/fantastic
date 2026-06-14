@@ -1,14 +1,15 @@
 """scheduler bundle — recurring tasks as an agent.
 
-State (sidecars in `.fantastic/agents/{id}/`, written through file_bridge agent):
+State (sidecars in `.fantastic/agents/{id}/`, persisted THROUGH the loader):
   schedules.json   — list of {id, target, payload, interval_seconds, next_run, paused, run_count}
   history.jsonl    — append-only schedule_fired events, ring-trimmed to HISTORY_MAX
 
-All persistence routes through `file_bridge_id` configured on the
-scheduler agent's record. Unset → loud error at first I/O.
+There is NOTHING to wire — the scheduler persists through `kernel_state` (the loader),
+which owns the `.fantastic` store. A write failfasts only when no store is wired at the
+root (read-empty until then); a denied/failed write is surfaced, not lost.
 
 Verbs:
-  reflect      -> {sentence, tick_sec, paused, schedule_count, file_bridge_id, ...}
+  reflect      -> {sentence, tick_sec, paused, ...}
   boot         -> start tick loop (idempotent)
   schedule     args: target, payload, interval_seconds  -> {schedule_id}
   unschedule   args: schedule_id                        -> {removed: bool}
@@ -41,45 +42,42 @@ _cache: dict[str, list[dict]] = {}  # in-process schedules cache
 # ─── file routing ────────────────────────────────────────────────
 
 
-# STORE-RELATIVE paths (`agents/<id>/…`): wire `file_bridge_id` to the `.fantastic`
-# store and the sidecars land next to the agent's own agent.json — one store, no nest.
-def _sched_path(sid: str) -> str:
-    return f"agents/{sid}/schedules.json"
+# Sidecar filenames — kernel_state computes the dir (`agents/<id>/`) under the one
+# `.fantastic` store it owns. The scheduler wires NOTHING; it persists THROUGH the loader.
+_SCHED_NAME = "schedules.json"
+_HISTORY_NAME = "history.jsonl"
 
 
-def _history_path(sid: str) -> str:
-    return f"agents/{sid}/history.jsonl"
+async def _file_read(sid: str, kernel, name: str) -> str | None:
+    """Read a sidecar THROUGH the loader. Missing / no-store ⇒ None (reads lenient)."""
+    r = await kernel.send(
+        "kernel_state", {"type": "load_blob", "agent_id": sid, "name": name}
+    )
+    return r.get("content") if isinstance(r, dict) else None
 
 
-def _file_bridge_id(sid: str, kernel) -> str | None:
-    rec = kernel.get(sid) or {}
-    return rec.get("file_bridge_id")
+async def _file_write(sid: str, kernel, name: str, content: str) -> dict | None:
+    """Write a sidecar THROUGH the loader. Returns an error dict on a denied/no-store
+    write (no silent loss), or None on success."""
+    w = await kernel.send(
+        "kernel_state",
+        {"type": "persist_blob", "agent_id": sid, "name": name, "content": content},
+    )
+    if isinstance(w, dict) and w.get("error"):
+        out = {"error": w["error"]}
+        if w.get("reason"):
+            out["reason"] = w["reason"]
+        return out
+    return None
 
 
-async def _file_read(sid: str, kernel, path: str) -> str | None:
-    fid = _file_bridge_id(sid, kernel)
-    if not fid:
-        return None
-    r = await kernel.send(fid, {"type": "read", "path": path})
-    if not r or "content" not in r:
-        return None
-    return r["content"]
-
-
-async def _file_write(sid: str, kernel, path: str, content: str) -> None:
-    fid = _file_bridge_id(sid, kernel)
-    if not fid:
-        return
-    await kernel.send(fid, {"type": "write", "path": path, "content": content})
-
-
-# ─── schedules persistence (through file_bridge agent) ─────────────────
+# ─── schedules persistence (through the loader) ─────────────────
 
 
 async def _load(sid: str, kernel) -> list[dict]:
     if sid in _cache:
         return _cache[sid]
-    raw = await _file_read(sid, kernel, _sched_path(sid))
+    raw = await _file_read(sid, kernel, _SCHED_NAME)
     if not raw:
         _cache[sid] = []
         return _cache[sid]
@@ -90,27 +88,28 @@ async def _load(sid: str, kernel) -> list[dict]:
     return _cache[sid]
 
 
-async def _save(sid: str, kernel) -> None:
-    await _file_write(
-        sid, kernel, _sched_path(sid), json.dumps(_cache.get(sid, []), indent=2)
+async def _save(sid: str, kernel) -> dict | None:
+    """Persist the cache THROUGH the loader; returns an error dict on failure."""
+    return await _file_write(
+        sid, kernel, _SCHED_NAME, json.dumps(_cache.get(sid, []), indent=2)
     )
 
 
-# ─── history persistence (through file_bridge agent — read-modify-write) ──
+# ─── history persistence (through the loader — read-modify-write) ──
 
 
-async def _append_history(sid: str, kernel, event: dict) -> None:
-    raw = await _file_read(sid, kernel, _history_path(sid)) or ""
+async def _append_history(sid: str, kernel, event: dict) -> dict | None:
+    raw = await _file_read(sid, kernel, _HISTORY_NAME) or ""
     appended = raw + json.dumps(event, default=str) + "\n"
     # Ring-trim if oversize.
     lines = appended.splitlines()
     if len(lines) > 2 * HISTORY_MAX:
         appended = "\n".join(lines[-HISTORY_MAX:]) + "\n"
-    await _file_write(sid, kernel, _history_path(sid), appended)
+    return await _file_write(sid, kernel, _HISTORY_NAME, appended)
 
 
 async def _read_history(sid: str, kernel, limit: int) -> list[dict]:
-    raw = await _file_read(sid, kernel, _history_path(sid))
+    raw = await _file_read(sid, kernel, _HISTORY_NAME)
     if not raw:
         return []
     out: list[dict] = []
@@ -148,7 +147,10 @@ async def _tick_loop(sid: str, kernel) -> None:
                 await _fire(sid, sch, kernel)
                 sch["run_count"] = sch.get("run_count", 0) + 1
                 sch["next_run"] = time.time() + sch["interval_seconds"]
-                await _save(sid, kernel)
+                if err := await _save(sid, kernel):
+                    logger.warning(
+                        "scheduler %s: persist failed: %s", sid, err.get("error")
+                    )
     except asyncio.CancelledError:
         pass
     except Exception:
@@ -177,7 +179,10 @@ async def _fire(sid: str, sch: dict, kernel) -> None:
         "ts": ts,
         "duration_ms": int((time.time() - ts) * 1000),
     }
-    await _append_history(sid, kernel, event)
+    if err := await _append_history(sid, kernel, event):
+        logger.warning(
+            "scheduler %s: history persist failed: %s", sid, err.get("error")
+        )
     await kernel.emit(sid, event)
     if target and target != sid:
         await kernel.emit(target, event)
@@ -187,14 +192,13 @@ async def _fire(sid: str, sch: dict, kernel) -> None:
 
 
 async def _reflect(id, payload, kernel):
-    """Identity + tick state + file_bridge_id. No args."""
+    """Identity + tick state. No args."""
     rec = kernel.get(id) or {}
     return {
         "id": id,
         "sentence": "Recurring-task scheduler.",
         "tick_sec": float(rec.get("tick_sec") or 1.0),
         "paused": bool(rec.get("paused")),
-        "file_bridge_id": rec.get("file_bridge_id"),
         "running": id in _tick_tasks and not _tick_tasks[id].done(),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
@@ -206,18 +210,15 @@ async def _reflect(id, payload, kernel):
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. Starts the tick loop. Requires file_bridge_id."""
-    if not _file_bridge_id(id, kernel):
-        return {"error": "scheduler: file_bridge_id required"}
+    """Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write
+    failfasts only when no store is wired (reads are empty until then)."""
     if id not in _tick_tasks or _tick_tasks[id].done():
         _tick_tasks[id] = asyncio.create_task(_tick_loop(id, kernel))
     return {"running": True}
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60). Returns {schedule_id, schedule}. Persisted via file_bridge_id."""
-    if not _file_bridge_id(id, kernel):
-        return {"error": "scheduler: file_bridge_id required"}
+    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
     target = payload.get("target", "")
     sched_payload = payload.get("payload") or {}
     interval = max(1, int(payload.get("interval_seconds", 60)))
@@ -236,7 +237,13 @@ async def _schedule(id, payload, kernel):
         "paused": False,
     }
     (await _load(id, kernel)).append(sch)
-    await _save(id, kernel)
+    if err := await _save(id, kernel):
+        # roll back the in-cache append so a failed persist leaves no phantom schedule
+        _cache[id] = [s for s in _cache.get(id, []) if s["id"] != sch["id"]]
+        out = {"error": f"scheduler.schedule: {err['error']}"}
+        if err.get("reason"):
+            out["reason"] = err["reason"]
+        return out
     return {"schedule_id": sch["id"], "schedule": sch}
 
 
@@ -250,7 +257,11 @@ async def _unschedule(id, payload, kernel):
     _cache[id] = [s for s in cur if s["id"] != sid]
     removed = len(_cache[id]) < before
     if removed:
-        await _save(id, kernel)
+        if err := await _save(id, kernel):
+            return {
+                "error": f"scheduler.unschedule: {err['error']}",
+                **({"reason": err["reason"]} if err.get("reason") else {}),
+            }
     return {"removed": removed, "schedule_id": sid}
 
 
@@ -269,7 +280,11 @@ async def _pause(id, payload, kernel):
                 s["paused"] = True
                 touched += 1
         if touched:
-            await _save(id, kernel)
+            if err := await _save(id, kernel):
+                return {
+                    "error": f"scheduler.pause: {err['error']}",
+                    **({"reason": err["reason"]} if err.get("reason") else {}),
+                }
         return {"paused": touched > 0, "schedule_id": sid}
     kernel.update(id, paused=True)
     return {"paused": True, "scheduler_id": id}
@@ -285,7 +300,11 @@ async def _resume(id, payload, kernel):
                 s["paused"] = False
                 touched += 1
         if touched:
-            await _save(id, kernel)
+            if err := await _save(id, kernel):
+                return {
+                    "error": f"scheduler.resume: {err['error']}",
+                    **({"reason": err["reason"]} if err.get("reason") else {}),
+                }
         return {"resumed": touched > 0, "schedule_id": sid}
     kernel.update(id, paused=False)
     return {"resumed": True, "scheduler_id": id}
@@ -300,7 +319,11 @@ async def _tick_now(id, payload, kernel):
         if s["id"] == sid:
             await _fire(id, s, kernel)
             s["run_count"] = s.get("run_count", 0) + 1
-            await _save(id, kernel)
+            if err := await _save(id, kernel):
+                return {
+                    "error": f"scheduler.tick_now: {err['error']}",
+                    **({"reason": err["reason"]} if err.get("reason") else {}),
+                }
             return {"fired": True, "schedule_id": sid}
     return {"error": f"schedule {sid!r} not found"}
 

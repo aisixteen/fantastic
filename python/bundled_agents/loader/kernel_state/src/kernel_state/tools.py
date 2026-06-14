@@ -478,6 +478,118 @@ async def _forget_record(id, payload, agent):
     return {"ok": True}
 
 
+# ─── arbitrary-blob persistence (the loader as the ONE store authority) ────
+
+
+_RESERVED_BLOB_NAMES = {"agent.json", "readme.md"}
+
+
+def _guard_blob_name(name) -> str | None:
+    """Validate a blob filename: a single bare segment, not a kernel-managed file,
+    no escape/hidden. Returns an error string, or None when OK. Defense-in-depth
+    over the provider's clamp so a bad `name` fails AT the loader with a clear,
+    loader-scoped message instead of a deep fs error."""
+    if not isinstance(name, str) or not name:
+        return "name (non-empty str) required"
+    if name != Path(name).name:
+        return f"name {name!r} must be a single filename (no path segments)"
+    if name.startswith(".") or ".." in name:
+        return f"name {name!r} must not be hidden or contain '..'"
+    if name.lower() in _RESERVED_BLOB_NAMES:
+        return f"name {name!r} is reserved (kernel-managed)"
+    return None
+
+
+def _blob_reldir(agent, agent_id: str) -> str:
+    """Store-relative dir for an agent's sidecars — `agents/<id>`. Prefers the LIVE
+    agent's own `_root_path`, falls back to walking the record's parent chain."""
+    a = agent.ctx.get_agent(agent_id)
+    if a is not None:
+        abs_dir = a._root_path
+    else:
+        rec = agent.ctx.get(agent_id) or {}
+        abs_dir = _resolve_path(
+            agent, {"id": agent_id, "parent_id": rec.get("parent_id")}
+        )
+    return _store_reldir(agent, abs_dir)
+
+
+async def _persist_blob(id, payload, agent):
+    """args: agent_id:str (req), name:str (req), content:str (req). Persist an
+    agent's sidecar (e.g. state.yaml) THROUGH the loader's DISCOVERED store — a
+    whole-file write at `agents/<agent_id>/<name>`. A dumb BYTE authority: NO data
+    semantics (the caller owns its format). The consumer never computes a path or
+    wires a provider. No store wired ⇒ error (NO RAM fallback)."""
+    aid = payload.get("agent_id")
+    name = payload.get("name")
+    content = payload.get("content")
+    if not isinstance(aid, str) or not aid:
+        return {"error": "persist_blob: agent_id (str) required"}
+    if err := _guard_blob_name(name):
+        return {"error": f"persist_blob: {err}"}
+    if not isinstance(content, str):
+        return {"error": "persist_blob: content (str) required"}
+    store_id = _find_store(agent)
+    if store_id is None:
+        return {"error": "persist_blob: no store wired — persistence not available"}
+    reldir = _blob_reldir(agent, aid)
+    path = f"{reldir}/{name}" if reldir else name
+    reply = await agent.ctx.send(
+        store_id,
+        {
+            "type": "write_stream",
+            "path": path,
+            "bytes": content.encode("utf-8"),
+            "truncate": True,
+        },
+    )
+    if isinstance(reply, dict) and reply.get("error"):
+        out = {"error": f"persist_blob: {reply['error']}"}
+        if reply.get("reason"):
+            out["reason"] = reply["reason"]
+        if reply.get("hint"):
+            out["hint"] = reply["hint"]
+        return out
+    return {
+        "ok": True,
+        "name": name,
+        "size": reply.get("size") if isinstance(reply, dict) else None,
+    }
+
+
+async def _load_blob(id, payload, agent):
+    """args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the
+    loader's discovered store. Returns {name, content:str|null} — null when the file
+    is absent (a never-written sidecar reads empty). Surfaces a gate denial as an
+    error; the consumer decides whether to treat that as empty."""
+    aid = payload.get("agent_id")
+    name = payload.get("name")
+    if not isinstance(aid, str) or not aid:
+        return {"error": "load_blob: agent_id (str) required"}
+    if err := _guard_blob_name(name):
+        return {"error": f"load_blob: {err}"}
+    store_id = _find_store(agent)
+    if store_id is None:
+        return {"error": "load_blob: no store wired — persistence not available"}
+    reldir = _blob_reldir(agent, aid)
+    path = f"{reldir}/{name}" if reldir else name
+    reply = await agent.ctx.send(store_id, {"type": "read_stream", "path": path})
+    if isinstance(reply, dict) and isinstance(reply.get("bytes"), (bytes, bytearray)):
+        return {
+            "name": name,
+            "content": bytes(reply["bytes"]).decode("utf-8", "replace"),
+        }
+    if isinstance(reply, dict) and reply.get("reason") == "unauthorized":
+        out = {
+            "error": f"load_blob: {reply.get('error', 'unauthorized')}",
+            "reason": "unauthorized",
+        }
+        if reply.get("hint"):
+            out["hint"] = reply["hint"]
+        return out
+    return {"name": name, "content": None}  # absent → empty (NOT an error)
+
+
 async def on_shutdown(agent):
     """Final flush + unsubscribe — a graceful shutdown loses nothing."""
     loop = getattr(agent, "_fs_flush_loop", None)
@@ -491,6 +603,8 @@ VERBS = {
     "load_tree": _load_tree,
     "persist_record": _persist_record,
     "forget_record": _forget_record,
+    "persist_blob": _persist_blob,
+    "load_blob": _load_blob,
 }
 
 

@@ -107,7 +107,6 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
             {
                 "type": "create_agent",
                 "handler_module": "scheduler.tools",
-                "file_bridge_id": store_agent,
             },
         )
     )["id"]

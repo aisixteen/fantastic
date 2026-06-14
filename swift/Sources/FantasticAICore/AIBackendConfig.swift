@@ -58,6 +58,25 @@ public struct AIBackendConfig: Sendable {
     /// with whatever it accumulated, persisting that partial turn.
     public var emitInterruptedError: Bool
 
+    /// Encode each tool-call's `arguments` as a JSON STRING in the
+    /// assistant turn fed back to the provider (OpenAI shape — NIM).
+    /// When `false` (ollama / FM / Python reference), arguments stay a
+    /// JSON object. Mirrors Rust's `BackendConfig.tool_args_as_json`.
+    public var toolArgsAsJson: Bool
+
+    /// Dispatch a batch of tool-calls concurrently (ollama / FM) vs
+    /// serially (NIM). Either way the appended `role:tool` messages keep
+    /// the model-emitted order. Mirrors Rust's `parallel_tools`.
+    public var parallelTools: Bool
+
+    /// Extra system-prompt text appended AFTER the shared assembly
+    /// (primer + self-reflect + agent menu + send how-to). The Apple-FM
+    /// backend uses this for its always-inject durable memory (each
+    /// mounted yaml_state agent's `state_yaml` + any custom
+    /// `instructions` meta). Receives the agent + kernel so it can read
+    /// state on demand; runs every turn. Default empty (ollama / NIM).
+    public var systemPromptExtra: @Sendable (Agent, Kernel) async -> String
+
     /// Extra fields merged into the `reflect` reply (e.g. ollama/NIM add
     /// `host` + `model`; FM adds `available` + `model`). Receives the
     /// agent so it can read meta. Pure function — no side effects.
@@ -84,8 +103,11 @@ public struct AIBackendConfig: Sendable {
         persistToolCalls: Bool = false,
         includeAccumulatedOnError: Bool = false,
         emitInterruptedError: Bool = false,
+        toolArgsAsJson: Bool = false,
+        parallelTools: Bool = true,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
+        systemPromptExtra: @escaping @Sendable (Agent, Kernel) async -> String = { _, _ in "" },
         makeProvider:
             @escaping @Sendable (Agent, String, Kernel) async -> ProviderResult
     ) {
@@ -97,8 +119,11 @@ public struct AIBackendConfig: Sendable {
         self.persistToolCalls = persistToolCalls
         self.includeAccumulatedOnError = includeAccumulatedOnError
         self.emitInterruptedError = emitInterruptedError
+        self.toolArgsAsJson = toolArgsAsJson
+        self.parallelTools = parallelTools
         self.reflectExtra = reflectExtra
         self.backendStateExtra = backendStateExtra
+        self.systemPromptExtra = systemPromptExtra
         self.makeProvider = makeProvider
     }
 }

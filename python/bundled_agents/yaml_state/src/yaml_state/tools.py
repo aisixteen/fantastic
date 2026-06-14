@@ -7,17 +7,13 @@ identical:
   - data → current scratch-state, overwrite-in-place.
   - mem  → durable keyed facts, accrete + prune at LLM discretion.
 
-ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge — sealed /
-deny-all by default), referenced by `file_bridge_id` on this agent's record. This
-bundle owns NO disk surface of its own and never imports `fs`: it `send`s `read` /
-`write` verbs to its provider, exactly like `scheduler` / `ai_core`. The provider is
-wired (and OPENED) on demand by the operator/LLM — `set` / `delete` / `replace`
-**failfast** until `file_bridge_id` is set, and surface a denied write rather than
-losing it silently. Wire it to the **`.fantastic` store** (the same one the loader
-persists records through — ONE file_bridge serves both): the path is store-relative
-`agents/<id>/state.yaml`, so the sidecar lands NEXT TO its `agent.json`. Human-editable,
-git-diffable, disk-is-truth (read fresh each call, no cache — an external edit is seen
-on the next read).
+This bundle owns NO disk surface of its own and never imports `fs`. It persists
+THROUGH the loader (`kernel_state`) — there is NOTHING to wire: `set` / `read` just
+work. The loader writes `state.yaml` to the one `.fantastic` store it owns, landing the
+sidecar NEXT TO this agent's `agent.json` at `agents/<id>/state.yaml`. If no store is
+wired at the root, writes **failfast** (`set` / `delete` / `replace` surface the error;
+NO silent RAM) and reads return empty. Human-editable, git-diffable, disk-is-truth (read
+fresh each call, no cache — an external edit is seen on the next read).
 
 Keys are flat namespaced strings (dotted convention:
 `domain.subject.attribute`, e.g. `user.name`, `decision.db`). Values are
@@ -31,30 +27,14 @@ from typing import Any
 import yaml
 
 _MEM_SENTENCE = (
-    "Your durable memory. Facts you must remember across sessions live here "
-    "— auto-loaded into your context on boot. `set` a descriptive key the "
-    "moment the user tells you something worth keeping (a name, a preference, "
-    "a decision). Your current facts are already in your context — read them, "
-    "don't re-fetch."
+    "Your durable memory. Facts to remember across sessions live here. `set` a "
+    "descriptive key the moment the user tells you something worth keeping (a name, "
+    "a preference, a decision); `read` / `keys` them back when relevant."
 )
 _DATA_SENTENCE = (
     "Your durable scratch-state (component state, config, run params, current "
-    "selection). One value per key, overwrite-in-place; auto-loaded into your "
-    "context on boot."
+    "selection). One value per key, overwrite-in-place; `read` it when you need it."
 )
-
-
-def _file_bridge_id(agent) -> str | None:
-    rec = agent.get(agent.id) or {}
-    return rec.get("file_bridge_id")
-
-
-def _state_path(agent) -> str:
-    """state.yaml in the agent's own dir, RELATIVE to the provider's root. The provider
-    is the `.fantastic` store (the one the loader persists records through), so the path
-    is `agents/<id>/state.yaml` — landing the sidecar NEXT TO its `agent.json` under the
-    single store (no `.fantastic/.fantastic/...` double-nest)."""
-    return f"agents/{agent.id}/state.yaml"
 
 
 def _mode(agent) -> str:
@@ -69,47 +49,42 @@ def _emit_yaml(doc: dict[str, Any]) -> str:
     return yaml.safe_dump(doc, sort_keys=True, allow_unicode=True)
 
 
-def _need_file_bridge(agent, verb: str) -> dict | None:
-    """Failfast if no provider is wired — persistence needs an opened file_bridge."""
-    if not _file_bridge_id(agent):
-        return {
-            "error": (
-                f"yaml_state.{verb}: file_bridge_id required — wire (and open) a "
-                "file_bridge to persist"
-            )
-        }
-    return None
-
-
 async def _load(agent) -> dict[str, Any]:
-    """Read the store THROUGH the wired provider. Unwired / missing / denied ⇒ {}."""
-    fid = _file_bridge_id(agent)
-    if not fid:
-        return {}
-    r = await agent.send(fid, {"type": "read", "path": _state_path(agent)})
-    if not isinstance(r, dict) or "content" not in r:
+    """Read the store THROUGH the loader (`kernel_state.load_blob`). Missing / denied /
+    no-store ⇒ {} (reads are lenient; writes failfast)."""
+    r = await agent.send(
+        "kernel_state",
+        {"type": "load_blob", "agent_id": agent.id, "name": "state.yaml"},
+    )
+    content = r.get("content") if isinstance(r, dict) else None
+    if not content:
         return {}
     try:
-        doc = yaml.safe_load(r["content"])
+        doc = yaml.safe_load(content)
     except yaml.YAMLError:
         return {}
     return doc if isinstance(doc, dict) else {}
 
 
 async def _persist(agent, doc: dict[str, Any], verb: str) -> dict | None:
-    """Write the store THROUGH the provider; surface a denied/failed write as an error
-    (no silent loss). Returns an error dict, or None on success."""
-    fid = _file_bridge_id(agent)
+    """Write the store THROUGH the loader (`kernel_state.persist_blob`); surface a
+    denied/failed/no-store write as an error (no silent loss). Returns an error dict,
+    or None on success."""
     w = await agent.send(
-        fid, {"type": "write", "path": _state_path(agent), "content": _emit_yaml(doc)}
+        "kernel_state",
+        {
+            "type": "persist_blob",
+            "agent_id": agent.id,
+            "name": "state.yaml",
+            "content": _emit_yaml(doc),
+        },
     )
     if not isinstance(w, dict):
-        return {"error": f"yaml_state.{verb}: provider gave no reply"}
-    reason = w.get("error") or (
-        w.get("reason") if w.get("reason") == "unauthorized" else None
-    )
-    if reason:
-        out = {"error": f"yaml_state.{verb}: provider refused write — {reason}"}
+        return {"error": f"yaml_state.{verb}: loader gave no reply"}
+    if w.get("error"):
+        out = {"error": f"yaml_state.{verb}: {w['error']}"}
+        if w.get("reason"):
+            out["reason"] = w["reason"]
         if w.get("hint"):
             out["hint"] = w["hint"]
         return out
@@ -117,7 +92,7 @@ async def _persist(agent, doc: dict[str, Any], verb: str) -> dict | None:
 
 
 async def _reflect(id, payload, agent):
-    """Identity + mode + current key count + file_bridge_id binding. No args."""
+    """Identity + mode + current key count. No args."""
     doc = await _load(agent)
     mode = _mode(agent)
     return {
@@ -125,7 +100,6 @@ async def _reflect(id, payload, agent):
         "sentence": _MEM_SENTENCE if mode == "mem" else _DATA_SENTENCE,
         "mode": mode,
         "key_count": len(doc),
-        "file_bridge_id": _file_bridge_id(agent),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
@@ -153,9 +127,7 @@ async def _keys(id, payload, agent):
 
 
 async def _set(id, payload, agent):
-    """args: key:str, value:any. Upsert one key (data: overwrite; mem: accrete a fact). Persisted through file_bridge_id; failfast if unwired."""
-    if err := _need_file_bridge(agent, "set"):
-        return err
+    """args: key:str, value:any. Upsert one key (data: overwrite; mem: accrete a fact). Persisted through the loader; failfast if no store wired."""
     key = payload.get("key")
     if not isinstance(key, str) or not key:
         return {"error": "yaml_state.set: key (non-empty str) required"}
@@ -169,9 +141,7 @@ async def _set(id, payload, agent):
 
 
 async def _delete(id, payload, agent):
-    """args: key:str. Remove a key (prune / clear state). Persisted through file_bridge_id; failfast if unwired."""
-    if err := _need_file_bridge(agent, "delete"):
-        return err
+    """args: key:str. Remove a key (prune / clear state). Persisted through the loader; failfast if no store wired."""
     key = payload.get("key")
     if not isinstance(key, str) or not key:
         return {"error": "yaml_state.delete: key (non-empty str) required"}
@@ -184,9 +154,7 @@ async def _delete(id, payload, agent):
 
 
 async def _replace(id, payload, agent):
-    """args: doc:object. Overwrite the whole store (distill/prune-rewrite; {} clears). Persisted through file_bridge_id; failfast if unwired."""
-    if err := _need_file_bridge(agent, "replace"):
-        return err
+    """args: doc:object. Overwrite the whole store (distill/prune-rewrite; {} clears). Persisted through the loader; failfast if no store wired."""
     if "doc" not in payload:
         return {"error": "yaml_state.replace: doc (object) required"}
     doc = payload["doc"]

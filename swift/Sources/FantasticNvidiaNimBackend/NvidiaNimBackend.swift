@@ -35,12 +35,18 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                     "send": "args: text, client_id?. Streams a response via SSE.",
                     "history": "args: client_id?. Returns prior turns.",
                     "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "status":
+                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
                 ] as JSON,
                 // NIM persists finalized tool-calls into the assistant
                 // turn, and its `done` error path keeps `accumulated`.
                 persistToolCalls: true,
                 includeAccumulatedOnError: true,
+                // OpenAI shape: tool-call arguments are a JSON string;
+                // dispatch the batch serially (matches the Rust NIM port).
+                toolArgsAsJson: true,
+                parallelTools: false,
                 reflectExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),

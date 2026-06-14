@@ -59,6 +59,8 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                     "history":
                         "args: client_id?. Returns UI bubble log (not fed back to the model).",
                     "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "status":
+                        "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight count.",
                 ] as JSON,
                 // FM: stateless context, error-shaped interrupt done.
@@ -80,6 +82,14 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                         "reason": .string(Self.isAvailable() ? "ok" : Self.unavailableReason()),
                     ]
                 },
+                // Always-inject durable memory: the shared core appends
+                // this AFTER the substrate prompt (primer + menu + send
+                // how-to). Each mounted yaml_state agent's `state_yaml` +
+                // any custom `instructions` meta land in the FM session's
+                // instructions every turn — recall is structural.
+                systemPromptExtra: { agent, kernel in
+                    await Self.fullInstructions(agent: agent, kernel: kernel)
+                },
                 makeProvider: { agent, _, kernel in
                     guard Self.isAvailable() else {
                         return .refused(
@@ -88,11 +98,13 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                                 "reason": .string(Self.unavailableReason()),
                             ]))
                     }
-                    let inst = await Self.fullInstructions(agent: agent, kernel: kernel)
+                    // Instructions now flow through the assembled system
+                    // message (extracted by the provider from `messages`);
+                    // the provider needs only temperature + the kernel for
+                    // its native universal `send` tool.
                     let temp = Self.temperature(agent: agent)
                     return .provider(
-                        FoundationModelsProvider(
-                            instructions: inst, temperature: temp, kernel: kernel))
+                        FoundationModelsProvider(temperature: temp, kernel: kernel))
                 }
             ))
         coreBox.value = core
@@ -142,6 +154,22 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         // the mounted memory persists. No store wired ⇒ field omitted (the
         // memory is RAM-only and `set` failfasts — no silent fallback).
         let storeId = kernel.findStore()?.value
+
+        // Self-wire THIS backend's own `file_bridge_id` to the same store
+        // so the shared core persists chat history through it (FM is
+        // self-bootstrapping — it already self-mounts memory + discovers
+        // the store; ollama/NIM expect the operator to set this). Only when
+        // absent + a store exists; no store ⇒ history stays RAM-empty.
+        if let storeId, kernel.agent(agentId)?.metaValue(forKey: "file_bridge_id") == nil {
+            _ = await kernel.send(
+                agentId,
+                .object([
+                    "type": .string("update_agent"),
+                    "id": .string(agentId.value),
+                    "file_bridge_id": .string(storeId),
+                ]))
+        }
+
         for mode in ["mem", "data"] where !have.contains(mode) {
             var rec: JSON = .object([
                 "type": .string("create_agent"),

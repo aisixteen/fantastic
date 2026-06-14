@@ -15,7 +15,7 @@ context (read it, don't re-fetch); otherwise `read` / `keys` it on demand.
 ## When to use
 - The moment the user tells you something worth keeping → `set` it on a `mem` agent.
 - When durable state changes → `set` it on a `data` agent.
-- Reading: it's already injected; only `read` / `keys` when you need a key not in context.
+- Reading: `read` / `keys` on demand (or, if your backend injects memory on boot, it's already in context — don't re-fetch).
 
 ## Verbs
 - `read {key?}` — value at `key` (whole doc if omitted).
@@ -25,18 +25,15 @@ context (read it, don't re-fetch); otherwise `read` / `keys` it on demand.
 - `replace {doc}` — overwrite the whole store (`{}` clears).
 - `state_yaml {}` — the whole store as YAML (the block injected on boot).
 
-## Persistence — wire it (deny-all by default)
-yaml_state owns NO disk surface of its own; it persists `state.yaml` THROUGH a
-`file_bridge` agent (the gated fs edge, sealed by default), referenced by the
-`file_bridge_id` meta on its record. Wire it to the **`.fantastic` store** — the same
-file_bridge the loader persists records through, so ONE bridge serves both and the
-sidecar lands at `agents/<id>/state.yaml` next to its own `agent.json`. Until it's
-wired (and the bridge opened), `set`/`delete`/`replace` **fail fast** (`file_bridge_id
-required`) rather than silently dropping to RAM; a denied write is surfaced, not lost.
+## Persistence — automatic (through the loader)
+yaml_state owns NO disk surface of its own, and there is **nothing to wire**. It persists
+`state.yaml` THROUGH the loader (`kernel_state`), which writes it to the one `.fantastic`
+store it owns — landing the sidecar at `agents/<id>/state.yaml`, next to this agent's own
+`agent.json`. Just `set` / `read`. If no store is wired at the root, writes **fail fast**
+(no silent RAM) and reads return empty; a denied write is surfaced, not lost.
 
 ```
-create_agent file_bridge.tools id=store root=.fantastic ingress_rule=allow_all
-create_agent yaml_state.tools  mode=mem  file_bridge_id=store
+create_agent yaml_state.tools mode=mem
 ```
 
 ## Recipes

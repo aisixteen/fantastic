@@ -77,7 +77,9 @@ pub fn render_menu(menu: &[Value]) -> String {
         return "## Available agents\n(none — only `core` and `self`)".to_string();
     }
     let mut lines = vec![
-        "## Available agents (reflect on any for full verb signatures + arg shapes)".to_string(),
+        "## Available agents (reflect on any for full verb signatures + arg shapes; reflect \
+         `core` with readme:true for the whole-system guide)"
+            .to_string(),
     ];
     for m in menu {
         let id = m.get("id").and_then(Value::as_str).unwrap_or("");
@@ -107,8 +109,14 @@ pub fn render_menu(menu: &[Value]) -> String {
 }
 
 /// The universal `send` tool how-to, appended to the system prompt.
+/// Leads with ORIENT-FIRST (py-canonical) so the model reads the
+/// whole-system guide before guessing the wiring.
 pub const SEND_HOWTO: &str = r#"## How to use the `send` tool
 You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
+- ORIENT FIRST. For anything beyond the menu's verb names — especially the
+  browser frontend (panels/views), persistence, or how agents are wired — read
+  the full system guide in ONE call BEFORE acting:
+  `send('core', {type:'reflect', readme:true})`. Don't guess the wiring — read it first.
 - To do something concrete (read a file, run python, list agents, etc.), pick
   an agent from the menu above whose verbs cover what you need, then build
   `{type:'<verb>', ...args}` and pass it as `payload`.
@@ -154,10 +162,18 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     client_id: &str,
 ) -> Vec<Value> {
+    // Lean primer (py-canonical): a flat id-index of the tree + the
+    // bundle catalog by name — NOT the full nested tree. Keeps the
+    // rebuilt-every-turn system block cheap.
     let primer = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "reflect"}))
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
+        )
         .await;
-    let me = kernel.send(self_id, json!({"type": "reflect"})).await;
+    let me = kernel
+        .send(self_id, json!({"type": "reflect", "tree": "none"}))
+        .await;
 
     // Lazy menu rebuild.
     let needs_rebuild = state.menu.lock().expect("menu poisoned").is_none();

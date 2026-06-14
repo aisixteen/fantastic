@@ -69,11 +69,12 @@ async def file_bridge(seeded_kernel):
 @pytest.fixture
 async def store_agent(seeded_kernel):
     """The canonical persistence STORE: a file_bridge rooted at `.fantastic`, OPENED.
-    Persistence consumers (yaml_state, scheduler, ai backends) wire `file_bridge_id` to
-    THIS and write STORE-RELATIVE paths (`agents/<id>/…`), so sidecars land under
-    `.fantastic/agents/<id>/` next to their agent.json — one shared store, no nest. The
-    loader also discovers it as its record-persistence provider (root resolves to
-    `.fantastic`), so ONE bridge serves both roles — mirrors production wiring."""
+    The loader (`kernel_state`) DISCOVERS it as its provider (root resolves to `.fantastic`)
+    and persists records — AND internal-state agents (yaml_state, scheduler) — THROUGH it
+    via `persist_blob`, landing sidecars at `.fantastic/agents/<id>/` next to their
+    agent.json (one shared store, no nest). Tests just need this fixture present so the
+    loader has a store. (The ai backends still wire `file_bridge_id` to it directly — their
+    migration is separate.)"""
     rec = await seeded_kernel.send(
         seeded_kernel.id,
         {
