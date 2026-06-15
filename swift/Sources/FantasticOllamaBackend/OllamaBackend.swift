@@ -8,10 +8,12 @@
 // `FantasticAICore.AIBackend`; this file is just the ollama wire
 // (`AIProvider` impl) + the `buildAIBackend` config.
 
+import AsyncHTTPClient
 import FantasticAICore
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import NIOCore
 
 public let HANDLER_MODULE = "ollama_backend.tools"
 
@@ -95,20 +97,19 @@ struct OllamaProvider: AIProvider {
         let model = model
         return AsyncThrowingStream { continuation in
             let task = Task {
-                let url = URL(string: "\(host)/api/chat")!
-                var req = URLRequest(url: url)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 let body: JSON = .object([
                     "model": .string(model),
                     "messages": .array(messages),
                     "tools": .array(tools),
                     "stream": .bool(true),
                 ])
-                req.httpBody = body.serialize().data(using: .utf8)
+                var req = HTTPClientRequest(url: "\(host)/api/chat")
+                req.method = .POST
+                req.headers.add(name: "Content-Type", value: "application/json")
+                req.body = .bytes(ByteBuffer(string: body.serialize()))
                 do {
-                    let (bytes, _) = try await URLSession.shared.bytes(for: req)
-                    for try await line in bytes.lines {
+                    let response = try await HTTPClient.shared.execute(req, timeout: .seconds(600))
+                    for try await line in bytesToLines(response.body) {
                         guard let data = line.data(using: .utf8),
                             let parsed = try? JSON.parse(data)
                         else { continue }

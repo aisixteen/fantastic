@@ -11,10 +11,12 @@
 // tool-call aggregation that the shared core persists into the
 // assistant turn (config `persistToolCalls`).
 
+import AsyncHTTPClient
 import FantasticAICore
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import NIOCore
 import OrderedCollections
 
 public let HANDLER_MODULE = "nvidia_nim_backend.tools"
@@ -120,12 +122,11 @@ struct NvidiaNimProvider: AIProvider {
         let apiKey = apiKey
         return AsyncThrowingStream { continuation in
             let task = Task {
-                let url = URL(string: "\(host)/v1/chat/completions")!
-                var req = URLRequest(url: url)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                var req = HTTPClientRequest(url: "\(host)/v1/chat/completions")
+                req.method = .POST
+                req.headers.add(name: "Content-Type", value: "application/json")
+                req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
+                req.headers.add(name: "Accept", value: "text/event-stream")
 
                 var body: OrderedDictionary<String, JSON> = [:]
                 body["model"] = .string(model)
@@ -145,7 +146,7 @@ struct NvidiaNimProvider: AIProvider {
                     }
                     body["tools"] = .array(wrapped)
                 }
-                req.httpBody = JSON.object(body).serialize().data(using: .utf8)
+                req.body = .bytes(ByteBuffer(string: JSON.object(body).serialize()))
 
                 var attempt = 0
                 let maxAttempts = 3
@@ -154,20 +155,19 @@ struct NvidiaNimProvider: AIProvider {
                 while attempt < maxAttempts {
                     attempt += 1
                     do {
-                        let (bytes, response) = try await URLSession.shared.bytes(for: req)
-                        if let http = response as? HTTPURLResponse {
-                            if http.statusCode == 429 {
-                                let backoffMs = UInt64(1000 * (1 << (attempt - 1)))
-                                try? await Task.sleep(nanoseconds: backoffMs * 1_000_000)
-                                continue
-                            }
-                            if http.statusCode >= 400 {
-                                continuation.finish(
-                                    throwing: NimError.http(http.statusCode))
-                                return
-                            }
+                        let response = try await HTTPClient.shared.execute(
+                            req, timeout: .seconds(600))
+                        let statusCode = Int(response.status.code)
+                        if statusCode == 429 {
+                            let backoffMs = UInt64(1000 * (1 << (attempt - 1)))
+                            try? await Task.sleep(nanoseconds: backoffMs * 1_000_000)
+                            continue
                         }
-                        for try await line in bytes.lines {
+                        if statusCode >= 400 {
+                            continuation.finish(throwing: NimError.http(statusCode))
+                            return
+                        }
+                        for try await line in bytesToLines(response.body) {
                             guard line.hasPrefix("data: ") else { continue }
                             let payload = String(line.dropFirst(6))
                             if payload == "[DONE]" { break }

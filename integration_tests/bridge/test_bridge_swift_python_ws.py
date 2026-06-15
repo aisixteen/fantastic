@@ -20,10 +20,21 @@ binary is absent (never a failure).
 
 from __future__ import annotations
 
+import os as _os
 from pathlib import Path
 
+import pytest
 
 from helpers.seeding import seed_bridge_ws, seed_web, seed_web_ws
+
+# Local-loopback (127.0.0.1) bridge addressing — meaningless INSIDE a container
+# (that's the container's own loopback, not the host). The cross-CONTAINER bridge
+# is covered by test_bridge_container_to_container (host.containers.internal +
+# all-interface publish), so skip this local matrix under the container target.
+pytestmark = pytest.mark.skipif(
+    _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
+    reason="local-loopback bridge; container path = test_bridge_container_to_container",
+)
 
 
 async def test_swift_python_ws_forward_reflect(

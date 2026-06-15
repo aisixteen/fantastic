@@ -1,4 +1,4 @@
-// Remote kernel_bridge transport — WebSocket over URLSession.
+// Remote kernel_bridge transport — WebSocket over swift-nio.
 //
 // The bridge is WS-only (asymmetric client): it opens a WS to the
 // remote kernel's `web_ws` endpoint and ships **raw call frames** —
@@ -22,8 +22,7 @@ import Foundation
 
 public actor WebSocketTransport {
     private let endpoint: URL
-    private var task: URLSessionWebSocketTask?
-    private let session: URLSession
+    private var client: NIOWebSocketClient?
 
     /// Outstanding requests keyed by id; resumed when the remote
     /// echoes the reply back with the same id.
@@ -48,9 +47,8 @@ public actor WebSocketTransport {
     private var eventSink: AgentId?
     private weak var kernel: Kernel?
 
-    public init(endpoint: URL, session: URLSession = .shared) {
+    public init(endpoint: URL) {
         self.endpoint = endpoint
-        self.session = session
     }
 
     public func setEventSink(agentId: AgentId, kernel: Kernel) {
@@ -59,9 +57,12 @@ public actor WebSocketTransport {
     }
 
     public func connect() async {
-        let t = session.webSocketTask(with: endpoint)
-        self.task = t
-        t.resume()
+        // A failed dial leaves `client` nil → forward/watch return a clean
+        // "not connected" error (no throw out of boot).
+        guard let c = try? await NIOWebSocketClient.connect(url: endpoint) else {
+            return
+        }
+        self.client = c
         // Receive loop — pumps incoming frames into `pending` /
         // emits `event` frames on the bridge agent's local inbox.
         Task { [weak self] in
@@ -70,8 +71,10 @@ public actor WebSocketTransport {
     }
 
     public func close() {
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
+        if let c = client {
+            Task { await c.close() }
+        }
+        client = nil
         // Resume any in-flight callers with a transport-error.
         for (_, cont) in pending {
             cont.resume(
@@ -94,7 +97,7 @@ public actor WebSocketTransport {
     }
 
     public func forward(target: AgentId, payload: JSON) async -> JSON {
-        guard let task = task else {
+        guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
                 "reason": .string("not_connected"),
@@ -107,9 +110,8 @@ public actor WebSocketTransport {
             "target": .string(target.value),
             "payload": payload,
         ])
-        let msg = URLSessionWebSocketTask.Message.string(frame.serialize())
         do {
-            try await task.send(msg)
+            try await client.send(.text(frame.serialize()))
         } catch {
             return .object([
                 "error": .string("send failed: \(error)"),
@@ -146,7 +148,7 @@ public actor WebSocketTransport {
     /// codec binary frame (read_stream → raw bytes) or a plain text `reply`
     /// (write_stream status → empty body) — both resolve `binaryPending[id]`.
     public func binaryForward(target: AgentId, header: JSON, blob: Data) async -> (JSON, Data) {
-        guard let task = task else {
+        guard let client = client else {
             return (
                 .object([
                     "error": .string("websocket not connected"),
@@ -168,7 +170,7 @@ public actor WebSocketTransport {
         ])
         let frame = Codec.encodeBinaryFrame(header: wire, body: blob)
         do {
-            try await task.send(.data(frame))
+            try await client.send(.binary([UInt8](frame)))
         } catch {
             return (
                 .object([
@@ -203,7 +205,7 @@ public actor WebSocketTransport {
     /// inbound `event` frames are re-emitted on the bridge agent's
     /// local inbox via `setEventSink`.
     public func watchRemote(target: AgentId) async -> JSON {
-        guard let task = task else {
+        guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
                 "reason": .string("not_connected"),
@@ -214,7 +216,7 @@ public actor WebSocketTransport {
             "src": .string(target.value),
         ])
         do {
-            try await task.send(.string(frame.serialize()))
+            try await client.send(.text(frame.serialize()))
         } catch {
             return .object([
                 "error": .string("send failed: \(error)"),
@@ -230,7 +232,7 @@ public actor WebSocketTransport {
     /// Symmetric teardown for `watchRemote`. Events already in
     /// flight on the wire still arrive + re-emit.
     public func unwatchRemote(target: AgentId) async -> JSON {
-        guard let task = task else {
+        guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
                 "reason": .string("not_connected"),
@@ -241,7 +243,7 @@ public actor WebSocketTransport {
             "src": .string(target.value),
         ])
         do {
-            try await task.send(.string(frame.serialize()))
+            try await client.send(.text(frame.serialize()))
         } catch {
             return .object([
                 "error": .string("send failed: \(error)"),
@@ -255,20 +257,21 @@ public actor WebSocketTransport {
     }
 
     private func receiveLoop() async {
-        guard let task = task else { return }
+        guard let client = client else { return }
         while true {
             do {
-                let msg = try await task.receive()
+                let msg = try await client.receive()
                 switch msg {
-                case .string(let s):
+                case .text(let s):
                     if let parsed = try? JSON.parse(s) {
                         await handleInboundFrame(parsed, body: Data())
                     }
-                case .data(let d):
+                case .binary(let bytes):
                     // A codec binary frame (`[4B len|header|body]`) carries a
                     // read_stream reply's raw bytes. Plain JSON delivered as
-                    // `.data` fails decodeBinaryFrame (its length prefix is
-                    // garbage), so fall back to a UTF-8 parse.
+                    // a binary frame fails decodeBinaryFrame (its length prefix
+                    // is garbage), so fall back to a UTF-8 parse.
+                    let d = Data(bytes)
                     if let (header, body) = Codec.decodeBinaryFrame(d) {
                         await handleInboundFrame(header, body: body)
                     } else if let text = String(data: d, encoding: .utf8),
@@ -276,7 +279,6 @@ public actor WebSocketTransport {
                     {
                         await handleInboundFrame(parsed, body: Data())
                     }
-                @unknown default: continue
                 }
             } catch {
                 break

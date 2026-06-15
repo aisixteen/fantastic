@@ -5,7 +5,8 @@
 # operator's job (a project that carries its own web stack, or an LLM driving the
 # kernel) — see the note printed when no web host is found.
 #
-#   FANTASTIC_RUNTIME = python (default) | rust
+#   FANTASTIC_RUNTIME = python (default) | rust | swift (HEADLESS — no web server
+#                       on Linux; one-shot RPC + NIO bridges only)
 #   FANTASTIC_PORT    = suggested port for a web you compose (default 8088); used
 #                       only in the "compose a web" hint, not bound by the entrypoint
 #   FANTASTIC_WORKDIR = /work (bind-mounted; holds .fantastic/lock.json)
@@ -20,7 +21,13 @@
 #
 # The frontend is the prebuilt zip at $FANTASTIC_JS_KERNEL_ZIP — the image only
 # CARRIES it (not a CDN); copy bundle.min.js out of it into your project and serve
-# it via a file agent (the copy-from-zip convention). Swift is not in this image.
+# it via a file agent (the copy-from-zip convention).
+#
+# Swift is a FULL runtime here, at parity with python/rust: its web server is
+# swift-nio (cross-platform), so FANTASTIC_RUNTIME=swift serves HTTP on Linux
+# just the same — plus the NIO kernel_bridge / cloud_bridge for the
+# fantastic_relay embedded-router use case. (The macOS-only bundles — terminal,
+# runners, FoundationModels, apple_kvs — still compile to no-ops on Linux.)
 set -eu
 
 RUNTIME="${FANTASTIC_RUNTIME:-python}"
@@ -33,12 +40,14 @@ export FANTASTIC_JS_KERNEL_ZIP="${FANTASTIC_JS_KERNEL_ZIP:-/opt/fantastic/js_ker
 
 PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic}"
 RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
+SWIFT="${FANTASTIC_SWIFT:-/opt/fantastic/bin/fantastic-swift}"
 
-# Runtime → (binary, root id). python root = kernel_state; rust root = core.
+# Runtime → (binary, root id). python root = kernel_state; rust + swift root = core.
 case "$RUNTIME" in
-  python) BIN="$PY";   ROOT="kernel_state" ;;
-  rust)   BIN="$RUST"; ROOT="core" ;;
-  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust)" >&2
+  python) BIN="$PY";    ROOT="kernel_state" ;;
+  rust)   BIN="$RUST";  ROOT="core" ;;
+  swift)  BIN="$SWIFT"; ROOT="core" ;;
+  *) echo "entrypoint: unknown FANTASTIC_RUNTIME='$RUNTIME' (use python|rust|swift)" >&2
      exit 2 ;;
 esac
 

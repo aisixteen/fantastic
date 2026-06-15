@@ -36,6 +36,7 @@ freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0))
 # ingress_rule=allow_all, exactly as the operator must. $1=workdir $2=bin $3=root $4=port
 PYBIN=/opt/fantastic/venv/bin/fantastic
 RUSTBIN=/opt/fantastic/bin/fantastic-rust
+SWIFTBIN=/opt/fantastic/bin/fantastic-swift
 compose_web() {
   # Wire the persistence PROVIDER first — a file_bridge@.fantastic (open). Python
   # AND rust auto-persist records ONLY through a discovered store now (RAM if
@@ -64,8 +65,12 @@ if [ "$BUILD" = 1 ]; then
 fi
 
 # ── runtime-field check (one-shot reflect, no daemon) ───────────────────────
+# All three runtimes are full HTTP servers (swift's web is swift-nio now), so
+# each appears in the one-shot reflect check AND the serve checks below.
 echo "== reflect.runtime per runtime =="
-for pair in "python:/opt/fantastic/venv/bin/fantastic" "rust:/opt/fantastic/bin/fantastic-rust"; do
+for pair in "python:/opt/fantastic/venv/bin/fantastic" \
+            "rust:/opt/fantastic/bin/fantastic-rust" \
+            "swift:/opt/fantastic/bin/fantastic-swift"; do
   rt=${pair%%:*}; bin=${pair#*:}
   out=$($ENGINE run --rm --entrypoint "$bin" "$TAG" reflect 2>/dev/null || true)
   if printf '%s' "$out" | grep -Eq "\"runtime\"[[:space:]]*:[[:space:]]*\"$rt\""; then
@@ -77,10 +82,14 @@ done
 
 # ── serve check (daemon up, reachable via -p, workdir written) ──────────────
 echo "== serve (bind 0.0.0.0 + -p mapping + workdir) =="
-for rt in python rust; do
+for rt in python rust swift; do
   P=$(freeport); tmp=$(mktemp -d); c="ftsmoke-$rt-$$"
   CONTAINERS="$CONTAINERS $c"
-  case "$rt" in python) bin=$PYBIN; root=kernel_state ;; rust) bin=$RUSTBIN; root=core ;; esac
+  case "$rt" in
+    python) bin=$PYBIN; root=kernel_state ;;
+    rust) bin=$RUSTBIN; root=core ;;
+    swift) bin=$SWIFTBIN; root=core ;;
+  esac
   compose_web "$tmp" "$bin" "$root" "$P"   # explicit composition (image autocreates nothing)
   $ENGINE run -d --name "$c" -p "127.0.0.1:$P:$P" -v "$tmp:/work" \
     -e FANTASTIC_RUNTIME="$rt" -e FANTASTIC_PORT="$P" "$TAG" >/dev/null

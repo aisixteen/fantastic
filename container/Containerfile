@@ -1,13 +1,21 @@
-# Universal Fantastic kernel container — headless runtime collection.
+# Universal Fantastic kernel container — runtime collection.
 #
 # ONE fat OCI image (podman AND docker), tag `fantastic`,
-# carrying TWO execution runtimes (python canonical, rust prebuilt) + ONE
-# bundled runtime (the static js_kernel.zip, copied prebuilt from ts/). The
-# runtime is chosen at launch via FANTASTIC_RUNTIME (entrypoint.sh).
+# carrying THREE execution runtimes (python canonical, rust prebuilt, swift
+# prebuilt) + ONE bundled runtime (the static js_kernel.zip, copied prebuilt
+# from ts/). The runtime is chosen at launch via FANTASTIC_RUNTIME
+# (entrypoint.sh).
+#
+# SWIFT IS A FULL RUNTIME HERE — its web server is swift-nio (cross-platform),
+# so it serves HTTP on Linux at parity with python/rust (it joins the serve
+# smoke checks). The macOS-only bundles (terminal, runners, FoundationModels,
+# apple_kvs) compile to no-ops on Linux; everything the web/bridge surface needs
+# is portable. Built with --static-swift-stdlib so the binary needs no Swift
+# runtime in the slim final image (only a few Foundation C deps, apt-installed
+# below). The in-stage `reflect` (swift-build) is a build-time smoke test.
 #
 # NO JS engine (no node/bun/deno — security): the JS kernel ships ONLY as the
-# prebuilt zip, discovered at runtime + served statically. NO swift (its HTTP
-# server is Network.framework-only → can't serve on Linux). NO compilers in the
+# prebuilt zip, discovered at runtime + served statically. NO compilers in the
 # final image.
 #
 # Plain Dockerfile syntax (no BuildKit-only features) so `docker build`,
@@ -20,6 +28,34 @@ WORKDIR /src
 COPY rust/ ./
 RUN cargo build --release --bin fantastic \
     && mkdir -p /out && cp target/release/fantastic /out/fantastic-rust
+
+# ── swift kernel (prebuilt Linux binary — full runtime, NIO web server) ───
+# swift-tools-version 6.0 → the official swift:6.0 Linux toolchain. The web
+# server is swift-nio (cross-platform), so swift serves HTTP on Linux; only the
+# macOS-only bundles (terminal/runners/FM/kvs) compile to no-ops here.
+# `--static-swift-stdlib` bakes the Swift runtime into the binary so the slim
+# final image needs no swift libs. The in-stage `reflect` is a BUILD-TIME smoke
+# test: if the swift kernel isn't Linux-clean (or doesn't report runtime=swift),
+# the image build FAILS here.
+#
+# Pinned to `-bookworm` (Debian 12, glibc 2.36) to MATCH the final image's
+# `python:3.11-slim-bookworm` base. `--static-swift-stdlib` links the Swift
+# stdlib but NOT glibc, so the binary still needs the FINAL image's glibc to be
+# >= the build glibc. Same Debian release on both stages keeps that invariant
+# (a newer swift base → `GLIBC_2.38 not found` at runtime in the slim image).
+FROM swift:6.0-bookworm AS swift-build
+WORKDIR /src
+COPY swift/ ./
+# SwiftPM emits per-target resource bundles (`<pkg>_<target>.resources` dirs:
+# FantasticKernel's root_readme, FantasticWeb's transport.js/assets, plus the
+# nio-ssl/crypto bundles) NEXT TO the executable; `Bundle.module` resolves them
+# relative to the binary at runtime. They must travel with `fantastic-swift`
+# into the final image, or boot fatals ("could not load resource bundle"). Stage
+# the binary + ALL bundles into /out, then COPY /out wholesale below.
+RUN swift build -c release --static-swift-stdlib --product fantastic \
+    && mkdir -p /out && cp .build/release/fantastic /out/fantastic-swift \
+    && cp -r .build/release/*.resources /out/ \
+    && /out/fantastic-swift reflect | grep -Eq '"runtime"[[:space:]]*:[[:space:]]*"swift"'
 
 # ── python kernel (workspace synced into a self-contained venv) ──────────
 # Same base as `final` so the venv's interpreter path stays valid after COPY.
@@ -35,8 +71,13 @@ RUN uv sync --no-dev
 # ── final image ──────────────────────────────────────────────────────────
 FROM python:3.11-slim-bookworm AS final
 
+# tini/curl/unzip/ca-certificates: runtime essentials. libcurl4 + libxml2: the
+# Foundation C deps the --static-swift-stdlib headless swift binary still links
+# dynamically (the Swift stdlib + ICU are baked in; these two are not). Verified
+# against `ldd fantastic-swift` from the swift-build stage.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini curl unzip ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        tini curl unzip ca-certificates libcurl4 libxml2 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -u 1000 -m -s /bin/sh fantastic \
     && mkdir -p /work && chown fantastic:fantastic /work
@@ -46,6 +87,12 @@ COPY --from=py-build /opt/fantastic/venv /opt/fantastic/venv
 COPY --from=py-build /opt/fantastic/src /opt/fantastic/src
 # prebuilt rust binary.
 COPY --from=rust-build /out/fantastic-rust /opt/fantastic/bin/fantastic-rust
+# prebuilt swift binary (static Swift stdlib) + its SwiftPM resource bundles.
+# FULL runtime: NIO web server + bridges serve HTTP on Linux; only
+# terminal/runners/FM/kvs are gated out. /out carries `fantastic-swift` plus the
+# `*.resources` dirs SwiftPM resolves via `Bundle.module` at runtime — copied
+# wholesale (a dir COPY preserves the bundle names; a glob would flatten them).
+COPY --from=swift-build /out/ /opt/fantastic/bin/
 # the bundled JS runtime: the prebuilt frontend zip, COPIED from ts/ (not built).
 COPY ts/dist/js_kernel.zip /opt/fantastic/js_kernel.zip
 # the descriptive head page (all readmes), generated from the repo by
@@ -74,6 +121,7 @@ ENV FANTASTIC_RUNTIME=python \
     FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
     FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic \
     FANTASTIC_RUST=/opt/fantastic/bin/fantastic-rust \
+    FANTASTIC_SWIFT=/opt/fantastic/bin/fantastic-swift \
     FANTASTIC_ENV=container \
     FANTASTIC_VERSION=${FANTASTIC_VERSION}
 

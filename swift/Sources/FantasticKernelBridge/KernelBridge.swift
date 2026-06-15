@@ -7,7 +7,8 @@
 //
 // Transports:
 //   - InMemory: both kernels in one process (unit-test backbone)
-//   - WebSocket: real WS via URLSession against a remote `web_ws`
+//   - WebSocket: real WS via swift-nio (NIOWebSocketClient) against a
+//     remote `web_ws` — cross-platform (macOS + Linux)
 //
 // (HTTP transport was removed — WS subsumes its request/reply
 // semantic and adds streaming via the `watch`/`event` protocol.)
@@ -25,6 +26,14 @@
 import FantasticJSON
 import FantasticKernel
 import Foundation
+
+// The relay token-issuance leg is a plain HTTP POST via URLSession.data(for:)
+// — that path IS implemented on Linux (swift-corelibs-foundation, libcurl), so
+// it stays on URLSession. URLRequest/URLSession live in FoundationNetworking on
+// Linux; in Foundation on Apple. (The WS dial uses swift-nio, not URLSession.)
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
 
 /// `handler_module` of the WS derivation (ws / memory transports).
 public let WS_HANDLER_MODULE = "ws_bridge.tools"
@@ -387,8 +396,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         } catch {
             return .object(["error": .string("cloud_bridge: bad auth rule: \(error)")])
         }
-        let wsChannel = WSByteChannel(relayURL: relayURL, token: token)
         do {
+            let wsChannel = try await WSByteChannel.connect(relayURL: relayURL, token: token)
             let transport = try await CloudBridgeTransport.connect(
                 channel: wsChannel, server: server,
                 certDER: certDER, keyPKCS8: keyPKCS8, approvedPeerPEMs: approved,

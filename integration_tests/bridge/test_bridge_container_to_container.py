@@ -11,6 +11,11 @@ care whether the peer is a local container, a remote container, or a bare host).
 
 Runs ONLY under `FANTASTIC_TARGET=container` (skips otherwise — locally the
 `test_bridge_python_python_ws` forward path covers the same bridge surface).
+
+Parametrized over `python` AND `swift`: the swift leg proves the swift bridge's
+swift-nio WebSocket CLIENT (NIOWebSocketClient, which replaced the Apple-only
+URLSessionWebSocketTask) actually dials a peer over a real network ON LINUX —
+the one path the local-loopback swift bridge tests can't exercise in-container.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ def _free_port() -> int:
         s.close()
 
 
-def _launcher_or_skip() -> ContainerLauncher:
+def _launcher_or_skip(runtime: str) -> ContainerLauncher:
     if _TARGET != "container":
         pytest.skip("container→container bridge runs only under FANTASTIC_TARGET=container")
     engine = resolve_engine()
@@ -47,14 +52,17 @@ def _launcher_or_skip() -> ContainerLauncher:
         pytest.skip("no podman/docker found")
     if subprocess.run([engine, "image", "inspect", _IMAGE], capture_output=True).returncode != 0:
         pytest.skip(f"image {_IMAGE!r} not built (run `sh container/build.sh`)")
-    return ContainerLauncher(_IMAGE, "python", engine)
+    return ContainerLauncher(_IMAGE, runtime, engine)
 
 
 @pytest.mark.asyncio
-async def test_container_to_container_bridge_forward(parity_tmp) -> None:
+@pytest.mark.parametrize("runtime", ["python", "swift"])
+async def test_container_to_container_bridge_forward(parity_tmp, runtime) -> None:
     """A container's bridge forwards a call to ANOTHER container via the host
-    gateway — published ports only, no shared network."""
-    launcher = _launcher_or_skip()
+    gateway — published ports only, no shared network. Both containers run the
+    SAME runtime (`python` or `swift`); the swift leg proves the swift-nio WS
+    client dials cross-container on Linux."""
+    launcher = _launcher_or_skip(runtime)
     base = parity_tmp("ct2ct")
     wa = base / "A"
     wb = base / "B"

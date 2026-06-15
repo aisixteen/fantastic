@@ -1,43 +1,32 @@
-// Minimal HTTP server backed by Network.framework `NWListener`.
+// HTTP server backed by swift-nio (cross-platform: macOS + Linux).
 //
-// Mirrors Rust's `fantastic-web` axum routes at the wire level. No
-// external dependencies — `Network` is built into every Apple
-// platform. Trade-off: we hand-roll a small HTTP/1.1 parser. Worth
-// it for the brain kernel's small route surface.
+// Replaces the former Apple-only Network.framework (`NWListener`)
+// implementation wholesale — swift-nio is the project's existing
+// cross-platform networking layer (the kernel_bridge already uses it),
+// so the swift kernel now serves HTTP on Linux too, at full parity with
+// python/rust. The route surface + wire behavior are unchanged.
 //
-// Routes (match python/bundled_agents/web/host/app.py — the
-// reference template):
-//   GET  /                          → root link tree (JSON of agents)
+// Routes (match python/bundled_agents/web/host/app.py — the reference):
+//   GET  /                          → root link tree (agent index html)
 //   GET  /_fantastic/transport.js   → transport.js
-//   GET  /favicon.png               → bundled favicon
+//   GET  /favicon.png               → 404 (not served)
 //   GET  /_assets/<name>            → vendored Three.js / xterm assets
-//                                     (Swift-specific extension for
-//                                     hermetic operation — Python's
-//                                     canvas.html still loads these
-//                                     from a CDN; intentional drift)
 //   GET  /<agent_id>/               → kernel.send(agentId, render_html)
-//   GET  /<agent_id>/file/...       → kernel.send(agentId, read path)
-//   POST /<agent_id>/<verb>         → kernel.send(agentId, {type:verb, ...body})
-//
-// WebSocket upgrade (`/<agent_id>/ws`) lands in 8C — this file
-// dispatches unknown upgrades through to the WS handler hook.
+//   GET  /<agent_id>/file/<path>    → kernel.send(agentId, read_stream)
+//   <method> /<surface>/<...>       → dynamic child routes (web_rest), via
+//                                     the owner's `handle_route` verb
+//   GET  /<agent_id>/ws             → WebSocket upgrade → the shared proxy
+//                                     (web_ws), see WebSocket.swift
 
 import FantasticJSON
 import FantasticKernel
 import Foundation
-import Network
+import NIOCore
+import NIOFoundationCompat
+import NIOHTTP1
+import NIOPosix
+import NIOWebSocket
 import OrderedCollections
-
-#if canImport(Darwin)
-    import Darwin
-#endif
-
-/// Errors thrown by `WebServer.start`.
-public enum WebServerError: Error {
-    /// The `NWListener` did not reach `.ready` within the startup
-    /// timeout — the bound port never resolved.
-    case listenerStartTimeout
-}
 
 /// Surface kind a child agent's route contributes. Mirrors the
 /// `kind` field of Python's `get_routes` descriptors.
@@ -47,9 +36,7 @@ public enum RouteKind: String, Sendable {
 }
 
 /// A route contributed by a child agent (web_ws / web_rest), pulled
-/// at host boot via the child's `get_routes` verb. The Swift analog of
-/// Python's `{kind, path, method, endpoint}` descriptor — but the
-/// endpoint isn't a serializable closure, so `kind` selects the
+/// at host boot via the child's `get_routes` verb. `kind` selects the
 /// host's shared handler: `.websocket` runs the shared WS proxy;
 /// `.http` calls the owner's `handle_route` verb.
 public struct RouteSpec: Sendable {
@@ -89,29 +76,18 @@ public struct RouteSpec: Sendable {
 /// Server lifecycle owner. Started by `WebBundle.boot`, stopped by
 /// `WebBundle.shutdown`. One instance per `web.tools` agent.
 public final class WebServer: @unchecked Sendable {
-    private let kernel: Kernel
+    let kernel: Kernel
     private let agentId: AgentId
-    private var listener: NWListener?
     private let lock = NSLock()
-    private var connections: Set<ObjectIdentifier> = []
+    private var channel: Channel?
 
-    /// Dedicated queues so the listener's state callbacks never
-    /// compete with blocked `semaphore.wait` threads on the global
-    /// pool. Under heavy parallel load (e.g. the full test suite
-    /// booting many servers at once) routing the listener through
-    /// `.global()` could starve the pool and delay `.ready` past the
-    /// startup timeout, surfacing as a spurious port-0 boot. A private
-    /// serial queue for the listener + a concurrent queue for
-    /// connections keeps startup deterministic.
-    private let listenerQueue = DispatchQueue(label: "fantastic.web.listener")
-    private let connectionQueue = DispatchQueue(
-        label: "fantastic.web.connections", attributes: .concurrent)
+    /// Process-shared event loop group — never shut down (mirrors the
+    /// kernel_bridge's static-shared convention + NIO best practice).
+    static let group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton
 
     /// Dynamic routes contributed by child surface agents (web_ws /
     /// web_rest), pulled at host boot via each child's `get_routes`.
-    /// Guarded by `lock`. The host serves only rendering routes
-    /// natively; WS + REST live here (parity with Python — `web` is
-    /// rendering-only, surfaces are composable children).
+    /// The host serves only rendering + file routes natively.
     private var dynamicRoutes: [RouteSpec] = []
 
     public init(kernel: Kernel, agentId: AgentId) {
@@ -120,8 +96,7 @@ public final class WebServer: @unchecked Sendable {
     }
 
     /// Replace the routes owned by `owner` with `specs` (unmount-first,
-    /// so re-mounting is idempotent). Called from `WebBundle` after
-    /// pulling a child's `get_routes`.
+    /// so re-mounting is idempotent).
     public func mountRoutes(_ specs: [RouteSpec], for owner: AgentId) {
         lock.lock()
         defer { lock.unlock() }
@@ -136,9 +111,7 @@ public final class WebServer: @unchecked Sendable {
         dynamicRoutes.removeAll { $0.ownerId == owner }
     }
 
-    private func matchRoute(method: String, segments: [String])
-        -> (RouteSpec, [String: String])?
-    {
+    func matchRoute(method: String, segments: [String]) -> (RouteSpec, [String: String])? {
         lock.lock()
         let routes = dynamicRoutes
         lock.unlock()
@@ -150,64 +123,28 @@ public final class WebServer: @unchecked Sendable {
         return nil
     }
 
-    /// Start the listener. If `portHint` is 0, the OS picks any
-    /// free port. Returns the actual bound port.
+    /// Start the listener. If `portHint` is 0, the OS picks any free
+    /// port. Returns the actual bound port. Synchronous (binds + waits)
+    /// so `WebBundle.boot` gets the port immediately.
     @discardableResult
     public func start(portHint: UInt16) throws -> UInt16 {
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        let port: NWEndpoint.Port = portHint == 0 ? .any : NWEndpoint.Port(rawValue: portHint)!
-        let listener = try NWListener(using: parameters, on: port)
-        self.listener = listener
-
-        listener.newConnectionHandler = { [weak self] conn in
-            self?.accept(conn)
-        }
-
-        // Use an NSLock-protected box for cross-thread state shared
-        // with the listener callback (Swift 6 strict concurrency).
-        final class StartupResult: @unchecked Sendable {
-            let lock = NSLock()
-            var port: UInt16 = 0
-            var error: Error?
-        }
-        let result = StartupResult()
-        let semaphore = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { [weak listener] state in
-            switch state {
-            case .ready:
-                if let p = listener?.port {
-                    result.lock.lock()
-                    result.port = p.rawValue
-                    result.lock.unlock()
+        let bootstrap = ServerBootstrap(group: WebServer.group)
+            .serverChannelOption(ChannelOptions.backlog, value: 256)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { [weak self] channel in
+                guard let self = self else {
+                    return channel.eventLoop.makeSucceededVoidFuture()
                 }
-                semaphore.signal()
-            case .failed(let err):
-                result.lock.lock()
-                result.error = err
-                result.lock.unlock()
-                semaphore.signal()
-            case .cancelled:
-                break
-            default:
-                break
+                return self.configurePipeline(channel)
             }
-        }
-        listener.start(queue: listenerQueue)
-        let waitResult = semaphore.wait(timeout: .now() + .seconds(5))
-        result.lock.lock()
-        let err = result.error
-        let resolvedPort = result.port
-        result.lock.unlock()
-        if let err = err {
-            throw err
-        }
-        // Fail loudly on timeout rather than silently returning port 0
-        // (which would later surface as a confusing "can't connect").
-        if waitResult == .timedOut {
-            throw WebServerError.listenerStartTimeout
-        }
-        // Sync port back into the kernel + the web agent's meta.
+        // `.wait()` blocks the calling thread (WebBundle.boot's task thread,
+        // never an event-loop thread) until the bind resolves or throws.
+        let bound = try bootstrap.bind(host: "0.0.0.0", port: Int(portHint)).wait()
+        lock.lock()
+        channel = bound
+        lock.unlock()
+        let resolvedPort = UInt16(bound.localAddress?.port ?? 0)
         kernel.setHttpPort(resolvedPort)
         if let agent = kernel.agent(agentId) {
             agent.updateMeta([
@@ -219,149 +156,111 @@ public final class WebServer: @unchecked Sendable {
     }
 
     public func stop() {
-        listener?.cancel()
-        listener = nil
+        lock.lock()
+        let ch = channel
+        channel = nil
+        lock.unlock()
+        ch?.close(promise: nil)
         kernel.setHttpPort(0)
         if let agent = kernel.agent(agentId) {
             agent.updateMeta(["running": .bool(false)])
         }
     }
 
-    // MARK: - Per-connection lifecycle
+    // MARK: - Pipeline
 
-    private func accept(_ connection: NWConnection) {
-        let id = ObjectIdentifier(connection)
-        lock.lock()
-        connections.insert(id)
-        lock.unlock()
-
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                self?.readRequest(connection)
-            case .cancelled, .failed:
-                self?.lock.lock()
-                self?.connections.remove(id)
-                self?.lock.unlock()
-            default:
-                break
-            }
-        }
-        connection.start(queue: connectionQueue)
-    }
-
-    private func readRequest(_ connection: NWConnection, accumulated: Data = Data()) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) {
-            [weak self] data, _, isComplete, error in
-            guard let self = self else {
-                connection.cancel()
-                return
-            }
-            var buffer = accumulated
-            if let data = data, !data.isEmpty {
-                buffer.append(data)
-            }
-            // Try to parse — if headers aren't fully received yet,
-            // keep reading.
-            if let request = HTTPRequest.tryParse(buffer) {
-                Task { [weak self] in
-                    guard let self = self else { return }
-                    await self.handle(request: request, on: connection)
+    /// Configure a child connection's pipeline: HTTP server + a WebSocket
+    /// upgrade path (the upgrader matches a `.websocket` route and, on
+    /// upgrade, installs the shared `WebSocketProxyHandler`).
+    private func configurePipeline(_ channel: Channel) -> EventLoopFuture<Void> {
+        let kernel = self.kernel
+        let upgrader = NIOWebSocketServerUpgrader(
+            maxFrameSize: 1 << 24,  // 16 MiB: room for raw read_stream/write_stream chunks
+            shouldUpgrade: { [weak self] channel, head in
+                guard let self = self else {
+                    return channel.eventLoop.makeSucceededFuture(nil)
                 }
-                return
+                let segs = RouteSpec.segments(splitQuery(head.uri).0)
+                if let (spec, params) = self.matchRoute(method: "GET", segments: segs),
+                    spec.kind == .websocket, params["host_id"] != nil
+                {
+                    // Empty headers ⇒ upgrade approved; NIO adds Sec-WebSocket-Accept.
+                    return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                }
+                return channel.eventLoop.makeSucceededFuture(nil)
+            },
+            upgradePipelineHandler: { [weak self] channel, head in
+                guard let self = self,
+                    case let segs = RouteSpec.segments(splitQuery(head.uri).0),
+                    let (spec, params) = self.matchRoute(method: "GET", segments: segs),
+                    let hostId = params["host_id"]
+                else {
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }
+                return channel.pipeline.addHandler(
+                    WebSocketProxyHandler(hostId: hostId, legId: spec.ownerId, kernel: kernel))
+            })
+        let httpHandler = HTTPDispatchHandler(server: self)
+        let upgradeConfig: NIOHTTPServerUpgradeConfiguration = (
+            upgraders: [upgrader],
+            completionHandler: { _ in
+                // Upgrade SUCCEEDED — the plain-HTTP dispatch handler is no
+                // longer needed and must be removed, else post-upgrade
+                // WebSocket bytes reach its HTTP decoder and crash ("found
+                // IOData, expected HTTPPart"). NIO removes the HTTP codec it
+                // installed, but NOT handlers we added after the upgrader.
+                channel.pipeline.removeHandler(httpHandler, promise: nil)
             }
-            if error != nil || isComplete {
-                connection.cancel()
-                return
-            }
-            // Need more bytes.
-            self.readRequest(connection, accumulated: buffer)
+        )
+        return channel.pipeline.configureHTTPServerPipeline(
+            withServerUpgrade: upgradeConfig
+        ).flatMap {
+            channel.pipeline.addHandler(httpHandler)
         }
     }
 
-    // MARK: - Request handling
+    // MARK: - Request handling (HTTP; WS is handled by the upgrader above)
 
-    private func handle(request: HTTPRequest, on connection: NWConnection) async {
-        // Strip the query string before routing; keep it for dynamic
-        // HTTP handlers (e.g. web_rest's `?readme=1`).
+    func handle(request: HTTPRequest) async -> HTTPResponse {
         let (pathOnly, query) = splitQuery(request.path)
         let segments = RouteSpec.segments(pathOnly)
-        let isWSUpgrade = request.headers["Upgrade"]?.lowercased() == "websocket"
 
         // ── Built-in rendering routes (host owns these) ──
         switch (request.method, pathOnly) {
         case ("GET", "/"):
-            await write(response: await serveIndex(), to: connection)
-            return
+            return await serveIndex()
         case ("GET", "/_fantastic/transport.js"):
-            // URL matches python/web/host/app.py — keeps the bundled
-            // transport.js reachable at the same path on both runtimes.
-            await write(
-                response: HTTPResponse(
-                    status: 200, contentType: "application/javascript",
-                    body: WebAssets.transportJS.data(using: .utf8) ?? Data()),
-                to: connection)
-            return
+            return HTTPResponse(
+                status: 200, contentType: "application/javascript",
+                body: WebAssets.transportJS.data(using: .utf8) ?? Data())
         case ("GET", "/favicon.png"):
-            await write(
-                response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
-                to: connection)
-            return
+            return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
         case ("GET", let path) where path.hasPrefix("/_assets/"):
             if let asset = WebAssets.body(forPath: path) {
-                await write(
-                    response: HTTPResponse(
-                        status: 200, contentType: asset.contentType,
-                        body: asset.body.data(using: .utf8) ?? Data(),
-                        extraHeaders: [
-                            "Cache-Control": "public, max-age=31536000, immutable"
-                        ]),
-                    to: connection)
-            } else {
-                await write(
-                    response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
-                    to: connection)
+                return HTTPResponse(
+                    status: 200, contentType: asset.contentType,
+                    body: asset.body.data(using: .utf8) ?? Data(),
+                    extraHeaders: ["Cache-Control": "public, max-age=31536000, immutable"])
             }
-            return
+            return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
         default:
             break
         }
 
-        // ── Dynamic surfaces (web_ws / web_rest children) ──
-        if isWSUpgrade {
-            // WS is opt-in: served only when a web_ws child contributed
-            // a `/{host_id}/ws` route. No route → 404 (parity: Python's
-            // host doesn't serve WS without web_ws).
-            if let (spec, params) = matchRoute(method: "GET", segments: segments),
-                spec.kind == .websocket,
-                let hostId = params["host_id"]
-            {
-                runWebSocketProxy(
-                    hostId: hostId, legId: spec.ownerId, connection: connection,
-                    request: request, kernel: kernel)
-                return
-            }
-            await write(
-                response: HTTPResponse(status: 404, contentType: "text/plain", body: Data()),
-                to: connection)
-            return
-        }
+        // ── Dynamic .http surfaces (web_rest children) ──
         if let (spec, params) = matchRoute(method: request.method, segments: segments),
             spec.kind == .http
         {
-            let resp = await dispatchHTTPRoute(
+            return await dispatchHTTPRoute(
                 spec: spec, params: params, query: query, request: request)
-            await write(response: resp, to: connection)
-            return
         }
 
-        // ── Built-in agent rendering routes (GET /<id>/, /<id>/file) ──
-        await write(response: await serveAgentRoute(request: request), to: connection)
+        // ── Built-in agent rendering routes (GET /<id>/, /<id>/file/<path>) ──
+        return await serveAgentRoute(request: request)
     }
 
     /// Forward a matched HTTP route to its owning child agent via the
-    /// `handle_route` verb. The owner returns `{status, content_type,
-    /// body}` which we translate into an `HTTPResponse`.
+    /// `handle_route` verb → `{status, content_type, body}`.
     private func dispatchHTTPRoute(
         spec: RouteSpec, params: [String: String], query: [String: String],
         request: HTTPRequest
@@ -392,8 +291,7 @@ public final class WebServer: @unchecked Sendable {
     private func serveIndex() async -> HTTPResponse {
         let listed = await kernel.send(
             AgentId("core"), .object(["type": .string("list_agents")]))
-        let ids = (listed["agents"].asArray ?? [])
-            .compactMap { $0["id"].asString }
+        let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         let html = """
             <!doctype html><html><head><title>fantastic</title></head>
             <body>
@@ -404,8 +302,7 @@ public final class WebServer: @unchecked Sendable {
             </body></html>
             """
         return HTTPResponse(
-            status: 200, contentType: "text/html",
-            body: html.data(using: .utf8) ?? Data())
+            status: 200, contentType: "text/html", body: html.data(using: .utf8) ?? Data())
     }
 
     private func serveAgentRoute(request: HTTPRequest) async -> HTTPResponse {
@@ -413,12 +310,11 @@ public final class WebServer: @unchecked Sendable {
             return HTTPResponse(status: 404, contentType: "text/plain", body: Data())
         }
         let agentTarget = AgentId(firstSeg)
-        // `GET /<id>/` → render_html
+        // `GET /<id>/` or `/<id>` → render_html + transport injection.
         if request.method == "GET",
             request.path == "/\(firstSeg)/" || request.path == "/\(firstSeg)"
         {
-            let reply = await kernel.send(
-                agentTarget, .object(["type": .string("render_html")]))
+            let reply = await kernel.send(agentTarget, .object(["type": .string("render_html")]))
             if let html = reply["html"].asString {
                 let injected = WebAssets.injectTransport(into: html)
                 return HTTPResponse(
@@ -427,18 +323,14 @@ public final class WebServer: @unchecked Sendable {
             }
             return HTTPResponse(
                 status: 404, contentType: "text/plain",
-                body: (reply["error"].asString ?? "no render_html reply")
-                    .data(using: .utf8) ?? Data())
+                body: (reply["error"].asString ?? "no render_html reply").data(using: .utf8)
+                    ?? Data())
         }
         // `GET /<id>/file/<path>` → pipe the agent's `read_stream` SOURCE (raw
         // bytes, chunked; gated by the served agent's OWN leg — a sealed
-        // file_bridge denies → 404). Mirrors py/rust's read_stream octet route;
-        // no whole-file `read`/`image_base64` fallback.
-        if request.method == "GET",
-            request.path.hasPrefix("/\(firstSeg)/file/")
-        {
-            let filePath = String(
-                request.path.dropFirst("/\(firstSeg)/file/".count))
+        // file_bridge denies → 404). No whole-file `read` fallback.
+        if request.method == "GET", request.path.hasPrefix("/\(firstSeg)/file/") {
+            let filePath = String(request.path.dropFirst("/\(firstSeg)/file/".count))
             var buf = Data()
             var offset = 0
             while true {
@@ -457,59 +349,88 @@ public final class WebServer: @unchecked Sendable {
                 offset = Int(meta["next_offset"].asInt ?? Int64(offset))
                 if meta["eof"].asBool ?? true { break }
             }
-            return HTTPResponse(
-                status: 200, contentType: guessMime(path: filePath), body: buf)
+            return HTTPResponse(status: 200, contentType: guessMime(path: filePath), body: buf)
         }
-        // POST/REST surfaces are no longer served by the host — they
-        // live in the `web_rest` child (parity with Python). An
-        // unmatched request that reached here is a 404.
         return HTTPResponse(
-            status: 404, contentType: "text/plain",
-            body: "no route".data(using: .utf8) ?? Data())
-    }
-
-    /// Split a request path into its path component + parsed query
-    /// dict. `/a/b?x=1&y=2` → (`/a/b`, [x:1, y:2]).
-    private func splitQuery(_ path: String) -> (String, [String: String]) {
-        guard let q = path.firstIndex(of: "?") else { return (path, [:]) }
-        let pathOnly = String(path[..<q])
-        let queryStr = String(path[path.index(after: q)...])
-        var query: [String: String] = [:]
-        for pair in queryStr.split(separator: "&") {
-            let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
-            if kv.count == 2 {
-                query[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
-            } else if kv.count == 1 {
-                query[kv[0]] = ""
-            }
-        }
-        return (pathOnly, query)
-    }
-
-    private func write(response: HTTPResponse, to connection: NWConnection) async {
-        let headers =
-            response.extraHeaders
-            .map { "\($0.key): \($0.value)\r\n" }
-            .joined()
-        let head = """
-            HTTP/1.1 \(response.status) \(statusText(response.status))\r
-            Content-Type: \(response.contentType)\r
-            Content-Length: \(response.body.count)\r
-            Connection: close\r
-            \(headers)\r
-
-            """
-        var out = head.data(using: .utf8) ?? Data()
-        out.append(response.body)
-        connection.send(
-            content: out,
-            completion: .contentProcessed { _ in
-                connection.cancel()
-            })
+            status: 404, contentType: "text/plain", body: "no route".data(using: .utf8) ?? Data())
     }
 }
 
-// MARK: - HTTP types
+// MARK: - NIO HTTP dispatch handler
+
+/// Collects one request (head + body + end), dispatches it to the
+/// `WebServer`'s async router, and writes the response — then closes
+/// (one request per connection, `Connection: close`, mirroring the
+/// former hand-rolled server). The async hop into `kernel.send` is the
+/// project's established bridge idiom; the context is carried into the
+/// completion via `NIOLoopBound` (only ever touched on its event loop).
+final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
+
+    private let server: WebServer
+    private var head: HTTPRequestHead?
+    private var bodyBuffer: ByteBuffer?
+
+    init(server: WebServer) { self.server = server }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        switch unwrapInboundIn(data) {
+        case .head(let h):
+            head = h
+            bodyBuffer = nil
+        case .body(var chunk):
+            if bodyBuffer == nil {
+                bodyBuffer = chunk
+            } else {
+                bodyBuffer!.writeBuffer(&chunk)
+            }
+        case .end:
+            guard let h = head else { return }
+            let bodyData: Data? = bodyBuffer.flatMap {
+                $0.getData(at: $0.readerIndex, length: $0.readableBytes)
+            }
+            var headers: [String: String] = [:]
+            for (name, value) in h.headers { headers[name] = value }
+            let req = HTTPRequest(
+                method: h.method.rawValue, path: h.uri, headers: headers, body: bodyData)
+            head = nil
+            bodyBuffer = nil
+
+            let server = self.server
+            let bound = NIOLoopBound((context, self), eventLoop: context.eventLoop)
+            let eventLoop = context.eventLoop
+            Task {
+                let resp = await server.handle(request: req)
+                eventLoop.execute {
+                    let (ctx, handler) = bound.value
+                    handler.writeResponse(context: ctx, response: resp)
+                }
+            }
+        }
+    }
+
+    private func writeResponse(context: ChannelHandlerContext, response: HTTPResponse) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: response.contentType)
+        headers.add(name: "Content-Length", value: String(response.body.count))
+        headers.add(name: "Connection", value: "close")
+        for (k, v) in response.extraHeaders { headers.add(name: k, value: v) }
+        let respHead = HTTPResponseHead(
+            version: .http1_1,
+            status: HTTPResponseStatus(statusCode: response.status, reasonPhrase: statusText(response.status)),
+            headers: headers)
+        context.write(wrapOutboundOut(.head(respHead)), promise: nil)
+        var buf = context.channel.allocator.buffer(capacity: response.body.count)
+        buf.writeBytes(response.body)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+            context.close(promise: nil)
+        }
+    }
+}
+
+// MARK: - HTTP request/response models
 
 public struct HTTPRequest: Sendable {
     public let method: String
@@ -525,40 +446,6 @@ public struct HTTPRequest: Sendable {
         }
         return String(trimmed[..<idx])
     }
-
-    /// Attempt to parse `data` as a complete HTTP/1.1 request.
-    /// Returns nil if the buffer doesn't yet contain a full message.
-    static func tryParse(_ data: Data) -> HTTPRequest? {
-        guard let crlfCrlf = rangeOfCRLFCRLF(in: data) else { return nil }
-        let headerData = data.prefix(upTo: crlfCrlf.lowerBound)
-        guard let headerStr = String(data: headerData, encoding: .utf8) else { return nil }
-        let lines = headerStr.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else { return nil }
-        let parts = requestLine.split(separator: " ", maxSplits: 2)
-            .map(String.init)
-        guard parts.count >= 2 else { return nil }
-        let method = parts[0]
-        let path = parts[1]
-        var headers: [String: String] = [:]
-        for line in lines.dropFirst() where !line.isEmpty {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
-            let value = String(line[line.index(after: colon)...])
-                .trimmingCharacters(in: .whitespaces)
-            headers[key] = value
-        }
-        // Body extraction if Content-Length present.
-        var body: Data? = nil
-        if let lenStr = headers["Content-Length"], let len = Int(lenStr), len > 0 {
-            let bodyStart = crlfCrlf.upperBound
-            let available = data.count - bodyStart
-            if available < len {
-                return nil  // need more bytes
-            }
-            body = data[bodyStart..<(bodyStart + len)]
-        }
-        return HTTPRequest(method: method, path: path, headers: headers, body: body)
-    }
 }
 
 public struct HTTPResponse: Sendable {
@@ -567,12 +454,7 @@ public struct HTTPResponse: Sendable {
     let body: Data
     let extraHeaders: [String: String]
 
-    init(
-        status: Int,
-        contentType: String,
-        body: Data,
-        extraHeaders: [String: String] = [:]
-    ) {
+    init(status: Int, contentType: String, body: Data, extraHeaders: [String: String] = [:]) {
         self.status = status
         self.contentType = contentType
         self.body = body
@@ -580,15 +462,24 @@ public struct HTTPResponse: Sendable {
     }
 }
 
-private func rangeOfCRLFCRLF(in data: Data) -> Range<Data.Index>? {
-    let needle: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
-    guard data.count >= needle.count else { return nil }
-    for i in data.startIndex...(data.endIndex - needle.count) {
-        if data[i..<(i + needle.count)].elementsEqual(needle) {
-            return i..<(i + needle.count)
+// MARK: - shared helpers
+
+/// Split a request path into its path component + parsed query dict.
+/// `/a/b?x=1&y=2` → (`/a/b`, [x:1, y:2]).
+func splitQuery(_ path: String) -> (String, [String: String]) {
+    guard let q = path.firstIndex(of: "?") else { return (path, [:]) }
+    let pathOnly = String(path[..<q])
+    let queryStr = String(path[path.index(after: q)...])
+    var query: [String: String] = [:]
+    for pair in queryStr.split(separator: "&") {
+        let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+        if kv.count == 2 {
+            query[kv[0]] = kv[1].removingPercentEncoding ?? kv[1]
+        } else if kv.count == 1 {
+            query[kv[0]] = ""
         }
     }
-    return nil
+    return (pathOnly, query)
 }
 
 private func statusText(_ status: Int) -> String {

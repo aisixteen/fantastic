@@ -64,33 +64,41 @@ public protocol CloudByteChannel: Sendable {
 /// Raised by a `CloudByteChannel` when the underlying transport closes.
 public struct CloudChannelClosed: Error { public let reason: String }
 
-/// Production channel: a URLSession WebSocket to the relay, Binary frames.
+/// Production channel: a swift-nio WebSocket to the relay, Binary frames.
 public actor WSByteChannel: CloudByteChannel {
-    private let task: URLSessionWebSocketTask
+    private let client: NIOWebSocketClient
+
+    private init(client: NIOWebSocketClient) {
+        self.client = client
+    }
 
     /// Dial `relayURL`, offering `fantastic.relay.v1` + the verbatim `token` as
-    /// the two WS subprotocols (URLSession emits them as
-    /// `Sec-WebSocket-Protocol: fantastic.relay.v1, <token>`).
-    public init(relayURL: URL, token: String, session: URLSession = .shared) {
-        self.task = session.webSocketTask(with: relayURL, protocols: [CLOUD_SUBPROTOCOL, token])
-        self.task.resume()
+    /// the two WS subprotocols (emitted as
+    /// `Sec-WebSocket-Protocol: fantastic.relay.v1, <token>`). Async: the dial +
+    /// WS upgrade complete before the channel is usable.
+    public static func connect(relayURL: URL, token: String) async throws -> WSByteChannel {
+        let client = try await NIOWebSocketClient.connect(
+            url: relayURL, subprotocols: [CLOUD_SUBPROTOCOL, token])
+        return WSByteChannel(client: client)
     }
 
     public func sendBytes(_ bytes: [UInt8]) async throws {
-        try await task.send(.data(Data(bytes)))
+        try await client.send(.binary(bytes))
     }
 
     public func recvBytes() async throws -> [UInt8] {
-        let msg = try await task.receive()
-        switch msg {
-        case .data(let d): return [UInt8](d)
-        case .string(let s): return [UInt8](s.utf8)
-        @unknown default: return []
+        do {
+            switch try await client.receive() {
+            case .binary(let b): return b
+            case .text(let s): return [UInt8](s.utf8)
+            }
+        } catch {
+            throw CloudChannelClosed(reason: "relay websocket closed: \(error)")
         }
     }
 
     public func close() async {
-        task.cancel(with: .normalClosure, reason: nil)
+        await client.close()
     }
 }
 

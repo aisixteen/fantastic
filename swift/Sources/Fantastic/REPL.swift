@@ -289,6 +289,8 @@ enum REPLMode {
 
     private static func printLine(_ s: String) {
         print(s)
-        fflush(stdout)
+        // Flush ALL streams — avoids the `stdout` C global (a mutable `var` on
+        // Glibc that Swift 6 strict concurrency rejects on Linux).
+        fflush(nil)
     }
 }

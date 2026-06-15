@@ -11,7 +11,10 @@ rust/target
 **/.fantastic
 integration_tests/tmp
 swift/.build
-swift/Tests
+# swift/Tests is NOT excluded: `swift build` (the swift-build stage) validates
+# that every target declared in Package.swift has its source dir present —
+# including testTargets — so stripping Tests/ breaks the build. The final image
+# copies only the built binary, never the test sources.
 .claude
 # ts/dist is large + regenerated; the image copies ONLY the prebuilt bundle.
 ts/dist/*
