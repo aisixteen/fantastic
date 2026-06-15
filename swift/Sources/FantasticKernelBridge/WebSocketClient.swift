@@ -33,7 +33,10 @@ public actor NIOWebSocketClient {
 
     /// Thrown by `receive()` once the connection has closed (peer close frame,
     /// TCP drop, or local `close()`).
-    public struct Closed: Error { public let reason: String }
+    public struct Closed: Error {
+        public let reason: String
+        public init(reason: String) { self.reason = reason }
+    }
 
     /// Process-shared loop group (matches the rest of the kernel's NIO usage —
     /// never shut down).
@@ -49,10 +52,12 @@ public actor NIOWebSocketClient {
     }
 
     /// Dial `url`, complete the HTTP→WS upgrade, and return a connected client.
-    /// `subprotocols` are offered verbatim as `Sec-WebSocket-Protocol`. Throws
-    /// if the TCP connect, TLS handshake, or WS upgrade fails.
+    /// `subprotocols` are offered verbatim as `Sec-WebSocket-Protocol`;
+    /// `authToken`, if set, is sent as an `X-Fantastic-Auth` header (the relay's
+    /// connection credential). Throws if the TCP connect, TLS handshake, or WS
+    /// upgrade fails.
     public static func connect(
-        url: URL, subprotocols: [String] = []
+        url: URL, subprotocols: [String] = [], authToken: String? = nil
     ) async throws -> NIOWebSocketClient {
         guard let scheme = url.scheme?.lowercased(),
             let host = url.host
@@ -94,7 +99,8 @@ public actor NIOWebSocketClient {
                     completionHandler: { _ in signal.succeed() }
                 )
                 let requester = WSUpgradeRequester(
-                    host: host, uri: uri, subprotocols: subprotocols, signal: signal)
+                    host: host, uri: uri, subprotocols: subprotocols,
+                    authToken: authToken, signal: signal)
                 do {
                     if isTLS {
                         let sslContext = try NIOSSLContext(
@@ -236,12 +242,17 @@ private final class WSUpgradeRequester: ChannelInboundHandler, RemovableChannelH
     private let host: String
     private let uri: String
     private let subprotocols: [String]
+    private let authToken: String?
     private let signal: WSUpgradeSignal
 
-    init(host: String, uri: String, subprotocols: [String], signal: WSUpgradeSignal) {
+    init(
+        host: String, uri: String, subprotocols: [String], authToken: String?,
+        signal: WSUpgradeSignal
+    ) {
         self.host = host
         self.uri = uri
         self.subprotocols = subprotocols
+        self.authToken = authToken
         self.signal = signal
     }
 
@@ -252,6 +263,9 @@ private final class WSUpgradeRequester: ChannelInboundHandler, RemovableChannelH
         if !subprotocols.isEmpty {
             headers.add(
                 name: "Sec-WebSocket-Protocol", value: subprotocols.joined(separator: ", "))
+        }
+        if let authToken = authToken {
+            headers.add(name: "X-Fantastic-Auth", value: authToken)
         }
         let head = HTTPRequestHead(
             version: .http1_1, method: .GET, uri: uri, headers: headers)

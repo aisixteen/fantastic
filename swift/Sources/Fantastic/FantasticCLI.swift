@@ -47,26 +47,6 @@ struct FantasticCLI {
             return
         }
 
-        // `__cloud-cert <id_key_b64url>` — print this runtime's deterministic
-        // device cert (PEM) for an Ed25519 id_key. No kernel/lock; used by the
-        // relay e2e harness to cross-pin a swift leg's ACTUAL cert.
-        if args.first == "__cloud-cert", let idkB64 = args.dropFirst().first {
-            guard let idKey = CloudCert.b64urlDecode(idkB64), idKey.count == 32 else {
-                FileHandle.standardError.write(
-                    "fantastic: __cloud-cert: bad id_key\n".data(using: .utf8) ?? Data())
-                exit(2)
-            }
-            do {
-                let (certDER, _) = try CloudCert.selfSigned(idKey: idKey)
-                print(CloudCert.pem(certDER), terminator: "")
-            } catch {
-                FileHandle.standardError.write(
-                    "fantastic: __cloud-cert: \(error)\n".data(using: .utf8) ?? Data())
-                exit(1)
-            }
-            return
-        }
-
         // `reflect [<id>] [k=v ...]` — read-only, no lock.
         // Default target is `kernel` (matches Python; Swift's
         // substrate doesn't have a `kernel`-named agent yet, so the

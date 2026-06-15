@@ -1,11 +1,11 @@
-"""STREAMS through the relay — raw bytes cross-kernel over cloud_bridge.
+"""STREAMS through the relay — raw bytes cross-kernel over relay_connector.
 
 The matrix (test_relay_matrix) proves text `call`/`reply` round-trips through the
 relay. This proves the BINARY half: a `write_stream`/`read_stream` chunk rides the
 whole chain as RAW BYTES (never base64) —
 
-    test ──binary WS frame──▶ A.web_ws ──▶ A.cloud_bridge ──tag-1 TLS record──▶
-        relay (opaque ciphertext) ──▶ B.cloud_bridge ──▶ B.file_bridge (disk)
+    test ──binary WS frame──▶ A.web_ws ──▶ A.relay_connector ──binary WS frame──▶
+        relay-kernel (routes by target) ──▶ B.relay_connector ──▶ B.file_bridge (disk)
 
 and back out for `read_stream`. A is always python (the canonical driver — the
 test speaks the io_bridge binary-frame codec straight onto A's web_ws); B is
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import struct
 import sys
 import uuid
@@ -32,14 +31,14 @@ import pytest
 import websockets
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from relay_harness import Relay, cloud_cert, new_id_key, require_relay  # noqa: E402
+from relay_harness import Relay, require_relay  # noqa: E402
 
 from helpers.kernel_proc import KernelProc  # noqa: E402
 from helpers.seeding import seed_create, seed_web, seed_web_ws  # noqa: E402
-from test_relay_matrix import CLOUD_BRIDGE_RUNTIMES, _HANDLER_MODULE, _cb_meta  # noqa: E402
+from test_relay_matrix import RELAY_RUNTIMES, _HANDLER_MODULE, _relay_meta  # noqa: E402
 
 # A python driver streams to each host runtime's fs through the relay.
-TARGETS = [rt for rt in ("python", "rust", "swift") if rt in CLOUD_BRIDGE_RUNTIMES]
+TARGETS = [rt for rt in ("python", "rust", "swift") if rt in RELAY_RUNTIMES]
 
 # Non-UTF-8 bytes — proves the channel is raw, not text/base64.
 PAYLOAD = bytes([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80]) * 1024  # 8 KiB
@@ -142,7 +141,7 @@ async def test_relay_streams_raw_bytes(
         ingress_rule="allow_all",
     )
 
-    relay = Relay(*require_relay(), free_port()).start()
+    relay = Relay(require_relay(), free_port()).start()
     spawned: list[KernelProc] = []
     try:
         kp_a = bin_a.start_daemon(wd_a, port_a, label="python")
@@ -152,32 +151,19 @@ async def test_relay_streams_raw_bytes(
         spawned.append(kp_b)
         await kp_b.wait_ready()
 
-        idk_a, idk_b = new_id_key(), new_id_key()
-        cert_a = cloud_cert("python", idk_a, bin_a, wd_a)
-        cert_b = cloud_cert(rt_b, idk_b, bin_b, wd_b)
-        rv = "rv-" + os.urandom(4).hex()
-        meta_a = _cb_meta(
+        meta_a = _relay_meta(
             handler_module=_HANDLER_MODULE["python"],
-            peer="A",
-            partner="B",
-            role="client",
+            guid="A",
+            partner_guid="B",
             relay_url=relay.url,
-            rendezvous=rv,
-            id_key=idk_a,
-            peer_cert_pem=cert_b,
-            issue_url=relay.issue_url,
-            auth=None,
+            relay_token=relay.password,
         )
-        meta_b = _cb_meta(
+        meta_b = _relay_meta(
             handler_module=_HANDLER_MODULE[rt_b],
-            peer="B",
-            partner="A",
-            role="server",
+            guid="B",
+            partner_guid="A",
             relay_url=relay.url,
-            rendezvous=rv,
-            id_key=idk_b,
-            peer_cert_pem=cert_a,
-            issue_url=relay.issue_url,
+            relay_token=relay.password,
             # B answers inbound forwards — its leg must be explicitly OPEN.
             auth="allow_all",
         )

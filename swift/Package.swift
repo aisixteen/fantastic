@@ -154,15 +154,14 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
                 .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 // HTTP/1 + WebSocket: the cross-platform WS CLIENT
                 // (NIOWebSocketClient) the bridge dials peers/relay with —
                 // replaces URLSessionWebSocketTask (Apple-only, dead on Linux).
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
+                // NIOSSL: TLS for the WS client's wss:// dials (relay via cloudflared).
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
-                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         .target(

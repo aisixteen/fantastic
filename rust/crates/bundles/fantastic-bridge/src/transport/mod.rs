@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
 
-pub mod cloud;
 pub mod memory;
+pub mod relay;
 #[cfg(feature = "full")]
 pub mod ssh;
 pub mod ws;
@@ -111,4 +111,19 @@ pub trait BridgeTransport: Send + Sync {
     /// Idempotent close. Subsequent `recv_frame` resolves with
     /// `ConnectionClosed`; subsequent `send_frame` likewise.
     async fn close(&self);
+
+    /// Directory snapshot from a relay-kernel router (`relay_connector` only):
+    /// `{peers:[{guid,status,last_seen,since}]}`. Default: not a relay transport.
+    async fn list_peers(&self, _timeout_s: f64) -> Value {
+        serde_json::json!({"error": "transport has no relay directory"})
+    }
+    /// Subscribe to the relay directory; `peer_*` events re-emit on the connector
+    /// inbox. Default: not a relay transport.
+    async fn watch_directory(&self, _timeout_s: f64) -> Value {
+        serde_json::json!({"error": "transport has no relay directory"})
+    }
+    /// Stop the directory subscription. Default: no-op.
+    async fn unwatch_directory(&self) -> Value {
+        serde_json::json!({"ok": true})
+    }
 }

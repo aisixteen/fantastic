@@ -24,7 +24,7 @@ dependencies = [
   "fantastic-python-runtime",
   "fantastic-io-bridge",
   "fantastic-ws-bridge",
-  "fantastic-cloud-bridge",
+  "fantastic-relay-connector",
   "fantastic-ssh-runner",
   "fantastic-local-runner",
   "fantastic-runner-core",
@@ -63,7 +63,7 @@ testpaths = [
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
   "bundled_agents/io/io_bridge/tests",
   "bundled_agents/io/ws_bridge/tests",
-  "bundled_agents/io/cloud_bridge/tests",
+  "bundled_agents/io/relay_connector/tests",
   "bundled_agents/runner/ssh_runner/tests",
   "bundled_agents/runner/local_runner/tests",
   "bundled_agents/python_runtime/tests",
@@ -85,7 +85,7 @@ members = [
   "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/io/io_bridge",
   "bundled_agents/io/ws_bridge",
-  "bundled_agents/io/cloud_bridge",
+  "bundled_agents/io/relay_connector",
   "bundled_agents/runner/ssh_runner",
   "bundled_agents/runner/local_runner",
   "bundled_agents/runner/runner_core",
@@ -109,7 +109,7 @@ fantastic-nvidia-nim-backend = { workspace = true }
 fantastic-anthropic-backend = { workspace = true }
 fantastic-io-bridge = { workspace = true }
 fantastic-ws-bridge = { workspace = true }
-fantastic-cloud-bridge = { workspace = true }
+fantastic-relay-connector = { workspace = true }
 fantastic-ssh-runner = { workspace = true }
 fantastic-local-runner = { workspace = true }
 fantastic-runner-core = { workspace = true }

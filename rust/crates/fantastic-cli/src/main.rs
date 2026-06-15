@@ -37,9 +37,12 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_ollama_backend::OllamaBackendBundle,
     );
     // The bridge ships TWO derivations of io_bridge (mirrors py's separate
-    // ws_bridge + cloud_bridge bundles): ws/ssh transports vs the relay.
+    // ws_bridge + relay_connector bundles): ws/ssh transports vs the relay-kernel router.
     reg.register("ws_bridge.tools", fantastic_bridge::WsBridgeBundle);
-    reg.register("cloud_bridge.tools", fantastic_bridge::CloudBridgeBundle);
+    reg.register(
+        "relay_connector.tools",
+        fantastic_bridge::RelayConnectorBundle,
+    );
     reg.register(
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
@@ -100,17 +103,6 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    // `__cloud-cert <id_key_b64url>` — print this runtime's deterministic device
-    // cert (PEM) for an Ed25519 id_key. No workdir/bootstrap; used by the relay
-    // e2e harness to cross-pin a rust leg's actual cert.
-    if args.first().map(String::as_str) == Some("__cloud-cert") {
-        let idk = args
-            .get(1)
-            .ok_or("__cloud-cert: id_key (b64url) required")?;
-        print!("{}", fantastic_bridge::cloud_cert_pem_b64url(idk)?);
-        return Ok(());
-    }
-
     let workdir = std::env::current_dir()?;
 
     // Seed `.fantastic/readme.md` if missing, regardless of which mode
