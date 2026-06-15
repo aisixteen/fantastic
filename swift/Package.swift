@@ -9,8 +9,12 @@
 // Public products:
 //   • FantasticKernel{Embedded,Full}  — umbrella modules the Apple
 //                                       app imports (`@_exported`)
-//   • FantasticKernel + FantasticJSON + FantasticBundles
-//     + FantasticKernelStartup        — granular libraries
+//   • FantasticKernel + FantasticJSON + FantasticIoBridge
+//     + FantasticBundles + FantasticKernelStartup
+//                                      — granular libraries
+//     (FantasticIoBridge is exported so external hosts — e.g. the
+//      fantastic_relay router — reuse the canonical IngressRules /
+//      egress rules instead of a local copy)
 //   • fantastic                       — CLI executable
 //
 // FantasticKernelEmbedded is the multi-platform sandbox-safe tier
@@ -34,6 +38,10 @@ let package = Package(
     products: [
         .library(name: "FantasticJSON", targets: ["FantasticJSON"]),
         .library(name: "FantasticKernel", targets: ["FantasticKernel"]),
+        // The io base (channel model + IngressRules/egress rule registries +
+        // gate_inbound). Exported so external hosts (the fantastic_relay router)
+        // delegate their password rule to the canonical rules, not a local copy.
+        .library(name: "FantasticIoBridge", targets: ["FantasticIoBridge"]),
         .library(name: "FantasticBundles", targets: [
             "FantasticFile",
             "FantasticYamlState",
