@@ -6,7 +6,11 @@
 // On boot we check whether an existing lock's `pid` is still alive
 // via `kill(pid, 0)` — stale locks (dead pid) get overwritten.
 
-import Darwin
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
 import FantasticJSON
 import Foundation
 
