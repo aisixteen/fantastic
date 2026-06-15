@@ -80,11 +80,12 @@ async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
     assert "nvapi-secret" not in blob1
 
 
-async def test_send_requires_file_bridge_id(seeded_kernel):
+async def test_send_without_provider_failfasts(seeded_kernel):
+    # No file_bridge_id ⇒ no api_key sidecar ⇒ make_provider returns None ⇒ send failfasts
+    # (chat history no longer needs file_bridge_id — it's a mounted chat yaml_state).
     nid = await _make_nvidia(seeded_kernel)
     r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
     assert "error" in r
-    assert "file_bridge_id" in r["error"]
 
 
 async def test_send_requires_api_key(seeded_kernel, store_agent):
@@ -95,10 +96,10 @@ async def test_send_requires_api_key(seeded_kernel, store_agent):
     assert "api_key" in r["error"]
 
 
-async def test_history_requires_file_bridge_id(seeded_kernel):
-    nid = await _make_nvidia(seeded_kernel)
+async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
+    nid = await _make_nvidia(seeded_kernel, store_agent)
     r = await seeded_kernel.send(nid, {"type": "history"})
-    assert "error" in r
+    assert r["messages"] == []
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):
@@ -177,40 +178,31 @@ async def test_clear_api_key_failfast_without_file_bridge_id(seeded_kernel):
 
 
 async def test_history_returns_messages(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    chat = json.dumps(
-        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-    )
-    await seeded_kernel.send(
-        store_agent,
-        {
-            "type": "write",
-            "path": f"agents/{nid}/chat_cli.json",
-            "content": chat,
-        },
-    )
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
+    fp = _FakeProvider([["hello"]])
+    nt._providers[nid] = fp
+    try:
+        await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+    finally:
+        nt._providers.pop(nid, None)
     r = await seeded_kernel.send(nid, {"type": "history"})
-    assert len(r["messages"]) == 2
+    assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
     assert r["client_id"] == "cli"
 
 
 async def test_history_per_client(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    for cid, last in (("alice", "A-reply"), ("bob", "B-reply")):
-        chat = json.dumps(
-            [
-                {"role": "user", "content": f"hi from {cid}"},
-                {"role": "assistant", "content": last},
-            ]
+    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
+    fp = _FakeProvider([["A-reply"], ["B-reply"]])
+    nt._providers[nid] = fp
+    try:
+        await seeded_kernel.send(
+            nid, {"type": "send", "text": "hi from alice", "client_id": "alice"}
         )
         await seeded_kernel.send(
-            store_agent,
-            {
-                "type": "write",
-                "path": f"agents/{nid}/chat_{cid}.json",
-                "content": chat,
-            },
+            nid, {"type": "send", "text": "hi from bob", "client_id": "bob"}
         )
+    finally:
+        nt._providers.pop(nid, None)
     a = await seeded_kernel.send(nid, {"type": "history", "client_id": "alice"})
     b = await seeded_kernel.send(nid, {"type": "history", "client_id": "bob"})
     assert a["messages"][-1]["content"] == "A-reply"
@@ -260,24 +252,22 @@ async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_run_persists_history_via_file_bridge(
-    seeded_kernel, store_agent, tmp_path
-):
+async def test_run_persists_history(seeded_kernel, store_agent):
+    # History lands in the mounted chat yaml_state (persisted THROUGH the loader),
+    # NOT a chat_<client>.json the AI writes itself — read it back via `history`.
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["reply"]])
     nt._providers[nid] = fp
     try:
         await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
-        path = tmp_path / ".fantastic" / "agents" / nid / "chat_cli.json"
-        assert path.exists()
-        data = json.loads(path.read_text())
-        assert data[-2] == {"role": "user", "content": "hi"}
-        assert data[-1] == {"role": "assistant", "content": "reply"}
     finally:
         nt._providers.pop(nid, None)
+    data = (await seeded_kernel.send(nid, {"type": "history"}))["messages"]
+    assert data[-2] == {"role": "user", "content": "hi"}
+    assert data[-1] == {"role": "assistant", "content": "reply"}
 
 
-async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_path):
+async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     nt._providers[nid] = fp
@@ -288,15 +278,16 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_p
         await seeded_kernel.send(
             nid, {"type": "send", "text": "hi B", "client_id": "bob"}
         )
-        path_a = tmp_path / ".fantastic" / "agents" / nid / "chat_alice.json"
-        path_b = tmp_path / ".fantastic" / "agents" / nid / "chat_bob.json"
-        assert path_a.exists() and path_b.exists()
-        a = json.loads(path_a.read_text())
-        b = json.loads(path_b.read_text())
-        assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
-        assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
     finally:
         nt._providers.pop(nid, None)
+    a = (await seeded_kernel.send(nid, {"type": "history", "client_id": "alice"}))[
+        "messages"
+    ]
+    b = (await seeded_kernel.send(nid, {"type": "history", "client_id": "bob"}))[
+        "messages"
+    ]
+    assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
+    assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
 
 
 async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):

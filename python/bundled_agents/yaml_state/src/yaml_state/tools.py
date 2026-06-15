@@ -35,12 +35,18 @@ _DATA_SENTENCE = (
     "Your durable scratch-state (component state, config, run params, current "
     "selection). One value per key, overwrite-in-place; `read` it when you need it."
 )
+_CHAT_SENTENCE = (
+    "An append-only conversation log (one list per client key). `append` turns, "
+    "`read` the thread back. Used as a backend's durable chat history."
+)
+
+_SENTENCES = {"mem": _MEM_SENTENCE, "data": _DATA_SENTENCE, "chat": _CHAT_SENTENCE}
 
 
 def _mode(agent) -> str:
     rec = agent.get(agent.id) or {}
     m = rec.get("mode")
-    return m if m in ("mem", "data") else "data"
+    return m if m in ("mem", "data", "chat") else "data"
 
 
 def _emit_yaml(doc: dict[str, Any]) -> str:
@@ -97,7 +103,7 @@ async def _reflect(id, payload, agent):
     mode = _mode(agent)
     return {
         "id": id,
-        "sentence": _MEM_SENTENCE if mode == "mem" else _DATA_SENTENCE,
+        "sentence": _SENTENCES.get(mode, _DATA_SENTENCE),
         "mode": mode,
         "key_count": len(doc),
         "verbs": {
@@ -165,6 +171,30 @@ async def _replace(id, payload, agent):
     return {"replaced": True, "keys": len(doc)}
 
 
+async def _append(id, payload, agent):
+    """args: key:str, value:any. Append `value` to the list at `key` (creating it). If
+    `value` is a LIST, extend (append each element) — so a batch lands in one call.
+    Append-only log semantics (e.g. a chat thread). Persisted through the loader; failfast if no store wired."""
+    key = payload.get("key")
+    if not isinstance(key, str) or not key:
+        return {"error": "yaml_state.append: key (non-empty str) required"}
+    if "value" not in payload:
+        return {"error": "yaml_state.append: value required"}
+    doc = await _load(agent)
+    cur = doc.get(key)
+    if not isinstance(cur, list):
+        cur = []
+    value = payload["value"]
+    if isinstance(value, list):
+        cur.extend(value)
+    else:
+        cur.append(value)
+    doc[key] = cur
+    if err := await _persist(agent, doc, "append"):
+        return err
+    return {"key": key, "length": len(cur)}
+
+
 async def _state_yaml(id, payload, agent):
     """args: none. The entire store as YAML text — the exact block injected on boot."""
     return {"yaml": _emit_yaml(await _load(agent))}
@@ -176,6 +206,7 @@ VERBS = {
     "read": _read,
     "keys": _keys,
     "set": _set,
+    "append": _append,
     "delete": _delete,
     "replace": _replace,
     "state_yaml": _state_yaml,

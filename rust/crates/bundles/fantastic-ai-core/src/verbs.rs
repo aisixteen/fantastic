@@ -4,9 +4,11 @@
 //! constructed by the backend and passed in per `send`.
 
 use crate::agent_loop::{run_generation, BackendConfig};
+use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
 use crate::events::{emit_done, emit_status, to_caller};
-use crate::helpers::{mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
+use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
 use crate::history::load_history;
+use crate::projection::derive_reaction;
 use crate::provider::Provider;
 use crate::state::{state_for, status_snapshot, CurrentEntry, QueuedEntry};
 use fantastic_kernel::{AgentId, Kernel};
@@ -55,6 +57,110 @@ pub async fn history(
     );
     let messages = load_history(agent_id, kernel, &client_id).await;
     json!({"messages": messages, "client_id": client_id})
+}
+
+/// Compact ONE stored turn for a `recall` reply: bulky tool-call JSON → a
+/// short marker, content capped — so paging back can't itself blow the
+/// window. Bounds the REPLY only, never the store.
+fn recall_render(m: &Value) -> String {
+    let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+    let s = if content.is_empty() {
+        if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
+            let names: Vec<&str> = tcs
+                .iter()
+                .filter_map(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(Value::as_str)
+                })
+                .collect();
+            format!("[tool_calls: {}]", names.join(", "))
+        } else {
+            serde_json::to_string(m).unwrap_or_default()
+        }
+    } else {
+        content.to_string()
+    };
+    s.chars().take(2000).collect()
+}
+
+/// `recall` verb: page turns back from the DURABLE chat store (the FULL
+/// conversation, never trimmed — so anything compaction dropped is one call
+/// away). Read-only. args: `client_id?`, `query?` (case-insensitive
+/// substring), `limit?` (default 20, max 100), `before?` (store index).
+pub async fn recall(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let client_id = safe_client(
+        payload
+            .get("client_id")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CLIENT_ID),
+    );
+    let full = load_history(agent_id, kernel, &client_id).await;
+    let q = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    let q = q.trim();
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(20)
+        .clamp(1, 100) as usize;
+    let before = payload
+        .get("before")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let mut indexed: Vec<(usize, &Value)> = full.iter().enumerate().collect();
+    if let Some(before) = before {
+        indexed.retain(|(i, _)| *i < before);
+    }
+    if !q.is_empty() {
+        indexed.retain(|(_, m)| {
+            serde_json::to_string(m)
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(q)
+        });
+    }
+    let total = indexed.len();
+    let truncated = total > limit;
+    let page = &indexed[total.saturating_sub(limit)..];
+    let messages: Vec<Value> = page
+        .iter()
+        .map(|(i, m)| {
+            json!({"index": i, "role": m.get("role").and_then(Value::as_str), "content": recall_render(m)})
+        })
+        .collect();
+    json!({"messages": messages, "total": total, "truncated": truncated, "client_id": client_id})
+}
+
+/// `context_status` verb: the context-budget posture + the last overflow
+/// projection + the model's derived reaction to it. Read-only.
+pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    let meta = agent_meta(agent_id, kernel);
+    let state = state_for(agent_id);
+    let last_projection = state
+        .projection
+        .lock()
+        .expect("projection poisoned")
+        .clone()
+        .unwrap_or(Value::Null);
+    let last_reaction = derive_reaction(agent_id, &state, kernel)
+        .await
+        .unwrap_or(Value::Null);
+    let strategy = meta
+        .get("context_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("compact");
+    json!({
+        "context_window": resolve_context_window(&meta),
+        "output_reserve": output_reserve(&meta),
+        "budget": agent_budget(&meta),
+        "strategy": strategy,
+        "last_projection": last_projection,
+        "last_reaction": last_reaction,
+    })
 }
 
 /// Per-`send` ceiling, in seconds.

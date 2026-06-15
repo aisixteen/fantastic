@@ -28,10 +28,12 @@ proxy of the lock-poll constants.
 AI rehaul backlog (TODO — not in scope for the current decoupling).
 These items will need a coordinated redesign across all LLM
 backends + the TS ai_view before the next major bump:
-  1. Cross-backend conversation portability — today history lives
-     in <backend>/chat_<client>.json. Switching upstream_id starts
-     a fresh conversation. Future: history travels with the chat
-     tile, backends become stateless-modulo-streaming.
+  1. Cross-backend conversation portability — history now lives in a
+     mounted chat yaml_state (per-client key, persisted THROUGH the
+     loader; the AI writes no disk itself), but it is a child of THIS
+     agent, so switching upstream_id still starts a fresh conversation.
+     Future: history travels with the chat tile, backends become
+     stateless-modulo-streaming.
   2. Tool-call streaming protocol — current contract is one
      tool_call per chunk (ollama) vs argument fragments aggregated
      across chunks (OpenAI/NIM). Pick one and version it.
@@ -39,9 +41,7 @@ backends + the TS ai_view before the next major bump:
      have no defined wire shape. Needs the WS binary frame channel
      (also blocks terminal_backend's image-paste).
   4. Cost / token tracking — no per-turn cost report today.
-  5. Context-window management — backends silently truncate; no
-     surface to inspect or override.
-  6. Auth — api_key sidecar is plaintext; no per-tenant scoping.
+  5. Auth — api_key sidecar is plaintext; no per-tenant scoping.
 """
 
 from __future__ import annotations
@@ -55,6 +55,17 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+
+from ai_core.context import (
+    ProjectionCtx,
+    budget,
+    estimate_one,
+    estimate_tokens,
+    output_reserve,
+    resolve_context_window,
+)
+from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
+from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -82,6 +93,20 @@ _menu_cache: dict[str, list[dict]] = {}
 #   UI can show a pulse indicator (claude-code style).
 _queue: dict[str, list[dict]] = {}
 _current: dict[str, dict] = {}
+
+# Last context-overflow projection per agent — the PUBLIC summary surfaced by the
+# `context_status` verb. {fired:bool, strategy?, kept_turns?, dropped_turns?, summarized?,
+# too_small?}. Kept free of internal bookkeeping (see `_compaction_mark`).
+_projection: dict[str, dict] = {}
+
+# PRIVATE reaction cursor per agent — where the last compaction notice landed in the
+# durable store + which client's thread it was, so `_derive_reaction` can scan from there
+# for the model's recall/persist reaction. Internal; never surfaced in a verb reply.
+_compaction_mark: dict[str, dict] = {}
+
+# The AI's mounted `chat` yaml_state id (its durable history store), keyed by agent id.
+# The conversation lives there (persisted THROUGH the loader) — the AI writes NO disk.
+_chat_agent: dict[str, str] = {}
 
 
 # ─── shared constants ───────────────────────────────────────────
@@ -287,45 +312,66 @@ def _safe_client(client_id: str) -> str:
     return "".join(c if (c.isalnum() or c in "._-") else "_" for c in s)[:64]
 
 
-def _chat_path(self_id: str, client_id: str) -> str:
-    """Per-client chat thread, STORE-RELATIVE (`agents/<id>/…`, not `.fantastic/…`):
-    wire `file_bridge_id` to the `.fantastic` store and the sidecar lands next to the
-    agent's own `agent.json` — one store, no `.fantastic/.fantastic/…` double-nest.
-    Two callers (cli, browser tab) → two files."""
-    return f"agents/{self_id}/chat_{_safe_client(client_id)}.json"
-
-
 def _file_bridge_id(self_id: str, kernel) -> str | None:
+    """Still used by the nvidia backend for its api_key sidecar. Chat history NO LONGER
+    uses it — that lives in a mounted `chat` yaml_state (below), persisted via the loader."""
     rec = kernel.get(self_id) or {}
     return rec.get("file_bridge_id")
 
 
-async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
-    fid = _file_bridge_id(self_id, kernel)
-    if not fid:
-        return []
-    r = await kernel.send(fid, {"type": "read", "path": _chat_path(self_id, client_id)})
-    if not r or "content" not in r:
-        return []
+async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
+    """The AI's mounted `chat` yaml_state — its durable conversation store, which
+    persists THROUGH the loader (the AI writes NO disk itself). Discovered among this
+    agent's children, or created (idempotent + cached). None only if creation fails."""
+    cached = _chat_agent.get(self_id)
+    if cached and kernel.get(cached):
+        return cached
+    _chat_agent.pop(self_id, None)
     try:
-        return json.loads(r["content"])
-    except json.JSONDecodeError:
+        online = await kernel.send("kernel_state", {"type": "list_agents"})
+    except Exception:
+        online = {}
+    for a in online.get("agents", []) if isinstance(online, dict) else []:
+        rec = kernel.get(a.get("id")) or {}
+        if (
+            rec.get("parent_id") == self_id
+            and rec.get("handler_module") == "yaml_state.tools"
+            and rec.get("mode") == "chat"
+        ):
+            _chat_agent[self_id] = a["id"]
+            return a["id"]
+    r = await kernel.send(
+        self_id,
+        {"type": "create_agent", "handler_module": "yaml_state.tools", "mode": "chat"},
+    )
+    cid = r.get("id") if isinstance(r, dict) else None
+    if cid:
+        _chat_agent[self_id] = cid
+    return cid
+
+
+async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
+    """The client's conversation, read from the mounted `chat` yaml_state (key-per-client)."""
+    cid = await _ensure_chat_agent(self_id, kernel)
+    if not cid:
         return []
+    r = await kernel.send(cid, {"type": "read", "key": _safe_client(client_id)})
+    val = r.get("value") if isinstance(r, dict) else None
+    return val if isinstance(val, list) else []
 
 
 async def _save_history(
-    self_id: str, kernel, client_id: str, messages: list[dict]
+    self_id: str, kernel, client_id: str, new_turns: list[dict]
 ) -> None:
-    fid = _file_bridge_id(self_id, kernel)
-    if not fid:
+    """APPEND this turn's new messages to the `chat` yaml_state (key-per-client). The
+    durable record is never trimmed; the projection only shapes what the model sees."""
+    if not new_turns:
+        return
+    cid = await _ensure_chat_agent(self_id, kernel)
+    if not cid:
         return
     await kernel.send(
-        fid,
-        {
-            "type": "write",
-            "path": _chat_path(self_id, client_id),
-            "content": json.dumps(messages, indent=2),
-        },
+        cid, {"type": "append", "key": _safe_client(client_id), "value": new_turns}
     )
 
 
@@ -418,6 +464,21 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
   send tool reaches every agent in the system.
 """
 
+_CONTEXT_HOWTO = """## Context window & compaction
+Your live context is finite. When the conversation outgrows it, the system COMPACTS your
+view: older turns are summarized or elided and a `[context-notice]` turn is inserted. The
+DURABLE transcript is ALWAYS whole — compaction only shapes what you see right now, and
+nothing is ever truly lost.
+- To page dropped turns back on demand: `send('<your_own_id>', {type:'recall', query?, limit?})`.
+  `query` substring-filters your full history; `limit` caps the page. Use it whenever you
+  need a detail from earlier that isn't in your current view.
+- When a compaction notice lands and the dropped span held durable facts (names, decisions,
+  preferences), persist them to your memory agent (in the menu above) via the send tool —
+  that is how they survive beyond this window.
+- To inspect your budget + the last compaction + your own last reaction:
+  `send('<your_own_id>', {type:'context_status'})`.
+"""
+
 
 async def _assemble(
     self_id: str,
@@ -452,6 +513,7 @@ async def _assemble(
                 f"You are `{self_id}`. " + _render_reflect(me),
                 _render_menu(menu),
                 _SEND_HOWTO,
+                _CONTEXT_HOWTO,
             ]
         )
     # System block is rebuilt on EVERY user turn; chat.json holds only
@@ -523,6 +585,177 @@ async def _emit_status(
     )
 
 
+# ─── context-overflow projection (the per-agent strategy) ───────
+
+
+def _recent_n(rec: dict) -> int:
+    try:
+        n = int(rec.get("recent_n"))
+    except (TypeError, ValueError):
+        n = 6
+    return max(1, min(n, 50))
+
+
+def _make_summarizer(provider):
+    """Closure over the backend provider: summarize a span of turns to a string.
+    tools=[] (the summarizer can't tool-call); input is capped so summarizing can't
+    itself blow the window."""
+
+    async def _summarize(msgs: list[dict]) -> str:
+        rendered = "\n".join(
+            f"{m.get('role', '?')}: {str(m.get('content', ''))}" for m in msgs
+        )[:20000]
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "Summarize the conversation excerpt below concisely, PRESERVING "
+                    "names, decisions, facts, preferences, and unresolved tasks. "
+                    "Output ONLY the summary."
+                ),
+            },
+            {"role": "user", "content": rendered},
+        ]
+        parts: list[str] = []
+        async for chunk in provider.chat(prompt, tools=[]):
+            if isinstance(chunk, str):
+                parts.append(chunk)
+        return "".join(parts)
+
+    return _summarize
+
+
+def _context_notice(
+    strategy: str, summary: str | None, omitted_marker: bool, dropped_n: int
+) -> dict:
+    """The ONE canonical inbound context-notice — composed at the SEAM from a strategy's
+    `Projection` artifact (no strategy fabricates its own turn anymore). A `role:user`
+    turn (the role every backend reliably attends to). Carries the protocol affordances:
+    `recall` to page dropped turns back, and persist-to-memory. Injected into the MODEL
+    view ONLY — never the durable store."""
+    lines = [
+        f"[context-notice] Your conversation exceeded the window and was compacted "
+        f"(strategy={strategy}, {dropped_n} earlier turn(s) dropped from THIS view)."
+    ]
+    if summary is not None:
+        lines.append("Summary of the dropped span:\n" + summary)
+    elif omitted_marker:
+        lines.append("An earlier span was omitted in place.")
+    lines.append(
+        "The full transcript is intact in durable storage. To page dropped turns back, "
+        "send {type:'recall', query?, limit?} to your OWN id. If the dropped span holds "
+        "durable facts (names, decisions, preferences), persist them to your memory agent "
+        "now via the send tool — the earlier turns are leaving your live view."
+    )
+    return {"role": "user", "content": "\n".join(lines)}
+
+
+async def _project_context(
+    rec, cfg: Backend, provider, self_id, kernel, client_id, messages
+):
+    """Shape the assembled `messages` to fit the agent's token budget via its configured
+    `context_strategy` (default `compact`), then prepend the ONE canonical context-notice
+    and push a `context:compacted` event to the caller. Returns the projected message
+    list, OR an `{error}` dict when even the system block + the live user turn won't fit
+    (the `too_small` failsafe — a failfast that ALSO pushes a `context:too_small` event,
+    NOT a fallback). Durable store untouched. Called ONCE per send, at turn entry."""
+    b = budget(rec)
+    if estimate_tokens(messages) <= b:
+        _projection[self_id] = {"fired": False}
+        return messages
+    system_block = messages[:1]
+    body = messages[1:]
+    if not body:
+        _projection[self_id] = {"fired": False}
+        return messages
+    sys_tokens = estimate_tokens(system_block)
+    body_budget = b - sys_tokens
+    # The live user turn AND the prepended notice envelope are both non-negotiable — if
+    # there's no room for BOTH, fail loud (so the trim below can never drop the live turn).
+    if body_budget < estimate_one(body[-1]) + NOTICE_ENVELOPE_RESERVE:
+        hint = (
+            f"the system prompt ({sys_tokens} tok) leaves no room in the "
+            f"{resolve_context_window(rec)}-token window for even one turn; "
+            "reduce agents/menu or raise context_window"
+        )
+        _projection[self_id] = {"fired": False, "too_small": True}
+        _compaction_mark.pop(self_id, None)
+        await _to_caller(
+            kernel,
+            self_id,
+            client_id,
+            {
+                "type": "context",
+                "source": self_id,
+                "ts": time.time(),
+                "phase": "too_small",
+                "detail": {
+                    "context_window": resolve_context_window(rec),
+                    "system_tokens": sys_tokens,
+                    "hint": hint,
+                },
+            },
+        )
+        return {"error": f"{cfg.name}: context_insufficient — " + hint}
+    strat_name = rec.get("context_strategy", DEFAULT_STRATEGY)
+    strat = get_strategy(strat_name)
+    if strat is None:
+        return {
+            "error": f"{cfg.name}: unknown context_strategy {strat_name!r} "
+            f"(valid: {strategy_names()})"
+        }
+    ctx = ProjectionCtx(
+        budget=body_budget,
+        recent_n=_recent_n(rec),
+        summarize=_make_summarizer(provider),
+        self_id=self_id,
+        kernel=kernel,
+    )
+    proj = await strat(body, system_block, rec, ctx)
+    notice = _context_notice(
+        strat_name, proj.summary, proj.omitted_marker, len(body) - len(proj.body)
+    )
+    # Single budget authority: the strategy reserved the notice envelope, but guard the
+    # final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the last
+    # (live) turn: the failsafe above guarantees room for [notice + live turn], so the
+    # `len > 1` guard is a defensive backstop, not a fallback.
+    out_body = proj.body
+    while len(out_body) > 1 and estimate_tokens(system_block + [notice] + out_body) > b:
+        out_body = drop_orphan_tools(out_body[1:])
+    dropped_n = max(0, len(body) - len(out_body))
+    _projection[self_id] = {
+        "fired": True,
+        "strategy": strat_name,
+        "kept_turns": len(out_body),
+        "dropped_turns": dropped_n,
+        "summarized": proj.summary is not None,
+    }
+    # PRIVATE reaction cursor: the store index where THIS turn's new turns (incl. any
+    # recall/memory reactions) will land — `_derive_reaction` scans from here.
+    _compaction_mark[self_id] = {
+        "fired_at_index": max(0, len(body) - 1),
+        "client_id": client_id,
+    }
+    await _to_caller(
+        kernel,
+        self_id,
+        client_id,
+        {
+            "type": "context",
+            "source": self_id,
+            "ts": time.time(),
+            "phase": "compacted",
+            "detail": {
+                "strategy": strat_name,
+                "dropped_turns": dropped_n,
+                "kept_turns": len(out_body),
+                "summarized": proj.summary is not None,
+            },
+        },
+    )
+    return system_block + [notice] + out_body
+
+
 async def _run(
     self_id: str,
     user_text: str,
@@ -544,7 +777,27 @@ async def _run(
     messages = await _assemble(
         self_id, user_text, kernel, client_id, system_prompt, messages_override
     )
+    # Context-overflow projection: shape what the MODEL sees this turn to fit the
+    # window via the agent's `context_strategy` (default compact). Skipped when the
+    # caller supplies its own `messages` (stateless — it owns the context). Done ONCE
+    # at turn entry, never mid-tool-loop (would orphan role:tool from its assistant).
+    if not stateless:
+        projected = await _project_context(
+            kernel.get(self_id) or {},
+            cfg,
+            provider,
+            self_id,
+            kernel,
+            client_id,
+            messages,
+        )
+        if isinstance(projected, dict):  # too_small failsafe / config error
+            return projected
+        messages = projected
     last_text = ""
+    # The NEW turns this send produces — appended to the durable chat store at the end
+    # (NOT `messages[1:]`, which is the projected/trimmed view, not the full record).
+    new_turns: list[dict] = [{"role": "user", "content": user_text}]
 
     # Loop until the model stops emitting tool_calls. Bounded only by
     # SEND_TIMEOUT (asyncio.wait_for around the whole _run task) and
@@ -599,25 +852,25 @@ async def _run(
         # Record assistant turn carrying its tool_calls. ollama wants
         # `arguments` as a dict; OpenAI-flavored backends (nvidia) want a
         # JSON string — `cfg.tool_args_as_json` selects.
-        messages.append(
-            {
-                "role": "assistant",
-                "content": last_text,
-                "tool_calls": [
-                    {
-                        "id": c["id"],
-                        "type": "function",
-                        "function": {
-                            "name": c["name"],
-                            "arguments": json.dumps(c["arguments"])
-                            if cfg.tool_args_as_json
-                            else c["arguments"],
-                        },
-                    }
-                    for c in tool_calls
-                ],
-            }
-        )
+        assistant_turn = {
+            "role": "assistant",
+            "content": last_text,
+            "tool_calls": [
+                {
+                    "id": c["id"],
+                    "type": "function",
+                    "function": {
+                        "name": c["name"],
+                        "arguments": json.dumps(c["arguments"])
+                        if cfg.tool_args_as_json
+                        else c["arguments"],
+                    },
+                }
+                for c in tool_calls
+            ],
+        }
+        messages.append(assistant_turn)
+        new_turns.append(assistant_turn)
 
         # Execute tool_calls IN PARALLEL via asyncio.gather. Each runs
         # its own status entry → kernel.send → status exit → say emit;
@@ -671,24 +924,23 @@ async def _run(
         results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
         _invalidate_menu(self_id)
         messages.extend(results)
+        new_turns.extend(results)
 
     # Status before the back-compat `done` event so subscribers can
     # observe the final phase transition first.
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
     await _to_caller(kernel, self_id, client_id, {"type": "done", "source": self_id})
 
-    # Final assistant turn (the no-tool_calls completion that broke
-    # the loop) — append so the persisted history is complete.
-    messages.append({"role": "assistant", "content": last_text})
-    # Persist EVERYTHING except the rebuilt-each-turn system prompt
-    # at index 0. Keeping tool_calls + role:tool replies in the
-    # sidecar means:
-    #   1. Faulty tool calls (malformed function names, wrong args,
-    #      chat-template-token leaks) are auditable on disk after the fact.
-    #   2. The model gets full conversation memory on the next turn,
-    #      not a lossy summary.
+    # Final assistant turn (the no-tool_calls completion that broke the loop).
+    final_turn = {"role": "assistant", "content": last_text}
+    messages.append(final_turn)
+    new_turns.append(final_turn)
+    # APPEND this send's new turns (user + assistant(+tool_calls) + role:tool replies +
+    # final assistant) to the durable `chat` yaml_state. NOT `messages[1:]` — that's the
+    # projected/trimmed view; the store keeps the FULL conversation. Keeping tool_calls +
+    # role:tool replies means faulty calls are auditable and the next turn has full memory.
     if not stateless:
-        await _save_history(self_id, kernel, client_id, messages[1:])
+        await _save_history(self_id, kernel, client_id, new_turns)
     return {"response": last_text, "final": last_text, "client_id": client_id}
 
 
@@ -705,6 +957,8 @@ def _make_reflect(cfg: Backend):
             "model": rec.get("model", cfg.default_model),
             "endpoint": rec.get("endpoint", cfg.default_endpoint),
             "file_bridge_id": rec.get("file_bridge_id"),
+            "context_window": resolve_context_window(rec),
+            "context_strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
             "verbs": {
                 n: (f.__doc__ or "").strip().splitlines()[0]
                 for n, f in cfg._verbs.items()
@@ -715,6 +969,7 @@ def _make_reflect(cfg: Backend):
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
                 "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'interrupted'|'timeout'|'error' for done. detail.ahead for queued.",
                 "done": "{type:'done', source, client_id} — end of generation, interrupted, or timed out. Always preceded by status(phase='done', detail.reason).",
+                "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
             },
             "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`interrupt` skip the lock and stay snappy.",
         }
@@ -753,10 +1008,8 @@ def _make_send(cfg: Backend):
             }
         system_prompt = payload.get("system_prompt")
         messages_override = payload.get("messages")
-        stateless = isinstance(messages_override, list) and bool(messages_override)
-        # file_bridge_id is only needed for the stateful path (load + persist history).
-        if not stateless and not _file_bridge_id(id, kernel):
-            return {"error": f"{cfg.name}: file_bridge_id required"}
+        # History is auto-mounted (a `chat` yaml_state, persisted through the loader) —
+        # no operator wiring needed; nothing to failfast on here.
         # Backends that require a provider up front (nvidia: api_key) failfast here.
         if cfg.require_provider:
             provider = await _get_provider(id, kernel, cfg)
@@ -856,9 +1109,7 @@ def _make_send(cfg: Backend):
 
 def _make_history(cfg: Backend):
     async def _history(id, payload, kernel):
-        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's persisted chat. Failfast if file_bridge_id unset."""
-        if not _file_bridge_id(id, kernel):
-            return {"error": f"{cfg.name}: file_bridge_id required"}
+        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's full conversation from the mounted chat yaml_state (the durable record)."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         return {
             "messages": await _load_history(id, kernel, client_id),
@@ -889,6 +1140,106 @@ async def _status(id, payload, kernel):
     if cid:
         cid = _safe_client(cid)
     return _status_snapshot(id, cid)
+
+
+def _recall_render(m: dict) -> str:
+    """Compact ONE stored turn for a recall reply: bulky tool-call JSON → a short marker,
+    content capped — so paging back can't itself blow the window. Bounds the REPLY only."""
+    content = m.get("content")
+    if not content and m.get("tool_calls"):
+        names = [(tc.get("function") or {}).get("name") for tc in m["tool_calls"]]
+        content = "[tool_calls: " + ", ".join(n for n in names if n) + "]"
+    s = content if isinstance(content, str) else json.dumps(content, default=str)
+    return s[:2000]
+
+
+async def _recall(id, payload, kernel):
+    """args: client_id?:str (default 'cli'), query?:str (case-insensitive substring over the
+    serialized turn — matches tool args/replies too), limit?:int (default 20, max 100),
+    before?:int (store index — page backward). Pages turns back from the DURABLE chat store
+    (the FULL conversation, never trimmed — so anything compaction dropped is one call away).
+    Read-only. Returns {messages:[{index,role,content}], total, truncated, client_id}."""
+    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
+    full = await _load_history(id, kernel, client_id)
+    q = str(payload.get("query") or "").lower().strip()
+    try:
+        limit = int(payload.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 100))
+    before = payload.get("before")
+    indexed = list(enumerate(full))
+    if isinstance(before, int) and not isinstance(before, bool):
+        indexed = [(i, m) for i, m in indexed if i < before]
+    if q:
+        indexed = [
+            (i, m) for i, m in indexed if q in json.dumps(m, default=str).lower()
+        ]
+    truncated = len(indexed) > limit
+    page = indexed[-limit:]
+    return {
+        "messages": [
+            {"index": i, "role": m.get("role"), "content": _recall_render(m)}
+            for i, m in page
+        ],
+        "total": len(indexed),
+        "truncated": truncated,
+        "client_id": client_id,
+    }
+
+
+async def _derive_reaction(id, kernel) -> dict | None:
+    """Read-model over the durable transcript: AFTER the last compaction notice (its
+    `fired_at_index`), did the model react? Scans the same client's thread for `send`
+    tool-calls — a `recall` to its OWN id, or a memory write (`set`/`append`/`replace`)
+    to any agent. The reaction IS the 'ack'; this derives it, no extra channel. Returns
+    {recalled, persisted, recall_count} or None if no compaction has fired."""
+    proj = _projection.get(id)
+    mark = _compaction_mark.get(id)
+    if not proj or not proj.get("fired") or not mark:
+        return None
+    idx = mark.get("fired_at_index", 0)
+    client_id = mark.get("client_id", DEFAULT_CLIENT_ID)
+    store = await _load_history(id, kernel, client_id)
+    recalled = persisted = False
+    recall_count = 0
+    for m in store[idx:]:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            payload = args.get("payload")
+            ptype = payload.get("type") if isinstance(payload, dict) else None
+            if args.get("target_id") == id and ptype == "recall":
+                recalled = True
+                recall_count += 1
+            elif ptype in ("set", "append", "replace"):
+                persisted = True
+    return {"recalled": recalled, "persisted": persisted, "recall_count": recall_count}
+
+
+async def _context_status(id, payload, kernel):
+    """No args. The context-budget posture + the last overflow projection + the model's
+    derived reaction to it. Returns {context_window, output_reserve, budget, strategy,
+    last_projection:{fired, strategy?, kept_turns?, dropped_turns?, summarized?,
+    too_small?}|null, last_reaction:{recalled, persisted, recall_count}|null}."""
+    rec = kernel.get(id) or {}
+    return {
+        "context_window": resolve_context_window(rec),
+        "output_reserve": output_reserve(rec),
+        "budget": budget(rec),
+        "strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
+        "last_projection": _projection.get(id),
+        "last_reaction": await _derive_reaction(id, kernel),
+    }
 
 
 async def _boot(id, payload, kernel):
@@ -973,6 +1324,8 @@ def build(
         "refresh_menu": _refresh_menu,
         **(extra_verbs or {}),
         "status": _status,
+        "context_status": _context_status,
+        "recall": _recall,
         "boot": _boot,
     }
     cfg._verbs = verbs  # type: ignore[attr-defined]  # reflect lists these

@@ -28,6 +28,9 @@ pub struct BackendConfig {
     /// (NIM). Both preserve model-emitted order in the appended
     /// `role:tool` messages.
     pub parallel_tools: bool,
+    /// Backend error-message prefix (e.g. `"ollama_backend"`), used by the
+    /// context-projection seam's `too_small` / config-error messages.
+    pub name: &'static str,
 }
 
 /// Shared references bound for the duration of one generation. Cuts the
@@ -227,7 +230,38 @@ pub async fn run_generation(
         client_id,
         cfg,
     };
+    // `messages` is the FULL conversation (persistence source). `model_messages`
+    // is the projected view the model actually sees — the Context-Protocol seam
+    // shapes it to fit the window ONCE at entry (never mid-tool-loop, which would
+    // orphan a role:tool), prepending the canonical [context-notice]. New turns
+    // this send produces are appended to BOTH so the durable store stays whole
+    // while the model context stays bounded. The notice lives ONLY in the model
+    // view — it is never persisted.
     let mut messages = assemble_messages(self_id, state, user_text, kernel, client_id).await;
+    let mut model_messages = match crate::projection::project_context(
+        provider,
+        self_id,
+        state,
+        kernel,
+        client_id,
+        cfg.route,
+        cfg.name,
+        messages.clone(),
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            // too_small failsafe / unknown-strategy config error — the model is
+            // NOT called. Surface it as the send error (the seam already pushed
+            // the context:too_small event).
+            return Err(e
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("context projection error")
+                .to_string());
+        }
+    };
     let tools = vec![send_tool_def()];
     let mut last_text;
     let mut iteration = 0usize;
@@ -245,23 +279,25 @@ pub async fn run_generation(
             )
             .await;
         }
-        let (content, tool_calls) = run_pass(&ctx, &messages, &tools).await?;
+        let (content, tool_calls) = run_pass(&ctx, &model_messages, &tools).await?;
         last_text = content;
 
         if tool_calls.is_empty() {
             break;
         }
 
-        // Record the assistant turn with its tool_calls.
+        // Record the assistant turn with its tool_calls (to BOTH lists).
         let assistant_calls: Vec<Value> = tool_calls
             .iter()
             .map(|c| assistant_tool_call(c, cfg.tool_args_as_json))
             .collect();
-        messages.push(json!({
+        let assistant_turn = json!({
             "role": "assistant",
             "content": last_text,
             "tool_calls": assistant_calls,
-        }));
+        });
+        model_messages.push(assistant_turn.clone());
+        messages.push(assistant_turn);
 
         // Dispatch the batch (parallel or serial), order preserved.
         let results: Vec<Value> = if cfg.parallel_tools {
@@ -277,6 +313,7 @@ pub async fn run_generation(
 
         // Menu invalidates AFTER each tool batch.
         *state.menu.lock().expect("menu poisoned") = None;
+        model_messages.extend(results.clone());
         messages.extend(results);
     }
 
@@ -289,8 +326,9 @@ pub async fn run_generation(
     .await;
     emit_done(kernel, self_id, client_id, cfg.route).await;
 
-    // Append final assistant turn + persist everything except the
-    // rebuilt-each-turn system block at index 0.
+    // Append final assistant turn to the FULL list + persist everything except the
+    // rebuilt-each-turn system block at index 0 (the durable store is never trimmed
+    // by projection — `messages` is the full conversation, not the model view).
     messages.push(json!({"role": "assistant", "content": last_text}));
     let to_persist: Vec<Value> = messages.iter().skip(1).cloned().collect();
     let _ = save_history(self_id, kernel, client_id, &to_persist).await;

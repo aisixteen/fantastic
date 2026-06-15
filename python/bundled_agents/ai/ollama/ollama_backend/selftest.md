@@ -65,40 +65,50 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 
 ## Tests
 
-### Test 1: send without file_bridge_id → failfast
+### Test 1: send works without file_bridge_id (history auto-mounts)
+
+ollama has no api_key sidecar, so it needs NO `file_bridge_id`. Its
+per-client history auto-mounts as a `chat` yaml_state persisted THROUGH
+the loader (the AI writes no disk itself).
 
 ```bash
 OB=$(call kernel_state '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call $OB '{"type":"send","text":"hi"}'
+call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
-Expected: `{"error":"ollama_backend: file_bridge_id required"}`.
+Expected: a `final` reply containing "ready" — no file_bridge wiring needed.
 
-### Test 2: configure file_bridge_id, reflect shows it
+### Test 2: reflect surfaces the context-window posture
 
 ```bash
-FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":".fantastic","ingress_rule":"allow_all"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-call kernel_state "{\"type\":\"update_agent\",\"id\":\"$OB\",\"file_bridge_id\":\"$FA\"}"
-call $OB '{"type":"reflect"}' | python -m json.tool | grep -F "\"file_bridge_id\": \"$FA\""
+call $OB '{"type":"reflect"}' | python -c "
+import json,sys
+r = json.load(sys.stdin)
+print('context_window:', r.get('context_window'))
+print('context_strategy:', r.get('context_strategy'))
+"
 ```
-Expected: matches.
+Expected: `context_window` is an int (default 4096) and `context_strategy`
+is a string (default `compact`).
 
-### Test 3: simple send streams tokens, persists chat_cli.json
+### Test 3: simple send streams tokens, persists history
 
-The default caller is `client_id="cli"` (REPL/daemon flow). With
-per-client chat storage, the file lives at `chat_cli.json` — passing
-a different `client_id` would write `chat_<that>.json`.
+The default caller is `client_id="cli"` (REPL/daemon flow). History is
+per-client, persisted THROUGH the loader in a mounted chat yaml_state —
+the AI writes no disk itself. Read it back via the `history` verb (NOT a
+chat_<client>.json sidecar — that path is gone). A different `client_id`
+addresses a different thread.
 
 ```bash
 call $OB '{"type":"send","text":"reply with the single word: ok"}' | python -m json.tool | grep -F '"final"'
-test -f .fantastic/agents/$OB/chat_cli.json && python -c "
-import json
-d = json.load(open('.fantastic/agents/$OB/chat_cli.json'))
+call $OB '{"type":"history"}' | python -c "
+import json,sys
+d = json.load(sys.stdin)['messages']
 print('messages:', len(d), 'last:', d[-1]['content'][:50])
 "
 ```
 Expected: messages ≥ 2; last message contains "ok" (case-insensitive).
 
-### Test 4: tool-call round-trip — and the chat sidecar keeps the round-trip on disk
+### Test 4: tool-call round-trip — and the history keeps the round-trip
 
 ```bash
 call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
@@ -108,16 +118,16 @@ the reply, summarizes. Final answer mentions a number.
 Regression signal: model just says "I cannot check" without emitting
 tool_calls → either model lacks tool support or SEND_TOOL definition broke.
 
-The persistence is **lossless** — the sidecar must contain the full
+The persistence is **lossless** — the history must contain the full
 `assistant`-with-`tool_calls` turn AND its `role:tool` reply, not just
 the user/final-assistant pair. This is the audit trail for malformed
 tool-calls (Gemma chat-template-token leaks like `<|"|verb<|"|`,
 hallucinated verbs, args-as-string vs dict).
 
 ```bash
-python -c "
-import json
-d = json.load(open('.fantastic/agents/$OB/chat_cli.json'))
+call $OB '{"type":"history"}' | python -c "
+import json,sys
+d = json.load(sys.stdin)['messages']
 roles = [m['role'] for m in d]
 has_tcs = any(m.get('tool_calls') for m in d if m['role']=='assistant')
 has_tool = 'tool' in roles
@@ -138,7 +148,8 @@ Regression signal: PASS missing → `_run` reverted to lossy persistence
 call $OB '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev/null
 call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
-Expected: response mentions "teal" — proves chat_cli.json round-trip via file_bridge agent.
+Expected: response mentions "teal" — proves the history round-trip via the
+mounted chat yaml_state (persisted through the loader).
 
 ### Test 6: history verb returns messages
 
@@ -306,10 +317,10 @@ Expected: `PASS`. The terminal `status` carries `detail.reason='interrupted'`.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | send fails without file_bridge_id | |
-| 2 | reflect shows file_bridge_id | |
-| 3 | send streams + persists chat_<client_id>.json | |
-| 4 | tool-call round-trip + lossless tool history on disk | |
+| 1 | send works without file_bridge_id (history auto-mounts) | |
+| 2 | reflect surfaces context_window + context_strategy | |
+| 3 | send streams + persists per-client history (history verb) | |
+| 4 | tool-call round-trip + lossless tool history (history verb) | |
 | 5 | history persists across calls | |
 | 6 | history verb returns messages | |
 | 7 | status verb idle snapshot + reflect lists status | |

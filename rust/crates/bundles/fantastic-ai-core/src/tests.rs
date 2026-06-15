@@ -93,6 +93,7 @@ const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
     tool_args_as_json: false,
     parallel_tools: true,
+    name: "mock_backend",
 };
 
 #[async_trait]
@@ -133,6 +134,8 @@ impl Bundle for MockBundle {
                 }
             }
             "history" => verbs::history(agent_id, payload, kernel, "mock_backend").await,
+            "recall" => verbs::recall(agent_id, payload, kernel).await,
+            "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
             "refresh_menu" => verbs::refresh_menu(agent_id),
             "status" => verbs::status(agent_id, payload),
@@ -351,6 +354,147 @@ async fn send_streams_tokens_and_emits_done() {
         "missing streaming: {phases:?}"
     );
     assert!(phases.contains("done"), "missing done: {phases:?}");
+}
+
+// ── Context Protocol: budget primitives + strategies (no kernel) ─────
+
+fn turn(role: &str, content: &str) -> Value {
+    json!({"role": role, "content": content})
+}
+
+fn body(n: usize, size: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            turn(role, &format!("turn{i}-{}", "x".repeat(size)))
+        })
+        .collect()
+}
+
+/// A provider that yields one fixed summary token (for `compact`).
+struct SummaryProvider(&'static str);
+#[async_trait]
+impl Provider for SummaryProvider {
+    async fn chat(&self, _m: &[Value], _t: &[Value]) -> Result<ProviderStream, String> {
+        let ev = Ok(ProviderEvent::Token(self.0.to_string()));
+        Ok(Box::pin(futures_util::stream::iter(vec![ev])))
+    }
+    fn model(&self) -> String {
+        "sum".into()
+    }
+}
+
+#[test]
+fn context_estimate_and_budget() {
+    use crate::context::{budget, estimate_one, estimate_tokens, resolve_context_window};
+    assert!(estimate_one(&turn("user", &"x".repeat(400))) >= 100);
+    assert!(estimate_tokens(&body(4, 100)) > estimate_tokens(&body(2, 100)));
+    let mut m = Map::new();
+    m.insert("context_window".into(), json!(8000));
+    m.insert("num_ctx".into(), json!(2000));
+    assert_eq!(resolve_context_window(&m), 8000);
+    let mut m2 = Map::new();
+    m2.insert("num_ctx".into(), json!(2000));
+    assert_eq!(resolve_context_window(&m2), 2000);
+    assert_eq!(resolve_context_window(&Map::new()), 4096);
+    let mut tiny = Map::new();
+    tiny.insert("context_window".into(), json!(100));
+    tiny.insert("output_reserve".into(), json!(1000));
+    assert_eq!(budget(&tiny), 256); // floor
+}
+
+#[tokio::test]
+async fn compact_returns_projection_with_summary() {
+    let b = body(10, 80);
+    let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
+    let proj = crate::strategies::compact(&b, 4, 1_000_000, &provider).await;
+    assert_eq!(proj.summary.as_deref(), Some("SUMMARY"));
+    assert!(!proj.omitted_marker);
+    // recent verbatim, NO fabricated summary turn in the body
+    assert_eq!(proj.body, b[b.len() - 4..].to_vec());
+}
+
+#[test]
+fn truncate_returns_projection_no_summary() {
+    let b = body(10, 80);
+    let proj = crate::strategies::truncate(&b, 1_000_000);
+    assert!(proj.omitted_marker && proj.summary.is_none());
+    assert_eq!(proj.body[0], b[0]); // first kept
+    assert_eq!(proj.body[proj.body.len() - 1], b[b.len() - 1]); // live turn kept
+}
+
+#[test]
+fn context_notice_shapes() {
+    let n = crate::projection::context_notice("compact", Some("MY SUMMARY"), false, 7);
+    assert_eq!(n["role"], "user");
+    assert!(n.get("tool_calls").is_none());
+    let c = n["content"].as_str().unwrap();
+    assert!(c.contains("[context-notice]") && c.contains("MY SUMMARY"));
+    assert!(c.contains("recall") && c.contains("memory agent"));
+    assert!(c.contains("7 earlier turn"));
+    let t = crate::projection::context_notice("truncate", None, true, 3);
+    let tc = t["content"].as_str().unwrap();
+    assert!(tc.contains("omitted in place") && !tc.contains("Summary of the dropped span"));
+}
+
+// ── Context Protocol: recall + context_status (kernel-driven) ────────
+
+#[tokio::test]
+async fn recall_pages_durable_store_and_context_status_shape() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "recall").await;
+    scripts().insert(
+        backend.as_str().to_string(),
+        (
+            vec![vec![ScriptEvent::Token("noted".into())]],
+            Duration::ZERO,
+        ),
+    );
+    // Plant a distinctive fact in the durable store via a normal send.
+    let _ = kernel
+        .send(
+            &backend,
+            json!({"type": "send", "text": "my project codename is HALCYON", "client_id": "chat"}),
+        )
+        .await;
+    // recall finds it by substring (case-insensitive), full durable history.
+    let r = kernel
+        .send(
+            &backend,
+            json!({"type": "recall", "query": "codename", "client_id": "chat"}),
+        )
+        .await;
+    let msgs = r["messages"].as_array().expect("recall messages");
+    assert!(
+        msgs.iter().any(|m| m["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("halcyon")),
+        "recall did not page the planted fact back: {r:#?}"
+    );
+    assert_eq!(r["client_id"], "chat");
+
+    // context_status shape — default strategy, projection recorded.
+    let st = kernel
+        .send(&backend, json!({"type": "context_status"}))
+        .await;
+    for key in [
+        "context_window",
+        "output_reserve",
+        "budget",
+        "strategy",
+        "last_projection",
+        "last_reaction",
+    ] {
+        assert!(
+            st.get(key).is_some(),
+            "context_status missing {key:?}: {st:#?}"
+        );
+    }
+    assert_eq!(st["strategy"], "compact");
+    // a normal (under-budget) send does not fire compaction
+    assert_eq!(st["last_projection"]["fired"], false);
 }
 
 #[tokio::test]

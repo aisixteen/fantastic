@@ -1,6 +1,6 @@
 """cli singleton — terminal renderer.
 
-Receives `token`, `done`, `say`, `error`, `status` payloads. Prints to stdout.
+Receives `token`, `done`, `say`, `error`, `status`, `context` payloads. Prints to stdout.
 Unknown verbs are silently dropped (cli is a render sink).
 
 Renders the PTY intro too, but as a DUMB SINK — it prints what it is told and
@@ -33,7 +33,7 @@ async def _reflect(id, payload, kernel):
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
-        "accepts": ["token", "done", "say", "error", "status"],
+        "accepts": ["token", "done", "say", "error", "status", "context"],
     }
 
 
@@ -100,6 +100,25 @@ async def _status(id, payload, kernel):
     return None
 
 
+async def _context(id, payload, kernel):
+    """args: phase:str ('compacted'|'too_small'), source:str?, detail:dict?. Renders a
+    one-line context-protocol notice: `⟲ context compacted (strategy, N dropped)` or
+    `✗ context too small — <hint>`. Returns None."""
+    phase = payload.get("phase", "")
+    src = payload.get("source", "")
+    detail = payload.get("detail") or {}
+    prefix = f"  [{src}]" if src else " "
+    if phase == "compacted":
+        strat = detail.get("strategy", "?")
+        dropped = detail.get("dropped_turns", 0)
+        print(
+            f"{prefix} ⟲ context compacted ({strat}, {dropped} dropped; recall to page back)"
+        )
+    elif phase == "too_small":
+        print(f"{prefix} ✗ context too small — {detail.get('hint', '')}")
+    return None
+
+
 # ─── two-phase PTY intro (first contact) ────────────────────────
 
 
@@ -159,6 +178,7 @@ VERBS = {
     "say": _say,
     "error": _error,
     "status": _status,
+    "context": _context,
     "intro_booting": _intro_booting,
     "booted": _booted,
 }

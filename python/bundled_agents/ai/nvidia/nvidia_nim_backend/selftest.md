@@ -63,13 +63,18 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/n.log
 
 ## Tests
 
-### Test 1: `_send` failfast when `file_bridge_id` unset
+### Test 1: `_send` failfast when no api_key (no `file_bridge_id` ⇒ no sidecar)
+
+History no longer needs `file_bridge_id` (it auto-mounts a chat
+yaml_state through the loader), but the nvidia api_key sidecar still
+rides `file_bridge_id` — with none wired there is no key, so send
+failfasts on the missing provider before any network call.
 
 ```bash
 NB2=$(call kernel_state '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $NB2 '{"type":"send","text":"hi"}' | python -m json.tool
 ```
-Expected: `{"error":"nvidia_nim_backend: file_bridge_id required"}`.
+Expected: `{"error":"nvidia_nim_backend: api_key not set; call set_api_key first", ...}`.
 
 ### Test 2: `set_api_key` failfast when `file_bridge_id` unset
 
@@ -117,15 +122,19 @@ SSE stream + auth + model selection round-trip.
 
 Skip if `NVAPI_KEY` is unset.
 
+History persists THROUGH the loader in a mounted chat yaml_state (the AI
+writes no disk itself); read each thread back via the `history` verb.
+
 ```bash
 [ -n "$NVAPI_KEY" ] && {
   call $NB '{"type":"send","text":"my color is blue","client_id":"alice"}' >/dev/null
   call $NB '{"type":"send","text":"my color is red","client_id":"bob"}' >/dev/null
-  ls .fantastic/agents/$NB/chat_*.json
+  call $NB '{"type":"history","client_id":"alice"}' | python -c "import json,sys;print('alice:', json.load(sys.stdin)['messages'][0]['content'])"
+  call $NB '{"type":"history","client_id":"bob"}'   | python -c "import json,sys;print('bob:',   json.load(sys.stdin)['messages'][0]['content'])"
 } || echo "SKIPPED (no NVAPI_KEY)"
 ```
-Expected: `chat_alice.json` AND `chat_bob.json` exist, distinct
-content.
+Expected: alice's thread opens with "my color is blue", bob's with "my
+color is red" — distinct per-client threads.
 
 ### Test 7: `clear_api_key` removes sidecar; subsequent send refuses
 
@@ -217,7 +226,7 @@ or ESC interrupts mid-stream. ai_view is provider-agnostic.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | send failfast w/o file_bridge_id | |
+| 1 | send failfast w/o api_key (no file_bridge_id ⇒ no sidecar) | |
 | 2 | set_api_key failfast w/o file_bridge_id | |
 | 3 | send failfast w/o api_key | |
 | 4 | set_api_key writes sidecar, flips has_api_key, reflect doesn't leak key | |

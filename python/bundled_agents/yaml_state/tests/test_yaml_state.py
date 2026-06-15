@@ -131,3 +131,30 @@ async def test_disk_is_truth_next_to_record(seeded_kernel, store_agent):
     await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": cid})
     assert seeded_kernel.get(cid) is None
     assert cid not in seeded_kernel.ctx.agents
+
+
+async def test_append_extends_list(seeded_kernel, store_agent):
+    cid = await _mk(seeded_kernel)
+    await seeded_kernel.send(
+        cid, {"type": "append", "key": "log", "value": {"role": "user", "content": "a"}}
+    )
+    # a LIST value extends (batch in one call)
+    await seeded_kernel.send(
+        cid,
+        {
+            "type": "append",
+            "key": "log",
+            "value": [
+                {"role": "assistant", "content": "b"},
+                {"role": "user", "content": "c"},
+            ],
+        },
+    )
+    r = await seeded_kernel.send(cid, {"type": "read", "key": "log"})
+    assert [t["content"] for t in r["value"]] == ["a", "b", "c"]
+
+
+async def test_chat_mode_reflect(seeded_kernel, store_agent):
+    cid = await _mk(seeded_kernel, "chat")
+    r = await seeded_kernel.send(cid, {"type": "reflect"})
+    assert r["mode"] == "chat" and "append" in r["sentence"].lower()

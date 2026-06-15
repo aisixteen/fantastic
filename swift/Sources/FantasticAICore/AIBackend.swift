@@ -82,6 +82,14 @@ public final class AIBackend: @unchecked Sendable {
     private let runStatesLock = NSLock()
     private var runStates: [String: AIAgentRunState] = [:]
 
+    /// Context-Protocol state, keyed by agent id. `projectionCache` is the
+    /// PUBLIC `context_status.last_projection` summary; `compactionMark` is the
+    /// PRIVATE `(fired_at_index, client_id)` reaction cursor `deriveReaction`
+    /// scans from. Both guarded by `projectionLock`.
+    let projectionLock = NSLock()
+    var projectionCache: [String: JSON] = [:]
+    var compactionMark: [String: (Int, String)] = [:]
+
     init(config: AIBackendConfig) {
         self.config = config
     }
@@ -97,7 +105,7 @@ public final class AIBackend: @unchecked Sendable {
     }
 
     /// Fractional unix seconds — status timestamps + entry ages.
-    private func nowSecs() -> Double { Date().timeIntervalSince1970 }
+    func nowSecs() -> Double { Date().timeIntervalSince1970 }
 
     /// Opaque id for one user submission (status correlation).
     private func mintSendId() -> String { "snd_\(UUID().uuidString.prefix(8))" }
@@ -125,6 +133,10 @@ public final class AIBackend: @unchecked Sendable {
             return await sendVerb(agent: agent, payload: payload, kernel: kernel)
         case "history":
             return await historyVerb(agent: agent, payload: payload, kernel: kernel)
+        case "recall":
+            return await recallVerb(agent: agent, payload: payload, kernel: kernel)
+        case "context_status":
+            return await contextStatusVerb(agent: agent, kernel: kernel)
         case "status":
             return statusVerb(agentId: agentId, payload: payload)
         case "interrupt":
@@ -150,7 +162,18 @@ public final class AIBackend: @unchecked Sendable {
         for (k, v) in config.reflectExtra(agent) {
             fields[k] = v
         }
-        fields["verbs"] = config.verbs
+        // Context Protocol: context_window/context_strategy + the shared emits map.
+        for (k, v) in contextReflectFields(agent: agent) {
+            fields[k] = v
+        }
+        // Merge the shared protocol verbs (recall, context_status) into the
+        // per-backend `verbs` map so the capability is discoverable.
+        var verbs = config.verbs.asObject ?? [:]
+        verbs["recall"] = .string(
+            "args: client_id?, query? (substring), limit? (max 100), before?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.")
+        verbs["context_status"] = .string(
+            "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.")
+        fields["verbs"] = .object(verbs)
         return .object(fields)
     }
 
@@ -294,6 +317,34 @@ public final class AIBackend: @unchecked Sendable {
         messages.append(contentsOf: modelHistory)
         messages.append(
             .object(["role": .string("user"), "content": .string(userText)]))
+
+        // Context-Protocol seam: shape what the MODEL sees this turn to fit the
+        // window (prepending the canonical [context-notice]), ONCE at entry —
+        // never mid-tool-loop. `messages` is the model view; persistence uses
+        // `persistBase`/`newTurns` (the full conversation), so the durable store
+        // is never trimmed and the notice is never persisted. Skipped for
+        // stateless backends (FM owns its context; modelHistory is empty).
+        if !config.stateless {
+            switch await projectContext(
+                provider: provider, agent: agent, clientId: clientId, messages: messages,
+                kernel: kernel)
+            {
+            case .projected(let projected):
+                messages = projected
+            case .failed(let err):
+                // too_small failsafe / unknown-strategy — the model is NOT
+                // called. The seam already emitted context:too_small. Surface
+                // the error as a terminal done + leave the base (user turn) persisted.
+                await emitStatus(
+                    agentId: agentId, clientId: clientId, phase: "done", st: st,
+                    extraDetail: ["reason": .string("error")], kernel: kernel)
+                await emitDone(
+                    kernel: kernel, agentId: agentId, streamId: streamId, messageId: messageId,
+                    clientId: clientId, accumulated: "",
+                    error: err["error"].asString ?? "context projection error")
+                return
+            }
+        }
 
         // The agentic loop: stream a pass, dispatch any tool-calls back
         // through the kernel, feed the results in, repeat until the model
@@ -750,7 +801,7 @@ public final class AIBackend: @unchecked Sendable {
 
     /// Trim + sanitise a client id so it's safe as a filename suffix.
     /// Mirrors Rust `safe_client` / Python `_safe_client`.
-    private func safeClient(_ clientId: String) -> String {
+    func safeClient(_ clientId: String) -> String {
         let trimmed = clientId.trimmingCharacters(in: .whitespaces)
         let raw = trimmed.isEmpty ? "cli" : trimmed
         let mapped = raw.map { c -> Character in
@@ -769,7 +820,7 @@ public final class AIBackend: @unchecked Sendable {
 
     /// Load a client's persisted chat via the bound file_bridge. Empty on
     /// no provider / missing file / unparseable.
-    private func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
+    func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
         guard let fid = fileBridgeId(agent) else { return [] }
         let r = await kernel.send(
             AgentId(fid),

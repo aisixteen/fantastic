@@ -55,6 +55,14 @@ pub struct BackendState {
     pub queue: Mutex<VecDeque<QueuedEntry>>,
     /// Lazy menu cache — `None` means "rebuild on next assemble".
     pub menu: Mutex<Option<Vec<Value>>>,
+    /// PUBLIC last context-overflow projection summary (the `context_status`
+    /// verb's `last_projection`). `{fired, strategy?, kept_turns?,
+    /// dropped_turns?, summarized?, too_small?}`. Free of internal bookkeeping.
+    pub projection: Mutex<Option<Value>>,
+    /// PRIVATE reaction cursor: `(fired_at_index, client_id)` where the last
+    /// compaction notice landed in the durable store, so `derive_reaction`
+    /// can scan from there. Never surfaced in a verb reply.
+    pub compaction_mark: Mutex<Option<(usize, String)>>,
 }
 
 impl BackendState {
@@ -65,6 +73,8 @@ impl BackendState {
             current_meta: Mutex::new(None),
             queue: Mutex::new(VecDeque::new()),
             menu: Mutex::new(None),
+            projection: Mutex::new(None),
+            compaction_mark: Mutex::new(None),
         })
     }
 }

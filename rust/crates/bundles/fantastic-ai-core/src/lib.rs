@@ -44,11 +44,14 @@
 
 pub mod agent_loop;
 pub mod assembly;
+pub mod context;
 pub mod events;
 pub mod helpers;
 pub mod history;
+pub mod projection;
 pub mod provider;
 pub mod state;
+pub mod strategies;
 pub mod verbs;
 
 pub use agent_loop::{run_generation, BackendConfig};

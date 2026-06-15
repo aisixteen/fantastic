@@ -46,57 +46,52 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
     assert "send" in r["verbs"]
 
 
-async def test_send_requires_file_bridge_id(seeded_kernel):
-    oid = await _make_ollama(seeded_kernel)
-    r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
-    assert "error" in r
-    assert "file_bridge_id" in r["error"]
+async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
+    # History is auto-mounted (a `chat` yaml_state, persisted through the loader) — the
+    # AI needs NO file_bridge_id. (store_agent gives the loader a store to persist to.)
+    oid = await _make_ollama(seeded_kernel)  # NO file_bridge_id
+    fp = _FakeProvider([["ok"]])
+    ot._providers[oid] = fp
+    try:
+        r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        assert r["final"] == "ok"
+    finally:
+        ot._providers.pop(oid, None)
 
 
-async def test_history_requires_file_bridge_id(seeded_kernel):
+async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel)
     r = await seeded_kernel.send(oid, {"type": "history"})
-    assert "error" in r
+    assert r["messages"] == [] and r["client_id"] == "cli"
 
 
-async def test_history_returns_messages(seeded_kernel, store_agent, tmp_path):
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    # Pre-seed the default 'cli' client thread.
-    chat = json.dumps(
-        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-    )
-    await seeded_kernel.send(
-        store_agent,
-        {
-            "type": "write",
-            "path": f"agents/{oid}/chat_cli.json",
-            "content": chat,
-        },
-    )
+async def test_history_returns_messages(seeded_kernel, store_agent):
+    oid = await _make_ollama(seeded_kernel)
+    fp = _FakeProvider([["hello"]])
+    ot._providers[oid] = fp
+    try:
+        await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+    finally:
+        ot._providers.pop(oid, None)
     r = await seeded_kernel.send(oid, {"type": "history"})
-    assert len(r["messages"]) == 2
+    assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
     assert r["client_id"] == "cli"
 
 
-async def test_history_per_client(seeded_kernel, store_agent, tmp_path):
+async def test_history_per_client(seeded_kernel, store_agent):
     """Two clients = two separate threads; history reads only the asked-for one."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    # Seed two distinct chats.
-    for cid, last in (("alice", "A-reply"), ("bob", "B-reply")):
-        chat = json.dumps(
-            [
-                {"role": "user", "content": f"hi from {cid}"},
-                {"role": "assistant", "content": last},
-            ]
+    oid = await _make_ollama(seeded_kernel)
+    fp = _FakeProvider([["A-reply"], ["B-reply"]])
+    ot._providers[oid] = fp
+    try:
+        await seeded_kernel.send(
+            oid, {"type": "send", "text": "hi from alice", "client_id": "alice"}
         )
         await seeded_kernel.send(
-            store_agent,
-            {
-                "type": "write",
-                "path": f"agents/{oid}/chat_{cid}.json",
-                "content": chat,
-            },
+            oid, {"type": "send", "text": "hi from bob", "client_id": "bob"}
         )
+    finally:
+        ot._providers.pop(oid, None)
     a = await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"})
     b = await seeded_kernel.send(oid, {"type": "history", "client_id": "bob"})
     assert a["messages"][-1]["content"] == "A-reply"
@@ -265,45 +260,31 @@ async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
         ot._providers.pop(oid, None)
 
 
-async def test_run_persists_history_via_file_bridge(
-    seeded_kernel, store_agent, tmp_path
-):
-    """Default caller (no client_id) persists to chat_cli.json."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
+async def test_run_persists_history(seeded_kernel, store_agent):
+    """Default caller (no client_id) persists user+assistant to the chat yaml_state."""
+    oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
         await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
-        path = tmp_path / ".fantastic" / "agents" / oid / "chat_cli.json"
-        assert path.exists()
-        data = json.loads(path.read_text())
-        assert data[-2] == {"role": "user", "content": "hi"}
-        assert data[-1] == {"role": "assistant", "content": "reply"}
-        # System prompt must NOT be persisted — it's rebuilt fresh
-        # each turn from the live agent menu + howto.
-        assert all(m.get("role") != "system" for m in data)
     finally:
         ot._providers.pop(oid, None)
+    data = (await seeded_kernel.send(oid, {"type": "history"}))["messages"]
+    assert data[-2] == {"role": "user", "content": "hi"}
+    assert data[-1] == {"role": "assistant", "content": "reply"}
+    # System prompt is NEVER persisted — rebuilt fresh each turn from the live menu.
+    assert all(m.get("role") != "system" for m in data)
 
 
-async def test_run_persists_full_tool_call_round_trip(
-    seeded_kernel, store_agent, tmp_path
-):
-    """Lossless persistence of tool turns. The chat sidecar must keep:
-      1. The assistant turn that emitted tool_calls (with the tool_call
-         entries intact — `function.name` + `arguments`).
-      2. The role:tool reply linked by tool_call_id.
-      3. The final assistant turn that closed the loop.
-
-    This is the audit trail for malformed Gemma tool-calls
-    (chat-template-token leaks like `<|"|verb<|"|`, hallucinated verbs,
-    arguments-as-string vs dict). Without it, faulty calls evaporate
-    after the turn and we can't diagnose them after the fact.
-    """
-    oid = await _make_ollama(seeded_kernel, store_agent)
+async def test_run_persists_full_tool_call_round_trip(seeded_kernel, store_agent):
+    """Lossless persistence of tool turns to the chat yaml_state:
+      1. the assistant turn that emitted tool_calls (name + arguments intact),
+      2. the role:tool reply linked by tool_call_id,
+      3. the final assistant turn that closed the loop.
+    The audit trail for malformed tool-calls."""
+    oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider(
         [
-            # Iter 1: tool_call to kernel_state.list_agents
             [
                 {
                     "tool_call": {
@@ -316,38 +297,29 @@ async def test_run_persists_full_tool_call_round_trip(
                     }
                 }
             ],
-            # Iter 2: final text, loop ends
             ["Done."],
         ]
     )
     ot._providers[oid] = fp
     try:
         await seeded_kernel.send(oid, {"type": "send", "text": "list em"})
-        path = tmp_path / ".fantastic" / "agents" / oid / "chat_cli.json"
-        data = json.loads(path.read_text())
-        roles = [m["role"] for m in data]
-        # Expected sequence: user → asst-w-tcs → tool → asst-final
-        assert roles == ["user", "assistant", "tool", "assistant"], (
-            f"roles malformed: {roles}\nfull: {data}"
-        )
-        # 1. assistant turn with tool_calls preserved
-        asst_tcs = data[1]
-        assert asst_tcs["tool_calls"], "tool_calls dropped from persistence"
-        tc = asst_tcs["tool_calls"][0]
-        assert tc["function"]["name"] == "send"
-        assert tc["function"]["arguments"]["target_id"] == "kernel_state"
-        # 2. tool reply linked by tool_call_id
-        assert data[2]["tool_call_id"] == "call_X"
-        assert data[2]["name"] == "send"
-        # 3. final assistant turn captured
-        assert data[3] == {"role": "assistant", "content": "Done."}
     finally:
         ot._providers.pop(oid, None)
+    data = (await seeded_kernel.send(oid, {"type": "history"}))["messages"]
+    roles = [m["role"] for m in data]
+    assert roles == ["user", "assistant", "tool", "assistant"], (
+        f"roles malformed: {roles}\nfull: {data}"
+    )
+    tc = data[1]["tool_calls"][0]
+    assert tc["function"]["name"] == "send"
+    assert tc["function"]["arguments"]["target_id"] == "kernel_state"
+    assert data[2]["tool_call_id"] == "call_X" and data[2]["name"] == "send"
+    assert data[3] == {"role": "assistant", "content": "Done."}
 
 
-async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_path):
-    """Two client_ids → two distinct chat files, each with its own turns."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
+async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
+    """Two client_ids → two distinct threads in the chat yaml_state."""
+    oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:
@@ -357,15 +329,16 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent, tmp_p
         await seeded_kernel.send(
             oid, {"type": "send", "text": "hi B", "client_id": "bob"}
         )
-        path_a = tmp_path / ".fantastic" / "agents" / oid / "chat_alice.json"
-        path_b = tmp_path / ".fantastic" / "agents" / oid / "chat_bob.json"
-        assert path_a.exists() and path_b.exists()
-        a = json.loads(path_a.read_text())
-        b = json.loads(path_b.read_text())
-        assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
-        assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
     finally:
         ot._providers.pop(oid, None)
+    a = (await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"}))[
+        "messages"
+    ]
+    b = (await seeded_kernel.send(oid, {"type": "history", "client_id": "bob"}))[
+        "messages"
+    ]
+    assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
+    assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
 
 
 async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):
@@ -547,9 +520,9 @@ async def test_refresh_menu_verb_invalidates(seeded_kernel, store_agent):
     assert oid not in ot._menu_cache
 
 
-async def test_menu_not_persisted_to_chat_json(seeded_kernel, store_agent, tmp_path):
-    """Menu lives in the system block ONLY — never written to chat_<client>.json."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
+async def test_menu_not_persisted_to_history(seeded_kernel, store_agent):
+    """Menu lives in the system block ONLY — never in the persisted history."""
+    oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
@@ -558,8 +531,9 @@ async def test_menu_not_persisted_to_chat_json(seeded_kernel, store_agent, tmp_p
         )
     finally:
         ot._providers.pop(oid, None)
-    chat_path = tmp_path / ".fantastic" / "agents" / oid / "chat_alice.json"
-    data = json.loads(chat_path.read_text())
+    data = (await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"}))[
+        "messages"
+    ]
     blob = json.dumps(data)
     # Persisted history is just user/assistant turns — none of the
     # menu prose, send-tool how-to, or substrate primer should leak in.

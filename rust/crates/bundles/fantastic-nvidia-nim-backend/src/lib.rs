@@ -61,6 +61,7 @@ const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::PerClientInbox,
     tool_args_as_json: true,
     parallel_tools: false,
+    name: "nvidia_nim_backend",
 };
 
 // ── NIM-local: Bearer HTTP client cache ─────────────────────────────
@@ -411,6 +412,8 @@ impl Bundle for NvidiaNimBundle {
             "boot" | "shutdown" => Value::Null,
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "nvidia_nim_backend").await,
+            "recall" => verbs::recall(agent_id, payload, kernel).await,
+            "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
             "refresh_menu" => verbs::refresh_menu(agent_id),
             "set_api_key" => set_api_key_reply(agent_id, payload, kernel).await,
@@ -461,6 +464,13 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let file_bridge_id_v = helpers::meta_string(agent_id, kernel, "file_bridge_id");
     let has_key = has_api_key(agent_id, kernel).await;
     let generating = state::is_generating(agent_id);
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
+    let context_strategy = meta
+        .get("context_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("compact")
+        .to_string();
     json!({
         "id": agent_id.as_str(),
         "sentence": "NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling).",
@@ -469,11 +479,15 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "file_bridge_id": file_bridge_id_v,
         "has_api_key": has_key,
         "generating": generating,
+        "context_window": context_window,
+        "context_strategy": context_strategy,
         "verbs": {
             "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
             "boot": "No-op. Returns null.",
             "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Failfast if file_bridge_id unset OR api_key not set.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
+            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
+            "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "interrupt": "No args. Cancels any in-flight `send`. Returns {interrupted:bool}.",
             "refresh_menu": "No args. Drops the cached agent menu.",
             "set_api_key": "args: api_key:str (req). Persists to .fantastic/agents/<id>/api_key via file agent. Drops cached client.",
@@ -486,6 +500,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "say": "{type:'say', text, source, client_id} — per tool_call summary plus rate-limit notices.",
             "status": "{type:'status', source, client_id, ts, phase, detail} — phase machine: queued|thinking|streaming|tool_calling|done. detail.waiting_on='rate_limit' + wait_s during 429 backoff.",
             "done": "{type:'done', source, client_id} — back-compat end marker.",
+            "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called). Pull counterpart: the context_status verb.",
         },
         "concurrency": "Per-backend FIFO lock around `send`. reflect/history/interrupt/set_api_key/clear_api_key skip the lock.",
     })

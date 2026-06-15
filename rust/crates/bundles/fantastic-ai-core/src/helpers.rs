@@ -26,6 +26,16 @@ pub fn file_bridge_id(self_id: &AgentId, kernel: &Kernel) -> Option<String> {
     meta_string(self_id, kernel, "file_bridge_id")
 }
 
+/// A snapshot of the agent record's meta map (the per-agent config). Empty
+/// if the agent is gone. Used by the context-budget functions, mirroring
+/// the Python reference's `rec` dict.
+pub fn agent_meta(agent_id: &AgentId, kernel: &Kernel) -> serde_json::Map<String, Value> {
+    match kernel.agents.get(agent_id) {
+        Some(e) => e.meta.read().expect("meta poisoned").clone(),
+        None => serde_json::Map::new(),
+    }
+}
+
 /// Trim + sanitise a client id so it's safe as a filename suffix.
 /// Spaces / slashes / weirdness collapse to underscores; capped at 64.
 pub fn safe_client(client_id: &str) -> String {

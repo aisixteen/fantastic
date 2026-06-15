@@ -575,6 +575,81 @@ struct AIBackendTests {
         }
         #expect(Set(texts) == ["one", "two"])  // neither turn was clobbered
     }
+
+    // MARK: - Context Protocol
+
+    @Test func contextEstimateAndStrategies() async throws {
+        func turn(_ role: String, _ content: String) -> JSON {
+            .object(["role": .string(role), "content": .string(content)])
+        }
+        let body = (0..<10).map {
+            turn(
+                $0 % 2 == 0 ? "user" : "assistant", "turn\($0)-\(String(repeating: "x", count: 80))"
+            )
+        }
+        #expect(AIContext.estimateOne(turn("user", String(repeating: "x", count: 400))) >= 100)
+        #expect(AIContext.estimateTokens(body) > AIContext.estimateTokens(Array(body.prefix(2))))
+
+        // truncate: keeps first + recent, omittedMarker, NO summary.
+        let tr = AIStrategies.truncate(body: body, budget: 1_000_000)
+        #expect(tr.omittedMarker && tr.summary == nil)
+        #expect(tr.body.first?["content"].asString == body.first?["content"].asString)
+        #expect(tr.body.last?["content"].asString == body.last?["content"].asString)
+
+        // compact: recent verbatim + a summary artifact (via the mock provider).
+        let cp = await AIStrategies.compact(
+            body: body, recentN: 4, budget: 1_000_000, provider: MockProvider(tokens: ["SUMMARY"]))
+        #expect(cp.summary == "SUMMARY")
+        #expect(cp.body.count == 4)
+    }
+
+    @Test func contextNoticeShapes() async throws {
+        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        let n = backend.contextNotice(
+            strategy: "compact", summary: "MY SUMMARY", omittedMarker: false, droppedN: 7)
+        #expect(n["role"].asString == "user")
+        #expect(n["tool_calls"].asArray == nil)
+        let c = n["content"].asString ?? ""
+        #expect(c.contains("[context-notice]") && c.contains("MY SUMMARY"))
+        #expect(c.contains("recall") && c.contains("memory agent") && c.contains("7 earlier turn"))
+        let t = backend.contextNotice(
+            strategy: "truncate", summary: nil, omittedMarker: true, droppedN: 3)
+        let tc = t["content"].asString ?? ""
+        #expect(tc.contains("omitted in place") && !tc.contains("Summary of the dropped span"))
+    }
+
+    @Test func recallPagesStoreAndContextStatusShape() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["noted"])) })
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"),
+                "text": .string("my project codename is HALCYON"),
+                "client_id": .string("chat"),
+            ]))
+        try await waitForHistory(kernel: kernel, id: id, client: "chat", count: 2)
+
+        // recall finds the planted fact by substring, full durable history.
+        let r = await kernel.send(
+            id,
+            .object([
+                "type": .string("recall"), "query": .string("codename"),
+                "client_id": .string("chat"),
+            ]))
+        let msgs = r["messages"].asArray ?? []
+        #expect(
+            msgs.contains { ($0["content"].asString ?? "").lowercased().contains("halcyon") })
+        #expect(r["client_id"].asString == "chat")
+
+        // context_status shape — default strategy, projection recorded.
+        let st = await kernel.send(id, .object(["type": .string("context_status")]))
+        #expect(st["context_window"].asInt != nil)
+        #expect(st["budget"].asInt != nil)
+        #expect(st["strategy"].asString == "compact")
+        #expect(st["last_projection"]["fired"].asBool == false)  // under-budget send
+        #expect(st["last_reaction"] == .null)  // no compaction fired
+    }
 }
 
 /// Poll the `history` verb until it reaches `count` messages (the

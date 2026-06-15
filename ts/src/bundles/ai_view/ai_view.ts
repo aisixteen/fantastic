@@ -17,6 +17,9 @@ const CHAT_CSS = `
   .chat-view .msg.user { align-self:flex-end; background:rgba(110,90,220,0.32); color:#fff; }
   .chat-view .msg.user.queued { opacity:0.55; font-style:italic; }
   .chat-view .msg.assistant { align-self:flex-start; background:rgba(36,38,56,0.50); color:#cde; }
+  .chat-view .msg.notice { align-self:center; max-width:92%; text-align:center; font-size:11px; color:#ffd166; background:rgba(255,209,102,0.12); box-shadow:inset 0 0 0 1px rgba(255,209,102,0.18); }
+  .chat-view .msg.notice.too-small { color:#ff8a8a; background:rgba(255,120,120,0.12); box-shadow:inset 0 0 0 1px rgba(255,120,120,0.22); }
+  .chat-view .tool-block.recall .tool-verb { color:#9ad0ff; }
   .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:8px; background:rgba(24,26,40,0.50); backdrop-filter:blur(12px) saturate(160%); box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06); font-family:ui-monospace,SFMono-Regular,monospace; font-size:12px; color:#abb; }
   .chat-view .tool-block .tool-head { display:flex; align-items:baseline; gap:6px; }
   .chat-view .tool-block .tool-verb { color:#ffd166; }
@@ -203,6 +206,7 @@ export const aiView: ViewBundle = {
     const makeToolBlock = (tool: Dict): ToolHandle => {
       const el = document.createElement("div");
       el.className = "tool-block pending";
+      if (s(tool, "verb") === "recall") el.classList.add("recall");
       const head = document.createElement("div");
       head.className = "tool-head";
       head.innerHTML = `<span class="tool-verb"></span>(<span class="tool-target"></span>)<span class="tool-state"></span>`;
@@ -333,6 +337,25 @@ export const aiView: ViewBundle = {
         refreshBusy();
       }
     });
+    // context protocol — push half. Render an inline centered notice when the live view
+    // was compacted, or when the window is too small (a failfast; the model wasn't called).
+    const offContext = host.on(backend, "context", (p) => {
+      if (!mine(p)) return;
+      const phase = s(p, "phase");
+      const detail = obj(p, "detail");
+      let bubble: HTMLElement;
+      if (phase === "too_small") {
+        bubble = addMsg("notice", `context too small — ${s(detail, "hint")}`, dialogEl);
+        bubble.classList.add("too-small");
+        setPhase("idle", "context too small");
+        refreshBusy();
+      } else {
+        const strat = s(detail, "strategy");
+        const dropped = typeof detail["dropped_turns"] === "number" ? (detail["dropped_turns"] as number) : 0;
+        const kept = typeof detail["kept_turns"] === "number" ? (detail["kept_turns"] as number) : 0;
+        addMsg("notice", `context compacted · ${strat} · ${dropped} dropped → ${kept} kept (recall to page back)`, dialogEl);
+      }
+    });
 
     // boot: replay history + rebuild from a status snapshot
     const hist = (await host.call(backend, { type: "history", client_id: clientId })) as Dict;
@@ -414,6 +437,7 @@ export const aiView: ViewBundle = {
         offStatus();
         offToken();
         offDone();
+        offContext();
         host.unwatch(backend);
         window.removeEventListener("keydown", onEsc);
         if (elapsedTimer !== null) clearInterval(elapsedTimer);

@@ -51,6 +51,7 @@ const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
     tool_args_as_json: false,
     parallel_tools: true,
+    name: "ollama_backend",
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
@@ -194,6 +195,8 @@ impl Bundle for OllamaBackendBundle {
             }
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "ollama_backend").await,
+            "recall" => verbs::recall(agent_id, payload, kernel).await,
+            "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
             "refresh_menu" => verbs::refresh_menu(agent_id),
             "status" => verbs::status(agent_id, payload),
@@ -228,6 +231,13 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
     let file_bridge_id = helpers::meta_string(agent_id, kernel, "file_bridge_id");
     let generating = state::is_generating(agent_id);
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
+    let context_strategy = meta
+        .get("context_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("compact")
+        .to_string();
     json!({
         "id": agent_id.as_str(),
         "sentence": "Ollama-backed LLM agent (native tool-calling).",
@@ -235,12 +245,16 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "endpoint": endpoint,
         "file_bridge_id": file_bridge_id,
         "generating": generating,
+        "context_window": context_window,
+        "context_strategy": context_strategy,
         "verbs": {
             "reflect": "Identity + model + endpoint + generating flag + file_bridge_id binding. No args.",
             "boot": "No-op. Returns null.",
             "shutdown": "Aborts any in-flight send and drops process-memory state. Returns {stopped:bool}.",
             "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Per-backend FIFO lock. Returns {response, final, client_id}.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id} — that client's persisted chat.",
+            "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
+            "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "interrupt": "No args. Cancels any in-flight send. Returns {interrupted:bool}.",
             "refresh_menu": "No args. Drops the cached agent menu. Returns {refreshed:true}.",
             "status": "args: client_id:str?. Returns the in-flight/queue snapshot (text redacted for other clients).",
@@ -250,6 +264,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "token": "{type:'token', text, source, client_id} — one per streaming chunk.",
             "say": "{type:'say', text:'[tool target → reply]', source, client_id} — one per tool-call summary.",
             "done": "{type:'done', source, client_id} — final event after streaming completes (or interrupt).",
+            "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called — a failfast). Pull counterpart: the context_status verb.",
         },
         "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait + receive a queued status event. reflect/history/interrupt/status skip the lock.",
     })

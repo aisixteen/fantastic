@@ -40,6 +40,10 @@ ags = "ags"
 # (io_bridge ingress rules, mirrored across py/rust/swift); the hyphen makes
 # typos read it as a standalone word. Intentional English prefix, not `miss`.
 mis = "mis"
+# `strat` is the deliberate shorthand for "strategy" in the Context Protocol's
+# overflow-strategy seam (`strat_name` / `stratName` / `strategy=strat`),
+# mirrored across py/rust/swift. Not a typo of `start`/`strata`.
+strat = "strat"
 
 [files]
 # Skip vendored third-party JS / CSS assets — minified bundles

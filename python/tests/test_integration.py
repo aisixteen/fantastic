@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
-
 import ollama_backend.tools as ot
 
 
@@ -18,10 +15,9 @@ class _FakeProvider:
             yield x
 
 
-async def test_persistence_routing_through_file_bridge(
-    seeded_kernel, store_agent, tmp_path
-):
-    """ollama_backend.send writes per-client chat (default chat_cli.json) via the file_bridge agent at the right path."""
+async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
+    """ollama_backend.send persists its per-client chat THROUGH the loader (a mounted
+    chat yaml_state — the AI writes no disk itself); read it back via the `history` verb."""
     ob = (
         await seeded_kernel.send(
             "kernel_state",
@@ -37,9 +33,7 @@ async def test_persistence_routing_through_file_bridge(
         await seeded_kernel.send(ob, {"type": "send", "text": "world"})
     finally:
         ot._providers.pop(ob, None)
-    chat = tmp_path / ".fantastic" / "agents" / ob / "chat_cli.json"
-    assert chat.exists()
-    data = json.loads(chat.read_text())
+    data = (await seeded_kernel.send(ob, {"type": "history"}))["messages"]
     assert data[-2]["content"] == "world"
     assert data[-1]["content"] == "hello"
 
