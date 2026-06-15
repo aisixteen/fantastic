@@ -145,14 +145,33 @@ export const terminalView: ViewBundle = {
       try {
         fit.fit();
         term.refresh(0, term.rows - 1);
+        // Autoscroll must keep working AFTER a resize: fit() may have shifted
+        // the bottom row (reflowOnResize is off, so the buffer doesn't re-pin
+        // itself), so re-anchor to the new bottom here. Resize-first, so resize
+        // is never gated by autoscroll.
+        if (autoscroll) {
+          term.scrollToBottom();
+          pendingOutput = false;
+        }
       } catch {
         /* layout still settling */
       }
     };
     let roTimer: ReturnType<typeof setTimeout> | undefined;
+    // Coalescing debounce — NOT a reset-on-every-event debounce. The autoscroll
+    // tick calls term.scrollToBottom() every 100ms, and the resulting renderer
+    // churn nudges the observed mount, so a reset-style debounce (clearTimeout
+    // on every RO callback) would be perpetually starved by the autoscroll tick
+    // and tightFit would never fire — autoscroll-on silently killing resize.
+    // Instead, the FIRST RO callback after a quiet period arms a fixed-deadline
+    // timer that always elapses; later callbacks during that window are absorbed
+    // (80ms to let the RO burst settle, then a rAF so layout has committed).
     const ro = new ResizeObserver(() => {
-      clearTimeout(roTimer);
-      roTimer = setTimeout(() => requestAnimationFrame(tightFit), 80);
+      if (roTimer) return; // a fit is already scheduled — coalesce
+      roTimer = setTimeout(() => {
+        roTimer = undefined;
+        requestAnimationFrame(tightFit);
+      }, 80);
     });
     ro.observe(mount);
 
