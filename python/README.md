@@ -278,7 +278,7 @@ uv run pytest -n auto
     ├── ai/anthropic/anthropic_backend        # Anthropic LLM (anthropic_backend.tools) — thin binding over ai_core
     ├── io/io_bridge/                         # the IO base — a reflectable keystone agent (channel model, rule registries, read loop/verbs/lifecycle, MemoryTransport); bridges + web faces derive from it; IO legs sealed by default
     ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws / ssh+ws transports
-    ├── io/cloud_bridge/                  # cross-kernel bridge via a zero-trust relay — dial-out + Noise E2E (CONTRACT v1)
+    ├── io/relay_connector/               # cross-kernel bridge through a relay-KERNEL router — dial ws://host/<guid>, X-Fantastic-Auth, reach a partner_guid; tunnels io_bridge frames; auto-reconnect + keepalive + directory (list_peers/watch) + kernelgroup typing (role/owner_guid/exposes via set_identity)
     ├── runner/runner_core/                   # shared runner lifecycle + Transport seam; local_runner and ssh_runner bind to it
     └── runner/{local_runner, ssh_runner}     # spawn local / remote `fantastic`
 ```

@@ -280,7 +280,7 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
 
 # Per-runtime `handler_module` for the WS bridge agent. All three host runtimes
 # now ship the WS derivation as `ws_bridge.tools` (they split the combined
-# kernel_bridge into ws_bridge + cloud_bridge). Keyed by the RUNTIME enum from
+# kernel_bridge into ws_bridge + relay_connector). Keyed by the RUNTIME enum from
 # the root reflect (the bridge is seeded on the DIALING kernel, so it matches
 # THAT runtime).
 _WS_BRIDGE_HANDLER_MODULE = {

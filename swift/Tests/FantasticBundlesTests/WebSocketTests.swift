@@ -30,51 +30,11 @@ struct WebSocketTests {
             .object(["type": .string("mount"), "child_id": .string(wsId)]))
     }
 
-    @Test func computeAcceptMatchesRFC() {
-        // RFC 6455 example: key "dGhlIHNhbXBsZSBub25jZQ==" → accept
-        // "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        let accept = computeWebSocketAccept(key: "dGhlIHNhbXBsZSBub25jZQ==")
-        #expect(accept == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
-    }
-
-    @Test func decodeUnmaskedTextFrame() {
-        // FIN=1 + opcode=1 (text), len=5, payload="Hello"
-        let bytes: [UInt8] = [
-            0x81, 0x05, 0x48, 0x65, 0x6C, 0x6C, 0x6F,
-        ]
-        let data = Data(bytes)
-        let result = decodeFrame(data)
-        #expect(result != nil)
-        if let (frame, consumed) = result {
-            #expect(frame.opcode == .text)
-            #expect(String(data: frame.payload, encoding: .utf8) == "Hello")
-            #expect(consumed == 7)
-        }
-    }
-
-    @Test func decodeMaskedTextFrame() {
-        // RFC 6455 example masked frame: FIN=1 + opcode=1, MASK=1
-        // len=5, mask=0x37,0xfa,0x21,0x3d, masked "Hello"
-        let bytes: [UInt8] = [
-            0x81, 0x85,
-            0x37, 0xFA, 0x21, 0x3D,
-            // "Hello" XOR'd with the mask:
-            0x48 ^ 0x37, 0x65 ^ 0xFA, 0x6C ^ 0x21, 0x6C ^ 0x3D, 0x6F ^ 0x37,
-        ]
-        let data = Data(bytes)
-        let result = decodeFrame(data)
-        #expect(result != nil)
-        if let (frame, _) = result {
-            #expect(frame.opcode == .text)
-            #expect(String(data: frame.payload, encoding: .utf8) == "Hello")
-        }
-    }
-
-    @Test func decodeReturnsNilForIncompleteFrame() {
-        // Header only, no payload bytes.
-        let data = Data([0x81, 0x05])
-        #expect(decodeFrame(data) == nil)
-    }
+    // NOTE: the former frame-unit tests (computeWebSocketAccept / decodeFrame)
+    // are gone — swift-nio's WebSocket upgrader + frame codec own the handshake
+    // hash and framing now. The two end-to-end tests below exercise that real
+    // path through the NIO server (a stronger guarantee than the hand-rolled
+    // codec the unit tests used to pin).
 
     @Test func wsCallRoundTripsThroughServer() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)

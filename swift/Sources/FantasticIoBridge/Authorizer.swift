@@ -13,7 +13,7 @@
 // `ingress_rule`/`egress_rule` (symmetric) or the legacy `auth` shorthand (both).
 //
 // SWIFT SPECIFIC: there is no shared read loop. The ONLY inbound-`call` dispatcher is
-// `CloudBridgeTransport.dispatch`, so an ingress rule is enforced on the cloud_bridge
+// `RelayTransport.dispatch`, so an ingress rule is enforced on the relay_connector
 // leg only (correct-by-construction; ws is an asymmetric client, in-memory forward is
 // a direct kernel call). The relay e2e matrix covers Swift's real inbound path.
 // Rules are TRANSITIONAL (inline plumbing), not invocational (agents).

@@ -76,15 +76,18 @@ single point of variance is `(transport | listener) + (transport literal) +
 | Derivation | Path | Direction | Transport | Extractor |
 |---|---|---|---|---|
 | `ws_bridge` (was `kernel_bridge`) | `io/ws_bridge/` | outbound dial | ws / ssh+ws / memory | `EnvelopeExtractor` |
-| `cloud_bridge` | `io/cloud_bridge/` | outbound dial (+TLS) | `cloud_bridge` (relay) | `EnvelopeExtractor` |
+| `relay_connector` | `io/relay_connector/` | outbound dial (relay router) | `relay` | `EnvelopeExtractor` |
 | `web_ws` | `io/web_ws/` | inbound, 1:N | ws (listener) | `EnvelopeExtractor` |
 | `web_rest` | `io/web_rest/` | inbound, 1:N | http (listener) | header (`X-Fantastic-Auth`) |
 
 `ws_bridge` is the WS-only asymmetric client (its inbound `call` path fires only for
-memory/relay, never a real WS peer). `cloud_bridge` keeps its name (the relay
-CONTRACT v1 + the `__cloud-cert` subcommand + the cross-runtime any-to-any matrix pin
-it) and its record `transport="cloud_bridge"`; it now declares an explicit
-`fantastic-io-bridge` dep. The `web` host is **unchanged** and is **not** a derivation
+memory/relay, never a real WS peer). `relay_connector` (record `transport="relay"`)
+dials a relay-KERNEL router (`../fantastic_relay`) at `ws://<host>/<guid>`
+(subprotocol `fantastic.relay.v1`, group password in `X-Fantastic-Auth`) and tunnels
+the bridge frames to a `partner_guid` — no certs/TLS/token-issuer, the relay auths
+the connection and routes by `target`. (It replaced the old `cloud_bridge` zero-trust
+relay; the cross-runtime any-to-any matrix moved to a live `relayd`.) The `web` host
+is **unchanged** and is **not** a derivation
 — it stays the render-only uvicorn host and keeps the duck-typed `get_routes` mount
 seam that the inbound faces bind through.
 
@@ -115,7 +118,7 @@ sealed leg leaks neither dispatch nor telemetry (teardown verbs stay ungated).
 
 The extractor varies by **modality**, not by transport:
 
-- **message** channels (ws_bridge, cloud_bridge, web_ws, web_rest POST) carry the
+- **message** channels (ws_bridge, relay_connector, web_ws, web_rest POST) carry the
   credential on the frame **envelope** (`auth_token`, a sibling of `id`/`target` —
   never inside the dispatched payload, so the target agent never sees it), gated
   **per-frame**. Extractor = `EnvelopeExtractor`.
@@ -147,7 +150,7 @@ cannot connect until it is opened.
 ### 2.6 Reachability + the discovery loop
 
 `io_bridge` is a **shared abstract library, not an agent** (§2.1): every leg
-(`ws_bridge`/`cloud_bridge`/`web_ws`/`web_rest`/`file_bridge`) DERIVES from it. So the
+(`ws_bridge`/`relay_connector`/`web_ws`/`web_rest`/`file_bridge`) DERIVES from it. So the
 discovery-through-denial loop closes via **each derivation's OWN short readme** + the
 denial's inline `hint` — there is no keystone agent to reflect:
 
@@ -185,13 +188,13 @@ two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
   envelope sibling, never inside `payload`; a leg with no egress credential attaches
   no `auth_token` → byte-identical to pre-auth.
 - **Frame codec — raw bytes, never base64** (`io_bridge._codec`, shared by web_ws +
-  ws_bridge + cloud_bridge): a frame carrying a raw `bytes` value (a `read_stream`
+  ws_bridge + relay_connector): a frame carrying a raw `bytes` value (a `read_stream`
   chunk; `write_stream` takes `bytes`) serializes as a **binary frame**
   `[4-byte BE header-len | JSON header (the bytes value → null + `_binary_path`) |
   raw body]`; a plain frame is UTF-8 JSON. The text/binary split is carried by the
-  transport, not guessed: WS transports use the WS frame TYPE (text→`str`,
-  binary→`bytes`); cloud_bridge prepends a 1-byte tag (`0`=text,`1`=binary) to its
-  length-delimited TLS record. The stream chunk field is `bytes` (was `b64`) — there
+  transport, not guessed — every transport is WS-based and uses the WS frame TYPE
+  (text→`str`, binary→`bytes`); relay_connector tunnels over the relay, which
+  forwards the frame kind end-to-end. The stream chunk field is `bytes` (was `b64`) — there
   is no base64 anywhere on the stream path. **Ports (#524/#525/#526) must mirror this
   codec**, else cross-runtime file streaming drifts (the relay matrix would catch it
   once a streaming case is added).
@@ -213,13 +216,15 @@ two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
   adds `persistence: {provider:<id>|null}` (which file_bridge the loader persists through),
   via a duck-typed `reflect_root_extra(agent)` hook. So a client reads the whole gate/wiring
   state in ONE reflect — no per-agent round-trips, no kernel skip-sealed heuristic.
-- **Record fields** (`.fantastic`): `transport` (memory|ws|ssh+ws|cloud_bridge),
+- **Record fields** (`.fantastic`): `transport` (memory|ws|ssh+ws|relay),
   per-leg `ingress_rule`/`egress_rule`/`auth`. `handler_module` strings:
-  `cloud_bridge.tools`, `web.tools`, `web_ws.tools`, `web_rest.tools` stable;
+  `relay_connector.tools`, `web.tools`, `web_ws.tools`, `web_rest.tools` stable;
   `kernel_bridge.tools` → `ws_bridge.tools` migrated in lockstep.
-- **Relay / TLS** (external frozen interface `../fantastic_relay` CONTRACT v1):
-  subprotocol, claims, pairing, Ed25519-pubkey pinning, `>I` framing, `__cloud-cert`
-  — untouched.
+- **Relay** (external interface `../fantastic_relay`, a relay-KERNEL router):
+  dial `ws://<host>/<guid>`, subprotocol `fantastic.relay.v1`, group password in the
+  `X-Fantastic-Auth` header (checked once at the WS upgrade), routed by `target`. No
+  TLS/certs/Ed25519/token-issuer — that whole zero-trust `cloud_bridge` model was
+  removed when `relay_connector` replaced it.
 - **Env-var names**: `FANTASTIC_GROUP_TOKEN`, `FANTASTIC_TARGET`/`FANTASTIC_IMAGE`
   — preserved. (`relay_e2e` no longer uses an opt-in `FANTASTIC_RELAY_E2E` flag; it
   self-skips on absent relay binaries.)
@@ -258,7 +263,7 @@ this doc's current-state critical path.
 - Base: `python/bundled_agents/io/io_bridge/src/io_bridge/`
   (`tools.py`, `_engine.py`, `_transport.py`, `_memory.py`, `channel.py`, `_base.py`,
   `ingress_rules/`, `egress_rules/`, `readme.md`).
-- Derivations: `python/bundled_agents/io/{ws_bridge,cloud_bridge}/`,
+- Derivations: `python/bundled_agents/io/{ws_bridge,relay_connector}/`,
   `python/bundled_agents/web/{web_ws,web_rest}/`.
 - Render-only host (unchanged): `python/bundled_agents/web/host/`.
 - Boot seam: `python/main.py` (`_build_kernel`).

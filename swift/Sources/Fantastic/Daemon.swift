@@ -81,7 +81,9 @@ enum DaemonMode {
         // Aligns with Python's behavior on a freshly-initialized
         // workdir.)
         let webExists = kernel.agent(AgentId("web")) != nil
-        let isTTY = isatty(fileno(stdin)) != 0
+        // fd 0 is stdin — avoid the `stdin` C global, which Glibc exposes as a
+        // mutable `var` that Swift 6 strict concurrency rejects on Linux.
+        let isTTY = isatty(0) != 0
 
         if !webExists && !isTTY {
             // Nothing to do; exit silently. Matches Python's

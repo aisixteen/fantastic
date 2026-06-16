@@ -23,10 +23,21 @@ Both binaries are required; the test skips cleanly when either is absent.
 
 from __future__ import annotations
 
+import os as _os
+
 import pytest
 
 from helpers.seeding import root_id, seed_bridge_ws, seed_web, seed_web_ws
 from helpers.streaming import assert_watch_remote_streams
+
+# Local-loopback (127.0.0.1) bridge addressing — meaningless INSIDE a container
+# (that's the container's own loopback, not the host). The cross-CONTAINER bridge
+# is covered by test_bridge_container_to_container (host.containers.internal +
+# all-interface publish), so skip this local matrix under the container target.
+pytestmark = pytest.mark.skipif(
+    _os.environ.get("FANTASTIC_TARGET", "local").strip().lower() == "container",
+    reason="local-loopback bridge; container path = test_bridge_container_to_container",
+)
 
 
 @pytest.mark.asyncio

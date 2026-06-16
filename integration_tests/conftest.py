@@ -40,7 +40,7 @@ from helpers.launcher import (  # noqa: E402
 _REPO_ROOT = _HERE.parent
 
 # Target selection — `local` (default) runs locally-built binaries; `container`
-# runs the universal image (python/rust only) so the SAME tests validate the
+# runs the universal image (python/rust/swift) so the SAME tests validate the
 # shipped container. `FANTASTIC_IMAGE` overrides the image tag.
 _TARGET = __import__("os").environ.get("FANTASTIC_TARGET", "local").strip().lower()
 _IMAGE = __import__("os").environ.get("FANTASTIC_IMAGE", "fantastic:latest")
@@ -83,18 +83,18 @@ def python_binary():
 
 @pytest.fixture(scope="session")
 def swift_binary():
-    """A launcher for the Swift kernel — LOCAL ONLY.
+    """A launcher for the Swift kernel.
 
-    Swift's HTTP server is Network.framework-only, so there is no Linux
-    container for it; under `FANTASTIC_TARGET=container` swift tests skip.
-    Searches the canonical `swift build` output plus the isolated
-    dev-iteration path and picks whichever is **newest by mtime** (avoids
-    silently running a stale binary that masked missing verbs before).
+    `FANTASTIC_TARGET=local` (default) → a `LocalLauncher` over the built
+    binary. `FANTASTIC_TARGET=container` → a `ContainerLauncher` running the
+    universal image's swift runtime (its web server is swift-nio, so it serves
+    HTTP on Linux at parity with python/rust). Locally it searches the canonical
+    `swift build` output plus the isolated dev-iteration path and picks whichever
+    is **newest by mtime** (avoids silently running a stale binary that masked
+    missing verbs before).
     """
     if _TARGET == "container":
-        pytest.skip(
-            "swift has no Linux container (Network.framework HTTP); skipped under container target"
-        )
+        return _container_launcher_or_skip("swift")
     candidates = [
         _REPO_ROOT / "swift" / ".build" / "debug" / "fantastic",
         Path("/tmp/swift-fm-build/debug/fantastic"),

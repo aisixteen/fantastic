@@ -4,7 +4,7 @@ name = "fantastic-io-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "IO base — shared library (NOT a bundle): per-leg ingress/egress rule registries + the binary-safe frame codec. Every io derivation (ws_bridge/cloud_bridge/web_ws/web_rest/file_bridge) imports it. Mirrors python/bundled_agents/io/io_bridge."
+description = "IO base — shared library (NOT a bundle): per-leg ingress/egress rule registries + the binary-safe frame codec. Every io derivation (ws_bridge/relay_connector/web_ws/web_rest/file_bridge) imports it. Mirrors python/bundled_agents/io/io_bridge."
 
 [dependencies]
 serde_json = { workspace = true }

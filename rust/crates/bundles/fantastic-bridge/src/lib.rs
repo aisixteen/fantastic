@@ -1,5 +1,6 @@
 //! fantastic-bridge — cross-kernel comms. TWO io_bridge derivations:
-//! `ws_bridge` (ws/ssh/memory) + `cloud_bridge` (relay), sharing one engine.
+//! `ws_bridge` (ws/ssh/memory) + `relay_connector` (relay-kernel router),
+//! sharing one engine.
 //!
 //! Pairs of bridge agents forward `send` envelopes between kernels
 //! over a pluggable transport. Weak binding: remote agents are
@@ -61,6 +62,7 @@ pub mod transport;
 
 use authorizer::{Action, Decision, EgressRule, IngressRule};
 use transport::memory::MemoryTransport;
+use transport::relay::RelayTransport;
 #[cfg(feature = "full")]
 use transport::ssh::SshTransport;
 use transport::ws::WsTransport;
@@ -68,47 +70,33 @@ use transport::{BridgeTransport, TransportError};
 
 /// `handler_module` of the WS derivation (ws / ssh+ws / memory transports).
 pub const WS_HANDLER_MODULE: &str = "ws_bridge.tools";
-/// `handler_module` of the CLOUD derivation (the zero-trust relay transport).
-pub const CLOUD_HANDLER_MODULE: &str = "cloud_bridge.tools";
+/// `handler_module` of the RELAY derivation (the relay-kernel router transport).
+pub const RELAY_HANDLER_MODULE: &str = "relay_connector.tools";
 
 /// Which transport family a bundle admits — the only behavioural difference
 /// between the two derivations (they share one engine, mirroring py's
-/// io_bridge engine + thin ws_bridge / cloud_bridge derivations).
+/// io_bridge engine + thin ws_bridge / relay_connector derivations).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     /// ws / ssh+ws / memory (the `ws_bridge` derivation).
     Ws,
-    /// the relay (`cloud_bridge` derivation).
-    Cloud,
+    /// the relay-kernel router (`relay_connector` derivation).
+    Relay,
 }
 
 impl Family {
     fn label(self) -> &'static str {
         match self {
             Family::Ws => "ws_bridge",
-            Family::Cloud => "cloud_bridge",
+            Family::Relay => "relay_connector",
         }
     }
     fn admits(self, transport_kind: &str) -> bool {
         match self {
             Family::Ws => matches!(transport_kind, "memory" | "ws" | "ssh+ws"),
-            Family::Cloud => transport_kind == "cloud_bridge",
+            Family::Relay => matches!(transport_kind, "memory" | "relay"),
         }
     }
-}
-
-/// Derive this runtime's deterministic self-signed device cert (PEM) for an
-/// Ed25519 identity key, given as b64url-nopad. Exposed for the relay e2e
-/// harness to cross-pin a rust leg's ACTUAL cert (each runtime's DER differs, so
-/// a python/swift validator that pins by exact cert needs the rust cert verbatim).
-pub fn cloud_cert_pem_b64url(id_key_b64url: &str) -> Result<String, String> {
-    use base64::Engine as _;
-    let id_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(id_key_b64url.trim_end_matches('='))
-        .map_err(|e| format!("bad id_key b64url: {e}"))?;
-    let (der, _key) =
-        transport::cloud::self_signed_cert(&id_key).map_err(|e| format!("cert: {e:?}"))?;
-    Ok(transport::cloud::der_to_pem(&der))
 }
 
 /// readme.md auto-seeded into the agent's dir on creation.
@@ -171,9 +159,9 @@ impl BridgeState {
 /// The WS derivation of io_bridge — ws / ssh+ws / memory transports. Registered
 /// under `ws_bridge.tools`. (Was the combined `kernel_bridge`; cloud split out.)
 pub struct WsBridgeBundle;
-/// The CLOUD derivation of io_bridge — the zero-trust relay transport.
-/// Registered under `cloud_bridge.tools`. Shares the engine with `WsBridgeBundle`.
-pub struct CloudBridgeBundle;
+/// The RELAY derivation of io_bridge — the relay-kernel router transport.
+/// Registered under `relay_connector.tools`. Shares the engine with `WsBridgeBundle`.
+pub struct RelayConnectorBundle;
 
 /// Shared dispatch — the one bridge engine both derivations run. `family` is the
 /// only difference: it bounds which transport a `boot` may open.
@@ -192,9 +180,63 @@ async fn dispatch(
         "forward" => forward_reply(agent_id, payload, kernel).await,
         "watch_remote" => watch_remote_reply(agent_id, payload, "watch").await,
         "unwatch_remote" => watch_remote_reply(agent_id, payload, "unwatch").await,
+        "list_peers" | "watch_directory" | "unwatch_directory" => {
+            directory_reply(agent_id, payload, verb).await
+        }
+        "set_identity" => set_identity_reply(agent_id, payload, kernel).await,
         other => json!({"error": format!("{}: unknown verb {other:?}", family.label())}),
     };
     Ok(Some(reply))
+}
+
+/// The relay directory verbs (`relay_connector` only) — addressed to the relay's
+/// own `relay` agent (`target:"relay"`), not the partner. `list_peers` is a
+/// one-shot snapshot; `watch_directory` subscribes so `peer_*` events re-emit on
+/// this connector's inbox; `unwatch_directory` stops it.
+async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value {
+    let Some(state) = BRIDGES.lock().get(agent_id).cloned() else {
+        return json!({"error": format!("relay_connector.{op}: not connected (call boot first)")});
+    };
+    let timeout = payload
+        .get("timeout")
+        .and_then(Value::as_f64)
+        .unwrap_or(30.0);
+    match op {
+        "list_peers" => state.transport.list_peers(timeout).await,
+        "watch_directory" => state.transport.watch_directory(timeout).await,
+        _ => state.transport.unwatch_directory().await,
+    }
+}
+
+/// `set_identity` (`relay_connector` only): advertise/update this peer's directory
+/// typing — `role`/`owner_guid`/`exposes` (all optional, merged over the record).
+/// Persists the change so it re-announces on the next boot, then pushes it to the
+/// relay live (→ `peer_updated`). Mirrors py `_set_identity`.
+async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let Some(state) = BRIDGES.lock().get(agent_id).cloned() else {
+        return json!({"error": "relay_connector.set_identity: not connected (call boot first)"});
+    };
+    if let Some(role) = payload.get("role") {
+        if !role.is_null() && role.as_str() != Some("manager") && role.as_str() != Some("kernel") {
+            return json!({"error": "relay_connector.set_identity: role must be manager|kernel"});
+        }
+    }
+    // Merge only the provided well-known keys into the record + persist (explicit
+    // null retracts a field, e.g. owner_guid:null = become standalone).
+    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
+        let mut patch = serde_json::Map::new();
+        for k in ["role", "owner_guid", "exposes"] {
+            if let Some(v) = payload.get(k) {
+                patch.insert(k.to_string(), v.clone());
+            }
+        }
+        if !patch.is_empty() {
+            agent.update_meta(patch);
+            let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
+        }
+    }
+    let attrs = identity_from_meta(agent_id, kernel);
+    state.transport.set_identity(attrs).await
 }
 
 /// Shared BINARY dispatch — `forward` carrying a raw request chunk
@@ -267,9 +309,9 @@ impl Bundle for WsBridgeBundle {
 }
 
 #[async_trait]
-impl Bundle for CloudBridgeBundle {
+impl Bundle for RelayConnectorBundle {
     fn name(&self) -> &str {
-        "cloud_bridge"
+        "relay_connector"
     }
     fn readme(&self) -> Option<&'static str> {
         Some(README)
@@ -280,7 +322,7 @@ impl Bundle for CloudBridgeBundle {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError> {
-        dispatch(Family::Cloud, agent_id, payload, kernel).await
+        dispatch(Family::Relay, agent_id, payload, kernel).await
     }
     async fn handle_binary(
         &self,
@@ -289,7 +331,7 @@ impl Bundle for CloudBridgeBundle {
         blob: Vec<u8>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Vec<u8>), BundleError> {
-        dispatch_binary(Family::Cloud, agent_id, header, blob, kernel).await
+        dispatch_binary(Family::Relay, agent_id, header, blob, kernel).await
     }
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         let _ = shutdown_reply(agent_id, kernel).await;
@@ -303,6 +345,51 @@ fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String>
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
     meta.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Mint an opaque relay GUID (32 hex). Not cryptographic — it only needs to be
+/// unique within a relay group (the relay rejects duplicate GUIDs); composed from
+/// time + pid + a stack address + a process-monotonic counter, mirroring the
+/// kernel's own `mint_id` philosophy (no extra crate dep).
+fn mint_guid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut stack: u64 = 0;
+    let stack_ptr = &mut stack as *mut u64 as u64;
+    let lo = (std::process::id() as u64).rotate_left(32)
+        ^ stack_ptr
+        ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("{nanos:016x}{lo:016x}")
+}
+
+/// Assemble the directory-attributes blob to advertise from the record's well-known
+/// keys (`role`/`owner_guid`/`exposes`). Defaults are OMITTED (role=kernel /
+/// owner_guid=null / exposes=[]) so a plain peer advertises nothing — the relay's
+/// own defaults stand. Opaque to the relay; mirrors py `_identity_from_record`.
+fn identity_from_meta(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let mut attrs = serde_json::Map::new();
+    if let Some(role) = meta_string(agent_id, kernel, "role") {
+        if role != "kernel" {
+            attrs.insert("role".into(), Value::String(role));
+        }
+    }
+    if let Some(owner) = meta_value(agent_id, kernel, "owner_guid") {
+        if !owner.is_null() {
+            attrs.insert("owner_guid".into(), owner);
+        }
+    }
+    if let Some(exposes) = meta_value(agent_id, kernel, "exposes") {
+        if exposes.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            attrs.insert("exposes".into(), exposes);
+        }
+    }
+    Value::Object(attrs)
 }
 
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
@@ -323,65 +410,6 @@ fn meta_u64(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<u64> {
     meta.get(key).and_then(Value::as_u64)
 }
 
-fn meta_bool(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<bool> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
-    meta.get(key).and_then(Value::as_bool)
-}
-
-fn meta_strings(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Vec<String>> {
-    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let meta = agent.meta.read().expect("meta poisoned");
-    meta.get(key).and_then(Value::as_array).map(|a| {
-        a.iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect()
-    })
-}
-
-/// The TokenSource seam (cloud_bridge does NOT authenticate or mint): a literal
-/// `token`, else POST the relay's `/issue` control-plane endpoint with
-/// `provider`/`password`. Provider-agnostic — `provider` selects the auth method
-/// (password today; Apple/Google later = the same call, a different provider).
-async fn resolve_token(agent_id: &AgentId, kernel: &Kernel) -> Result<String, String> {
-    if let Some(t) = meta_string(agent_id, kernel, "token") {
-        return Ok(t);
-    }
-    let Some(url) = meta_string(agent_id, kernel, "issue_url") else {
-        return Err("cloud_bridge: token or issue_url required".into());
-    };
-    let body = json!({
-        "provider": meta_string(agent_id, kernel, "provider").unwrap_or_else(|| "password".into()),
-        "credential": meta_string(agent_id, kernel, "password").unwrap_or_default(),
-        "peer_id": meta_string(agent_id, kernel, "peer_id").unwrap_or_default(),
-        "partner_peer_id": meta_string(agent_id, kernel, "partner_peer_id").unwrap_or_default(),
-        "rendezvous": meta_string(agent_id, kernel, "rendezvous").unwrap_or_default(),
-    });
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("cloud_bridge: issue endpoint request: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "cloud_bridge: issue endpoint denied (HTTP {})",
-            resp.status().as_u16()
-        ));
-    }
-    let token = resp
-        .text()
-        .await
-        .map_err(|e| format!("cloud_bridge: issue endpoint body: {e}"))?
-        .trim()
-        .to_string();
-    if token.is_empty() {
-        return Err("cloud_bridge: issue endpoint returned no token".into());
-    }
-    Ok(token)
-}
-
 // ── verb implementations ────────────────────────────────────────────
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
@@ -393,16 +421,30 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .or_else(|| meta_string(agent_id, kernel, "transport"))
         .unwrap_or_else(|| "memory".to_string());
     let pending = bridge.as_ref().map(|b| b.pending_count()).unwrap_or(0);
+    let is_relay = transport_kind == "relay";
+    let sentence = if is_relay {
+        "Cross-kernel comms through a relay-kernel router — dial-out WS, group-password auth (X-Fantastic-Auth), GUID-routed; symmetric RPC tunneled over the relay."
+    } else {
+        "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); memory/ws/ssh+ws; weak proxy."
+    };
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Cross-kernel comms bridge — WS-only, asymmetric (no peer bridge needed); memory/ws/ssh+ws; weak proxy.",
+        "sentence": sentence,
         "transport": transport_kind,
         "connected": connected,
+        // ws-flavored fields (null on a relay leg) + relay fields (null on a ws leg).
         "host": meta_string(agent_id, kernel, "host"),
         "port": meta_u64(agent_id, kernel, "port"),
         "peer_id": meta_string(agent_id, kernel, "peer_id"),
         "local_port": meta_u64(agent_id, kernel, "local_port"),
         "remote_port": meta_u64(agent_id, kernel, "remote_port"),
+        "relay_url": meta_string(agent_id, kernel, "relay_url"),
+        "guid": meta_string(agent_id, kernel, "guid"),
+        "partner_guid": meta_string(agent_id, kernel, "partner_guid"),
+        // Directory typing (relay legs) — what we advertise to the relay's directory.
+        "role": meta_string(agent_id, kernel, "role").unwrap_or_else(|| "kernel".into()),
+        "owner_guid": meta_value(agent_id, kernel, "owner_guid").unwrap_or(Value::Null),
+        "exposes": meta_value(agent_id, kernel, "exposes").unwrap_or_else(|| json!([])),
         // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
         // `reflect` → `update_agent` edit is a direct mirror. No `auth` alias in
         // the reflect (it's a legacy WRITE shorthand only). `sealed` = the leg
@@ -435,14 +477,14 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     }
 
     let kind = meta_string(agent_id, kernel, "transport").unwrap_or_else(|| {
-        if family == Family::Cloud {
-            "cloud_bridge"
+        if family == Family::Relay {
+            "relay"
         } else {
             "memory"
         }
         .to_string()
     });
-    // The derivation only opens transports in its own family — a `cloud_bridge`
+    // The derivation only opens transports in its own family — a `relay_connector`
     // can't open a ws socket and vice-versa (the two-bundle split).
     if !family.admits(&kind) {
         return json!({
@@ -514,60 +556,53 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
                 "error": "bridge: ssh+ws transport requires the `full` feature"
             })
         }
-        "cloud_bridge" => {
-            use base64::Engine as _;
-            use transport::cloud::{self_signed_cert, CloudTransport, WsByteChannel};
+        "relay" => {
+            // Relay-kernel router: dial ws://<relay_url>/<guid> (group password in
+            // X-Fantastic-Auth, checked once at the WS upgrade) and tunnel to a
+            // fixed partner GUID. No certs/mTLS/issue_url — the relay auths the
+            // connection and routes by `target`.
             let relay_url = match meta_string(agent_id, kernel, "relay_url") {
                 Some(u) => u,
-                None => return json!({"error": "cloud_bridge: relay_url required"}),
+                None => return json!({"error": "relay_connector: relay_url required"}),
             };
-            let id_key_b64 = match meta_string(agent_id, kernel, "id_key") {
-                Some(k) => k,
-                None => return json!({"error": "cloud_bridge: id_key required"}),
-            };
-            let id_key = match base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(id_key_b64.trim_end_matches('='))
-            {
-                Ok(k) => k,
-                Err(e) => return json!({"error": format!("cloud_bridge: bad id_key: {e}")}),
-            };
-            let approved = match meta_strings(agent_id, kernel, "approved_peer_certs") {
-                Some(a) if !a.is_empty() => a,
-                _ => return json!({"error": "cloud_bridge: approved_peer_certs required"}),
-            };
-            // TokenSource: literal `token`, else POST the relay's `/issue` endpoint.
-            let token = match resolve_token(agent_id, kernel).await {
-                Ok(t) => t,
-                Err(e) => return json!({ "error": e }),
-            };
-            // TLS role: tls_role | initiator | derived (initiator = peer_id < partner ⇒ client).
-            let server = match meta_string(agent_id, kernel, "tls_role").as_deref() {
-                Some("server") => true,
-                Some("client") => false,
-                _ => match meta_bool(agent_id, kernel, "initiator") {
-                    Some(i) => !i,
-                    None => {
-                        let peer = meta_string(agent_id, kernel, "peer_id").unwrap_or_default();
-                        let partner =
-                            meta_string(agent_id, kernel, "partner_peer_id").unwrap_or_default();
-                        if partner.is_empty() {
-                            return json!({"error": "cloud_bridge: need tls_role, initiator, or partner_peer_id"});
-                        }
-                        peer >= partner
+            // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
+            // persisted into the record, so every later hydration re-dials the SAME
+            // path; an explicit guid always wins, and a minted one is never
+            // regenerated (read verbatim next boot). Mirrors py/swift.
+            let guid = match meta_string(agent_id, kernel, "guid") {
+                Some(g) => g,
+                None => {
+                    let g = mint_guid();
+                    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
+                        let mut patch = serde_json::Map::new();
+                        patch.insert("guid".to_string(), Value::String(g.clone()));
+                        agent.update_meta(patch);
+                        let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
                     }
-                },
+                    g
+                }
             };
-            let (cert, key) = match self_signed_cert(&id_key) {
-                Ok(c) => c,
-                Err(e) => return json!({"error": format!("cloud_bridge: cert: {e}")}),
+            let partner = match meta_string(agent_id, kernel, "partner_guid") {
+                Some(p) => p,
+                None => return json!({"error": "relay_connector: partner_guid required"}),
             };
-            let channel = match WsByteChannel::connect(&relay_url, &token).await {
-                Ok(c) => c,
-                Err(e) => return json!({"error": format!("cloud_bridge: relay dial: {e}")}),
-            };
-            match CloudTransport::connect(channel, server, cert, key, &approved).await {
+            let token = meta_string(agent_id, kernel, "relay_token").unwrap_or_default();
+            // `reconnect` (s) backoff before each re-dial; default 10, 0 = one-shot.
+            let reconnect = meta_value(agent_id, kernel, "reconnect")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10.0);
+            // Directory typing: validate `role` and advertise the attrs blob on connect.
+            if let Some(role) = meta_string(agent_id, kernel, "role") {
+                if role != "manager" && role != "kernel" {
+                    return json!({"error": format!("relay_connector: role must be manager|kernel, got {role:?}")});
+                }
+            }
+            let identity = identity_from_meta(agent_id, kernel);
+            match RelayTransport::connect(&relay_url, &guid, &token, &partner, reconnect, identity)
+                .await
+            {
                 Ok(t) => t,
-                Err(e) => return json!({"error": format!("cloud_bridge: handshake: {e}")}),
+                Err(e) => return json!({"error": format!("relay_connector: relay dial: {e}")}),
             }
         }
         other => return json!({"error": format!("bridge: unknown transport {other:?}")}),

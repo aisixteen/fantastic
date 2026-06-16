@@ -1,5 +1,5 @@
 //! codec — the binary-safe frame codec shared by every transport (web_ws WS frames,
-//! ws_bridge, cloud_bridge). Mirrors `python/bundled_agents/io/io_bridge/_codec.py`.
+//! ws_bridge, relay_connector). Mirrors `python/bundled_agents/io/io_bridge/_codec.py`.
 //!
 //! A frame is a JSON envelope. A frame whose payload carries raw bytes (a `read_stream`
 //! chunk, audio) is a **binary frame**:
@@ -18,8 +18,9 @@
 //! inside the dict; rust passes the body alongside). The **wire layout is identical**, so
 //! a rust leg and a python web_ws interoperate byte-for-byte.
 //!
-//! The text/binary split is carried by the TRANSPORT, not guessed here (WS frame type;
-//! a 1-byte tag on cloud_bridge's TLS record).
+//! The text/binary split is carried by the TRANSPORT, not guessed here — every
+//! transport today is WS-based (web_ws, ws_bridge, relay_connector over the relay)
+//! and uses the WS frame type; the relay forwards the frame kind end-to-end.
 
 use serde_json::Value;
 

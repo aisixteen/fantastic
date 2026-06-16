@@ -1,6 +1,6 @@
 //! fantastic-io-bridge — the IO base. A **shared library, NOT a bundle** (no agent,
 //! no entry point): the per-leg authorization rule registries that every io derivation
-//! (`ws_bridge`/`cloud_bridge`/`web_ws`/`web_rest`/`file_bridge`) imports + calls at one
+//! (`ws_bridge`/`relay_connector`/`web_ws`/`web_rest`/`file_bridge`) imports + calls at one
 //! choke point. Mirrors `python/bundled_agents/io/io_bridge`.
 
 pub mod authorizer;

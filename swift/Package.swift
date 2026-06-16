@@ -72,12 +72,16 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
-        // cloud_bridge: end-to-end TLS 1.3 mTLS over the relay's opaque pipe.
-        // swift-nio-ssl vendors BoringSSL (the only vetted TLS-1.3-over-buffers
-        // path in Swift); swift-crypto gives portable Ed25519 (CryptoKit on Apple).
+        // swift-nio: the cross-platform (macOS + Linux) event-driven networking
+        // core — the `FantasticWeb` HTTP + WS server AND the relay/WS bridge
+        // clients run on it. swift-nio-ssl vendors BoringSSL for TLS on the
+        // wss:// dials (the only vetted TLS-1.3-over-buffers path in Swift).
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // Cross-platform (macOS + Linux) streaming HTTP client for the LLM
+        // backends — replaces URLSession.bytes (Apple-only) so ollama/nvidia
+        // stream on Linux too. NIO-based, shares the swift-nio above.
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.20.0"),
     ],
     targets: [
         // ── Core ─────────────────────────────────────────────────
@@ -150,15 +154,30 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
                 .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                // HTTP/1 + WebSocket: the cross-platform WS CLIENT
+                // (NIOWebSocketClient) the bridge dials peers/relay with —
+                // replaces URLSessionWebSocketTask (Apple-only, dead on Linux).
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                // NIOSSL: TLS for the WS client's wss:// dials (relay via cloudflared).
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
-                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         .target(
             name: "FantasticWeb",
-            dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge"],
+            dependencies: [
+                "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+                // swift-nio HTTP + WebSocket server (cross-platform: macOS + Linux).
+                // Replaces the Apple-only Network.framework listener so the swift
+                // kernel serves HTTP on Linux too. All from the already-declared
+                // swift-nio package — no new top-level dependency.
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+            ],
             resources: [
                 .copy("Resources/three.module.js"),
                 .copy("Resources/xterm.min.js"),
@@ -191,17 +210,23 @@ let package = Package(
         .target(
             name: "FantasticAICore",
             dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           // ByteBuffer for the cross-platform line-streaming helper.
+                           .product(name: "NIOCore", package: "swift-nio")]
         ),
         .target(
             name: "FantasticOllamaBackend",
             dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
         ),
         .target(
             name: "FantasticNvidiaNimBackend",
             dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
         ),
         .target(
             name: "FantasticFoundationModelsBackend",

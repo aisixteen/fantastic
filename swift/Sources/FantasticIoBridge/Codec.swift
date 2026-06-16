@@ -9,7 +9,9 @@
 // base64. Swift's `JSON` can't hold raw `Data`, so (like rust's `Value`) the
 // header + body travel SEPARATELY — the wire layout is identical, so a swift leg
 // and a python/rust web_ws interoperate byte-for-byte. The text/binary split is
-// carried by the TRANSPORT (WS frame type; a 1-byte tag on the TLS record).
+// carried by the TRANSPORT — every transport is WS-based (web_ws, ws_bridge,
+// relay_connector over the relay) and uses the WS frame type; the relay forwards
+// the frame kind end-to-end.
 
 import FantasticJSON
 import Foundation

@@ -92,7 +92,7 @@ whichever host is up over the WS bridge, and any host serves it generically
 ```
 fantastic_canvas/
 ├── python/   reference implementation — uvicorn + FastAPI
-├── swift/    production runtime for Apple — Network.framework + URLSession
+├── swift/    production runtime for Apple — swift-nio web + URLSession (serves Linux too)
 ├── rust/     server / CLI host runtime — axum + tokio (pure Rust)
 └── ts/       browser frontend kernel — views as agents, served over the bridge
 ```
@@ -237,11 +237,19 @@ users.
 
 This kernel is **not an independent project.** It, the
 [Aisixteen Fantastic Apple client](https://github.com/Alexadar/fantastic_app)
-and the [zero-trust cloud relay](https://github.com/Alexadar/fantastic_relay)
+and the [relay-kernel router](https://github.com/Alexadar/fantastic_relay)
 are by the **same author — Koreniuk Oleksandr (aisixteen, kvazis@gmail.com)**
 — and form one product family under one license (AGPL-3.0-or-later). The
 client links this Swift kernel directly as a dependency; the relay is the
-`cloud_bridge` rendezvous that pairs kernels across networks.
+relay-KERNEL router the `relay_connector` bundle dials to reach kernels across
+networks. The relay is a thin **directory + router**: kernels and **managers**
+(an app — incl. a headless `app --headless` — that owns kernels and exposes
+control) join the same group and appear in its live directory (`list_peers`),
+each typed by `role` (`manager`/`kernel`), `owner_guid`, and an advertised
+`exposes` control surface. **Reach ≠ control** — the directory says who owns what;
+a manager drives another manager's kernel by `forward`ing the lifecycle verb to
+that owner. The `relay_connector` advertises this typing via `set_identity`; the
+relay stores + reflects it without interpreting it.
 
 **Trademark carve-out (AGPL §7):** **"Aisixteen Fantastic"** and the
 **AISIXTEEN** word mark (USPTO reg. 7,238,635) are trademarks of AISIXTEEN.

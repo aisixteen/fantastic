@@ -7,7 +7,8 @@
 //
 // Transports:
 //   - InMemory: both kernels in one process (unit-test backbone)
-//   - WebSocket: real WS via URLSession against a remote `web_ws`
+//   - WebSocket: real WS via swift-nio (NIOWebSocketClient) against a
+//     remote `web_ws` — cross-platform (macOS + Linux)
 //
 // (HTTP transport was removed — WS subsumes its request/reply
 // semantic and adds streaming via the `watch`/`event` protocol.)
@@ -26,25 +27,33 @@ import FantasticJSON
 import FantasticKernel
 import Foundation
 
+// The relay token-issuance leg is a plain HTTP POST via URLSession.data(for:)
+// — that path IS implemented on Linux (swift-corelibs-foundation, libcurl), so
+// it stays on URLSession. URLRequest/URLSession live in FoundationNetworking on
+// Linux; in Foundation on Apple. (The WS dial uses swift-nio, not URLSession.)
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
 /// `handler_module` of the WS derivation (ws / memory transports).
 public let WS_HANDLER_MODULE = "ws_bridge.tools"
-/// `handler_module` of the CLOUD derivation (the zero-trust relay transport).
-public let CLOUD_HANDLER_MODULE = "cloud_bridge.tools"
+/// `handler_module` of the RELAY derivation (the relay-kernel router transport).
+public let RELAY_HANDLER_MODULE = "relay_connector.tools"
 
 /// Which transport family a bundle admits — the only behavioural difference
 /// between the two derivations (they share one engine, mirroring py's separate
-/// `ws_bridge` + `cloud_bridge` bundles and rust's `Family`).
+/// `ws_bridge` + `relay_connector` bundles and rust's `Family`).
 public enum BridgeFamily: Sendable {
     /// ws / memory (the `ws_bridge` derivation).
     case ws
-    /// the relay (`cloud_bridge` derivation).
-    case cloud
+    /// the relay-kernel router (`relay_connector` derivation).
+    case relay
 
-    var label: String { self == .ws ? "ws_bridge" : "cloud_bridge" }
+    var label: String { self == .ws ? "ws_bridge" : "relay_connector" }
     func admits(_ transportKind: String) -> Bool {
         switch self {
         case .ws: return transportKind == "ws" || transportKind == "memory"
-        case .cloud: return transportKind == "cloud_bridge"
+        case .relay: return transportKind == "relay" || transportKind == "memory"
         }
     }
 }
@@ -56,7 +65,7 @@ public enum BridgeFamily: Sendable {
 enum BridgeTransport {
     case memory(InMemoryBridge)
     case ws(WebSocketTransport)
-    case cloud(CloudBridgeTransport)
+    case relay(RelayTransport)
 
     func forward(target: AgentId, payload: JSON) async -> JSON {
         switch self {
@@ -64,7 +73,7 @@ enum BridgeTransport {
             return await bridge.forward(target: target, payload: payload)
         case .ws(let transport):
             return await transport.forward(target: target, payload: payload)
-        case .cloud(let transport):
+        case .relay(let transport):
             return await transport.forward(target: target, payload: payload)
         }
     }
@@ -80,9 +89,9 @@ enum BridgeTransport {
             // `web_ws.handleBinaryFrame` decodes it, gates, and replies with a
             // codec binary frame (read_stream) or a text reply (write_stream).
             return await transport.binaryForward(target: target, header: header, blob: blob)
-        case .cloud(let transport):
-            // Cloud tunnels the codec frame as a tag-1 binary record `[4B len|
-            // tag(1B)|wire]` over the mTLS relay (mirrors rust's cloud wire).
+        case .relay(let transport):
+            // Tunneled over the relay as a binary WS message wrapped in a relay
+            // `send` envelope; the partner connector decodes, gates, dispatches.
             return await transport.binaryForward(target: target, header: header, blob: blob)
         }
     }
@@ -93,7 +102,7 @@ enum BridgeTransport {
             return await bridge.watchRemote(target: target)
         case .ws(let transport):
             return await transport.watchRemote(target: target)
-        case .cloud(let transport):
+        case .relay(let transport):
             return await transport.watchRemote(target: target)
         }
     }
@@ -104,16 +113,46 @@ enum BridgeTransport {
             return await bridge.unwatchRemote(target: target)
         case .ws(let transport):
             return await transport.unwatchRemote(target: target)
-        case .cloud(let transport):
+        case .relay(let transport):
             return await transport.unwatchRemote(target: target)
         }
     }
 
+    // Directory surface — relay_connector only (addresses the relay's `relay` agent).
+
+    func listPeers(timeout: Double) async -> JSON {
+        guard case .relay(let transport) = self else {
+            return .object(["error": .string("transport has no relay directory")])
+        }
+        return await transport.listPeers(timeout: timeout)
+    }
+
+    func watchDirectory(timeout: Double) async -> JSON {
+        guard case .relay(let transport) = self else {
+            return .object(["error": .string("transport has no relay directory")])
+        }
+        return await transport.watchDirectory(timeout: timeout)
+    }
+
+    func unwatchDirectory() async -> JSON {
+        guard case .relay(let transport) = self else {
+            return .object(["ok": .bool(true)])
+        }
+        return await transport.unwatchDirectory()
+    }
+
+    func setIdentity(_ attrs: JSON) async -> JSON {
+        guard case .relay(let transport) = self else {
+            return .object(["error": .string("transport has no relay directory")])
+        }
+        return await transport.setIdentity(attrs)
+    }
+
     /// Release transport resources (receive loop, heartbeat, relay socket).
-    /// memory/ws legs are torn down by ARC; the cloud leg holds long-lived
+    /// memory/ws legs are torn down by ARC; the relay leg holds long-lived
     /// Tasks + a WS, so it needs an explicit close.
     func close() async {
-        if case .cloud(let transport) = self {
+        if case .relay(let transport) = self {
             await transport.close()
         }
     }
@@ -225,7 +264,7 @@ public actor InMemoryBridge {
 
 public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     /// Which io_bridge derivation this instance is — the only difference between
-    /// `ws_bridge.tools` and `cloud_bridge.tools` (one engine, two registrations).
+    /// `ws_bridge.tools` and `relay_connector.tools` (one engine, two registrations).
     public let family: BridgeFamily
     public var name: String { family.label }
     private let lock = NSLock()
@@ -281,99 +320,69 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         return bridges[agentId]
     }
 
-    /// The TokenSource seam (cloud_bridge does NOT authenticate or mint): a literal
-    /// `token`, else POST the relay's `/issue` control-plane endpoint with
-    /// `provider`/`password`. Provider-agnostic — `provider` selects the auth method
-    /// (password today; Apple/Google later = the same call, a different provider).
-    private func resolveCloudToken(agent: Agent) async -> (token: String?, error: String?) {
-        if let t = agent.metaValue(forKey: "token")?.asString {
-            return (t, nil)
+    /// Assemble the directory-attributes blob to advertise from the record's
+    /// well-known keys (`role`/`owner_guid`/`exposes`). Defaults are OMITTED
+    /// (role=kernel / owner_guid=null / exposes=[]) so a plain peer advertises
+    /// nothing — the relay's own defaults stand. Opaque to the relay; mirrors py
+    /// `_identity_from_record` / rust `identity_from_meta`.
+    private func relayIdentity(_ agent: Agent) -> JSON {
+        var attrs: JSON = [:]
+        if let role = agent.metaValue(forKey: "role")?.asString, role != "kernel" {
+            attrs["role"] = .string(role)
         }
-        guard let urlStr = agent.metaValue(forKey: "issue_url")?.asString,
-            let url = URL(string: urlStr)
-        else {
-            return (nil, "cloud_bridge: token or issue_url required")
+        if let owner = agent.metaValue(forKey: "owner_guid"), owner.asString != nil {
+            attrs["owner_guid"] = owner
         }
-        let body: [String: String] = [
-            "provider": agent.metaValue(forKey: "provider")?.asString ?? "password",
-            "credential": agent.metaValue(forKey: "password")?.asString ?? "",
-            "peer_id": agent.metaValue(forKey: "peer_id")?.asString ?? "",
-            "partner_peer_id": agent.metaValue(forKey: "partner_peer_id")?.asString ?? "",
-            "rendezvous": agent.metaValue(forKey: "rendezvous")?.asString ?? "",
-        ]
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        req.timeoutInterval = 10
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                return (nil, "cloud_bridge: issue endpoint denied (HTTP \(http.statusCode))")
-            }
-            let token = String(decoding: data, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return token.isEmpty
-                ? (nil, "cloud_bridge: issue endpoint returned no token")
-                : (token, nil)
-        } catch {
-            return (nil, "cloud_bridge: issue endpoint request: \(error)")
+        if let exposes = agent.metaValue(forKey: "exposes"), case .array(let a) = exposes,
+            !a.isEmpty
+        {
+            attrs["exposes"] = exposes
         }
+        return attrs
     }
 
-    /// Boot a `cloud_bridge` leg: dial the relay, run peer↔peer mTLS, attach.
-    /// Mirrors the Rust `"cloud_bridge"` boot arm + Python's `build_transport`.
-    /// Required meta: `relay_url`, `id_key` (b64url Ed25519 seed),
-    /// `approved_peer_certs` (PEM list), `token`. TLS role: `tls_role`
-    /// ("server"/"client") | `initiator` (bool) | derived from
-    /// `peer_id`/`partner_peer_id` (server = peer_id >= partner_peer_id, so the
-    /// lexicographically-smaller peer initiates).
-    private func bootCloudBridge(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
+    /// Boot a `relay_connector` leg: dial the relay-kernel router and attach.
+    /// Mirrors the Rust `"relay"` boot arm + Python's `build_transport`. Required
+    /// meta: `relay_url` (ws://host:port), `partner_guid` (the peer kernel to reach).
+    /// `guid` (our id = the WS path) is auto-minted + persisted on first boot if
+    /// absent (explicit wins, never regenerated). Optional: `relay_token`
+    /// (the group password for X-Fantastic-Auth, default ""). No certs/mTLS — the
+    /// relay auths the connection at the WS upgrade and routes by `target`.
+    private func bootRelay(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
         guard let relayURLStr = agent.metaValue(forKey: "relay_url")?.asString,
             let relayURL = URL(string: relayURLStr)
         else {
-            return .object(["error": .string("cloud_bridge: relay_url required")])
+            return .object(["error": .string("relay_connector: relay_url required")])
         }
-        guard let idKeyB64 = agent.metaValue(forKey: "id_key")?.asString,
-            let idKey = CloudCert.b64urlDecode(idKeyB64)
+        // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
+        // persisted into the record, so every later hydration re-dials the SAME path;
+        // an explicit guid always wins, and a minted one is never regenerated (read
+        // verbatim next boot). Mirrors py/rust.
+        let guid: String
+        if let existing = agent.metaValue(forKey: "guid")?.asString, !existing.isEmpty {
+            guid = existing
+        } else {
+            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            _ = agent.updateMeta(["guid": .string(guid)])
+            await kernel.persistRecord(agent)
+        }
+        guard let partnerGuid = agent.metaValue(forKey: "partner_guid")?.asString,
+            !partnerGuid.isEmpty
         else {
-            return .object(["error": .string("cloud_bridge: id_key (b64url) required")])
+            return .object(["error": .string("relay_connector: partner_guid required")])
         }
-        let approved = (agent.metaValue(forKey: "approved_peer_certs")?.asArray ?? [])
-            .compactMap { $0.asString }
-        guard !approved.isEmpty else {
-            return .object(["error": .string("cloud_bridge: approved_peer_certs required")])
+        let token = agent.metaValue(forKey: "relay_token")?.asString ?? ""
+        // `reconnect` (s) backoff before each re-dial; default 10, 0 = one-shot.
+        let reconnect = agent.metaValue(forKey: "reconnect")?.asDouble ?? 10
+        // Directory typing: validate `role` and advertise the attrs blob on connect.
+        if let role = agent.metaValue(forKey: "role")?.asString, role != "manager",
+            role != "kernel"
+        {
+            return .object([
+                "error": .string("relay_connector: role must be manager|kernel, got \(role)")
+            ])
         }
-        let (resolvedToken, tokenError) = await resolveCloudToken(agent: agent)
-        guard let token = resolvedToken else {
-            return .object(["error": .string(tokenError ?? "cloud_bridge: token unavailable")])
-        }
-        let server: Bool
-        switch agent.metaValue(forKey: "tls_role")?.asString {
-        case "server": server = true
-        case "client": server = false
-        default:
-            if let initiator = agent.metaValue(forKey: "initiator")?.asBool {
-                server = !initiator
-            } else {
-                let peer = agent.metaValue(forKey: "peer_id")?.asString ?? ""
-                let partner = agent.metaValue(forKey: "partner_peer_id")?.asString ?? ""
-                guard !partner.isEmpty else {
-                    return .object([
-                        "error": .string(
-                            "cloud_bridge: need tls_role, initiator, or partner_peer_id")
-                    ])
-                }
-                server = peer >= partner
-            }
-        }
-        let certDER: [UInt8]
-        let keyPKCS8: [UInt8]
-        do {
-            (certDER, keyPKCS8) = try CloudCert.selfSigned(idKey: idKey)
-        } catch {
-            return .object(["error": .string("cloud_bridge: cert: \(error)")])
-        }
+        let identity = relayIdentity(agent)
         // Resolve the per-leg ingress + egress rules from the record (`ingress_rule`
         // / `egress_rule`, else the legacy `auth` shorthand). A bad rule fails loudly.
         let ingress: IngressRule
@@ -385,22 +394,20 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             egress = try resolveEgress(
                 egressRule: agent.metaValue(forKey: "egress_rule"), auth: auth)
         } catch {
-            return .object(["error": .string("cloud_bridge: bad auth rule: \(error)")])
+            return .object(["error": .string("relay_connector: bad auth rule: \(error)")])
         }
-        let wsChannel = WSByteChannel(relayURL: relayURL, token: token)
         do {
-            let transport = try await CloudBridgeTransport.connect(
-                channel: wsChannel, server: server,
-                certDER: certDER, keyPKCS8: keyPKCS8, approvedPeerPEMs: approved,
+            let transport = try await RelayTransport.connect(
+                relayURL: relayURL, guid: guid, token: token, partnerGuid: partnerGuid,
+                reconnect: reconnect, identity: identity,
                 localAgentId: agentId, localKernel: kernel, ingress: ingress, egress: egress)
-            attachTransport(agentId: agentId, transport: .cloud(transport))
+            attachTransport(agentId: agentId, transport: .relay(transport))
             return .object([
                 "booted": .bool(true),
-                "transport": .string("cloud_bridge"),
-                "role": .string(server ? "server" : "client"),
+                "transport": .string("relay"),
             ])
         } catch {
-            return .object(["error": .string("cloud_bridge: connect failed: \(error)")])
+            return .object(["error": .string("relay_connector: connect failed: \(error)")])
         }
     }
 
@@ -412,24 +419,23 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         Verbs: forward (await reply), watch_remote/unwatch_remote (stream \
         remote emits onto this bridge's inbox). Weak binding — remote is \
         addressed by URL + path only, no shared types.
-        Transports: ws (default) · cloud_bridge. cloud_bridge reaches a peer \
-        through a zero-trust relay: both peers dial OUT (WSS), the relay pairs \
-        + forwards opaque frames, and the peers run peer↔peer TLS 1.3 mutual \
-        auth (self-signed Ed25519 device certs, pinned by PUBLIC KEY) — so the \
-        relay sees only ciphertext. Meta: transport=cloud_bridge, relay_url, \
-        id_key (b64url Ed25519), approved_peer_certs (PEM list), a token source \
-        (token | issue_url+password+provider — POST the relay's /issue), \
-        tls_role|initiator|partner_peer_id.
+        Transports: ws (default) · relay. relay (relay_connector) reaches a peer \
+        through a relay-KERNEL router: dial ws://<host>/<guid> (group password in \
+        X-Fantastic-Auth, subprotocol fantastic.relay.v1), the relay routes by \
+        `target` and tunnels the bridge frames — symmetric RPC + binary streams \
+        (raw bytes, no base64). Meta: transport=relay, relay_url, guid (our id = \
+        WS path), partner_guid (peer to reach), relay_token (X-Fantastic-Auth).
         Authorization: two symmetric, typed per-leg rules — `ingress_rule` (the \
         inbound FILTER) and `egress_rule` (the outbound DECORATOR), each \
         {type, env}; a legacy `auth` shorthand sets both. Types: allow_all \
         (default) | deny_inbound (refuse inbound calls, reply \
         {reason:"unauthorized"}) | password (kernel-GROUP shared secret: ingress \
         checks the envelope auth_token against the group token from an env var, \
-        default FANTASTIC_GROUP_TOKEN; egress presents it). Resolved by name from \
-        the IngressRules/EgressRules registries. Swift enforces ingress on the \
-        cloud_bridge leg only — its sole inbound-call path (ws is an asymmetric \
-        client; in-memory forward is a direct kernel call).
+        default FANTASTIC_GROUP_TOKEN; egress presents it). These per-leg rules \
+        gate the tunneled bridge calls, INDEPENDENT of the relay's own connection \
+        auth. Resolved by name from the IngressRules/EgressRules registries. Swift \
+        enforces ingress on the relay leg only — its sole inbound-call path (ws is \
+        an asymmetric client; in-memory forward is a direct kernel call).
         """
     }
 
@@ -446,7 +452,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             // surfaced). Read-key == write-key (py parity): `ingress_rule` (inbound
             // FILTER, default deny_inbound — the SEAL) / `egress_rule` (outbound
             // DECORATOR, default silent); `auth` is a legacy WRITE shorthand only,
-            // never reflected. Swift gates only the cloud_bridge inbound-call path.
+            // never reflected. Swift gates only the relay_connector inbound-call path.
             let a = kernel.agent(agentId)
             let authMeta = a?.metaValue(forKey: "auth")
             // SEALED BY DEFAULT — an io leg with no rule reflects as deny_inbound.
@@ -495,9 +501,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             }
             let kind =
                 agent.metaValue(forKey: "transport")?.asString
-                ?? (family == .cloud ? "cloud_bridge" : "ws")
+                ?? (family == .relay ? "relay" : "ws")
             // The derivation only opens transports in its own family — a
-            // cloud_bridge can't open a ws socket and vice-versa (the split).
+            // relay_connector can't open a ws socket and vice-versa (the split).
             guard family.admits(kind) else {
                 return .object([
                     "error": .string(
@@ -505,8 +511,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
             // NOTE: the `auth` policy (deny_inbound) is enforced only on the
-            // cloud_bridge leg below — Swift's sole inbound-`call` dispatcher. The
-            // ws transport is an asymmetric client (no inbound calls) and the
+            // relay_connector leg below — Swift's sole inbound-`call` dispatcher.
+            // The ws transport is an asymmetric client (no inbound calls) and the
             // in-memory forward is a direct kernel call, so there is no inbound
             // frame to gate on those paths (matches the relay e2e coverage).
             switch kind {
@@ -537,8 +543,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                     "error": .string(
                         "bridge: memory transport requires explicit attachInMemory")
                 ])
-            case "cloud_bridge":
-                return await bootCloudBridge(agentId: agentId, agent: agent, kernel: kernel)
+            case "relay":
+                return await bootRelay(agentId: agentId, agent: agent, kernel: kernel)
             default:
                 return .object([
                     "error": .string("bridge: unknown transport \(kind)")
@@ -597,6 +603,50 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
             return await transport.unwatchRemote(target: AgentId(targetStr))
+        case "list_peers", "watch_directory", "unwatch_directory":
+            // Directory surface (relay_connector): addresses the relay's own `relay`
+            // agent (target:"relay"), not the partner.
+            guard let transport = bridgeFor(agentId) else {
+                return .object([
+                    "error": .string("relay_connector.\(verb): not connected (call boot first)"),
+                    "reason": .string("not_attached"),
+                ])
+            }
+            let timeout = payload["timeout"].asDouble ?? 30
+            switch verb {
+            case "list_peers": return await transport.listPeers(timeout: timeout)
+            case "watch_directory": return await transport.watchDirectory(timeout: timeout)
+            default: return await transport.unwatchDirectory()
+            }
+        case "set_identity":
+            // Advertise/update this peer's directory typing (role/owner_guid/exposes):
+            // persisted (so it re-announces next boot) + pushed to the relay live.
+            guard let transport = bridgeFor(agentId) else {
+                return .object([
+                    "error": .string(
+                        "relay_connector.set_identity: not connected (call boot first)"),
+                    "reason": .string("not_attached"),
+                ])
+            }
+            if let role = payload["role"].asString, role != "manager", role != "kernel" {
+                return .object([
+                    "error": .string("relay_connector.set_identity: role must be manager|kernel")
+                ])
+            }
+            guard let agent = kernel.agent(agentId) else {
+                return .object(["error": .string("relay_connector.set_identity: no agent")])
+            }
+            // Merge only the provided well-known keys into the record + persist (an
+            // explicit null retracts a field, e.g. owner_guid:null = become standalone).
+            var changed = false
+            if case .object(let m) = payload {
+                for k in ["role", "owner_guid", "exposes"] where m[k] != nil {
+                    _ = agent.updateMeta([k: m[k]!])
+                    changed = true
+                }
+            }
+            if changed { await kernel.persistRecord(agent) }
+            return await transport.setIdentity(relayIdentity(agent))
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }

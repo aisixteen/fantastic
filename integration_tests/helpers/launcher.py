@@ -20,9 +20,9 @@ bypassed via `--entrypoint <bin>`): a rootless container runs as uid 1000, and
 a `.fantastic/` dir seeded on the host would be unwritable by it — so every
 record is created by the container's own uid, start to finish.
 
-Swift has no Linux container (its HTTP server is Network.framework-only), so
-only `python` and `rust` have a container launcher; swift fixtures skip cleanly
-under `FANTASTIC_TARGET=container`.
+All three host runtimes (python, rust, swift) have a container launcher: swift's
+web server is swift-nio (cross-platform), so it serves HTTP on Linux at parity —
+it ships in the universal image and runs under `FANTASTIC_TARGET=container`.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from .kernel_proc import KernelProc, spawn
 _CONTAINER_BIN = {
     "python": "/opt/fantastic/venv/bin/fantastic",
     "rust": "/opt/fantastic/bin/fantastic-rust",
+    "swift": "/opt/fantastic/bin/fantastic-swift",
 }
 
 # Built-in DNS name a container uses to reach the HOST gateway (and thus another
@@ -86,7 +87,9 @@ class ContainerLauncher:
 
     def __init__(self, image: str, runtime: str, engine: str) -> None:
         if runtime not in _CONTAINER_BIN:
-            raise ValueError(f"no container launcher for runtime {runtime!r} (python|rust only)")
+            raise ValueError(
+                f"no container launcher for runtime {runtime!r} (python|rust|swift)"
+            )
         self.image = image
         self.runtime = runtime
         self.engine = engine

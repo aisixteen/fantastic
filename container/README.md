@@ -5,12 +5,14 @@ a `container`-backend node. Same recipe under **podman and docker**, shipped as
 **two separate per-arch image tags** (`:amd64` + `:arm64`) — pick the one for your
 machine (no merged manifest).
 
-- **Two execution runtimes:** `python` (canonical) + `rust` (prebuilt binary).
+- **Three execution runtimes:** `python` (canonical) + `rust` (prebuilt binary)
+  + `swift` (prebuilt Linux binary). Swift is a **full runtime** at parity with
+  the others — its HTTP + WS server is **swift-nio** (cross-platform), so it
+  serves on Linux; built `--static-swift-stdlib` so the slim final image needs no
+  Swift libs.
 - **One bundled runtime:** the static `js_kernel.zip` (the browser frontend),
   copied prebuilt from `ts/` and discovered at runtime — **no JS engine** runs it
   (no node/bun/deno, by security decision).
-- **No swift** — its HTTP server is `Network.framework`-only (can't serve on
-  Linux); it stays native. Re-containerizing it needs a SwiftNIO/Hummingbird port.
 
 The kernels are self-describing; given only their `reflect` + the zip's readme an
 LLM weaves/​revives the wiring itself (the emergent-code capability).
