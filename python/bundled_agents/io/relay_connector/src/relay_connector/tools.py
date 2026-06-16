@@ -101,8 +101,14 @@ async def _set_identity(id, payload, kernel):
     list). Persists the change so it re-announces on the next boot. Boot first."""
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {"error": "relay_connector.set_identity: not connected (call boot first)"}
-    if "role" in payload and payload["role"] is not None and payload["role"] not in ROLES:
+        return {
+            "error": "relay_connector.set_identity: not connected (call boot first)"
+        }
+    if (
+        "role" in payload
+        and payload["role"] is not None
+        and payload["role"] not in ROLES
+    ):
         return {"error": f"relay_connector.set_identity: role must be one of {ROLES}"}
     # Merge only the provided well-known keys into the record + persist (an explicit
     # null retracts a field, e.g. owner_guid:null = become standalone).
