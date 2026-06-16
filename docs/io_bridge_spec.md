@@ -3,9 +3,8 @@
 Branch `kernel_auth` · greenfield (no back-compat, single author).
 
 This is the **state-of-the-IO-layer** doc: what shipped in the io_bridge collapse,
-the model it implements, and the work still deferred. The full build rationale lives
-in the historical blueprint (`docs/io_bridge_blueprint.md`); this doc is the concise,
-current-truth reference. Code + tests are done and green on `kernel_auth`.
+the model it implements, and the work still deferred — the concise, current-truth
+reference. Code + tests are done and green on `kernel_auth`.
 
 ---
 
@@ -267,4 +266,3 @@ this doc's current-state critical path.
   `python/bundled_agents/web/{web_ws,web_rest}/`.
 - Render-only host (unchanged): `python/bundled_agents/web/host/`.
 - Boot seam: `python/main.py` (`_build_kernel`).
-- Blueprint (history/rationale): `docs/io_bridge_blueprint.md`.
