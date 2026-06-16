@@ -20,5 +20,5 @@ Token goes on the **frame envelope** (`auth_token`), never inside the payload.
 | `silent` | egress default (present nothing) |
 
 ## Derivations (the actual agents)
-`ws_bridge` · `cloud_bridge` · `web_ws` · `web_rest` · `file_bridge` — each has its
+`ws_bridge` · `relay_connector` · `web_ws` · `web_rest` · `file_bridge` — each has its
 own readme; `reflect readme=true` on the sealed agent to learn how to open it.

@@ -1,6 +1,6 @@
 """bridge_core — direct unit tests of the shared engine primitives (the
 transport-agnostic surface; full forward/round-trip coverage lives in the
-ws_bridge + cloud_bridge suites that drive it through MemoryTransport).
+ws_bridge + relay_connector suites that drive it through MemoryTransport).
 
 The authorization rules the engine consults are tested in the `io_bridge` suite."""
 

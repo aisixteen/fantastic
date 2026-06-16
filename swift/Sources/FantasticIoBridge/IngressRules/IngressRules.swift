@@ -2,7 +2,7 @@
 //
 // Each ingress rule is its own file in this folder (an `extension IngressRules`);
 // `resolve` registers them BY NAME. Add a rule = drop a file + one switch arm; the
-// cloud_bridge dispatcher never changes (it is rule-agnostic).
+// relay_connector dispatcher never changes (it is rule-agnostic).
 
 import FantasticJSON
 

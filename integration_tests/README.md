@@ -2,7 +2,7 @@
 
 Cross-runtime tests that spawn real `fantastic` kernels as subprocesses,
 pair them via the WS bridge bundle (`ws_bridge` on python · rust · swift — all
-three split the combined `kernel_bridge` into `ws_bridge` + `cloud_bridge`), and
+three split the combined `kernel_bridge` into `ws_bridge` + `relay_connector`), and
 exercise the canonical verb surface (send / reflect / streams) across the wire.
 
 These are **integration** tests — heavyweight, slow, real network I/O.
@@ -105,8 +105,8 @@ Container target notes:
 - Seeding one-shots run **inside** the container too (a rootless container's uid
   can't write a host-seeded `.fantastic/`); `/` is the dynamic agent index on
   every runtime, so a 200 on `/` is the readiness signal.
-- **Swift** has no Linux container (Network.framework HTTP) → swift tests skip
-  under `container`.
+- **Swift** is a full Linux container runtime now (its web is swift-nio) → swift
+  tests run under `container` at parity with python/rust.
 - **Bridge across containers — each container is a unit at `host:port`, NO shared
   network.** The WS bridge is weak-binding by URL, so it just dials the peer's
   PUBLISHED address:

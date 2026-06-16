@@ -141,6 +141,13 @@ enum BridgeTransport {
         return await transport.unwatchDirectory()
     }
 
+    func setIdentity(_ attrs: JSON) async -> JSON {
+        guard case .relay(let transport) = self else {
+            return .object(["error": .string("transport has no relay directory")])
+        }
+        return await transport.setIdentity(attrs)
+    }
+
     /// Release transport resources (receive loop, heartbeat, relay socket).
     /// memory/ws legs are torn down by ARC; the relay leg holds long-lived
     /// Tasks + a WS, so it needs an explicit close.
@@ -257,7 +264,7 @@ public actor InMemoryBridge {
 
 public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     /// Which io_bridge derivation this instance is — the only difference between
-    /// `ws_bridge.tools` and `cloud_bridge.tools` (one engine, two registrations).
+    /// `ws_bridge.tools` and `relay_connector.tools` (one engine, two registrations).
     public let family: BridgeFamily
     public var name: String { family.label }
     private let lock = NSLock()
@@ -313,10 +320,32 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         return bridges[agentId]
     }
 
+    /// Assemble the directory-attributes blob to advertise from the record's
+    /// well-known keys (`role`/`owner_guid`/`exposes`). Defaults are OMITTED
+    /// (role=kernel / owner_guid=null / exposes=[]) so a plain peer advertises
+    /// nothing — the relay's own defaults stand. Opaque to the relay; mirrors py
+    /// `_identity_from_record` / rust `identity_from_meta`.
+    private func relayIdentity(_ agent: Agent) -> JSON {
+        var attrs: JSON = [:]
+        if let role = agent.metaValue(forKey: "role")?.asString, role != "kernel" {
+            attrs["role"] = .string(role)
+        }
+        if let owner = agent.metaValue(forKey: "owner_guid"), owner.asString != nil {
+            attrs["owner_guid"] = owner
+        }
+        if let exposes = agent.metaValue(forKey: "exposes"), case .array(let a) = exposes,
+            !a.isEmpty
+        {
+            attrs["exposes"] = exposes
+        }
+        return attrs
+    }
+
     /// Boot a `relay_connector` leg: dial the relay-kernel router and attach.
     /// Mirrors the Rust `"relay"` boot arm + Python's `build_transport`. Required
-    /// meta: `relay_url` (ws://host:port), `guid` (our self-asserted id = the WS
-    /// path), `partner_guid` (the peer kernel to reach). Optional: `relay_token`
+    /// meta: `relay_url` (ws://host:port), `partner_guid` (the peer kernel to reach).
+    /// `guid` (our id = the WS path) is auto-minted + persisted on first boot if
+    /// absent (explicit wins, never regenerated). Optional: `relay_token`
     /// (the group password for X-Fantastic-Auth, default ""). No certs/mTLS — the
     /// relay auths the connection at the WS upgrade and routes by `target`.
     private func bootRelay(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
@@ -325,8 +354,17 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         else {
             return .object(["error": .string("relay_connector: relay_url required")])
         }
-        guard let guid = agent.metaValue(forKey: "guid")?.asString, !guid.isEmpty else {
-            return .object(["error": .string("relay_connector: guid required")])
+        // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
+        // persisted into the record, so every later hydration re-dials the SAME path;
+        // an explicit guid always wins, and a minted one is never regenerated (read
+        // verbatim next boot). Mirrors py/rust.
+        let guid: String
+        if let existing = agent.metaValue(forKey: "guid")?.asString, !existing.isEmpty {
+            guid = existing
+        } else {
+            guid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            _ = agent.updateMeta(["guid": .string(guid)])
+            await kernel.persistRecord(agent)
         }
         guard let partnerGuid = agent.metaValue(forKey: "partner_guid")?.asString,
             !partnerGuid.isEmpty
@@ -336,6 +374,15 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         let token = agent.metaValue(forKey: "relay_token")?.asString ?? ""
         // `reconnect` (s) backoff before each re-dial; default 10, 0 = one-shot.
         let reconnect = agent.metaValue(forKey: "reconnect")?.asDouble ?? 10
+        // Directory typing: validate `role` and advertise the attrs blob on connect.
+        if let role = agent.metaValue(forKey: "role")?.asString, role != "manager",
+            role != "kernel"
+        {
+            return .object([
+                "error": .string("relay_connector: role must be manager|kernel, got \(role)")
+            ])
+        }
+        let identity = relayIdentity(agent)
         // Resolve the per-leg ingress + egress rules from the record (`ingress_rule`
         // / `egress_rule`, else the legacy `auth` shorthand). A bad rule fails loudly.
         let ingress: IngressRule
@@ -352,7 +399,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         do {
             let transport = try await RelayTransport.connect(
                 relayURL: relayURL, guid: guid, token: token, partnerGuid: partnerGuid,
-                reconnect: reconnect,
+                reconnect: reconnect, identity: identity,
                 localAgentId: agentId, localKernel: kernel, ingress: ingress, egress: egress)
             attachTransport(agentId: agentId, transport: .relay(transport))
             return .object([
@@ -405,7 +452,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             // surfaced). Read-key == write-key (py parity): `ingress_rule` (inbound
             // FILTER, default deny_inbound — the SEAL) / `egress_rule` (outbound
             // DECORATOR, default silent); `auth` is a legacy WRITE shorthand only,
-            // never reflected. Swift gates only the cloud_bridge inbound-call path.
+            // never reflected. Swift gates only the relay_connector inbound-call path.
             let a = kernel.agent(agentId)
             let authMeta = a?.metaValue(forKey: "auth")
             // SEALED BY DEFAULT — an io leg with no rule reflects as deny_inbound.
@@ -571,6 +618,35 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             case "watch_directory": return await transport.watchDirectory(timeout: timeout)
             default: return await transport.unwatchDirectory()
             }
+        case "set_identity":
+            // Advertise/update this peer's directory typing (role/owner_guid/exposes):
+            // persisted (so it re-announces next boot) + pushed to the relay live.
+            guard let transport = bridgeFor(agentId) else {
+                return .object([
+                    "error": .string(
+                        "relay_connector.set_identity: not connected (call boot first)"),
+                    "reason": .string("not_attached"),
+                ])
+            }
+            if let role = payload["role"].asString, role != "manager", role != "kernel" {
+                return .object([
+                    "error": .string("relay_connector.set_identity: role must be manager|kernel")
+                ])
+            }
+            guard let agent = kernel.agent(agentId) else {
+                return .object(["error": .string("relay_connector.set_identity: no agent")])
+            }
+            // Merge only the provided well-known keys into the record + persist (an
+            // explicit null retracts a field, e.g. owner_guid:null = become standalone).
+            var changed = false
+            if case .object(let m) = payload {
+                for k in ["role", "owner_guid", "exposes"] where m[k] != nil {
+                    _ = agent.updateMeta([k: m[k]!])
+                    changed = true
+                }
+            }
+            if changed { await kernel.persistRecord(agent) }
+            return await transport.setIdentity(relayIdentity(agent))
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }

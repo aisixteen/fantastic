@@ -18,7 +18,7 @@ bridge is an asymmetric client. Streaming uses `watch_remote` →
 This bundle is THIN: the transport-agnostic engine (read loop, verbs, lifecycle,
 reply correlation) lives in `io_bridge`; here we only supply the `ws`/`ssh+ws`
 transport builder (`_ws.build_transport`) + reflect dressing. The sibling
-`cloud_bridge` bundle reuses the same engine with a relay+Noise transport.
+`relay_connector` bundle reuses the same engine with a relay-router transport.
 
 Transports: `memory` (test backbone) / `ws` / `ssh+ws`.
 """

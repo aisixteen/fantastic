@@ -71,8 +71,8 @@ kernel modules.
 | tools | `FantasticTools` | both | LLM tool registry |
 | scheduler | `FantasticScheduler` | both | recurring tasks (schedule/unschedule/list/pause/resume/tick_now/history; `interval_seconds`); persists `schedules.json`/`history.jsonl` THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | cli_bundle | `FantasticCliBundle` | both | scripted-CLI surface |
-| ws_bridge / cloud_bridge | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `cloud_bridge`: peer↔peer TLS 1.3 mTLS through the zero-trust relay, pinned by Ed25519 pubkey (1-byte text/binary tag on the TLS record) |
-| web | `FantasticWeb` | both | HTTP + WS server (Network.framework) |
+| ws_bridge / relay_connector | `FantasticKernelBridge` | both | cross-kernel comms, two io_bridge derivations (sealed by default). `ws_bridge`: in-memory + WS (asymmetric; targets remote `web_ws`). `relay_connector`: dials a relay-KERNEL router (`ws://host/<guid>`, group password in `X-Fantastic-Auth`, subprotocol `fantastic.relay.v1`), reaches a `partner_guid` and TUNNELS io_bridge frames over it; our `guid` auto-mints + persists on first boot if absent (explicit wins); auto-reconnect + keepalive + directory (`list_peers`/`watch_directory`); directory typing for the kernelgroup model — advertises an opaque attrs blob (`role` manager\|kernel, `owner_guid`, `exposes`) to the relay, `set_identity` updates it live; raw `read_stream` chunks ride as native binary WS frames (no base64) |
+| web | `FantasticWeb` | both | HTTP + WS server (swift-nio — serves on macOS + Linux) |
 | web_ws | `FantasticWebWS` | both | composable WS verb surface (child of a `web` host; `web_ws.tools`) |
 | web_rest | `FantasticWebRest` | both | composable REST verb surface (child of a `web` host; `web_rest.tools`) |
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE (thin over `FantasticAICore`) |
@@ -117,7 +117,7 @@ swift/
     FantasticKernel/                   Agent, Kernel actor, Bundle protocol,
                                        BundleRegistry, persistence, lock, system verbs
     FantasticKernelStartup/            startKernel / startKernelInMemory
-    FantasticWeb/                      HTTP + WS server (Network.framework)
+    FantasticWeb/                      HTTP + WS server (swift-nio; macOS + Linux)
     FantasticAICore/                   shared LLM machinery (history, cancellation,
                                        verb dispatch); AI backends are thin over this
     FantasticOllamaBackend/            local LLM SSE
@@ -166,9 +166,12 @@ breaking change to:
   — `OrderedDictionary` for `JSON.object` key-order preservation
 - [Yams](https://github.com/jpsim/Yams) 5.1+
   — YAML serialization for the `yaml_state` durable-memory agent
+- [swift-nio](https://github.com/apple/swift-nio) 2.x
+  — the cross-platform event-driven networking core; HTTP + WS server
+  (`FantasticWeb`) and the relay/WS bridge clients run on it, so the kernel
+  serves on macOS **and** Linux. No Hummingbird, no Vapor.
 
-That's it — no Hummingbird, no Vapor, no NIO directly. HTTP + WS run
-on `Network.framework`; LLM backends run on `URLSession.AsyncBytes`.
+LLM backends run on `URLSession.AsyncBytes`.
 
 ## License
 

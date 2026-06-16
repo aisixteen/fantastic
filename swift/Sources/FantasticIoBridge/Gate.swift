@@ -1,7 +1,7 @@
 // The one inbound choke point + the file_bridge-style verb gate.
 //
 // Swift mirror of py/rust `gate_inbound`: every io derivation (ws_bridge /
-// cloud_bridge / web_ws / web_rest / file_bridge) calls THIS at one place to
+// relay_connector / web_ws / web_rest / file_bridge) calls THIS at one place to
 // authorize an inbound action. Sealed-by-default lives in
 // `IngressRules.resolve` (absent ⇒ DenyInbound), so a leg with no rule denies.
 

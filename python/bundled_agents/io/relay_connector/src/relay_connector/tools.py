@@ -43,7 +43,13 @@ from io_bridge import (  # noqa: F401
     _state,
     _test_transport_inject,
 )
-from relay_connector._relay import SENTENCE, build_transport, reflect_fields
+from relay_connector._relay import (
+    ROLES,
+    SENTENCE,
+    _identity_from_record,
+    build_transport,
+    reflect_fields,
+)
 
 VERBS = make_verbs(
     build_transport=build_transport,
@@ -87,9 +93,30 @@ async def _unwatch_directory(id, payload, kernel):
     return await st.transport.unwatch_directory()
 
 
+async def _set_identity(id, payload, kernel):
+    """Advertise/update this peer's DIRECTORY identity — the typed attrs the relay
+    reflects into `list_peers` + a `peer_updated` event (it never interprets them).
+    Well-known keys (all optional, merged over the record): `role` (manager|kernel),
+    `owner_guid` (the managing peer; null = standalone), `exposes` (control-surface
+    list). Persists the change so it re-announces on the next boot. Boot first."""
+    st = _state(id)
+    if st.transport is None or st.transport.closed:
+        return {"error": "relay_connector.set_identity: not connected (call boot first)"}
+    if "role" in payload and payload["role"] is not None and payload["role"] not in ROLES:
+        return {"error": f"relay_connector.set_identity: role must be one of {ROLES}"}
+    # Merge only the provided well-known keys into the record + persist (an explicit
+    # null retracts a field, e.g. owner_guid:null = become standalone).
+    patch = {k: payload[k] for k in ("role", "owner_guid", "exposes") if k in payload}
+    if patch:
+        kernel.update(id, **patch)
+    attrs = _identity_from_record(kernel.get(id) or {})
+    return await st.transport.set_identity(attrs)
+
+
 VERBS["list_peers"] = _list_peers
 VERBS["watch_directory"] = _watch_directory
 VERBS["unwatch_directory"] = _unwatch_directory
+VERBS["set_identity"] = _set_identity
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

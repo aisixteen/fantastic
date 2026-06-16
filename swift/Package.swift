@@ -72,12 +72,12 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
-        // cloud_bridge: end-to-end TLS 1.3 mTLS over the relay's opaque pipe.
-        // swift-nio-ssl vendors BoringSSL (the only vetted TLS-1.3-over-buffers
-        // path in Swift); swift-crypto gives portable Ed25519 (CryptoKit on Apple).
+        // swift-nio: the cross-platform (macOS + Linux) event-driven networking
+        // core — the `FantasticWeb` HTTP + WS server AND the relay/WS bridge
+        // clients run on it. swift-nio-ssl vendors BoringSSL for TLS on the
+        // wss:// dials (the only vetted TLS-1.3-over-buffers path in Swift).
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         // Cross-platform (macOS + Linux) streaming HTTP client for the LLM
         // backends — replaces URLSession.bytes (Apple-only) so ollama/nvidia
         // stream on Linux too. NIO-based, shares the swift-nio above.

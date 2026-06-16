@@ -1,4 +1,4 @@
-//! Unit tests for the ws_bridge / cloud_bridge derivations.
+//! Unit tests for the ws_bridge / relay_connector derivations.
 //!
 //! Most tests drive the memory transport — deterministic, no I/O,
 //! and exercises every code path the bridge cares about. WS gets
@@ -68,6 +68,47 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
 fn readme_present_and_titled() {
     assert!(!README.is_empty());
     assert!(README.contains("ws_bridge"));
+}
+
+#[tokio::test]
+async fn identity_from_meta_builds_directory_attrs_blob() {
+    // The kernelgroup typing we advertise: well-known keys present → blob; defaults
+    // (role=kernel / no owner / empty exposes) OMITTED so a plain peer advertises {}.
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+
+    let mut meta = Map::new();
+    meta.insert("role".into(), json!("manager"));
+    meta.insert("owner_guid".into(), json!("mgrA"));
+    meta.insert("exposes".into(), json!(["stop", "restart"]));
+    let typed = Agent::new(
+        AgentId::from("leg"),
+        Some("core".to_string()),
+        None,
+        meta,
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx = kernel.register(Arc::clone(&typed));
+    let attrs = identity_from_meta(&AgentId::from("leg"), &kernel);
+    assert_eq!(attrs["role"], json!("manager"));
+    assert_eq!(attrs["owner_guid"], json!("mgrA"));
+    assert_eq!(attrs["exposes"], json!(["stop", "restart"]));
+
+    // A plain kernel (role defaults to kernel, no owner/exposes) advertises nothing.
+    let plain = Agent::new(
+        AgentId::from("plain"),
+        Some("core".to_string()),
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx2 = kernel.register(plain);
+    assert_eq!(
+        identity_from_meta(&AgentId::from("plain"), &kernel),
+        json!({})
+    );
 }
 
 #[tokio::test]

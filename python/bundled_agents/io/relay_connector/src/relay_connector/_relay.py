@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import Any, Awaitable, Callable
 
 from io_bridge import (
@@ -88,12 +89,17 @@ class RelayTransport(_BaseTransport):
         partner_guid: str,
         reconnect: float = DEFAULT_RECONNECT,
         heartbeat: float = DEFAULT_HEARTBEAT,
+        identity: dict | None = None,
         ws: Any = None,
     ) -> None:
         self._dialer = dialer
         self._partner = partner_guid
         self._reconnect = reconnect
         self._heartbeat = heartbeat
+        # Directory attributes we advertise to the relay (opaque blob — the relay
+        # stores + reflects it, never interprets it). `{}` ⇒ a plain peer, no
+        # announce sent (byte-identical to an un-typed leg).
+        self._identity: dict = identity or {}
         self._ws = ws
         self._closed = False
         self._hb_task: asyncio.Task | None = None
@@ -113,6 +119,7 @@ class RelayTransport(_BaseTransport):
         partner_guid: str,
         heartbeat: float = DEFAULT_HEARTBEAT,
         reconnect: float = DEFAULT_RECONNECT,
+        identity: dict | None = None,
         dialer: Dialer | None = None,
     ) -> "RelayTransport":
         dialer = dialer or _default_dialer(relay_url, guid, token)
@@ -121,13 +128,14 @@ class RelayTransport(_BaseTransport):
             partner_guid=partner_guid,
             reconnect=reconnect,
             heartbeat=heartbeat,
+            identity=identity,
         )
         # Eager first dial. On failure: one-shot (reconnect<=0) raises so boot
         # fails loudly; otherwise swallow it — recv() auto-connects in the
         # background (the leg boots, then connects + maintains).
         try:
             t._ws = await dialer()
-            t._start_heartbeat()
+            await t._on_socket_open()
         except Exception:
             if reconnect <= 0:
                 raise
@@ -155,13 +163,45 @@ class RelayTransport(_BaseTransport):
             asyncio.create_task(self._heartbeat_loop()) if self._heartbeat > 0 else None
         )
 
+    async def _on_socket_open(self) -> None:
+        """Run after EVERY successful (re)dial: start the heartbeat and re-advertise
+        our directory identity (the relay drops our state on disconnect, so the
+        announce must ride each new socket)."""
+        self._start_heartbeat()
+        await self._announce()
+
+    async def _announce(self) -> None:
+        """Advertise our directory attributes to the relay (`target:"relay"`,
+        fire-and-forget — the relay reflects them into `list_peers` and emits a
+        `peer_updated` event). No-op for a plain peer (`identity == {}`)."""
+        if not self._identity:
+            return
+        ws = self._ws
+        if ws is None:
+            return
+        try:
+            wire, is_binary = encode_frame(
+                {"type": "announce", "attrs": self._identity, "target": "relay"}
+            )
+            await ws.send(wire if is_binary else wire.decode("utf-8"))
+        except Exception:
+            self._ws = None  # the socket is gone; recv() will re-dial + re-announce.
+
+    async def set_identity(self, attrs: dict) -> dict:
+        """Replace the advertised directory attributes and re-announce now (a manager
+        publishing/retracting a kernel's control surface). The caller persists the
+        new attrs into the record so they re-announce on the next boot."""
+        self._identity = attrs or {}
+        await self._announce()
+        return {"ok": True, "attrs": self._identity}
+
     async def _reconnect_ws(self) -> Any | None:
         """(Re)dial with the backoff. Returns a live ws, or None if explicitly
         closed. Raises ConnectionClosed only in one-shot mode (reconnect<=0)."""
         while not self._closed:
             try:
                 self._ws = await self._dialer()
-                self._start_heartbeat()
+                await self._on_socket_open()
                 return self._ws
             except Exception as e:
                 self._ws = None
@@ -322,6 +362,30 @@ class RelayTransport(_BaseTransport):
             pass
 
 
+# ─── directory identity (the advertised attrs blob) ─────────────
+
+ROLES = ("manager", "kernel")
+
+
+def _identity_from_record(rec: dict) -> dict:
+    """Assemble the directory-attributes blob we advertise from the record's
+    well-known keys. Defaults are OMITTED (role=kernel / owner_guid=null /
+    exposes=[]) so a plain peer advertises nothing — the relay's own defaults
+    stand and the wire stays byte-identical to an un-typed leg. The blob is opaque
+    to the relay; adding a new well-known key here needs no relay change."""
+    attrs: dict = {}
+    role = rec.get("role")
+    if role and role != "kernel":
+        attrs["role"] = role
+    owner_guid = rec.get("owner_guid")
+    if owner_guid is not None:
+        attrs["owner_guid"] = owner_guid
+    exposes = rec.get("exposes")
+    if exposes:
+        attrs["exposes"] = exposes
+    return attrs
+
+
 # ─── the build_transport seam ───────────────────────────────────
 
 
@@ -329,15 +393,27 @@ async def build_transport(
     kind: str, rec: dict, kernel: Any, st: _BridgeState
 ) -> _BaseTransport:
     """Build a relay transport from the agent record. Required: `relay_url`
-    (ws://host:port), `guid` (our id — the WS path), `partner_guid` (the peer to
-    reach). Optional: `relay_token` (X-Fantastic-Auth; default ""), `heartbeat`
-    (s, default 30; 0 off), `reconnect` (s before each re-dial, default 10; 0 =
-    one-shot — boot fails if the relay is down)."""
+    (ws://host:port), `partner_guid` (the peer to reach). `guid` (our id — the WS
+    path) is auto-minted on first boot if absent and PERSISTED into the record, so
+    every later hydration re-dials the SAME path; an explicit `guid` always wins.
+    Optional: `relay_token` (X-Fantastic-Auth; default ""), `heartbeat` (s, default
+    30; 0 off), `reconnect` (s before each re-dial, default 10; 0 = one-shot — boot
+    fails if the relay is down)."""
     relay_url = rec.get("relay_url")
-    guid = rec.get("guid")
     partner_guid = rec.get("partner_guid")
-    if not relay_url or not guid or not partner_guid:
-        raise ValueError("relay_connector requires relay_url, guid, partner_guid")
+    if not relay_url or not partner_guid:
+        raise ValueError("relay_connector requires relay_url, partner_guid")
+    guid = rec.get("guid")
+    if not guid:
+        # Mint our own relay identity ONCE and persist it into the record. The seal:
+        # auto-gen only FILLS an absent field (explicit guid wins), and once written
+        # back it is never regenerated — the next hydration reads it verbatim, so the
+        # WS path is stable across reboots and the partner keeps finding us.
+        guid = uuid.uuid4().hex
+        kernel.update(rec["id"], guid=guid)
+    role = rec.get("role")
+    if role is not None and role not in ROLES:
+        raise ValueError(f"relay_connector role must be one of {ROLES}, got {role!r}")
     token = rec.get("relay_token") or ""
     heartbeat = float(rec.get("heartbeat", DEFAULT_HEARTBEAT))
     reconnect = float(rec.get("reconnect", DEFAULT_RECONNECT))
@@ -348,6 +424,7 @@ async def build_transport(
         str(partner_guid),
         heartbeat=heartbeat,
         reconnect=reconnect,
+        identity=_identity_from_record(rec),
     )
 
 
@@ -365,4 +442,7 @@ def reflect_fields(rec: dict, st: _BridgeState) -> dict:
         "guid": rec.get("guid"),
         "partner_guid": rec.get("partner_guid"),
         "reconnect": float(rec.get("reconnect", DEFAULT_RECONNECT)),
+        "role": rec.get("role") or "kernel",
+        "owner_guid": rec.get("owner_guid"),
+        "exposes": rec.get("exposes") or [],
     }

@@ -104,6 +104,8 @@ private actor MemoryRelayWire: RelayWire {
 /// frame kind (text or native binary — raw bytes, no base64).
 private actor MemoryRelayHub {
     private var wires: [String: MemoryRelayWire] = [:]
+    /// Per-guid advertised directory attrs (set by an `announce` frame).
+    private var announcedAttrs: [String: JSON] = [:]
 
     func register(_ guid: String) -> MemoryRelayWire {
         let w = MemoryRelayWire(guid: guid, hub: self)
@@ -111,12 +113,24 @@ private actor MemoryRelayHub {
         return w
     }
 
+    func announced(of guid: String) -> JSON? { announcedAttrs[guid] }
+
     func route(from sender: String, _ message: NIOWebSocketClient.Message) async {
         switch message {
         case .text(let s):
-            guard let env = try? JSON.parse(s), env["type"].asString == "send",
-                let target = env["target"].asString
-            else { return }
+            guard let env = try? JSON.parse(s) else { return }
+            switch env["type"].asString {
+            case "announce":
+                // Directory typing: store the opaque attrs blob (the relay never
+                // interprets it). A real relay would also emit `peer_updated`.
+                announcedAttrs[sender] = env["attrs"]
+                return
+            case "send":
+                break  // fall through to routing below
+            default:
+                return
+            }
+            guard let target = env["target"].asString else { return }
             let event: JSON = .object([
                 "type": .string("event"), "source": .string(sender), "payload": env["payload"],
             ])
@@ -222,6 +236,22 @@ struct RelayTransportTests {
 
             await transportA.close()
             await transportB.close()
+        }
+    }
+
+    @Test func setIdentityAdvertisesDirectoryAttrs() async throws {
+        try await withDeadline(15) {
+            let hub = MemoryRelayHub()
+            let wire = await hub.register("mgr")
+            // A plain attach advertises nothing (empty identity).
+            let t = await RelayTransport.attach(wire: wire, partnerGuid: "B")
+            #expect(await hub.announced(of: "mgr") == nil)
+            // set_identity advertises the opaque attrs blob to the relay.
+            _ = await t.setIdentity(["role": .string("manager"), "exposes": [.string("stop")]])
+            let attrs = await hub.announced(of: "mgr")
+            #expect(attrs?["role"].asString == "manager")
+            #expect(attrs?["exposes"].asArray?.count == 1)
+            await t.close()
         }
     }
 

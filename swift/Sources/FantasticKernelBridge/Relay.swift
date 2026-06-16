@@ -46,6 +46,10 @@ public actor RelayTransport {
     private let dialer: (@Sendable () async throws -> any RelayWire)?
     /// Backoff before each re-dial (0 = one-shot: a drop is terminal).
     private let reconnectSecs: Double
+    /// Directory attributes we advertise to the relay (an opaque blob — the relay
+    /// stores + reflects it, never interprets it). Re-announced on every (re)connect;
+    /// `setIdentity` replaces it. `.object([:])` ⇒ a plain peer, no announce sent.
+    private var identity: JSON
 
     /// Outstanding text forwards keyed by id; resumed on the matching reply.
     private var pending: [String: CheckedContinuation<JSON, Never>] = [:]
@@ -74,12 +78,14 @@ public actor RelayTransport {
 
     private init(
         client: (any RelayWire)?, partner: String,
-        dialer: (@Sendable () async throws -> any RelayWire)?, reconnectSecs: Double
+        dialer: (@Sendable () async throws -> any RelayWire)?, reconnectSecs: Double,
+        identity: JSON = [:]
     ) {
         self.client = client
         self.partner = partner
         self.dialer = dialer
         self.reconnectSecs = reconnectSecs
+        self.identity = identity
     }
 
     /// Test seam: attach to a pre-built wire (a paired in-process hub) instead of
@@ -111,6 +117,7 @@ public actor RelayTransport {
         token: String,
         partnerGuid: String,
         reconnect: Double = 10,
+        identity: JSON = [:],
         localAgentId: AgentId? = nil,
         localKernel: Kernel? = nil,
         ingress: IngressRule = IngressRules.AllowAll(),
@@ -131,7 +138,8 @@ public actor RelayTransport {
             initial = nil  // heal in the background.
         }
         let t = RelayTransport(
-            client: initial, partner: partnerGuid, dialer: dialer, reconnectSecs: reconnect)
+            client: initial, partner: partnerGuid, dialer: dialer, reconnectSecs: reconnect,
+            identity: identity)
         await t.finishBoot(
             localAgentId: localAgentId, localKernel: localKernel,
             ingress: ingress, egress: egress)
@@ -144,15 +152,36 @@ public actor RelayTransport {
     private func finishBoot(
         localAgentId: AgentId?, localKernel: Kernel?,
         ingress: IngressRule, egress: EgressRule
-    ) {
+    ) async {
         if let localAgentId, let localKernel {
             self.eventSink = localAgentId
             self.kernel = localKernel
         }
         self.ingress = ingress
         self.egress = egress
+        await announce()  // advertise on the eager socket (no-op if not yet connected)
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
         heartbeatTask = Task { [weak self] in await self?.heartbeatLoop() }
+    }
+
+    /// Advertise our directory attributes to the relay (`{type:"announce", attrs,
+    /// target:"relay"}`, fire-and-forget). No-op for a plain peer (empty blob) or
+    /// while disconnected (the next reconnect re-announces).
+    private func announce() async {
+        guard case .object(let m) = identity, !m.isEmpty, let client = client else { return }
+        let frame: JSON = .object([
+            "type": .string("announce"), "attrs": identity, "target": .string("relay"),
+        ])
+        try? await client.send(.text(frame.serialize()))
+    }
+
+    /// Replace the advertised directory attributes and re-announce now (a manager
+    /// publishing/retracting a kernel's control surface). The caller persists the
+    /// new attrs into the record so they re-announce on the next boot.
+    public func setIdentity(_ attrs: JSON) async -> JSON {
+        identity = attrs
+        await announce()
+        return .object(["ok": .bool(true), "attrs": attrs])
     }
 
     // ── receive loop ───────────────────────────────────────────────
@@ -162,6 +191,7 @@ public actor RelayTransport {
             if client == nil {
                 guard let c = await reconnect() else { break }  // gave up / closed
                 client = c
+                await announce()  // re-advertise: the relay dropped our state on the disconnect
             }
             let msg: NIOWebSocketClient.Message
             do {

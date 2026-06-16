@@ -60,8 +60,9 @@ impl std::error::Error for TransportError {}
 /// One frame on the wire. A **text** frame is plain JSON (the call/reply/event
 /// envelopes); a **binary** frame carries a JSON header PLUS a raw body (a
 /// `read_stream`/`write_stream` chunk) — raw bytes, never base64. The
-/// text/binary split is carried by the TRANSPORT (WS frame type; a 1-byte tag
-/// on the cloud_bridge TLS record), matching the shared `io_bridge` codec.
+/// text/binary split is carried by the TRANSPORT (the WS frame type — every
+/// transport is WS-based; the relay forwards the frame kind end-to-end),
+/// matching the shared `io_bridge` codec.
 #[derive(Debug)]
 pub enum Frame {
     /// A JSON envelope with no raw bytes.
@@ -94,9 +95,9 @@ pub trait BridgeTransport: Send + Sync {
     /// queued (memory) / sent over the socket (ws).
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError>;
 
-    /// Push a BINARY frame (`[4B len|header|body]` over a WS binary message /
-    /// the TLS record with a binary tag). Default: refuse — only stream-capable
-    /// transports (memory/ws/ssh/cloud) override it.
+    /// Push a BINARY frame (`[4B len|header|body]` over a WS binary message).
+    /// Default: refuse — only stream-capable transports (memory/ws/ssh/relay)
+    /// override it.
     async fn send_binary(&self, _header: Value, _body: Vec<u8>) -> Result<(), TransportError> {
         Err(TransportError::Other(
             "transport does not carry binary frames".into(),
@@ -125,5 +126,11 @@ pub trait BridgeTransport: Send + Sync {
     /// Stop the directory subscription. Default: no-op.
     async fn unwatch_directory(&self) -> Value {
         serde_json::json!({"ok": true})
+    }
+    /// Advertise/replace this peer's directory attributes (the opaque blob the relay
+    /// reflects into `list_peers` + a `peer_updated` event). Default: not a relay
+    /// transport.
+    async fn set_identity(&self, _attrs: Value) -> Value {
+        serde_json::json!({"error": "transport has no relay directory"})
     }
 }

@@ -1,6 +1,6 @@
 """io_bridge — shared library: channel model + rule registries + bridge engine.
 
-Pure shared code imported by every io_bridge derivation (ws_bridge, cloud_bridge,
+Pure shared code imported by every io_bridge derivation (ws_bridge, relay_connector,
 web_ws, web_rest, file_bridge). NOT a registered bundle — no entry point, no agent
 instance. The derivations are the agents; this is the code they share.
 """

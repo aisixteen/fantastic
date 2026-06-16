@@ -5,8 +5,9 @@
 # operator's job (a project that carries its own web stack, or an LLM driving the
 # kernel) — see the note printed when no web host is found.
 #
-#   FANTASTIC_RUNTIME = python (default) | rust | swift (HEADLESS — no web server
-#                       on Linux; one-shot RPC + NIO bridges only)
+#   FANTASTIC_RUNTIME = python (default) | rust | swift — all three are full
+#                       runtimes that serve HTTP + WS on Linux (swift's web is
+#                       swift-nio, at parity with python/rust)
 #   FANTASTIC_PORT    = suggested port for a web you compose (default 8088); used
 #                       only in the "compose a web" hint, not bound by the entrypoint
 #   FANTASTIC_WORKDIR = /work (bind-mounted; holds .fantastic/lock.json)
@@ -25,8 +26,8 @@
 #
 # Swift is a FULL runtime here, at parity with python/rust: its web server is
 # swift-nio (cross-platform), so FANTASTIC_RUNTIME=swift serves HTTP on Linux
-# just the same — plus the NIO kernel_bridge / cloud_bridge for the
-# fantastic_relay embedded-router use case. (The macOS-only bundles — terminal,
+# just the same — plus the NIO ws_bridge / relay_connector for cross-kernel
+# comms (e.g. dialling the fantastic_relay router). (The macOS-only bundles — terminal,
 # runners, FoundationModels, apple_kvs — still compile to no-ops on Linux.)
 set -eu
 

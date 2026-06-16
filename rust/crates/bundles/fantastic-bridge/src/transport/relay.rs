@@ -41,6 +41,11 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 type SharedSink = Arc<Mutex<Option<WsSink>>>;
+/// The directory attributes we advertise to the relay (an opaque blob — the relay
+/// stores + reflects it, never interprets it). Shared + mutable so `set_identity`
+/// updates it and every reconnect re-announces the LATEST value. `Null`/`{}` ⇒ a
+/// plain peer, no announce sent.
+type SharedIdentity = Arc<std::sync::Mutex<Value>>;
 /// Outstanding relay-LEVEL requests (the directory `call`/`watch target:relay`),
 /// keyed by minted id. Distinct from the engine's partner bridge-frame correlation.
 type RelayPending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>>>;
@@ -63,6 +68,7 @@ pub struct RelayTransport {
     heartbeat: Mutex<Option<JoinHandle<()>>>,
     relay_pending: RelayPending,
     relay_next_id: AtomicU64,
+    identity: SharedIdentity,
 }
 
 /// Build the WS upgrade request (path GUID + subprotocol + auth header) and dial.
@@ -101,6 +107,7 @@ impl RelayTransport {
         token: &str,
         partner_guid: &str,
         reconnect_secs: f64,
+        identity: Value,
     ) -> Result<Arc<Self>, TransportError> {
         let url = format!("{}/{}", relay_url.trim_end_matches('/'), guid);
         let token = token.to_string();
@@ -110,6 +117,7 @@ impl RelayTransport {
         let closed = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
         let relay_pending: RelayPending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let identity: SharedIdentity = Arc::new(std::sync::Mutex::new(identity));
 
         // Eager first dial. On success seed the initial source; on failure with
         // reconnect off, fail the boot; otherwise heal in the background.
@@ -127,6 +135,9 @@ impl RelayTransport {
                 None
             }
         };
+        // Advertise our directory identity on the eager socket (no-op if not
+        // connected / plain peer). Each later reconnect re-announces (in supervise).
+        send_announce(&sink, &identity).await;
 
         let supervisor = tokio::spawn(supervise(
             url,
@@ -137,6 +148,7 @@ impl RelayTransport {
             Arc::clone(&closed),
             Arc::clone(&connected),
             Arc::clone(&relay_pending),
+            Arc::clone(&identity),
             reconnect_secs,
             initial,
         ));
@@ -156,6 +168,7 @@ impl RelayTransport {
             heartbeat: Mutex::new(Some(heartbeat)),
             relay_pending,
             relay_next_id: AtomicU64::new(0),
+            identity,
         }))
     }
 
@@ -280,6 +293,7 @@ async fn supervise(
     closed: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     relay_pending: RelayPending,
+    identity: SharedIdentity,
     reconnect_secs: f64,
     mut initial: Option<SplitStream<WsStream>>,
 ) {
@@ -289,7 +303,7 @@ async fn supervise(
             break;
         }
         let source = if let Some(s) = initial.take() {
-            s // first iteration: the eager connection
+            s // first iteration: the eager connection (announced in connect())
         } else {
             tokio::time::sleep(backoff).await;
             if closed.load(Ordering::SeqCst) {
@@ -300,6 +314,8 @@ async fn supervise(
                     let (s, source) = stream.split();
                     *sink.lock().await = Some(s);
                     connected.store(true, Ordering::SeqCst);
+                    // Re-advertise: the relay drops our state on disconnect.
+                    send_announce(&sink, &identity).await;
                     source
                 }
                 Err(_) => {
@@ -322,6 +338,25 @@ async fn supervise(
     let _ = tx
         .send(Err(TransportError::ConnectionClosed("relay closed".into())))
         .await;
+}
+
+/// Advertise our directory attributes to the relay (`{type:"announce", attrs,
+/// target:"relay"}`, fire-and-forget). No-op when the blob is empty (a plain peer)
+/// or when no socket is live (the next reconnect re-announces).
+async fn send_announce(sink: &SharedSink, identity: &SharedIdentity) {
+    let attrs = identity.lock().expect("identity poisoned").clone();
+    let empty = match &attrs {
+        Value::Object(m) => m.is_empty(),
+        _ => true,
+    };
+    if empty {
+        return;
+    }
+    let text = json!({"type": "announce", "attrs": attrs, "target": "relay"}).to_string();
+    let mut guard = sink.lock().await;
+    if let Some(s) = guard.as_mut() {
+        let _ = s.send(Message::Text(text)).await;
+    }
 }
 
 /// Send the relay's no-reply `keepalive` verb every `HEARTBEAT_SECS` while
@@ -466,6 +501,12 @@ impl BridgeTransport for RelayTransport {
                 .await;
         }
         json!({"ok": true, "unwatched": "relay"})
+    }
+
+    async fn set_identity(&self, attrs: Value) -> Value {
+        *self.identity.lock().expect("identity poisoned") = attrs.clone();
+        send_announce(&self.sink, &self.identity).await;
+        json!({"ok": true, "attrs": attrs})
     }
 }
 

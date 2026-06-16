@@ -449,6 +449,75 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
         relay.stop()
 
 
+# ── kernelgroup directory typing (manager / owned-kernel) ───────
+
+
+@pytest.mark.skip(
+    reason="pending relay kernelgroup support — the relay must store the connector's "
+    "`announce` attrs blob, reflect it into `list_peers` entries (under `attrs`), and "
+    "emit `peer_updated`. Contract: fantastic_relay/tmp/kernelgroup_handoff.md. The "
+    "canvas side (advertise on connect + set_identity) is unit-tested per runtime."
+)
+@pytest.mark.parametrize("rt", ["python", "rust", "swift"])
+@pytest.mark.asyncio
+async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> None:
+    """A manager peer and an owned kernel join; `list_peers` carries each peer's
+    advertised typing (`attrs.role`/`owner_guid`/`exposes`), and `set_identity`
+    live-updates it. Enable once the relay honors the `announce` contract."""
+    if _pair_skip_reason(rt, rt):
+        pytest.skip("relay_connector not available")
+    relay = Relay(require_relay(), free_port()).start()
+    try:
+        kp_a, kp_b, _, _, spawned = await _spawn_pair(
+            rt, rt, request, parity_tmp, free_port, f"relay_kg_{rt}"
+        )
+        try:
+            mgr = _relay_meta(
+                handler_module=_HANDLER_MODULE[rt],
+                guid="A",
+                partner_guid="B",
+                relay_url=relay.url,
+                relay_token=relay.password,
+                auth="allow_all",
+            )
+            mgr["role"] = "manager"  # A is a manager-peer
+            owned = _relay_meta(
+                handler_module=_HANDLER_MODULE[rt],
+                guid="B",
+                partner_guid="A",
+                relay_url=relay.url,
+                relay_token=relay.password,
+                auth="allow_all",
+            )
+            owned["owner_guid"] = "A"  # B is a kernel owned by manager A
+            owned["exposes"] = ["stop"]
+            created = await asyncio.gather(
+                kp_a.call("kernel", "create_agent", **mgr),
+                kp_b.call("kernel", "create_agent", **owned),
+            )
+            await _await_connected(kp_a, created)
+            await _await_connected(kp_b, created)
+
+            # list_peers entries carry the advertised attrs blob.
+            snap = await kp_a.call("cb", "list_peers")
+            by_guid = {p.get("guid"): p for p in snap.get("peers", [])}
+            assert by_guid["A"].get("attrs", {}).get("role") == "manager", snap
+            assert by_guid["B"].get("attrs", {}).get("owner_guid") == "A", snap
+            assert by_guid["B"].get("attrs", {}).get("exposes") == ["stop"], snap
+
+            # set_identity live-updates the control surface → reflected in list_peers.
+            r = await kp_b.call("cb", "set_identity", exposes=["stop", "restart"])
+            assert r.get("ok") is True, r
+            snap2 = await kp_a.call("cb", "list_peers")
+            b2 = {p.get("guid"): p for p in snap2.get("peers", [])}["B"]
+            assert b2.get("attrs", {}).get("exposes") == ["stop", "restart"], snap2
+        finally:
+            for kp in spawned:
+                kp.terminate()
+    finally:
+        relay.stop()
+
+
 # ── auto-reconnect (relay restart) ──────────────────────────────
 
 

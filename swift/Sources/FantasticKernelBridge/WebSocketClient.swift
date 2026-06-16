@@ -2,7 +2,7 @@
 //
 // `URLSessionWebSocketTask` is Apple-only — it does not exist (functionally) on
 // swift-corelibs-foundation, so the bridge's dial-OUT legs (ws_bridge's
-// `WebSocketTransport`, cloud_bridge's `WSByteChannel`) could not run on Linux.
+// `WebSocketTransport`, relay_connector's `RelayTransport`) could not run on Linux.
 // This is the one missing primitive: a minimal WS client with a pull-based
 // async surface (`send` / `receive` / `close`) mirroring the slice of
 // `URLSessionWebSocketTask` those legs used — so they run identically on macOS
@@ -177,9 +177,8 @@ public actor NIOWebSocketClient {
 // ── inbox: lock-guarded cross-thread message handoff (EL → actor) ──────────
 
 /// FIFO bridge from the event-loop handler (which delivers frames) to the
-/// actor's `receive()`. Lock-guarded (the same pattern as CloudBridge's
-/// `HandshakeWaiter`) so frame ORDER is preserved — a `Task{}`-per-frame hop
-/// would race and reorder a stream.
+/// actor's `receive()`. Lock-guarded so frame ORDER is preserved — a
+/// `Task{}`-per-frame hop would race and reorder a stream.
 final class WSClientInbox: @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [NIOWebSocketClient.Message] = []

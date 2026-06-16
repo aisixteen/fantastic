@@ -1,81 +1,98 @@
-# relay_e2e — kernels through the zero-trust relay (cloud_bridge)
+# relay_e2e — kernels through the relay-kernel router (`relay_connector`)
 
-End-to-end proof that two host kernels reach each other through a **relay** via the
-`cloud_bridge` transport: both dial OUT to the relay, it pairs them by
-`(tenant, rendezvous)` and forwards **opaque** frames, the two cloud_bridges run
-**end-to-end TLS 1.3 mutual auth** (Ed25519 device certs, pinned), and a
-`kernel.send` round-trips A → relay → B → reply. Setup spec: `../../tmp/relay_e2e_setup.md`.
+End-to-end proof that two host kernels reach each other through a **relay-KERNEL
+router** (`relayd`, sibling repo `../fantastic_relay/relaykernel`) via the
+`relay_connector` transport. Each kernel runs a `relay_connector` agent that dials
+the relay at `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, group password
+in the `X-Fantastic-Auth` header, checked once at the WS upgrade). The relay routes
+by `target`; the connectors **tunnel** the shared `io_bridge` `call`/`reply` frames
+to each other by GUID, so a `kernel.send` round-trips A → relay → B → reply.
+
+No certs, no TLS/mTLS, no Ed25519, no token-issuer, no rendezvous — that whole
+zero-trust `cloud_bridge` model is gone. The only relay-connection secret is the
+group password (`RELAY_PASSWORD`), set on the relay as `FANTASTIC_GROUP_TOKEN` with
+`RELAY_INGRESS_RULE=password`. The per-leg `ingress_rule`/`egress_rule`/`auth` that
+gate the **tunneled** bridge calls are INDEPENDENT of that connection password.
+
+## Two targets (like the rest of the suite)
+
+- **`FANTASTIC_TARGET=local`** (default): a local `relayd` subprocess on loopback;
+  kernels dial `ws://127.0.0.1:<port>`.
+- **`FANTASTIC_TARGET=container`**: the `relay:latest` image, published on the host;
+  kernel CONTAINERS reach it via the host gateway
+  `ws://host.containers.internal:<port>` (the cross-container "unit" model — no
+  shared network).
 
 ## The matrix
 
-`test_relay_any_to_any` is parametrized over the **3 host runtimes × 2** — every
-unordered pair (**any-to-any**) plus **same-kind**:
+`test_relay_any_to_any` (and the auth variants) are parametrized over the **3 host
+runtimes × 2** — every unordered pair (**any-to-any**) plus **same-kind**:
 
-| pair | status |
-|---|---|
-| python ↔ python / python ↔ rust / python ↔ swift / rust ↔ rust / rust ↔ swift / swift ↔ swift | **runs** (live relay round-trip) |
+| pairs |
+|---|
+| python↔python · python↔rust · python↔swift · rust↔rust · rust↔swift · swift↔swift |
 
-All three host runtimes ship a cloud_bridge transport and interop any-to-any.
-Cross-runtime cert pinning works because the harness derives each leg's ACTUAL
-cert the way its own runtime does (python via `_tls`, rust/swift via the kernel
-binary's `__cloud-cert` subcommand) and cross-feeds it to the validating peer. A
-pair skips only if a runtime's binary isn't built (clear skip reason).
+All three host runtimes ship a `relay_connector` transport (same `handler_module`,
+`relay_connector.tools`) and interop any-to-any over the same relay. A pair skips
+only if a runtime's binary isn't built (clear skip reason).
+
+### Tests
+
+- **`test_relay_any_to_any`** — A carries `auth="deny_inbound"`, B is opened with
+  `allow_all`. A→B forward round-trips B's root reflect; B→A is refused on arrival
+  at A with `{reason:"unauthorized"}` — the cross-runtime wire-shape guard.
+- **`test_relay_password_group_member`** — both legs `auth="password"` with the SAME
+  group token in env (`FANTASTIC_GROUP_TOKEN`, never persisted): the token is
+  presented on each call envelope, survives the relay, is checked on arrival —
+  A→B and B→A both round-trip across every pair.
+- **`test_relay_password_rejects_outsider`** — A presents a DIFFERENT token than B
+  expects → B's `password` gate refuses `unauthorized`. B = each runtime in turn
+  (the enforcing receiver).
+- **`test_relay_asymmetric_rules`** — A is a hub with the symmetric SPLIT
+  (`ingress_rule="deny_inbound"` + `egress_rule="password"`), B a group member.
+  A→B round-trips (A's egress presents, B's ingress checks); B→A is denied (A's
+  ingress). Independent per-direction rules, identical wire shape everywhere.
+- **`test_relay_directory[python|rust|swift]`** — two connectors of the runtime
+  both connect, then `list_peers` (addressed to the relay's own `relay` agent,
+  `target:"relay"`) returns BOTH peers with `status:"green"`, and
+  `watch_directory` acks. (The live event-surfacing onto the connector inbox is
+  unit-tested per runtime.)
+- **`test_relay_reconnects_after_relay_restart`** (python↔python) — a leg with
+  `reconnect=1` forwards, the relay is killed + restarted on the SAME port, the
+  leg re-dials with its backoff, and a forward round-trips again over the healed
+  connection. The reconnect logic is shared/mirrored across runtimes.
+- **`test_relay_kernelgroup_typing[python|rust|swift]`** — **SKIPPED pending the
+  relay half** (the relay must store each peer's advertised `announce` attrs blob,
+  reflect it into `list_peers` entries' `attrs`, and emit `peer_updated`). A manager
+  peer + an owned kernel join; `list_peers` carries `attrs.role`/`owner_guid`/
+  `exposes` and `set_identity` live-updates it. Contract:
+  `fantastic_relay/tmp/kernelgroup_handoff.md`. The canvas side (advertise on
+  connect + `set_identity`) is unit-tested per runtime.
 
 ## Run it
 
-Opt-in (kept out of the default `pytest` run so the canvas suite stays
-self-contained — it boots binaries from the sibling repo):
+Heavy + opt-in (kept out of the default `pytest` run); skips cleanly when `relayd`
+isn't built or the engine/image is absent.
 
 ```sh
-# 1. build the relay binaries (router + token issuer) — once
-cargo build --release --manifest-path ../fantastic_relay/rust/Cargo.toml
+# 1. build the relay kernel — once
+cd ../fantastic_relay/relaykernel && swift build      # → .build/{debug,release}/relayd
+#    (or, for the container target: sh ../fantastic_relay/relaykernel/container/build.sh)
 
 # 2. run (from integration_tests/)
 uv run pytest relay_e2e/ -v
+#    container target:  FANTASTIC_TARGET=container uv run pytest relay_e2e/ -v
 ```
-
-No opt-in flag — it self-skips cleanly when the relay binaries (router / issuer)
-or the canvas venv aren't built, so a default `pytest` run picks it up wherever
-the relay is present and skips everywhere else.
 
 ## How it works (no mocks)
 
-- `relay_harness.Relay` locates `fantastic-router` + `fantastic-issue` under
-  `../fantastic_relay/rust/target/release/`, runs `fantastic-issue keygen`, boots a
-  router on a loopback port (`ROUTER_REQUIRE_E2E=false` — the relay just forwards
-  opaque bytes; cloud_bridge still runs full TLS between the legs), and mints a
-  per-leg token via `fantastic-issue token`.
-- Device identities are generated by invoking the **canvas venv**'s real
-  `cloud_bridge._tls.self_signed_cert`, so the harness's pinned cert byte-matches
-  the cert the kernel derives from `id_key`.
-- Two daemons boot with `web` + `web_ws` (drivable, no auto-booting cloud_bridge).
-  The test then `create_agent`s a `cloud_bridge` leg on **both concurrently**
-  (`asyncio.gather`) — each blocks in the TLS handshake until the relay pairs them
-  — then `reflect` (asserts `connected`) and `forward` a reflect through the relay.
-- **Directional auth** (`test_relay_any_to_any`). Leg A carries `auth="deny_inbound"`
-  (the hub→spoke push policy). The matrix asserts BOTH directions for every runtime
-  pair: A→B forward succeeds (B's leg is EXPLICITLY opened with `ingress_rule=allow_all`,
-  because IO legs now SEAL by default — an absent rule resolves to `deny_inbound`),
-  and B→A reverse is refused on arrival at A with `{reason:"unauthorized"}` — the
-  cross-runtime guard that the per-leg `auth` gate (`io_bridge.gate_inbound` and its
-  rust/swift mirrors) produces an identical wire shape everywhere.
-- **Group auth** (`test_relay_password_group_member` + `test_relay_password_rejects_outsider`).
-  Both legs run `auth="password"`; the group token is injected into each daemon's
-  env (`FANTASTIC_GROUP_TOKEN`, never persisted). When the tokens match (all 6
-  pairs), the token is presented on each call envelope, survives the relay+TLS, and
-  is checked on arrival — A→B and B→A both round-trip. When they differ (B = each
-  runtime in turn), B refuses the outsider `unauthorized`. Proves the `password`
-  rule's present-on-outbound / check-on-inbound works end-to-end cross-runtime.
-- **Asymmetric rules** (`test_relay_asymmetric_rules`, all 6 pairs). A is a hub with
-  the symmetric SPLIT — `ingress_rule="deny_inbound"` (refuse inbound) +
-  `egress_rule="password"` (still present the fleet token) — and B is a group member.
-  Asserts A→B round-trips (A's egress presents, B's ingress checks) while B→A is
-  denied (A's ingress). The cross-runtime guard that `ingress_rule`/`egress_rule` are
-  independent per-direction rules with an identical wire shape everywhere.
-
-## Done-when (production)
-
-Once rust + swift cloud_bridge mirrors land, the full matrix runs; flip the relay
-to `ROUTER_REQUIRE_E2E=true ROUTER_E2E_ASSERTED=true` and confirm its logs show
-ciphertext + metadata only. Run against both relay binaries (`fantastic-router`
-and `relayd`) via `RELAY_BINARY` for parity.
+- `relay_harness.Relay` locates the newest built `relayd` (release preferred), boots
+  it on a loopback port with `FANTASTIC_GROUP_TOKEN=<RELAY_PASSWORD>` +
+  `RELAY_INGRESS_RULE=password` (local target), or runs `relay:latest` published on
+  the host (container target). It skips cleanly when the binary/image is missing.
+- Each daemon boots with `web` + `web_ws` (drivable over WS, no auto-booting relay
+  leg). The test then `create_agent`s a `relay_connector` leg on **both
+  concurrently** (`asyncio.gather`), polls `reflect.connected`, and `forward`s a
+  reflect through the relay.
+- The relay binary is parametrizable via the harness; the same suite runs the Swift
+  `relayd` locally and the `relay:latest` container under the two targets.

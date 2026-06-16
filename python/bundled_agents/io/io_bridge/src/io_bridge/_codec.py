@@ -1,5 +1,5 @@
 """io_bridge frame codec — the ONE binary-safe wire encoding shared by every
-transport (web_ws WS frames, ws_bridge WSTransport, cloud_bridge TLS records).
+transport (web_ws WS frames, ws_bridge WSTransport, relay_connector relay frames).
 
 A bridge frame is a JSON envelope (`{type, target, payload, id}` / `{type:reply,
 id, data}` / …). JSON cannot hold a raw `bytes` value — so a frame whose payload
@@ -14,11 +14,11 @@ header, reads the trailing M bytes as the body, and sets it back at that path. A
 frame with NO bytes is plain UTF-8 JSON. This is how raw bytes ride the wire WITHOUT
 base64 — the +33% size + encode/decode tax is gone.
 
-The text/binary distinction is carried by the transport, NOT guessed here:
-  - WS transports (web_ws, WSTransport) use the WS frame TYPE — a text frame arrives
-    as `str`, a binary frame as `bytes`; `decode_frame` dispatches on that.
-  - byte-stream transports (cloud_bridge, inside TLS) prepend a 1-byte discriminator
-    to their length-delimited record and hand `decode_frame` the right type.
+The text/binary distinction is carried by the transport, NOT guessed here. Every
+transport today is WS-based (web_ws, ws_bridge's WSTransport, relay_connector over
+the relay) and uses the WS frame TYPE — a text frame arrives as `str`, a binary
+frame as `bytes`; `decode_frame` dispatches on that. The relay forwards the WS
+frame kind end-to-end, so a tunneled binary chunk stays a binary frame.
 
 Only ONE bytes value per frame is supported (the stream protocol carries exactly one
 chunk per frame); the first found in a depth-first walk wins.

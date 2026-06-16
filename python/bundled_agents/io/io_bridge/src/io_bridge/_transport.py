@@ -1,10 +1,11 @@
 """io_bridge transports — the transport-agnostic abstraction shared by every
-bridge bundle (`ws_bridge`, `cloud_bridge`, …).
+bridge bundle (`ws_bridge`, `relay_connector`, …).
 
 A transport is the thin `send(frame) / recv()` shim the dispatch engine
 (`_engine.py`) talks to. Concrete transports live in the bundles:
   - `ws_bridge._ws.WSTransport` — a `websockets` client to a remote `web_ws`.
-  - `cloud_bridge._transport.CloudBridgeTransport` — dial-out relay + Noise E2E.
+  - `relay_connector._relay.RelayTransport` — dials a relay-KERNEL router and
+    tunnels these frames to a partner GUID (auth via the X-Fantastic-Auth header).
 This module ships only the contract + the in-process `MemoryTransport` that the
 whole test suite runs on (no network, no subprocess).
 

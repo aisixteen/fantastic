@@ -183,6 +183,7 @@ async fn dispatch(
         "list_peers" | "watch_directory" | "unwatch_directory" => {
             directory_reply(agent_id, payload, verb).await
         }
+        "set_identity" => set_identity_reply(agent_id, payload, kernel).await,
         other => json!({"error": format!("{}: unknown verb {other:?}", family.label())}),
     };
     Ok(Some(reply))
@@ -205,6 +206,37 @@ async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value
         "watch_directory" => state.transport.watch_directory(timeout).await,
         _ => state.transport.unwatch_directory().await,
     }
+}
+
+/// `set_identity` (`relay_connector` only): advertise/update this peer's directory
+/// typing — `role`/`owner_guid`/`exposes` (all optional, merged over the record).
+/// Persists the change so it re-announces on the next boot, then pushes it to the
+/// relay live (→ `peer_updated`). Mirrors py `_set_identity`.
+async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let Some(state) = BRIDGES.lock().get(agent_id).cloned() else {
+        return json!({"error": "relay_connector.set_identity: not connected (call boot first)"});
+    };
+    if let Some(role) = payload.get("role") {
+        if !role.is_null() && role.as_str() != Some("manager") && role.as_str() != Some("kernel") {
+            return json!({"error": "relay_connector.set_identity: role must be manager|kernel"});
+        }
+    }
+    // Merge only the provided well-known keys into the record + persist (explicit
+    // null retracts a field, e.g. owner_guid:null = become standalone).
+    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
+        let mut patch = serde_json::Map::new();
+        for k in ["role", "owner_guid", "exposes"] {
+            if let Some(v) = payload.get(k) {
+                patch.insert(k.to_string(), v.clone());
+            }
+        }
+        if !patch.is_empty() {
+            agent.update_meta(patch);
+            let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
+        }
+    }
+    let attrs = identity_from_meta(agent_id, kernel);
+    state.transport.set_identity(attrs).await
 }
 
 /// Shared BINARY dispatch — `forward` carrying a raw request chunk
@@ -315,6 +347,51 @@ fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String>
     meta.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
+/// Mint an opaque relay GUID (32 hex). Not cryptographic — it only needs to be
+/// unique within a relay group (the relay rejects duplicate GUIDs); composed from
+/// time + pid + a stack address + a process-monotonic counter, mirroring the
+/// kernel's own `mint_id` philosophy (no extra crate dep).
+fn mint_guid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut stack: u64 = 0;
+    let stack_ptr = &mut stack as *mut u64 as u64;
+    let lo = (std::process::id() as u64).rotate_left(32)
+        ^ stack_ptr
+        ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("{nanos:016x}{lo:016x}")
+}
+
+/// Assemble the directory-attributes blob to advertise from the record's well-known
+/// keys (`role`/`owner_guid`/`exposes`). Defaults are OMITTED (role=kernel /
+/// owner_guid=null / exposes=[]) so a plain peer advertises nothing — the relay's
+/// own defaults stand. Opaque to the relay; mirrors py `_identity_from_record`.
+fn identity_from_meta(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let mut attrs = serde_json::Map::new();
+    if let Some(role) = meta_string(agent_id, kernel, "role") {
+        if role != "kernel" {
+            attrs.insert("role".into(), Value::String(role));
+        }
+    }
+    if let Some(owner) = meta_value(agent_id, kernel, "owner_guid") {
+        if !owner.is_null() {
+            attrs.insert("owner_guid".into(), owner);
+        }
+    }
+    if let Some(exposes) = meta_value(agent_id, kernel, "exposes") {
+        if exposes.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            attrs.insert("exposes".into(), exposes);
+        }
+    }
+    Value::Object(attrs)
+}
+
 fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
     let meta = agent.meta.read().expect("meta poisoned");
@@ -364,6 +441,10 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "relay_url": meta_string(agent_id, kernel, "relay_url"),
         "guid": meta_string(agent_id, kernel, "guid"),
         "partner_guid": meta_string(agent_id, kernel, "partner_guid"),
+        // Directory typing (relay legs) — what we advertise to the relay's directory.
+        "role": meta_string(agent_id, kernel, "role").unwrap_or_else(|| "kernel".into()),
+        "owner_guid": meta_value(agent_id, kernel, "owner_guid").unwrap_or(Value::Null),
+        "exposes": meta_value(agent_id, kernel, "exposes").unwrap_or_else(|| json!([])),
         // Read-key == write-key (py parity): `ingress_rule`/`egress_rule`, so a
         // `reflect` → `update_agent` edit is a direct mirror. No `auth` alias in
         // the reflect (it's a legacy WRITE shorthand only). `sealed` = the leg
@@ -484,9 +565,22 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
                 Some(u) => u,
                 None => return json!({"error": "relay_connector: relay_url required"}),
             };
+            // `guid` (our WS path) is auto-minted ONCE on first boot if absent and
+            // persisted into the record, so every later hydration re-dials the SAME
+            // path; an explicit guid always wins, and a minted one is never
+            // regenerated (read verbatim next boot). Mirrors py/swift.
             let guid = match meta_string(agent_id, kernel, "guid") {
                 Some(g) => g,
-                None => return json!({"error": "relay_connector: guid required"}),
+                None => {
+                    let g = mint_guid();
+                    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
+                        let mut patch = serde_json::Map::new();
+                        patch.insert("guid".to_string(), Value::String(g.clone()));
+                        agent.update_meta(patch);
+                        let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
+                    }
+                    g
+                }
             };
             let partner = match meta_string(agent_id, kernel, "partner_guid") {
                 Some(p) => p,
@@ -497,7 +591,16 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
             let reconnect = meta_value(agent_id, kernel, "reconnect")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(10.0);
-            match RelayTransport::connect(&relay_url, &guid, &token, &partner, reconnect).await {
+            // Directory typing: validate `role` and advertise the attrs blob on connect.
+            if let Some(role) = meta_string(agent_id, kernel, "role") {
+                if role != "manager" && role != "kernel" {
+                    return json!({"error": format!("relay_connector: role must be manager|kernel, got {role:?}")});
+                }
+            }
+            let identity = identity_from_meta(agent_id, kernel);
+            match RelayTransport::connect(&relay_url, &guid, &token, &partner, reconnect, identity)
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => return json!({"error": format!("relay_connector: relay dial: {e}")}),
             }
