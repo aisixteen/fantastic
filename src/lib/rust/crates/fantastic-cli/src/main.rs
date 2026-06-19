@@ -1,14 +1,18 @@
-//! `fantastic` CLI — composes the kernel + default bundle set.
+//! `fantastic_kernel` — the pure **headless host** binary: composes the kernel
+//! lib + default bundle set, boots, serves, and blocks. It carries NO
+//! interactive front-end (no REPL, no renderer, no PTY) — the `fantastic` CLI
+//! product (`src/cli/`) owns all of that and embeds the kernel as a library.
 //!
 //! Modes (matched in order):
 //!
-//! 1. `fantastic` (no args) — daemon mode. Bootstrap the workdir,
+//! 1. `fantastic_kernel` (no args) — daemon mode. Bootstrap the workdir,
 //!    dispatch `boot` on every loaded agent, then block until
-//!    SIGINT/SIGTERM, then `shutdown` gracefully.
-//! 2. `fantastic reflect [<agent_id>]` — one-shot reflect on root
+//!    SIGINT/SIGTERM (only while a web daemon is serving), then
+//!    `shutdown` gracefully. With nothing to serve it boots, reports, exits.
+//! 2. `fantastic_kernel reflect [<agent_id>]` — one-shot reflect on root
 //!    (or specific id). No lock acquired; works while a daemon owns
 //!    the dir.
-//! 3. `fantastic <agent_id> <verb> [k=v ...]` — one-shot RPC.
+//! 3. `fantastic_kernel <agent_id> <verb> [k=v ...]` — one-shot RPC.
 //!    Acquires the lock; refuses with a clear message if a daemon
 //!    already holds it.
 
@@ -46,6 +50,10 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register(
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
+    );
+    reg.register(
+        fantastic_anthropic_backend::HANDLER_MODULE,
+        fantastic_anthropic_backend::AnthropicBundle,
     );
     reg.register(
         fantastic_proxy_agent::HANDLER_MODULE,
@@ -96,7 +104,7 @@ async fn main() -> std::process::ExitCode {
     match dispatch(args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("fantastic: {e}");
+            eprintln!("fantastic_kernel: {e}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -169,32 +177,10 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let _ = fantastic_core::seed_root_readme(&workdir);
     let kernel = Arc::clone(&booted.kernel);
 
-    // Attach the stdout renderer BEFORE the boot loop so its state
-    // subscriber observes the boot events (created/send/emit). Without
-    // an early attach, the renderer comes online after boot completes
-    // and a quiet daemon shows nothing until the first external event.
-    // Python parity — `core.run()` composes the cli renderer before
-    // running its boot phase when stdin.isatty().
-    use std::io::IsTerminal;
-    let has_tty = std::io::stdin().is_terminal();
-    let _cli_token = if has_tty {
-        Some(fantastic_cli_bundle::attach(&kernel))
-    } else {
-        None
-    };
-
-    // First PTY push (tty only): orient whoever lands in the terminal — human
-    // or an LLM dropped into the PTY — BEFORE boot, while the port is unknown.
-    // The text lives in the cli bundle; the binary is the composition root, so
-    // it may call it directly (the kernel crate stays decoupled).
-    if has_tty {
-        println!("{}", fantastic_cli_bundle::intro_booting(&kernel));
-    }
-
-    // `boot` every loaded agent. The web bundle uses this to spawn its
-    // axum listener; other bundles use it for whatever lazy init they
-    // need. Failures are logged + skipped — boot must never abort the
-    // daemon (matches Python's behaviour).
+    // Headless host — the kernel binary carries NO interactive CLI/renderer
+    // logic anymore (the `fantastic` PRODUCT owns the TUI/REPL). It just boots,
+    // serves, and blocks. `boot` every loaded agent (web binds its listener
+    // here); failures are logged + skipped — boot must never abort the daemon.
     for id in booted.loaded.iter() {
         let reply = kernel.send(id, json!({"type": "boot"})).await;
         if let Some(err) = reply.get("error").and_then(Value::as_str) {
@@ -202,29 +188,24 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Composition decision: block on a web daemon OR on an attached
-    // tty. Else exit silently.
+    // Composition decision: a headless host only blocks when it's actually
+    // serving something (a web daemon). With nothing to serve there's no point
+    // holding the process — boot, report, exit. (The interactive front-end that
+    // used to keep a bare kernel alive on a tty now lives in the `fantastic`
+    // PRODUCT, not here.)
     let has_web = kernel
         .agents
         .iter()
         .any(|e| e.value().handler_module.as_deref() == Some("web.tools"));
-    if !has_web && !has_tty {
+    if !has_web {
         bootstrap::shutdown(&workdir)?;
         return Ok(());
     }
 
-    // Second PTY push (tty only): the "all booted" close. Each agent already
-    // announced its OWN endpoints during boot (web published its listening URL,
-    // rendered by the cli subscriber) — main does NOT gather them. Non-tty keeps
-    // the plain one-line marker so logs are stable.
-    if has_tty {
-        println!("{}", fantastic_cli_bundle::booted());
-    } else {
-        eprintln!(
-            "fantastic: daemon up. {} agent(s) loaded. Ctrl-C to stop.",
-            booted.loaded.len()
-        );
-    }
+    eprintln!(
+        "fantastic_kernel: headless host up. {} agent(s) loaded. Ctrl-C to stop.",
+        booted.loaded.len()
+    );
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm() => {},
@@ -240,14 +221,14 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         },
     }
-    eprintln!("fantastic: shutting down...");
+    eprintln!("fantastic_kernel: shutting down...");
     // Issue shutdown on every loaded agent (LIFO so children stop
     // before parents).
     for id in booted.loaded.iter().rev() {
         let _ = kernel.send(id, json!({"type": "shutdown"})).await;
     }
     bootstrap::shutdown(&workdir)?;
-    eprintln!("fantastic: done.");
+    eprintln!("fantastic_kernel: done.");
     Ok(())
 }
 
