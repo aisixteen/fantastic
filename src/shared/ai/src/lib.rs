@@ -41,7 +41,8 @@ fn err_of(v: &Value) -> Option<String> {
 
 /// Provision the brain once: an open file_bridge (history sink) + the backend
 /// agent bound to it. Idempotent — a re-create returns the existing record.
-async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
+/// Returns the backend label (handler · model) for display.
+pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     let probe = kernel
         .send(&AgentId::from(BRAIN_ID), json!({"type": "reflect"}))
         .await;

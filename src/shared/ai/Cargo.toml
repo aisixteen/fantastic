@@ -1,0 +1,15 @@
+[package]
+name = "fantastic-brain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic-brain — drives an in-host AI backend agent through one turn via the kernel's send primitive."
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.40", features = ["rt", "macros", "sync"] }
+
+fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
+fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-anthropic-backend" }
