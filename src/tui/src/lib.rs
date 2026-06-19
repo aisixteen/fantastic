@@ -33,8 +33,9 @@ use tokio::sync::mpsc;
 mod chat;
 mod intro;
 mod movie;
-use chat::{Body, Route, State, Transcript};
+use chat::{Body, Route, State, Transcript, WsCmd};
 use fantastic_brain as ai;
+use fantastic_host::gateway::{self, KernelHandle};
 use fantastic_term::{used_rows, TerminalSession};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,19 @@ fn tab_at(agent_count: usize, col: u16, row: u16) -> Option<Mode> {
     None
 }
 
+/// Async results from the workspace-gateway tasks, delivered back into the
+/// `select!` loop. Spawned tasks own a cloned `KernelHandle` and report here.
+enum WsEvent {
+    /// A workspace kernel is live (`spawned` = we started it, else attached).
+    Attached(KernelHandle, bool),
+    /// A reply from a workspace verb / reflect.
+    Reply(Value),
+    /// A gateway error (attach/spawn/send failed).
+    Error(String),
+    /// The workspace kernel was asked to shut down.
+    Down,
+}
+
 struct App {
     kernel: Arc<Kernel>,
     agent_count: usize,
@@ -104,6 +118,13 @@ struct App {
     input: String,
     sticky: String,
     chat_busy: bool,
+    /// The live out-of-process workspace kernel (over the loopback gateway), if
+    /// one has been brought `up`. `None` until an explicit `@ws up`.
+    workspace: Option<KernelHandle>,
+    /// True while a workspace gateway task (attach/spawn) is in flight.
+    ws_busy: bool,
+    /// Async results from the workspace gateway tasks flow back here.
+    ws_tx: mpsc::UnboundedSender<WsEvent>,
     /// Reply channel for one-shot kernel commands (reflect / sugar verbs).
     cmd_tx: mpsc::UnboundedSender<(String, String)>,
     /// PTY-output repaint ping sender (used to lazily spawn the PTY for `@sh`).
@@ -171,6 +192,8 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     // One-shot kernel command replies flow back here as (source_id, text).
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
+    // Workspace gateway task results (attach/spawn/send/down) flow back here.
+    let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<WsEvent>();
     // PTY output → repaint pings.
     let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
 
@@ -208,6 +231,9 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         input: String::new(),
         sticky: "ai".into(),
         chat_busy: false,
+        workspace: None,
+        ws_busy: false,
+        ws_tx,
         cmd_tx,
         redraw_tx: redraw_tx.clone(),
         chat_term_grid: (tcols, trows),
@@ -254,6 +280,7 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                     app.chat_busy = false;
                 }
             }
+            Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
             Some(()) = redraw_rx.recv() => {}
             _ = ticker.tick() => {
                 if app.mode != Mode::Intro { continue; }
@@ -492,6 +519,138 @@ fn submit_chat(app: &mut App) {
         Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
         Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
         Route::Shell(cmd) => run_shell(app, cmd),
+        Route::Workspace(cmd) => dispatch_workspace(app, cmd),
+    }
+}
+
+/// Drive the out-of-process workspace kernel over the gateway. Lifecycle
+/// (`Up`/`Down`) and verbs all run in spawned tasks that own a cloned handle and
+/// report their result back through `ws_tx` → `handle_ws_event`.
+fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
+    let tx = app.ws_tx.clone();
+    match cmd {
+        WsCmd::Up(rt) => {
+            if app.ws_busy {
+                return;
+            }
+            app.chat.push(
+                "ws",
+                "you",
+                Body::Tool {
+                    verb: "up".into(),
+                    target: "ws".into(),
+                    summary: String::new(),
+                },
+                State::Done,
+            );
+            app.ws_busy = true;
+            tokio::spawn(async move {
+                let ev = match std::env::current_dir() {
+                    Ok(dir) => {
+                        let ws = gateway::Workspace { dir };
+                        // Probe for an existing daemon so we can report
+                        // attached-vs-spawned; either way attach_or_spawn yields
+                        // the live handle.
+                        let pre = ws.attach().await.ok().flatten().is_some();
+                        match ws.attach_or_spawn(rt).await {
+                            Ok(handle) => WsEvent::Attached(handle, !pre),
+                            Err(e) => WsEvent::Error(e.to_string()),
+                        }
+                    }
+                    Err(e) => WsEvent::Error(format!("cwd: {e}")),
+                };
+                let _ = tx.send(ev);
+            });
+        }
+        WsCmd::Down => {
+            let Some(handle) = app.workspace.clone() else {
+                app.chat
+                    .push("ws", "you", Body::Note("no workspace".into()), State::Done);
+                return;
+            };
+            app.chat.push(
+                "ws",
+                "you",
+                Body::Tool {
+                    verb: "down".into(),
+                    target: "ws".into(),
+                    summary: String::new(),
+                },
+                State::Done,
+            );
+            tokio::spawn(async move {
+                let _ = handle.send("core", json!({"type":"shutdown_kernel"})).await;
+                let _ = tx.send(WsEvent::Down);
+            });
+        }
+        WsCmd::Verb(target, payload) => {
+            let Some(handle) = app.workspace.clone() else {
+                app.chat.push(
+                    "ws",
+                    "you",
+                    Body::Note("no workspace — try `@ws up`".into()),
+                    State::Done,
+                );
+                return;
+            };
+            let verb = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("send")
+                .to_string();
+            app.chat.push(
+                "you",
+                "ws",
+                Body::Tool {
+                    verb,
+                    target: target.as_str().to_string(),
+                    summary: String::new(),
+                },
+                State::Done,
+            );
+            tokio::spawn(async move {
+                let ev = match handle.send(target.as_str(), payload).await {
+                    Ok(v) => WsEvent::Reply(v),
+                    Err(e) => WsEvent::Error(e.to_string()),
+                };
+                let _ = tx.send(ev);
+            });
+        }
+    }
+}
+
+/// Fold a workspace gateway task result into the App + transcript.
+fn handle_ws_event(app: &mut App, ev: WsEvent) {
+    match ev {
+        WsEvent::Attached(handle, spawned) => {
+            let note = format!(
+                "workspace {} at {}",
+                if spawned { "spawned" } else { "attached" },
+                handle.base_url
+            );
+            app.workspace = Some(handle);
+            app.ws_busy = false;
+            app.chat.push("ws", "you", Body::Note(note), State::Done);
+        }
+        WsEvent::Reply(v) => {
+            let rendered = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+            app.chat
+                .push("ws", "you", Body::Text(rendered), State::Done);
+        }
+        WsEvent::Error(e) => {
+            app.ws_busy = false;
+            app.chat
+                .push("ws", "you", Body::Note(format!("✗ ws: {e}")), State::Done);
+        }
+        WsEvent::Down => {
+            app.workspace = None;
+            app.chat.push(
+                "ws",
+                "you",
+                Body::Note("workspace stopped".into()),
+                State::Done,
+            );
+        }
     }
 }
 
@@ -635,12 +794,23 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
             mid.push(Span::styled(" · ", dim));
         }
     }
+    // Workspace status chip: `ws: none` (dim) or `ws: 127.0.0.1:<port>` in the
+    // `ws` rail color, derived from the live gateway handle.
+    let (ws_text, ws_style) = match &app.workspace {
+        Some(h) => (
+            format!("ws: {}", h.base_url.trim_start_matches("http://")),
+            Style::default().fg(chat::color_for("ws")),
+        ),
+        None => ("ws: none".to_string(), dim),
+    };
     vec![
         Line::from(Span::styled("  █", bar)),
         Line::from(mid),
         Line::from(vec![
             Span::styled("  █  ", bar),
             Span::styled("Shift+Tab: change mode", dim),
+            Span::styled("    ", dim),
+            Span::styled(ws_text, ws_style),
         ]),
     ]
 }
@@ -876,6 +1046,7 @@ mod e2e {
         // Dummy channels: hold the receivers so the senders stay live (a dropped
         // receiver would make `send` error, but the e2e paths never rely on it).
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel::<WsEvent>();
         let (redraw_tx, _redraw_rx) = mpsc::unbounded_channel::<()>();
 
         App {
@@ -887,6 +1058,9 @@ mod e2e {
             input: String::new(),
             sticky: "ai".into(),
             chat_busy: false,
+            workspace: None,
+            ws_busy: false,
+            ws_tx,
             cmd_tx,
             redraw_tx,
             chat_term_grid: (80, 24),
