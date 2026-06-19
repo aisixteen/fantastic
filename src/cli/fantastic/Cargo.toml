@@ -22,6 +22,8 @@ ratatui = "0.29"
 portable-pty = "0.8"
 vt100 = "0.15"
 tui-term = "0.2"
+# Startup billboard: zero-dep FIGlet engine + truecolor gradient (the intro).
+tui-banner = "0.2"
 
 # Kernel lib + bundle set (path-deps into the kernel workspace at src/lib/rust).
 # The product is the privileged host: it registers the FULL set (incl runners +
@@ -37,6 +39,7 @@ fantastic-scheduler = { path = "../../lib/rust/crates/bundles/fantastic-schedule
 fantastic-ai-core = { path = "../../lib/rust/crates/bundles/fantastic-ai-core" }
 fantastic-ollama-backend = { path = "../../lib/rust/crates/bundles/fantastic-ollama-backend" }
 fantastic-nvidia-nim-backend = { path = "../../lib/rust/crates/bundles/fantastic-nvidia-nim-backend" }
+fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-anthropic-backend" }
 fantastic-bridge = { path = "../../lib/rust/crates/bundles/fantastic-bridge" }
 fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
