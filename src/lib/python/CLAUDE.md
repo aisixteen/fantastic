@@ -204,8 +204,10 @@ prints what it is told and NEVER inspects the tree. The flow:
 daemon) keeps the plain `[kernel] up`. **Best-effort:** no renderer or a race is
 fine — everything is in the intro map + `reflect readme=true`. The verbs/text
 live in the `cli` bundle; the kernel stays decoupled (it sends verbs, never
-imports the bundle). Rust mirrors it: the `fantastic-cli` binary prints
-`fantastic_cli_bundle::intro_booting`/`booted`.
+imports the bundle). Rust no longer carries a stdout-renderer bundle: its
+`fantastic_kernel` binary is a pure headless host (boot + serve + one-shot
+verbs); the interactive front-end now lives in the `fantastic` CLI product
+(`src/cli/`), which owns the banner, mode tabs, and event log.
 
 REPL example:
 

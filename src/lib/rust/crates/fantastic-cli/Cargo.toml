@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 fantastic-kernel = { path = "../fantastic-kernel" }
 fantastic-core = { path = "../bundles/fantastic-core" }
-fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
 fantastic-file = { path = "../bundles/fantastic-file" }
 fantastic-yaml-state = { path = "../bundles/fantastic-yaml-state" }
 fantastic-web = { path = "../bundles/fantastic-web" }
@@ -23,6 +22,7 @@ fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
 fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
 fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
+fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
 fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../bundles/fantastic-tools" }
 # Full-tier-only bundles — subprocess-using; only compiled into the

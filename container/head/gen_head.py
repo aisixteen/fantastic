@@ -25,10 +25,10 @@ GITHUB = "https://github.com/Alexadar/fantastic_canvas"
 # should follow: main first, then each kernel, then the container.
 DOCS = [
     ("Main", "Root — Aisixteen Fantastic", "README.md"),
-    ("Kernels", "python kernel", "python/README.md"),
-    ("Kernels", "rust kernel", "rust/README.md"),
-    ("Kernels", "swift kernel", "swift/README.md"),
-    ("Kernels", "ts frontend kernel", "ts/readme.md"),
+    ("Kernels", "python kernel", "src/lib/python/README.md"),
+    ("Kernels", "rust kernel", "src/lib/rust/README.md"),
+    ("Kernels", "swift kernel", "src/lib/swift/README.md"),
+    ("Kernels", "ts frontend kernel", "src/lib/ts/readme.md"),
     ("Containers", "container (this image)", "container/README.md"),
 ]
 

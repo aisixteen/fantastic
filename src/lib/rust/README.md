@@ -118,7 +118,7 @@ cargo check  -p fantastic-cli    --no-default-features --features embedded
 Passes clean — that's the contract the sandboxed/no-subprocess tier
 ships against.
 
-## Bundle map (17 — 13 iOS-safe + 4 full-tier)
+## Bundle map (16 — 12 iOS-safe + 4 full-tier)
 
 The frontend ships no native view bundles — it is served generically
 from `ts/dist` via a `file` agent (the host never names the frontend).
@@ -128,7 +128,6 @@ iOS-safe bundles (compile under either tier):
 | crate                       | role                                                          |
 |-----------------------------|---------------------------------------------------------------|
 | `fantastic-core`            | root orchestrator (id="core")                                 |
-| `fantastic-cli-bundle`      | stdout renderer (ephemeral, tty-only)                         |
 | `fantastic-file`            | filesystem-as-agent                                           |
 | `fantastic-yaml-state`      | durable YAML memory agent (`state.yaml`; mem/data); persists THROUGH a `file_bridge` via `file_bridge_id` (failfast unset) |
 | `fantastic-web`             | axum HTTP host + WS + REST (dynamic mounting)                 |
@@ -166,10 +165,9 @@ rust/
 ├── crates/
 │   ├── fantastic-kernel/              substrate (Agent + Kernel + send/emit/watch/reflect)
 │   ├── fantastic-bundle/              bundle trait every bundle re-exports
-│   ├── fantastic-cli/                 the `fantastic` binary
+│   ├── fantastic-cli/                 the `fantastic_kernel` headless host binary
 │   └── bundles/
 │       ├── fantastic-core/                root orchestrator
-│       ├── fantastic-cli-bundle/          stdout renderer
 │       ├── fantastic-file/                fs-as-agent
 │       ├── fantastic-yaml-state/          durable YAML memory
 │       ├── fantastic-web/                 axum host + WS/REST router
