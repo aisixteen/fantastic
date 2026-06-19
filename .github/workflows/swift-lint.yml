@@ -16,7 +16,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'swift/**'
+      - 'src/lib/swift/**'
       - '.github/workflows/swift-lint.yml'
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
     runs-on: macos-latest
     defaults:
       run:
-        working-directory: swift
+        working-directory: src/lib/swift
     steps:
       - uses: actions/checkout@v4
 

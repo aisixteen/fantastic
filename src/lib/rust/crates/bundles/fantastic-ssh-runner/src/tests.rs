@@ -99,7 +99,7 @@ async fn boot_is_noop() {
     let tmp = TempDir::new().unwrap();
     let (kernel, id) = mk_kernel(
         &tmp,
-        json!({"host": "h", "remote_path": "/p", "remote_cmd": "fantastic", "remote_port": 8888, "local_port": 18181}),
+        json!({"host": "h", "remote_path": "/p", "remote_cmd": "fantastic_kernel", "remote_port": 8888, "local_port": 18181}),
     )
     .await;
     let r = kernel.send(&id, json!({"type": "boot"})).await;

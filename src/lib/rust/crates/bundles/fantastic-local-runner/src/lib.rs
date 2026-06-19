@@ -138,9 +138,9 @@ impl Transport for LocalTransport {
         };
         json!({
             "id": self.agent_id.as_str(),
-            "sentence": "Local `fantastic --port N` lifecycle (subprocess + lock.json).",
+            "sentence": "Local `fantastic_kernel --port N` lifecycle (subprocess + lock.json).",
             "remote_path": self.meta.get("remote_path").cloned().unwrap_or(Value::Null),
-            "remote_cmd": meta_str(&self.meta, "remote_cmd").unwrap_or("fantastic"),
+            "remote_cmd": meta_str(&self.meta, "remote_cmd").unwrap_or("fantastic_kernel"),
             "entry_path": meta_str(&self.meta, "entry_path").unwrap_or(""),
             "running": pid.is_some(),
             "pid": pid,
@@ -381,13 +381,13 @@ impl Transport for LocalTransport {
 /// Ladder:
 /// 1. `record.remote_cmd` (the Python bundle's preferred field)
 /// 2. `FANTASTIC_BIN` env var
-/// 3. `which fantastic`
+/// 3. `which fantastic_kernel`
 /// 4. Error
 pub fn resolve_fantastic_bin(meta: &Map<String, Value>) -> Result<PathBuf, String> {
     if let Some(c) = meta_str(meta, "remote_cmd") {
         if !c.is_empty() {
             // If absolute or contains a slash, use literally; otherwise
-            // try `which` so PATH-only names like "fantastic" resolve.
+            // try `which` so PATH-only names like "fantastic_kernel" resolve.
             if c.contains('/') || c.contains('\\') {
                 return Ok(PathBuf::from(c));
             }
@@ -402,11 +402,11 @@ pub fn resolve_fantastic_bin(meta: &Map<String, Value>) -> Result<PathBuf, Strin
             return Ok(PathBuf::from(p));
         }
     }
-    if let Ok(p) = which::which("fantastic") {
+    if let Ok(p) = which::which("fantastic_kernel") {
         return Ok(p);
     }
     Err(
-        "local_runner: no `fantastic` binary resolved; set record.remote_cmd or FANTASTIC_BIN"
+        "local_runner: no `fantastic_kernel` binary resolved; set record.remote_cmd or FANTASTIC_BIN"
             .to_string(),
     )
 }

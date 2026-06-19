@@ -12,8 +12,8 @@ set -euo pipefail
 
 PORT="${1:-8930}"
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
-FAN="$REPO/python/.venv/bin/fantastic"
-DIST="$REPO/ts/dist"
+FAN="$REPO/src/lib/python/.venv/bin/fantastic_kernel"
+DIST="$REPO/src/lib/ts/dist"
 
 [ -x "$FAN" ] || { echo "ERR: no fantastic bin at $FAN — run 'uv sync' in python/" >&2; exit 1; }
 [ -f "$DIST/main.js" ] || { echo "ERR: ts/dist not built — run 'npm run build' in ts/" >&2; exit 1; }

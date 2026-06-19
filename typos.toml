@@ -53,13 +53,13 @@ strat = "strat"
 extend-exclude = [
     "**/.fantastic/",
     "**/.build/",
-    "swift/Sources/FantasticWeb/Resources/",
+    "src/lib/swift/Sources/FantasticWeb/Resources/",
     # Rust mirror of the same vendored assets (Three.js `metalness`/`lod`/
     # `LOD`, xterm minified two-letter symbols). The Swift copy is already
     # excluded above; the Rust kernel restoration brought the same files in.
-    "rust/crates/bundles/fantastic-web/src/assets/",
+    "src/lib/rust/crates/bundles/fantastic-web/src/assets/",
     # The TS frontend kernel's own copies of those vendored bundles
     # (Three.js `LOD`, xterm's minified `diposable`/`Sur`, …) — the
     # originals the swift/rust copies above mirror.
-    "ts/src/vendor/",
+    "src/lib/ts/src/vendor/",
 ]

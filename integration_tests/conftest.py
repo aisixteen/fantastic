@@ -75,7 +75,7 @@ def python_binary():
     """
     if _TARGET == "container":
         return _container_launcher_or_skip("python")
-    candidate = _REPO_ROOT / "python" / ".venv" / "bin" / "fantastic"
+    candidate = _REPO_ROOT / "src" / "lib" / "python" / ".venv" / "bin" / "fantastic_kernel"
     if not candidate.exists():
         pytest.skip(f"python kernel binary not built: {candidate} (run `cd python && uv sync`)")
     return LocalLauncher(candidate)
@@ -96,8 +96,8 @@ def swift_binary():
     if _TARGET == "container":
         return _container_launcher_or_skip("swift")
     candidates = [
-        _REPO_ROOT / "swift" / ".build" / "debug" / "fantastic",
-        Path("/tmp/swift-fm-build/debug/fantastic"),
+        _REPO_ROOT / "src" / "lib" / "swift" / ".build" / "debug" / "fantastic_kernel",
+        Path("/tmp/swift-fm-build/debug/fantastic_kernel"),
     ]
     existing = [c for c in candidates if c.exists()]
     if not existing:
@@ -116,8 +116,8 @@ def rust_binary():
     if _TARGET == "container":
         return _container_launcher_or_skip("rust")
     candidates = [
-        _REPO_ROOT / "rust" / "target" / "release" / "fantastic",
-        _REPO_ROOT / "rust" / "target" / "debug" / "fantastic",
+        _REPO_ROOT / "src" / "lib" / "rust" / "target" / "release" / "fantastic_kernel",
+        _REPO_ROOT / "src" / "lib" / "rust" / "target" / "debug" / "fantastic_kernel",
     ]
     existing = [c for c in candidates if c.exists()]
     if not existing:

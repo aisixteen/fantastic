@@ -36,7 +36,7 @@ from .kernel_proc import KernelProc, spawn
 # Container-internal binary paths — must match container/entrypoint.sh defaults
 # (FANTASTIC_PY / FANTASTIC_RUST).
 _CONTAINER_BIN = {
-    "python": "/opt/fantastic/venv/bin/fantastic",
+    "python": "/opt/fantastic/venv/bin/fantastic_kernel",
     "rust": "/opt/fantastic/bin/fantastic-rust",
     "swift": "/opt/fantastic/bin/fantastic-swift",
 }

@@ -74,7 +74,7 @@ async def test_reflect_basic_fields(k, proj):
     r = await lr._reflect(aid, {}, k)
     assert r["id"] == aid
     assert r["remote_path"] == str(proj)
-    assert r["remote_cmd"] == "fantastic"
+    assert r["remote_cmd"] == "fantastic_kernel"
     assert r["entry_path"] == ""
     assert r["running"] is False
     assert r["pid"] is None
@@ -202,7 +202,7 @@ async def test_start_two_step_bootstrap_then_spawn_daemon(k, proj, monkeypatch):
         for a in runs
     ), f"expected create_agent call in runs={runs}"
     # Daemon spawn: just [cmd] (no flags)
-    assert spawned["args"] == ["fantastic"]
+    assert spawned["args"] == ["fantastic_kernel"]
     assert spawned["cwd"] == str(proj)
     assert spawned["start_new_session"] is True
 

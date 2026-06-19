@@ -54,14 +54,14 @@ jobs:
           go-version: "1.22"
       - name: Build vendored esbuild (linux-x64) + pack the bundle
         run: |
-          GOBIN="$PWD/ts/tools/esbuild/linux-x64" \
+          GOBIN="$PWD/src/lib/ts/tools/esbuild/linux-x64" \
             go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
           # record the sha so pack.sh's integrity gate passes
-          ( cd ts/tools/esbuild && shasum -a 256 linux-x64/esbuild \
+          ( cd src/lib/ts/tools/esbuild && shasum -a 256 linux-x64/esbuild \
               | awk '{print $1"  linux-x64/esbuild"}' >> SHA256SUMS )
-          ( cd ts && sh scripts/pack.sh )
+          ( cd src/lib/ts && sh scripts/pack.sh )
           mkdir -p dist
-          cp ts/dist/js_kernel.zip "dist/js_kernel-${{ inputs.version }}.zip"
+          cp src/lib/ts/dist/js_kernel.zip "dist/js_kernel-${{ inputs.version }}.zip"
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: "dist/js_kernel-${{ inputs.version }}.zip"
@@ -89,13 +89,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo build --release
-        working-directory: rust
-        run: cargo build --release --bin fantastic
+        working-directory: src/lib/rust
+        run: cargo build --release --bin fantastic_kernel
       - name: Package binary
         run: |
           mkdir -p dist
           tar -czf "dist/fantastic-rust-${{ matrix.label }}-${{ inputs.version }}.tar.gz" \
-            -C rust/target/release fantastic
+            -C src/lib/rust/target/release fantastic_kernel
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: "dist/fantastic-rust-${{ matrix.label }}-${{ inputs.version }}.tar.gz"
@@ -121,21 +121,21 @@ jobs:
       - name: swift --version
         run: swift --version
       - name: swift build -c release
-        working-directory: swift
-        run: swift build -c release --product fantastic
+        working-directory: src/lib/swift
+        run: swift build -c release --product fantastic_kernel
       - name: Package binary
-        working-directory: swift
+        working-directory: src/lib/swift
         run: |
           mkdir -p dist
           tar -czf "dist/fantastic-swift-macos-arm64-${{ inputs.version }}.tar.gz" \
-            -C .build/release fantastic
+            -C .build/release fantastic_kernel
       - uses: actions/attest-build-provenance@v1
         with:
-          subject-path: "swift/dist/fantastic-swift-macos-arm64-${{ inputs.version }}.tar.gz"
+          subject-path: "src/lib/swift/dist/fantastic-swift-macos-arm64-${{ inputs.version }}.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: swift-macos-arm64
-          path: swift/dist/fantastic-swift-*.tar.gz
+          path: src/lib/swift/dist/fantastic-swift-*.tar.gz
 
   # ── 1c) Python kernel host source tarball (interpreted; uv sync to install) ─
   python:
@@ -150,9 +150,9 @@ jobs:
       - name: Package python kernel source
         run: |
           mkdir -p dist
-          tar --exclude='python/.venv' --exclude='*__pycache__*' \
+          tar --exclude='src/lib/python/.venv' --exclude='*__pycache__*' \
               --exclude='*.pyc' --exclude='*.pytest_cache*' --exclude='*.ruff_cache*' \
-              -czf "dist/python-kernel-${{ inputs.version }}.tar.gz" python
+              -czf "dist/python-kernel-${{ inputs.version }}.tar.gz" src/lib/python
       - uses: actions/attest-build-provenance@v1
         with:
           subject-path: "dist/python-kernel-${{ inputs.version }}.tar.gz"
@@ -196,8 +196,8 @@ jobs:
           path: dist
       - name: Stage build context (zip + head page)
         run: |
-          mkdir -p ts/dist
-          cp dist/js_kernel-*.zip ts/dist/js_kernel.zip
+          mkdir -p src/lib/ts/dist
+          cp dist/js_kernel-*.zip src/lib/ts/dist/js_kernel.zip
           python3 container/head/gen_head.py > container/head/index.html
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

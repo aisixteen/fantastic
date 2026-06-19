@@ -4,9 +4,9 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Kernel } from "../../ts/src/kernel/kernel.ts";
-import { Agent } from "../../ts/src/kernel/agent.ts";
-import { WsBridge } from "../../ts/src/transport/bridge.ts";
+import { Kernel } from "../../src/lib/ts/src/kernel/kernel.ts";
+import { Agent } from "../../src/lib/ts/src/kernel/agent.ts";
+import { WsBridge } from "../../src/lib/ts/src/transport/bridge.ts";
 import { bootHost, teardownHost } from "./_host.ts";
 import type { Host } from "./_host.ts";
 

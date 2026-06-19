@@ -6,7 +6,7 @@
 use std::process::Command;
 
 fn fantastic_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_fantastic")
+    env!("CARGO_BIN_EXE_fantastic_kernel")
 }
 
 #[test]

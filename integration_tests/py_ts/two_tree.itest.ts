@@ -10,11 +10,11 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { Kernel } from "../../ts/src/kernel/kernel.ts";
-import { Agent } from "../../ts/src/kernel/agent.ts";
-import { WsBridge } from "../../ts/src/transport/bridge.ts";
-import { ProxyLoader } from "../../ts/src/bundles/loader/proxy_loader.ts";
-import { registerHtmlAgent } from "../../ts/src/bundles/html_agent/html_agent.ts";
+import { Kernel } from "../../src/lib/ts/src/kernel/kernel.ts";
+import { Agent } from "../../src/lib/ts/src/kernel/agent.ts";
+import { WsBridge } from "../../src/lib/ts/src/transport/bridge.ts";
+import { ProxyLoader } from "../../src/lib/ts/src/bundles/loader/proxy_loader.ts";
+import { registerHtmlAgent } from "../../src/lib/ts/src/bundles/html_agent/html_agent.ts";
 import { bootHost, teardownHost } from "./_host.ts";
 import type { Host } from "./_host.ts";
 

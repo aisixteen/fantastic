@@ -10,18 +10,18 @@
 #
 # Environment:
 #   FANTASTIC_RUST   path to the rust `fantastic` binary
-#                    (default: rust/target/release/fantastic)
+#                    (default: src/lib/rust/target/release/fantastic_kernel)
 #   FANTASTIC_PORT   port to bind (default: 18181)
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-RUST_BIN="${FANTASTIC_RUST:-$REPO_ROOT/rust/target/release/fantastic}"
+REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+RUST_BIN="${FANTASTIC_RUST:-$REPO_ROOT/src/lib/rust/target/release/fantastic_kernel}"
 PORT="${FANTASTIC_PORT:-18181}"
 
 if [ ! -x "$RUST_BIN" ]; then
     echo "compat-python: building rust binary first..."
-    (cd "$REPO_ROOT/rust" && cargo build --release --bin fantastic >/dev/null)
+    (cd "$REPO_ROOT/src/lib/rust" && cargo build --release --bin fantastic_kernel >/dev/null)
 fi
 test -x "$RUST_BIN" || { echo "compat-python: rust binary missing at $RUST_BIN"; exit 2; }
 

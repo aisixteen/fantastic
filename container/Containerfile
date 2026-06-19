@@ -25,9 +25,9 @@
 # ── rust kernel (prebuilt release binary) ────────────────────────────────
 FROM rust:bookworm AS rust-build
 WORKDIR /src
-COPY rust/ ./
-RUN cargo build --release --bin fantastic \
-    && mkdir -p /out && cp target/release/fantastic /out/fantastic-rust
+COPY src/lib/rust/ ./
+RUN cargo build --release --bin fantastic_kernel \
+    && mkdir -p /out && cp target/release/fantastic_kernel /out/fantastic-rust
 
 # ── swift kernel (prebuilt Linux binary — full runtime, NIO web server) ───
 # swift-tools-version 6.0 → the official swift:6.0 Linux toolchain. The web
@@ -45,15 +45,15 @@ RUN cargo build --release --bin fantastic \
 # (a newer swift base → `GLIBC_2.38 not found` at runtime in the slim image).
 FROM swift:6.0-bookworm AS swift-build
 WORKDIR /src
-COPY swift/ ./
+COPY src/lib/swift/ ./
 # SwiftPM emits per-target resource bundles (`<pkg>_<target>.resources` dirs:
 # FantasticKernel's root_readme, FantasticWeb's transport.js/assets, plus the
 # nio-ssl/crypto bundles) NEXT TO the executable; `Bundle.module` resolves them
 # relative to the binary at runtime. They must travel with `fantastic-swift`
 # into the final image, or boot fatals ("could not load resource bundle"). Stage
 # the binary + ALL bundles into /out, then COPY /out wholesale below.
-RUN swift build -c release --static-swift-stdlib --product fantastic \
-    && mkdir -p /out && cp .build/release/fantastic /out/fantastic-swift \
+RUN swift build -c release --static-swift-stdlib --product fantastic_kernel \
+    && mkdir -p /out && cp .build/release/fantastic_kernel /out/fantastic-swift \
     && cp -r .build/release/*.resources /out/ \
     && /out/fantastic-swift reflect | grep -Eq '"runtime"[[:space:]]*:[[:space:]]*"swift"'
 
@@ -65,7 +65,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/fantastic/venv \
     UV_LINK_MODE=copy
 RUN pip install --no-cache-dir uv
 WORKDIR /opt/fantastic/src
-COPY python/ ./
+COPY src/lib/python/ ./
 RUN uv sync --no-dev
 
 # ── final image ──────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ COPY --from=rust-build /out/fantastic-rust /opt/fantastic/bin/fantastic-rust
 # wholesale (a dir COPY preserves the bundle names; a glob would flatten them).
 COPY --from=swift-build /out/ /opt/fantastic/bin/
 # the bundled JS runtime: the prebuilt frontend zip, COPIED from ts/ (not built).
-COPY ts/dist/js_kernel.zip /opt/fantastic/js_kernel.zip
+COPY src/lib/ts/dist/js_kernel.zip /opt/fantastic/js_kernel.zip
 # the descriptive head page (all readmes), generated from the repo by
 # container/head/gen_head.py — build.sh produces it before the image build.
 COPY container/head/index.html /opt/fantastic/head/index.html
@@ -119,7 +119,7 @@ ARG FANTASTIC_VERSION=dev
 ENV FANTASTIC_RUNTIME=python \
     FANTASTIC_WORKDIR=/work \
     FANTASTIC_JS_KERNEL_ZIP=/opt/fantastic/js_kernel.zip \
-    FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic \
+    FANTASTIC_PY=/opt/fantastic/venv/bin/fantastic_kernel \
     FANTASTIC_RUST=/opt/fantastic/bin/fantastic-rust \
     FANTASTIC_SWIFT=/opt/fantastic/bin/fantastic-swift \
     FANTASTIC_ENV=container \

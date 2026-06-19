@@ -13,19 +13,19 @@
 #
 # Environment:
 #   FANTASTIC_RUST          path to the release binary
-#                            (default: rust/target/release/fantastic)
+#                            (default: src/lib/rust/target/release/fantastic_kernel)
 #   FANTASTIC_BENCH_RELAXED 1 → use 2× ceilings (CI default)
 #   FANTASTIC_BENCH_PORT    port for boot-to-listening (default 18282)
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-RUST_BIN="${FANTASTIC_RUST:-$REPO_ROOT/rust/target/release/fantastic}"
+REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+RUST_BIN="${FANTASTIC_RUST:-$REPO_ROOT/src/lib/rust/target/release/fantastic_kernel}"
 PORT="${FANTASTIC_BENCH_PORT:-18282}"
 
 if [ ! -x "$RUST_BIN" ]; then
     echo "[bench] building release binary first..."
-    (cd "$REPO_ROOT/rust" && cargo build --release --bin fantastic >/dev/null 2>&1)
+    (cd "$REPO_ROOT/src/lib/rust" && cargo build --release --bin fantastic_kernel >/dev/null 2>&1)
 fi
 test -x "$RUST_BIN" || { echo "[bench] rust binary missing at $RUST_BIN"; exit 2; }
 

@@ -7,7 +7,7 @@ license.workspace = true
 description = "The `fantastic` binary — composes the kernel + default bundle set."
 
 [[bin]]
-name = "fantastic"
+name = "fantastic_kernel"
 path = "src/main.rs"
 
 [dependencies]

@@ -38,8 +38,8 @@ jobs:
             paths-ignore:
               - '**/vendor/**'
               - '**/transport.js'
-              - swift/Sources/FantasticWeb/Resources
-              - rust/crates/bundles/fantastic-web/src/assets
+              - src/lib/swift/Sources/FantasticWeb/Resources
+              - src/lib/rust/crates/bundles/fantastic-web/src/assets
               - integration_tests
 
       - name: Autobuild

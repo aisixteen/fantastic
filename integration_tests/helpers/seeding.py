@@ -32,7 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Sovereign frontend artifact built by `cd ts && sh scripts/pack.sh`. Holds
 # exactly three entries: readme.md, bundle.min.js, bundle.min.js.map.
-FRONTEND_ZIP = _REPO_ROOT / "ts" / "dist" / "js_kernel.zip"
+FRONTEND_ZIP = _REPO_ROOT / "src" / "lib" / "ts" / "dist" / "js_kernel.zip"
 # Pinned line in the zip's readme.md carrying the bundle's integrity digest,
 # e.g. `# expected: 3881c729...`. pack.sh substitutes the real sha at build.
 _SHA_LINE = re.compile(r"^#\s*expected:\s*([0-9a-f]{64})\s*$", re.MULTILINE)

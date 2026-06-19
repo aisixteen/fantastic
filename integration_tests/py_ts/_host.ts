@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-const FANTASTIC = join(repoRoot, "python", ".venv", "bin", "fantastic");
+const FANTASTIC = join(repoRoot, "src", "lib", "python", ".venv", "bin", "fantastic_kernel");
 
 // Target selection — mirrors the python integration harness. `local` (default)
 // runs the built venv binary; `container` runs the universal image (python
@@ -34,7 +34,7 @@ const FANTASTIC = join(repoRoot, "python", ".venv", "bin", "fantastic");
 // e2e is host/browser → container only (no container↔container), so -p suffices.
 const TARGET = (process.env.FANTASTIC_TARGET ?? "local").trim().toLowerCase();
 const IMAGE = process.env.FANTASTIC_IMAGE ?? "fantastic:latest";
-const CONTAINER_BIN = "/opt/fantastic/venv/bin/fantastic"; // python in the image
+const CONTAINER_BIN = "/opt/fantastic/venv/bin/fantastic_kernel"; // python in the image
 // where ts/dist is mounted in container mode — INSIDE the workdir (/work), because
 // file_bridge clamps every root to the dir the kernel runs in (the running-dir law).
 const CONTAINER_DIST = "/work/dist";
@@ -158,7 +158,7 @@ export interface BootOptions {
 }
 
 /** Absolute path to the built frontend (`ts/dist`) — served when `serveDist`. */
-export const DIST_DIR = join(repoRoot, "ts", "dist");
+export const DIST_DIR = join(repoRoot, "src", "lib", "ts", "dist");
 
 /** Write a mount/fixture file into the dir ACTUALLY served at
  *  `/ts_dist/file/<name>` for THIS host. local: the workdir copy
