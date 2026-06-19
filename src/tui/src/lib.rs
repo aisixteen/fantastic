@@ -35,7 +35,7 @@ mod intro;
 mod movie;
 use chat::{Body, Route, State, Transcript};
 use fantastic_brain as ai;
-use fantastic_term::TerminalSession;
+use fantastic_term::{used_rows, TerminalSession};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -106,10 +106,17 @@ struct App {
     chat_busy: bool,
     /// Reply channel for one-shot kernel commands (reflect / sugar verbs).
     cmd_tx: mpsc::UnboundedSender<(String, String)>,
+    /// PTY-output repaint ping sender (used to lazily spawn the PTY for `@sh`).
+    redraw_tx: mpsc::UnboundedSender<()>,
+    /// The PTY grid the chat viewport should request (cols, max rows).
+    chat_term_grid: (u16, u16),
     /// True once the brain has been provisioned (so we only ensure it once).
     brain_ready: bool,
     /// Terminal-proxy mode PTY (spawned at startup).
     term: Option<TerminalSession>,
+    /// Chat mode: render the live PTY as a breathing viewport below the
+    /// transcript (set once `@sh` runs a command in this session).
+    term_active: bool,
     /// Intro mode: the scripted movie + when it (re)started (for its clock).
     movie: movie::Movie,
     intro_since: Option<Instant>,
@@ -202,8 +209,11 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         sticky: "ai".into(),
         chat_busy: false,
         cmd_tx,
+        redraw_tx: redraw_tx.clone(),
+        chat_term_grid: (tcols, trows),
         brain_ready: false,
         term: session,
+        term_active: false,
         movie: movie::Movie::storyboard(),
         intro_since: None,
         quit: false,
@@ -253,11 +263,22 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         if app.quit {
             break;
         }
-        // Keep the PTY grid matched to the terminal pane.
+        // Keep the PTY grid matched to whichever pane currently hosts it. In
+        // Terminal mode the PTY fills the body; in Chat mode the breathing
+        // viewport gives the PTY the full chat-body height (so htop/vim get
+        // real room) while only `used_rows` of it are displayed.
         if app.mode == Mode::Terminal {
             let (r, c) = term_grid(&term);
             if let Some(ts) = app.term.as_mut() {
                 ts.resize(r, c);
+            }
+        } else if app.mode == Mode::Chat {
+            app.chat_term_grid = chat_term_grid(&term);
+            if app.term_active {
+                let (r, c) = app.chat_term_grid;
+                if let Some(ts) = app.term.as_mut() {
+                    ts.resize(r, c);
+                }
             }
         }
         term.draw(|f| ui(f, &app))?;
@@ -349,6 +370,13 @@ fn handle_input(app: &mut App, ev: Event) {
         match app.mode {
             // In the live PTY, forward SIGINT to the shell.
             Mode::Terminal => {
+                if let Some(ts) = app.term.as_mut() {
+                    ts.write(&[0x03]);
+                }
+            }
+            // In chat with a breathing PTY, forward SIGINT to interrupt the
+            // running command (do NOT exit).
+            Mode::Chat if app.term_active => {
                 if let Some(ts) = app.term.as_mut() {
                     ts.write(&[0x03]);
                 }
@@ -463,6 +491,33 @@ fn submit_chat(app: &mut App) {
         }
         Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
         Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
+        Route::Shell(cmd) => run_shell(app, cmd),
+    }
+}
+
+/// Run `cmd` in the shared live PTY and start breathing its screen into the
+/// chat. Lazily spawns the `TerminalSession` (sized to the chat-body grid) on
+/// the first `@sh`, logs the command on the `sh` rail, then writes `cmd\r`.
+fn run_shell(app: &mut App, cmd: String) {
+    if app.term.is_none() {
+        let (rows, cols) = app.chat_term_grid;
+        app.term = TerminalSession::spawn(rows, cols, app.redraw_tx.clone()).ok();
+    }
+    app.chat.push(
+        "sh",
+        "you",
+        Body::Tool {
+            verb: "sh".to_string(),
+            target: "sh".to_string(),
+            summary: cmd.clone(),
+        },
+        State::Done,
+    );
+    if let Some(ts) = app.term.as_mut() {
+        let mut line = cmd;
+        line.push('\r');
+        ts.write(line.as_bytes());
+        app.term_active = true;
     }
 }
 
@@ -533,6 +588,20 @@ fn encode_key(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
 fn term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
     let size = term.size().unwrap_or(Size::new(80, 24));
     let rows = size.height.saturating_sub(3 + 8 + 2).max(1);
+    let cols = size.width.saturating_sub(2).max(1);
+    (rows, cols)
+}
+
+/// The chat-mode breathing-viewport grid `(rows, cols)`: the PTY is sized to the
+/// FULL chat-body interior so full-screen TUIs get real room, even though only
+/// `used_rows` of it are displayed below the transcript. Subtracts the same
+/// header (3) + events (8) + body border (2) chrome `term_grid` does, then one
+/// more row for the viewport's `│ sh` header inside the chat body.
+fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
+    let size = term.size().unwrap_or(Size::new(80, 24));
+    // Chat body interior height (Min(3) pane minus its border), minus the
+    // viewport header row and the input line (Length(3)) below the transcript.
+    let rows = size.height.saturating_sub(3 + 8 + 2 + 1 + 3).max(1);
     let cols = size.width.saturating_sub(2).max(1);
     (rows, cols)
 }
@@ -650,12 +719,42 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(parts[0]);
     f.render_widget(block, parts[0]);
 
+    // When a `@sh` command is live, the bottom of the chat body breathes the
+    // PTY screen. The viewport height = `used_rows` of the PTY (clamped to the
+    // body) + 1 for its `│ sh` header; the transcript scrolls in what remains.
+    let transcript_area = if app.term_active {
+        if let Some(ts) = &app.term {
+            if let Ok(p) = ts.parser.lock() {
+                // Leave the transcript at least one row; the viewport claims
+                // the rest, up to `used_rows` (+ its header).
+                let max_body = inner.height.saturating_sub(2).max(1);
+                let used = used_rows(&p, max_body).clamp(1, max_body);
+                let vp_h = (used + 1).min(inner.height.saturating_sub(1));
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(vp_h)])
+                    .split(inner);
+                render_chat_terminal(f, split[1], p.screen());
+                split[0]
+            } else {
+                inner
+            }
+        } else {
+            inner
+        }
+    } else {
+        inner
+    };
+
     let lines = transcript_lines(app);
     // Show the tail that fits the pane height.
-    let h = inner.height as usize;
+    let h = transcript_area.height as usize;
     let skip = lines.len().saturating_sub(h.max(1));
     let view: Vec<Line> = lines.into_iter().skip(skip).collect();
-    f.render_widget(Paragraph::new(view).wrap(Wrap { trim: false }), inner);
+    f.render_widget(
+        Paragraph::new(view).wrap(Wrap { trim: false }),
+        transcript_area,
+    );
 
     // Input line, prefixed with the sticky target (e.g. `@ai ▸ `).
     let prefix = format!("@{} ▸ ", app.sticky);
@@ -675,6 +774,25 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     let cx = parts[1].x + 1 + (prefix.chars().count() + app.input.chars().count()) as u16;
     let cy = parts[1].y + 1;
     f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
+}
+
+/// Render the breathing PTY viewport: a colored `│ sh` rail header, then the
+/// `tui-term` widget of the vt100 screen below it. A short Rect shows the TOP
+/// of the screen — which is where shell output lives — so a few lines of output
+/// render compactly while a full-screen TUI fills the available height.
+fn render_chat_terminal(f: &mut Frame, area: Rect, screen: &vt100::Screen) {
+    let rail = chat::color_for("sh");
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    let header = Line::from(vec![Span::styled(
+        "│ sh",
+        Style::default().fg(rail).add_modifier(Modifier::BOLD),
+    )]);
+    f.render_widget(Paragraph::new(header), parts[0]);
+    let pt = tui_term::widget::PseudoTerminal::new(screen);
+    f.render_widget(pt, parts[1]);
 }
 
 /// Flatten the transcript into styled lines: each message renders a colored `│`
@@ -732,6 +850,146 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod e2e {
+    //! Same-crate TUI e2e against ratatui's `TestBackend` — no tty, no network,
+    //! no model. Builds a real `App` (private fields) over a REAL in-proc host
+    //! kernel, renders frames into an in-memory buffer, and drives the actual
+    //! `handle_input` path. Fully deterministic.
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::MouseEvent;
+
+    /// Build an `App` wired to a real host kernel, with dummy channels and no
+    /// PTY. The kernel is composed via a blocking runtime so the helper itself
+    /// is synchronous (the e2e tests need no async surface).
+    fn test_app() -> App {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let (kernel, loaded) = rt
+            .block_on(fantastic_host::compose_manager())
+            .expect("compose host kernel");
+        let agent_count = loaded.len();
+
+        // Dummy channels: hold the receivers so the senders stay live (a dropped
+        // receiver would make `send` error, but the e2e paths never rely on it).
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (redraw_tx, _redraw_rx) = mpsc::unbounded_channel::<()>();
+
+        App {
+            kernel,
+            agent_count,
+            mode: Mode::Chat,
+            events: VecDeque::new(),
+            chat: Transcript::new(),
+            input: String::new(),
+            sticky: "ai".into(),
+            chat_busy: false,
+            cmd_tx,
+            redraw_tx,
+            chat_term_grid: (80, 24),
+            brain_ready: false,
+            term: None,
+            term_active: false,
+            movie: movie::Movie::storyboard(),
+            intro_since: None,
+            quit: false,
+            last_ctrl_c: None,
+            q_streak: 0,
+            last_q: None,
+        }
+    }
+
+    /// Flatten a rendered buffer to a single string (cell symbols, row order).
+    fn buffer_text(buf: &Buffer) -> String {
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        })
+    }
+
+    #[test]
+    fn renders_transcript_text_and_rail_glyph() {
+        let mut app = test_app();
+        app.chat
+            .push("you", "ai", Body::Text("ping-from-you".into()), State::Done);
+        app.chat.push(
+            "brain",
+            "you",
+            Body::Text("pong-from-ai".into()),
+            State::Done,
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("test terminal");
+        term.draw(|f| ui(f, &app)).expect("draw frame");
+
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("ping-from-you"),
+            "rendered frame should contain the user message"
+        );
+        assert!(
+            text.contains("pong-from-ai"),
+            "rendered frame should contain the ai message"
+        );
+        assert!(
+            text.contains('│'),
+            "rendered frame should contain the per-source `│` rail glyph"
+        );
+    }
+
+    #[test]
+    fn typed_char_appends_to_input() {
+        let mut app = test_app();
+        assert!(app.input.is_empty());
+        handle_input(&mut app, key(KeyCode::Char('x')));
+        assert_eq!(app.input, "x");
+        handle_input(&mut app, key(KeyCode::Char('y')));
+        assert_eq!(app.input, "xy");
+    }
+
+    #[test]
+    fn backtab_cycles_mode() {
+        let mut app = test_app();
+        assert!(app.mode == Mode::Chat);
+        handle_input(&mut app, key(KeyCode::BackTab));
+        assert!(app.mode == Mode::Terminal, "Chat → Terminal on BackTab");
+        handle_input(&mut app, key(KeyCode::BackTab));
+        assert!(app.mode == Mode::Intro, "Terminal → Intro on BackTab");
+    }
+
+    #[test]
+    fn header_tab_click_switches_mode() {
+        let mut app = test_app();
+        assert!(app.mode == Mode::Chat);
+
+        // Find a column inside the "Intro" tab on the header tab row, reusing the
+        // exact hit-test the runtime uses, then click it.
+        let intro_col = (0u16..200)
+            .find(|&c| tab_at(app.agent_count, c, TAB_ROW) == Some(Mode::Intro))
+            .expect("an Intro tab column should exist on the header row");
+
+        let click = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: intro_col,
+            row: TAB_ROW,
+            modifiers: KeyModifiers::NONE,
+        });
+        handle_input(&mut app, click);
+        assert!(
+            app.mode == Mode::Intro,
+            "clicking the Intro header tab switches to Intro mode"
+        );
+    }
 }
 
 #[cfg(test)]

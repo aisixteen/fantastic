@@ -14,25 +14,38 @@ use tokio::sync::mpsc::UnboundedSender;
 const BRAIN_ID: &str = "brain";
 const FS_ID: &str = "ai_fs";
 
-/// (handler_module, default model) for the selected backend.
-/// `FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic` (default ollama — no key needed).
-fn backend() -> (&'static str, String) {
-    match std::env::var("FANTASTIC_AI_BACKEND").as_deref() {
-        Ok("nvidia") => (
+/// Pure core of [`backend`]: pick `(handler_module, model)` from the selected
+/// backend + optional model override. Extracted so it's unit-testable without
+/// mutating process env.
+fn backend_for(backend: Option<&str>, model: Option<&str>) -> (&'static str, String) {
+    match backend {
+        Some("nvidia") => (
             "nvidia_nim_backend.tools",
-            std::env::var("FANTASTIC_AI_MODEL")
-                .unwrap_or_else(|_| "nvidia/llama-3_1-nemotron-ultra-253b-v1".to_string()),
+            model
+                .map(String::from)
+                .unwrap_or_else(|| "nvidia/llama-3_1-nemotron-ultra-253b-v1".to_string()),
         ),
-        Ok("anthropic") => (
+        Some("anthropic") => (
             fantastic_anthropic_backend::HANDLER_MODULE,
-            std::env::var("FANTASTIC_AI_MODEL")
-                .unwrap_or_else(|_| fantastic_anthropic_backend::DEFAULT_MODEL.to_string()),
+            model
+                .map(String::from)
+                .unwrap_or_else(|| fantastic_anthropic_backend::DEFAULT_MODEL.to_string()),
         ),
         _ => (
             "ollama_backend.tools",
-            std::env::var("FANTASTIC_AI_MODEL").unwrap_or_else(|_| "llama3.2".to_string()),
+            model
+                .map(String::from)
+                .unwrap_or_else(|| "llama3.2".to_string()),
         ),
     }
+}
+
+/// (handler_module, default model) for the selected backend.
+/// `FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic` (default ollama — no key needed).
+fn backend() -> (&'static str, String) {
+    let b = std::env::var("FANTASTIC_AI_BACKEND").ok();
+    let m = std::env::var("FANTASTIC_AI_MODEL").ok();
+    backend_for(b.as_deref(), m.as_deref())
 }
 
 fn err_of(v: &Value) -> Option<String> {
@@ -93,21 +106,42 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     Ok(backend_label())
 }
 
+/// Pure core of [`api_key_from_env`]: the generic key wins (if non-blank), else
+/// the provider-conventional key for key-requiring backends; `None` for ollama
+/// or when nothing usable is set. Blank/whitespace values are ignored.
+fn api_key_for(
+    generic: Option<&str>,
+    backend: Option<&str>,
+    anthropic: Option<&str>,
+    nvidia: Option<&str>,
+) -> Option<String> {
+    if let Some(k) = generic {
+        if !k.trim().is_empty() {
+            return Some(k.to_string());
+        }
+    }
+    let key = match backend {
+        Some("anthropic") => anthropic,
+        Some("nvidia") => nvidia,
+        _ => return None,
+    };
+    key.filter(|k| !k.trim().is_empty()).map(String::from)
+}
+
 /// The api_key for the selected backend, read from the environment. A generic
 /// `FANTASTIC_AI_KEY` wins; otherwise the provider-conventional var. `None` for
 /// ollama (no key) or when nothing is set.
 fn api_key_from_env() -> Option<String> {
-    if let Ok(k) = std::env::var("FANTASTIC_AI_KEY") {
-        if !k.trim().is_empty() {
-            return Some(k);
-        }
-    }
-    let var = match std::env::var("FANTASTIC_AI_BACKEND").as_deref() {
-        Ok("anthropic") => "ANTHROPIC_API_KEY",
-        Ok("nvidia") => "NVIDIA_API_KEY",
-        _ => return None,
-    };
-    std::env::var(var).ok().filter(|k| !k.trim().is_empty())
+    let generic = std::env::var("FANTASTIC_AI_KEY").ok();
+    let backend = std::env::var("FANTASTIC_AI_BACKEND").ok();
+    let anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+    let nvidia = std::env::var("NVIDIA_API_KEY").ok();
+    api_key_for(
+        generic.as_deref(),
+        backend.as_deref(),
+        anthropic.as_deref(),
+        nvidia.as_deref(),
+    )
 }
 
 fn backend_label() -> String {
@@ -134,4 +168,84 @@ pub async fn run_turn(kernel: Arc<Kernel>, text: String, tx: UnboundedSender<Str
         .or_else(|| err_of(&reply).map(|e| format!("✗ {e}")))
         .unwrap_or_else(|| serde_json::to_string(&reply).unwrap_or_default());
     let _ = tx.send(out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_defaults_to_ollama() {
+        assert_eq!(
+            backend_for(None, None),
+            ("ollama_backend.tools", "llama3.2".to_string())
+        );
+        // an unknown backend also falls back to ollama.
+        assert_eq!(backend_for(Some("bogus"), None).0, "ollama_backend.tools");
+    }
+
+    #[test]
+    fn backend_selects_provider_and_honors_model_override() {
+        assert_eq!(
+            backend_for(Some("nvidia"), None).0,
+            "nvidia_nim_backend.tools"
+        );
+        assert_eq!(
+            backend_for(Some("anthropic"), None).0,
+            fantastic_anthropic_backend::HANDLER_MODULE
+        );
+        assert_eq!(
+            backend_for(Some("anthropic"), None).1,
+            fantastic_anthropic_backend::DEFAULT_MODEL
+        );
+        // an explicit model overrides the per-backend default, for any backend.
+        assert_eq!(
+            backend_for(Some("ollama"), Some("gemma4:12b")).1,
+            "gemma4:12b"
+        );
+        assert_eq!(backend_for(Some("nvidia"), Some("x")).1, "x");
+    }
+
+    #[test]
+    fn api_key_generic_wins_when_present() {
+        assert_eq!(
+            api_key_for(Some("g"), Some("anthropic"), Some("a"), None).as_deref(),
+            Some("g")
+        );
+    }
+
+    #[test]
+    fn api_key_falls_back_to_provider_specific() {
+        assert_eq!(
+            api_key_for(None, Some("anthropic"), Some("a"), None).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            api_key_for(None, Some("nvidia"), None, Some("n")).as_deref(),
+            Some("n")
+        );
+    }
+
+    #[test]
+    fn api_key_none_for_ollama_and_ignores_blanks() {
+        // ollama (default / explicit) never carries a key, even if provider vars are set.
+        assert_eq!(api_key_for(None, None, Some("a"), Some("n")), None);
+        assert_eq!(api_key_for(None, Some("ollama"), Some("a"), None), None);
+        // a blank generic key is ignored → falls through to the provider key.
+        assert_eq!(
+            api_key_for(Some("  "), Some("anthropic"), Some("a"), None).as_deref(),
+            Some("a")
+        );
+        // a blank provider key yields None (no fallback).
+        assert_eq!(
+            api_key_for(None, Some("anthropic"), Some("   "), None),
+            None
+        );
+    }
+
+    #[test]
+    fn err_of_extracts_error_string() {
+        assert_eq!(err_of(&json!({"error": "boom"})).as_deref(), Some("boom"));
+        assert_eq!(err_of(&json!({"ok": true})), None);
+    }
 }

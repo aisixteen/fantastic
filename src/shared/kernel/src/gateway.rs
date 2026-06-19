@@ -50,43 +50,68 @@ impl Runtime {
 ///
 /// Returns `None` if nothing is found.
 pub fn resolve_kernel_bin(runtime: Runtime) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("FANTASTIC_KERNEL_BIN") {
+    let env_bin = std::env::var("FANTASTIC_KERNEL_BIN").ok();
+    let name = runtime.bin_name();
+
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).map(|d| d.join(name)).collect())
+        .unwrap_or_default();
+
+    // Dev fallback only makes sense for the rust substrate (it's the one built
+    // out of this repo's `src/lib/rust`).
+    let mut dev_candidates: Vec<PathBuf> = Vec::new();
+    if runtime == Runtime::Rust {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(libdir) = find_ancestor_dir(&cwd, "src/lib/rust") {
+                for profile in ["release", "debug"] {
+                    dev_candidates.push(libdir.join("target").join(profile).join(name));
+                }
+            }
+        }
+    }
+
+    resolve_kernel_bin_from(env_bin.as_deref(), &path_dirs, &dev_candidates)
+}
+
+/// Pure resolver core (no env / no cwd reads): the `FANTASTIC_KERNEL_BIN`
+/// override wins if it points at an existing file; else the first existing
+/// `$PATH` candidate; else the first existing dev candidate; else `None`. Each
+/// list element is a fully-formed candidate *path* to the binary.
+fn resolve_kernel_bin_from(
+    env_bin: Option<&str>,
+    path_dirs: &[PathBuf],
+    dev_candidates: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(p) = env_bin {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
         }
     }
-
-    let name = runtime.bin_name();
-    if let Some(p) = which_on_path(name) {
-        return Some(p);
+    for cand in path_dirs {
+        if cand.is_file() {
+            return Some(cand.clone());
+        }
     }
-
-    // Dev fallback only makes sense for the rust substrate (it's the one built
-    // out of this repo's `src/lib/rust`).
-    if runtime == Runtime::Rust {
-        if let Some(libdir) = find_ancestor_dir(&std::env::current_dir().ok()?, "src/lib/rust") {
-            for profile in ["release", "debug"] {
-                let cand = libdir.join("target").join(profile).join(name);
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
+    for cand in dev_candidates {
+        if cand.is_file() {
+            return Some(cand.clone());
         }
     }
     None
 }
 
-/// Manual `$PATH` scan for an executable — deliberately no `which` crate.
-fn which_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let cand = dir.join(name);
-        if cand.is_file() {
-            return Some(cand);
-        }
+/// The exact `_reflect` URL the gateway hits: `{base}/{rest}/_reflect[/{id}]`.
+fn reflect_url(base: &str, rest: &str, id: Option<&str>) -> String {
+    match id {
+        Some(target) => format!("{base}/{rest}/_reflect/{target}"),
+        None => format!("{base}/{rest}/_reflect"),
     }
-    None
+}
+
+/// The exact `send` URL the gateway POSTs to: `{base}/{rest}/{target}`.
+fn send_url(base: &str, rest: &str, target: &str) -> String {
+    format!("{base}/{rest}/{target}")
 }
 
 /// Walk up from `start` looking for a directory containing the relative
@@ -132,10 +157,7 @@ impl KernelHandle {
 
     /// `GET {base}/{rest}/_reflect[/{id}]`.
     pub async fn reflect(&self, id: Option<&str>) -> Result<Value> {
-        let url = match id {
-            Some(target) => format!("{}/{}/_reflect/{}", self.base_url, self.rest_id, target),
-            None => format!("{}/{}/_reflect", self.base_url, self.rest_id),
-        };
+        let url = reflect_url(&self.base_url, &self.rest_id, id);
         let resp = self
             .client
             .get(&url)
@@ -148,7 +170,7 @@ impl KernelHandle {
 
     /// `POST {base}/{rest}/{target}` with a JSON `{"type":"<verb>",...}` body.
     pub async fn send(&self, target: &str, payload: Value) -> Result<Value> {
-        let url = format!("{}/{}/{}", self.base_url, self.rest_id, target);
+        let url = send_url(&self.base_url, &self.rest_id, target);
         let resp = self
             .client
             .post(&url)
@@ -358,7 +380,7 @@ impl Workspace {
 
 /// HTTP reflect-ping: liveness = the web surface answers with status < 500.
 async fn reflect_ping(handle: &KernelHandle) -> bool {
-    let url = format!("{}/{}/_reflect", handle.base_url, handle.rest_id);
+    let url = reflect_url(&handle.base_url, &handle.rest_id, None);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
@@ -546,5 +568,81 @@ mod tests {
     fn discover_on_empty_dir_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(Workspace::new(tmp.path()).discover().is_none());
+    }
+
+    /// Touch a real file so `is_file()` is true in the resolver tests.
+    fn touch(p: &Path) {
+        fs::write(p, b"").unwrap();
+    }
+
+    #[test]
+    fn resolve_env_bin_wins_when_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_bin = tmp.path().join("fantastic_kernel");
+        touch(&env_bin);
+        // A dev candidate also exists, but the env override takes precedence.
+        let dev = tmp.path().join("dev_fantastic_kernel");
+        touch(&dev);
+        let got = resolve_kernel_bin_from(
+            Some(env_bin.to_str().unwrap()),
+            &[],
+            std::slice::from_ref(&dev),
+        );
+        assert_eq!(got, Some(env_bin));
+    }
+
+    #[test]
+    fn resolve_env_bin_missing_falls_through_to_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let on_path = tmp.path().join("fantastic_kernel");
+        touch(&on_path);
+        // env points at a non-existent file → ignored; first existing $PATH wins.
+        let missing = tmp.path().join("nope");
+        let got = resolve_kernel_bin_from(
+            Some(missing.to_str().unwrap()),
+            std::slice::from_ref(&on_path),
+            &[],
+        );
+        assert_eq!(got, Some(on_path));
+    }
+
+    #[test]
+    fn resolve_falls_back_to_first_existing_dev_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let release = tmp.path().join("release_kernel"); // does NOT exist
+        let debug = tmp.path().join("debug_kernel");
+        touch(&debug); // only the debug candidate exists
+        let got = resolve_kernel_bin_from(None, &[], &[release, debug.clone()]);
+        assert_eq!(got, Some(debug));
+    }
+
+    #[test]
+    fn resolve_none_when_nothing_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ghost = tmp.path().join("ghost");
+        let got = resolve_kernel_bin_from(
+            Some(ghost.to_str().unwrap()),
+            std::slice::from_ref(&ghost),
+            std::slice::from_ref(&ghost),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn reflect_and_send_urls_are_exact() {
+        let base = "http://127.0.0.1:8771";
+        let rest = "web_rest_95803a";
+        assert_eq!(
+            reflect_url(base, rest, None),
+            "http://127.0.0.1:8771/web_rest_95803a/_reflect"
+        );
+        assert_eq!(
+            reflect_url(base, rest, Some("core")),
+            "http://127.0.0.1:8771/web_rest_95803a/_reflect/core"
+        );
+        assert_eq!(
+            send_url(base, rest, "kernel"),
+            "http://127.0.0.1:8771/web_rest_95803a/kernel"
+        );
     }
 }

@@ -423,6 +423,7 @@ name = "fantastic-brain"
 version = "0.1.0"
 dependencies = [
  "fantastic-anthropic-backend",
+ "fantastic-host",
  "fantastic-kernel",
  "serde_json",
  "tokio",
