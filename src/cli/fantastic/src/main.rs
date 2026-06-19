@@ -30,6 +30,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
+mod term;
+use term::TerminalSession;
+
 /// The privileged host bundle set. The product owns the runtime (runners +
 /// terminal + AI backends), so it always registers the full set into its host.
 fn register_host_bundles() -> BundleRegistry {
@@ -99,13 +102,6 @@ impl Mode {
             Mode::Kernel => 2,
         }
     }
-    fn title(self) -> &'static str {
-        match self {
-            Mode::Ai => "AI",
-            Mode::Terminal => "Terminal",
-            Mode::Kernel => "Kernel manager",
-        }
-    }
 }
 
 struct App {
@@ -117,6 +113,8 @@ struct App {
     input: String,
     km_output: VecDeque<String>,
     cmd_tx: mpsc::UnboundedSender<String>,
+    /// Terminal-proxy mode PTY (spawned at startup).
+    term: Option<TerminalSession>,
     quit: bool,
 }
 
@@ -263,6 +261,8 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     // Command results (async kernel.send completions) flow back here.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
+    // PTY output → repaint pings.
+    let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
 
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
@@ -278,6 +278,10 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     execute!(out, EnterAlternateScreen)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
+    // Spawn the terminal-proxy PTY at the body size.
+    let (trows, tcols) = term_grid(&term);
+    let session = TerminalSession::spawn(trows, tcols, redraw_tx.clone()).ok();
+
     let mut app = App {
         kernel,
         agent_count,
@@ -286,9 +290,10 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         input: String::new(),
         km_output: VecDeque::new(),
         cmd_tx,
+        term: session,
         quit: false,
     };
-    app.push_event("host kernel composed — Shift+Tab switches modes, Ctrl-C quits".into());
+    app.push_event("host kernel composed — Shift+Tab switches modes, Ctrl-Q quits".into());
     app.km_line("kernel manager — type a command, Enter to run. `tree` to list agents.".into());
     term.draw(|f| ui(f, &app))?;
 
@@ -299,10 +304,18 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             Some(out) = cmd_rx.recv() => {
                 for l in out.split('\n') { app.km_line(l.to_string()); }
             }
+            Some(()) = redraw_rx.recv() => {}
             else => break,
         }
         if app.quit {
             break;
+        }
+        // Keep the PTY grid matched to the terminal pane.
+        if app.mode == Mode::Terminal {
+            let (r, c) = term_grid(&term);
+            if let Some(ts) = app.term.as_mut() {
+                ts.resize(r, c);
+            }
         }
         term.draw(|f| ui(f, &app))?;
     }
@@ -326,8 +339,9 @@ fn handle_input(app: &mut App, ev: Event) {
     if kind != KeyEventKind::Press {
         return;
     }
-    // Global keys.
-    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+    // Global keys. Ctrl-Q quits (NOT Ctrl-C — that must reach the shell in
+    // terminal mode). Shift+Tab cycles modes.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
         app.quit = true;
         return;
     }
@@ -335,17 +349,67 @@ fn handle_input(app: &mut App, ev: Event) {
         app.mode = app.mode.next();
         return;
     }
-    // Mode-specific (only Kernel manager has input in M2).
-    if app.mode == Mode::Kernel {
-        match code {
+    match app.mode {
+        Mode::Terminal => {
+            if let Some(ts) = app.term.as_mut() {
+                if let Some(bytes) = encode_key(code, modifiers) {
+                    ts.write(&bytes);
+                }
+            }
+        }
+        Mode::Kernel => match code {
             KeyCode::Char(c) => app.input.push(c),
             KeyCode::Backspace => {
                 app.input.pop();
             }
             KeyCode::Enter => submit_command(app),
             _ => {}
-        }
+        },
+        Mode::Ai => {} // M4
     }
+}
+
+/// Encode a key press into the bytes a PTY expects.
+fn encode_key(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let bytes = match code {
+        KeyCode::Char(c) if ctrl => {
+            let lc = c.to_ascii_lowercase();
+            if lc.is_ascii_alphabetic() {
+                vec![lc as u8 - b'a' + 1] // Ctrl-A..Z → 0x01..0x1a
+            } else {
+                return None;
+            }
+        }
+        KeyCode::Char(c) => {
+            let mut b = [0u8; 4];
+            c.encode_utf8(&mut b).as_bytes().to_vec()
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => vec![0x1b, b'[', b'A'],
+        KeyCode::Down => vec![0x1b, b'[', b'B'],
+        KeyCode::Right => vec![0x1b, b'[', b'C'],
+        KeyCode::Left => vec![0x1b, b'[', b'D'],
+        KeyCode::Home => vec![0x1b, b'[', b'H'],
+        KeyCode::End => vec![0x1b, b'[', b'F'],
+        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
+        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
+        _ => return None,
+    };
+    Some(bytes)
+}
+
+/// PTY grid size = the terminal-mode body pane (full width, minus header/events
+/// rows), inside its border.
+fn term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
+    let size = term.size().unwrap_or(Size::new(80, 24));
+    let rows = size.height.saturating_sub(3 + 8 + 2).max(1);
+    let cols = size.width.saturating_sub(2).max(1);
+    (rows, cols)
 }
 
 fn submit_command(app: &mut App) {
@@ -437,13 +501,10 @@ fn ui(f: &mut Frame, app: &App) {
 
     match app.mode {
         Mode::Kernel => render_kernel(f, app, rows[1]),
-        m => {
-            let body = Paragraph::new(format!("{} mode\n\n(stub — filled in M3–M4)", m.title()))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(" {} ", m.title())),
-                )
+        Mode::Terminal => render_terminal(f, app, rows[1]),
+        Mode::Ai => {
+            let body = Paragraph::new("AI mode\n\n(stub — filled in M4)")
+                .block(Block::default().borders(Borders::ALL).title(" AI "))
                 .wrap(Wrap { trim: true });
             f.render_widget(body, rows[1]);
         }
@@ -459,6 +520,20 @@ fn ui(f: &mut Frame, app: &App) {
     let log =
         List::new(items).block(Block::default().borders(Borders::ALL).title(" kernel events "));
     f.render_widget(log, rows[2]);
+}
+
+fn render_terminal(f: &mut Frame, app: &App, area: Rect) {
+    let blk = Block::default()
+        .borders(Borders::ALL)
+        .title(" terminal · $SHELL — Ctrl-Q quits app ");
+    if let Some(ts) = &app.term {
+        if let Ok(p) = ts.parser.lock() {
+            let pt = tui_term::widget::PseudoTerminal::new(p.screen()).block(blk);
+            f.render_widget(pt, area);
+            return;
+        }
+    }
+    f.render_widget(Paragraph::new("terminal unavailable").block(blk), area);
 }
 
 fn render_kernel(f: &mut Frame, app: &App, area: Rect) {

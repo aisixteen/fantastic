@@ -18,6 +18,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.29"
+# Terminal-proxy mode: a real PTY rendered server-side.
+portable-pty = "0.8"
+vt100 = "0.15"
+tui-term = "0.2"
 
 # Kernel lib + bundle set (path-deps into the kernel workspace at src/lib/rust).
 # The product is the privileged host: it registers the FULL set (incl runners +
