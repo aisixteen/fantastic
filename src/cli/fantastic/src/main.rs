@@ -13,8 +13,9 @@
 //! the root, and exits — for CI/build verification without a terminal.
 
 use std::collections::VecDeque;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use fantastic_kernel::bootstrap::{self, BootstrapOptions};
@@ -248,18 +249,130 @@ async fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let headless =
-        args.first().map(String::as_str) == Some("--smoke") || !io::stdout().is_terminal();
-    if headless {
-        eprint!("{}", ansi_banner(booted.loaded.len()));
+    match args.first().map(String::as_str) {
+        // A→Z headless demo: assemble → serve → terminal, printing each step.
+        Some("demo") => return demo_flow(&kernel).await,
+        // Compose host + reflect root + exit (CI/build check).
+        Some("--smoke") => {
+            eprint!("{}", ansi_banner(booted.loaded.len()));
+            let reply = kernel
+                .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+                .await;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            return Ok(());
+        }
+        _ => {}
+    }
+    // No tty → headless smoke; tty → the TUI.
+    if !io::stdout().is_terminal() {
         let reply = kernel
             .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
             .await;
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
     }
-
     run_tui(kernel, booted.loaded.len()).await
+}
+
+/// Headless A→Z demo of what the product drives: compose host → assemble a
+/// web-serving kernel via kernel-manager sugar → prove it serves over HTTP →
+/// run a terminal PTY command. Each step prints, so the loop is legible.
+async fn demo_flow(kernel: &Arc<Kernel>) -> Result<()> {
+    eprint!("{}", ansi_banner(1));
+
+    println!("── A · reflect the bare host ──");
+    let t = kernel
+        .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+        .await;
+    println!("   agents: {}\n", t.get("tree").cloned().unwrap_or(Value::Null));
+
+    println!("── B · assemble a web-serving kernel (the kernel-manager sugar) ──");
+    let port = free_port();
+    let r = kernel
+        .send(&AgentId::from("kernel"), json!({"type":"create_agent","handler_module":"file_bridge.tools","id":"files","root":".","ingress_rule":"allow_all"}))
+        .await;
+    println!("   create file_bridge files → {}", short(&r));
+    let r = kernel
+        .send(&AgentId::from("kernel"), json!({"type":"create_agent","handler_module":"web.tools","id":"web","port":port}))
+        .await;
+    println!("   create web (port {port}) → {}", short(&r));
+    let r = kernel.send(&AgentId::from("web"), json!({"type":"boot"})).await;
+    println!("   boot web → {}\n", short(&r));
+
+    println!("── C · reflect the assembled host ──");
+    let t = kernel
+        .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+        .await;
+    println!("   agents: {}\n", t.get("tree").cloned().unwrap_or(Value::Null));
+
+    println!("── D · HTTP GET / on the live host (it actually serves) ──");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    match http_get("127.0.0.1", port, "/") {
+        Ok((status, len, head)) => {
+            println!("   GET http://127.0.0.1:{port}/ → {status}  ({len} bytes)");
+            println!("   ‹{head}›\n");
+        }
+        Err(e) => println!("   GET failed: {e}\n"),
+    }
+
+    println!("── E · terminal PTY: run `uname -a` ──");
+    let (tx, _rx) = mpsc::unbounded_channel::<()>();
+    if let Ok(mut ts) = TerminalSession::spawn(12, 100, tx) {
+        ts.write(b"uname -a\r");
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        if let Ok(p) = ts.parser.lock() {
+            for line in p
+                .screen()
+                .contents()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(5)
+            {
+                println!("   {line}");
+            }
+        }
+    } else {
+        println!("   (pty unavailable)");
+    }
+
+    println!("\n── F · shutdown web ──");
+    let _ = kernel.send(&AgentId::from("web"), json!({"type":"shutdown"})).await;
+    println!("\n   that's the loop: compose host → assemble agents via `send` → serve + drive,");
+    println!("   all from one product. AI mode adds a brain that drives this same `send`.");
+    Ok(())
+}
+
+fn short(v: &Value) -> String {
+    if let Some(e) = v.get("error").and_then(Value::as_str) {
+        return format!("error: {e}");
+    }
+    if let Some(id) = v.get("id").and_then(Value::as_str) {
+        return format!("id={id}");
+    }
+    if v.get("booted").is_some() || v.get("already").is_some() {
+        return "ok".into();
+    }
+    v.to_string().chars().take(80).collect()
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .unwrap_or(8099)
+}
+
+fn http_get(host: &str, port: u16, path: &str) -> Result<(String, usize, String)> {
+    let mut s = std::net::TcpStream::connect((host, port))?;
+    s.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    write!(s, "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n")?;
+    let mut buf = String::new();
+    s.read_to_string(&mut buf)?;
+    let status = buf.lines().next().unwrap_or("").to_string();
+    let body = buf.split("\r\n\r\n").nth(1).unwrap_or("");
+    let head: String = body.chars().take(70).collect();
+    Ok((status, body.len(), head.replace('\n', " ")))
 }
 
 async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
