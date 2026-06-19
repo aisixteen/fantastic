@@ -3,9 +3,11 @@
 //! *host*: it composes an in-proc "brain" kernel and drives everything through
 //! the one primitive — `kernel.send(target, payload)`.
 //!
-//! M1 scaffold: compose + boot the in-proc host kernel, and a **Shift+Tab**
-//! 3-mode ratatui shell (AI / Terminal / Kernel-manager) with a live kernel
-//! event log. Modes are stubs here; M2–M4 fill them in.
+//! Modes (Shift+Tab cycles): AI / Terminal / Kernel-manager.
+//! - **Kernel manager** (M2): a command line whose sugar verbs drive the host
+//!   (`tree`, `reflect [id]`, `create <handler> [k=v…]`, `update <id> k=v…`,
+//!   `delete <id>`, `send <id> <verb> [k=v…]`).
+//! - AI / Terminal are stubs here (M3–M4).
 //!
 //! Headless: `fantastic --smoke` (or non-tty stdout) composes the host, reflects
 //! the root, and exits — for CI/build verification without a terminal.
@@ -24,12 +26,11 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
-use serde_json::{json, Value};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
-/// The privileged host bundle set. Mirrors the kernel binary's default
-/// registration but UNCONDITIONAL — the product owns the runtime (runners +
+/// The privileged host bundle set. The product owns the runtime (runners +
 /// terminal + AI backends), so it always registers the full set into its host.
 fn register_host_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
@@ -60,8 +61,6 @@ fn register_host_bundles() -> BundleRegistry {
         fantastic_tools::HANDLER_MODULE,
         fantastic_tools::ToolsBundle::new(),
     );
-    // Runtime/privileged bundles — these live in the PRODUCT now (the kernel
-    // lib stays pure). Always on here.
     reg.register(
         "terminal_backend.tools",
         fantastic_terminal_backend::TerminalBackendBundle,
@@ -110,20 +109,97 @@ impl Mode {
 }
 
 struct App {
-    #[allow(dead_code)] // M2+ drives the kernel via this handle
     kernel: Arc<Kernel>,
     agent_count: usize,
     mode: Mode,
     events: VecDeque<String>,
+    /// Kernel-manager command line + scrollback.
+    input: String,
+    km_output: VecDeque<String>,
+    cmd_tx: mpsc::UnboundedSender<String>,
     quit: bool,
 }
 
 impl App {
-    fn push(&mut self, line: String) {
-        if self.events.len() >= 500 {
-            self.events.pop_front();
+    fn push_event(&mut self, line: String) {
+        cap_push(&mut self.events, line, 500);
+    }
+    fn km_line(&mut self, line: String) {
+        cap_push(&mut self.km_output, line, 1000);
+    }
+}
+
+fn cap_push(buf: &mut VecDeque<String>, line: String, cap: usize) {
+    if buf.len() >= cap {
+        buf.pop_front();
+    }
+    buf.push_back(line);
+}
+
+/// k=v value coercion (mirrors the kernel CLI): bool → int → float → JSON
+/// object/array literal → string.
+fn parse_kv(v: &str) -> Value {
+    match v.to_ascii_lowercase().as_str() {
+        "true" => return json!(true),
+        "false" => return json!(false),
+        _ => {}
+    }
+    if let Ok(n) = v.parse::<i64>() {
+        return json!(n);
+    }
+    if let Ok(f) = v.parse::<f64>() {
+        return json!(f);
+    }
+    let looks_json =
+        (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('[') && v.ends_with(']'));
+    if looks_json {
+        if let Ok(parsed) = serde_json::from_str::<Value>(v) {
+            return parsed;
         }
-        self.events.push_back(line);
+    }
+    Value::String(v.to_string())
+}
+
+fn add_kvs(payload: &mut Map<String, Value>, kvs: &[&str]) {
+    for kv in kvs {
+        if let Some((k, v)) = kv.split_once('=') {
+            payload.insert(k.to_string(), parse_kv(v));
+        }
+    }
+}
+
+/// Parse a kernel-manager sugar command into `(target, payload)` for `send`.
+fn parse_command(line: &str) -> Result<(AgentId, Value), String> {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    let mut p = Map::new();
+    match toks.as_slice() {
+        [] => Err("empty".into()),
+        ["tree"] | ["reflect"] => {
+            Ok((AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"})))
+        }
+        ["reflect", id] => Ok((AgentId::from(*id), json!({"type":"reflect"}))),
+        ["create", handler, kvs @ ..] => {
+            p.insert("type".into(), json!("create_agent"));
+            p.insert("handler_module".into(), json!(*handler));
+            add_kvs(&mut p, kvs);
+            Ok((AgentId::from("kernel"), Value::Object(p)))
+        }
+        ["update", id, kvs @ ..] => {
+            p.insert("type".into(), json!("update_agent"));
+            p.insert("id".into(), json!(*id));
+            add_kvs(&mut p, kvs);
+            Ok((AgentId::from("kernel"), Value::Object(p)))
+        }
+        ["delete", id] => Ok((AgentId::from("kernel"), json!({"type":"delete_agent","id":id}))),
+        ["send", id, verb, kvs @ ..] => {
+            p.insert("type".into(), json!(*verb));
+            add_kvs(&mut p, kvs);
+            Ok((AgentId::from(*id), Value::Object(p)))
+        }
+        _ => Err(format!(
+            "unknown: {} (try: tree | reflect [id] | create <handler> [k=v] | update <id> k=v | delete <id> | send <id> <verb> [k=v])",
+            toks[0]
+        )),
     }
 }
 
@@ -158,8 +234,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Compose + boot the in-proc host kernel (the brain). RAM-only — no disk,
-    // no lock; this is the documented "embedding app's brain kernel" path.
     let booted = bootstrap::bootstrap(register_host_bundles(), BootstrapOptions::in_memory())?;
     let kernel = Arc::clone(&booted.kernel);
     for id in &booted.loaded {
@@ -167,10 +241,12 @@ async fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let headless = args.first().map(String::as_str) == Some("--smoke") || !io::stdout().is_terminal();
+    let headless =
+        args.first().map(String::as_str) == Some("--smoke") || !io::stdout().is_terminal();
     if headless {
+        eprint!("{}", ansi_banner(booted.loaded.len()));
         let reply = kernel
-            .send(&AgentId::from("kernel"), json!({"type": "reflect", "tree": "ids"}))
+            .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
             .await;
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
@@ -180,13 +256,14 @@ async fn main() -> Result<()> {
 }
 
 async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
-    // Kernel state events → log pane (sync subscriber → unbounded channel).
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<String>();
     let _tok = kernel.add_state_subscriber(Arc::new(move |e: &Value| {
         let _ = evt_tx.send(fmt_event(e));
     }));
 
-    // Terminal input on a blocking thread → channel (one tokio runtime drives UI).
+    // Command results (async kernel.send completions) flow back here.
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
+
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
@@ -206,15 +283,22 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         agent_count,
         mode: Mode::Ai,
         events: VecDeque::new(),
+        input: String::new(),
+        km_output: VecDeque::new(),
+        cmd_tx,
         quit: false,
     };
-    app.push("host kernel composed — Shift+Tab switches modes, q / Ctrl-C quits".into());
+    app.push_event("host kernel composed — Shift+Tab switches modes, Ctrl-C quits".into());
+    app.km_line("kernel manager — type a command, Enter to run. `tree` to list agents.".into());
     term.draw(|f| ui(f, &app))?;
 
     loop {
         tokio::select! {
             Some(ev) = in_rx.recv() => handle_input(&mut app, ev),
-            Some(line) = evt_rx.recv() => app.push(line),
+            Some(line) = evt_rx.recv() => app.push_event(line),
+            Some(out) = cmd_rx.recv() => {
+                for l in out.split('\n') { app.km_line(l.to_string()); }
+            }
             else => break,
         }
         if app.quit {
@@ -230,23 +314,113 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 }
 
 fn handle_input(app: &mut App, ev: Event) {
-    if let Event::Key(KeyEvent {
+    let Event::Key(KeyEvent {
         code,
         kind,
         modifiers,
         ..
     }) = ev
-    {
-        if kind != KeyEventKind::Press {
-            return; // ignore key-release/repeat (Windows fires them)
-        }
+    else {
+        return;
+    };
+    if kind != KeyEventKind::Press {
+        return;
+    }
+    // Global keys.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        app.quit = true;
+        return;
+    }
+    if code == KeyCode::BackTab {
+        app.mode = app.mode.next();
+        return;
+    }
+    // Mode-specific (only Kernel manager has input in M2).
+    if app.mode == Mode::Kernel {
         match code {
-            KeyCode::BackTab => app.mode = app.mode.next(), // Shift+Tab
-            KeyCode::Char('q') => app.quit = true,
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
+            KeyCode::Char(c) => app.input.push(c),
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            KeyCode::Enter => submit_command(app),
             _ => {}
         }
     }
+}
+
+fn submit_command(app: &mut App) {
+    let line = std::mem::take(&mut app.input);
+    let line = line.trim().to_string();
+    if line.is_empty() {
+        return;
+    }
+    app.km_line(format!("› {line}"));
+    match parse_command(&line) {
+        Ok((target, payload)) => {
+            let kernel = Arc::clone(&app.kernel);
+            let tx = app.cmd_tx.clone();
+            tokio::spawn(async move {
+                let reply = kernel.send(&target, payload).await;
+                let rendered =
+                    serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
+                let _ = tx.send(rendered);
+            });
+        }
+        Err(e) => app.km_line(format!("  ✗ {e}")),
+    }
+}
+
+/// The classic banner as raw ANSI (for the headless/greeting path) — the exact
+/// neon-magenta `█` + bright-magenta bold FANTASTIC from the first commit.
+fn ansi_banner(agents: usize) -> String {
+    let nm = "\x1b[38;5;165m"; // neon magenta
+    let bm = "\x1b[95m"; // bright magenta
+    let b = "\x1b[1m";
+    let d = "\x1b[2m";
+    let r = "\x1b[0m";
+    format!(
+        "\n  {nm}█{r}\n  {nm}█{r}  {bm}{b}FANTASTIC{r}\n  {nm}█{r}     {d}host · {agents} agents{r}\n\n"
+    )
+}
+
+/// The classic Diia-style asymmetric banner from the very first commit: a
+/// neon-magenta `█` vertical bar with bright-magenta bold FANTASTIC, plus host
+/// status + the mode tabs on the middle line.
+fn brand_header(app: &App) -> Vec<Line<'static>> {
+    let bar = Style::default().fg(Color::Indexed(165)); // neon magenta
+    let name = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+
+    let mut mid = vec![
+        Span::styled("  █  ", bar),
+        Span::styled("FANTASTIC", name),
+        Span::styled(format!("    host: {} agents    ", app.agent_count), dim),
+    ];
+    for (i, t) in ["AI", "Terminal", "Kernel manager"].iter().enumerate() {
+        let st = if i == app.mode.idx() {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            dim
+        };
+        l_push(&mut mid, format!(" {t} "), st);
+        if i < 2 {
+            mid.push(Span::styled(" · ", dim));
+        }
+    }
+    vec![
+        Line::from(Span::styled("  █", bar)),
+        Line::from(mid),
+        Line::from(Span::styled("  █", bar)),
+    ]
+}
+
+fn l_push(line: &mut Vec<Span<'static>>, text: String, style: Style) {
+    line.push(Span::styled(text, style));
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -259,31 +433,21 @@ fn ui(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
-    let tabs = Tabs::new(vec![
-        Line::from("AI"),
-        Line::from("Terminal"),
-        Line::from("Kernel manager"),
-    ])
-    .select(app.mode.idx())
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" fantastic · host: {} agents ", app.agent_count)),
-    )
-    .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
-    f.render_widget(tabs, rows[0]);
+    f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
 
-    let body = Paragraph::new(format!(
-        "{} mode\n\n(stub — filled in M2–M4)",
-        app.mode.title()
-    ))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", app.mode.title())),
-    )
-    .wrap(Wrap { trim: true });
-    f.render_widget(body, rows[1]);
+    match app.mode {
+        Mode::Kernel => render_kernel(f, app, rows[1]),
+        m => {
+            let body = Paragraph::new(format!("{} mode\n\n(stub — filled in M3–M4)", m.title()))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {} ", m.title())),
+                )
+                .wrap(Wrap { trim: true });
+            f.render_widget(body, rows[1]);
+        }
+    }
 
     let items: Vec<ListItem> = app
         .events
@@ -292,6 +456,37 @@ fn ui(f: &mut Frame, app: &App) {
         .take(6)
         .map(|e| ListItem::new(e.clone()))
         .collect();
-    let log = List::new(items).block(Block::default().borders(Borders::ALL).title(" kernel events "));
+    let log =
+        List::new(items).block(Block::default().borders(Borders::ALL).title(" kernel events "));
     f.render_widget(log, rows[2]);
+}
+
+fn render_kernel(f: &mut Frame, app: &App, area: Rect) {
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(area);
+
+    // Output scrollback (tail-anchored).
+    let h = parts[0].height.saturating_sub(2) as usize;
+    let lines: Vec<ListItem> = app
+        .km_output
+        .iter()
+        .rev()
+        .take(h.max(1))
+        .rev()
+        .map(|l| ListItem::new(l.clone()))
+        .collect();
+    let out = List::new(lines).block(Block::default().borders(Borders::ALL).title(" output "));
+    f.render_widget(out, parts[0]);
+
+    // Command line.
+    let prompt = format!("› {}", app.input);
+    let input = Paragraph::new(prompt.clone())
+        .block(Block::default().borders(Borders::ALL).title(" command "));
+    f.render_widget(input, parts[1]);
+    // Cursor at end of input.
+    let cx = parts[1].x + 1 + (2 + app.input.chars().count()) as u16;
+    let cy = parts[1].y + 1;
+    f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
 }
