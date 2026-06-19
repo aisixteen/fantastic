@@ -1,0 +1,42 @@
+[package]
+name = "fantastic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic — the CLI product (AI coder + kernel manager) that embeds the fantastic kernel lib as a privileged host."
+
+[[bin]]
+name = "fantastic"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ratatui = "0.29"
+
+# Kernel lib + bundle set (path-deps into the kernel workspace at src/lib/rust).
+# The product is the privileged host: it registers the FULL set (incl runners +
+# terminal) into its in-proc kernel.
+fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
+fantastic-core = { path = "../../lib/rust/crates/bundles/fantastic-core" }
+fantastic-file = { path = "../../lib/rust/crates/bundles/fantastic-file" }
+fantastic-yaml-state = { path = "../../lib/rust/crates/bundles/fantastic-yaml-state" }
+fantastic-web = { path = "../../lib/rust/crates/bundles/fantastic-web" }
+fantastic-web-ws = { path = "../../lib/rust/crates/bundles/fantastic-web-ws" }
+fantastic-web-rest = { path = "../../lib/rust/crates/bundles/fantastic-web-rest" }
+fantastic-scheduler = { path = "../../lib/rust/crates/bundles/fantastic-scheduler" }
+fantastic-ai-core = { path = "../../lib/rust/crates/bundles/fantastic-ai-core" }
+fantastic-ollama-backend = { path = "../../lib/rust/crates/bundles/fantastic-ollama-backend" }
+fantastic-nvidia-nim-backend = { path = "../../lib/rust/crates/bundles/fantastic-nvidia-nim-backend" }
+fantastic-bridge = { path = "../../lib/rust/crates/bundles/fantastic-bridge" }
+fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-agent" }
+fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
+fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-terminal-backend" }
+fantastic-python-runtime = { path = "../../lib/rust/crates/bundles/fantastic-python-runtime" }
+fantastic-local-runner = { path = "../../lib/rust/crates/bundles/fantastic-local-runner" }
+fantastic-ssh-runner = { path = "../../lib/rust/crates/bundles/fantastic-ssh-runner" }
