@@ -26,10 +26,11 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
+mod ai;
 mod term;
 use term::TerminalSession;
 
@@ -113,6 +114,11 @@ struct App {
     input: String,
     km_output: VecDeque<String>,
     cmd_tx: mpsc::UnboundedSender<String>,
+    /// AI mode: conversation log + input + completion channel.
+    ai_input: String,
+    ai_output: VecDeque<String>,
+    ai_tx: mpsc::UnboundedSender<String>,
+    ai_busy: bool,
     /// Terminal-proxy mode PTY (spawned at startup).
     term: Option<TerminalSession>,
     quit: bool,
@@ -124,6 +130,9 @@ impl App {
     }
     fn km_line(&mut self, line: String) {
         cap_push(&mut self.km_output, line, 1000);
+    }
+    fn ai_line(&mut self, line: String) {
+        cap_push(&mut self.ai_output, line, 1000);
     }
 }
 
@@ -263,6 +272,8 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
     // PTY output → repaint pings.
     let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
+    // AI turn completions.
+    let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<String>();
 
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
@@ -290,11 +301,16 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         input: String::new(),
         km_output: VecDeque::new(),
         cmd_tx,
+        ai_input: String::new(),
+        ai_output: VecDeque::new(),
+        ai_tx,
+        ai_busy: false,
         term: session,
         quit: false,
     };
     app.push_event("host kernel composed — Shift+Tab switches modes, Ctrl-Q quits".into());
     app.km_line("kernel manager — type a command, Enter to run. `tree` to list agents.".into());
+    app.ai_line("AI — type a message, Enter to send. Backend: FANTASTIC_AI_BACKEND (default ollama).".into());
     term.draw(|f| ui(f, &app))?;
 
     loop {
@@ -305,6 +321,10 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                 for l in out.split('\n') { app.km_line(l.to_string()); }
             }
             Some(()) = redraw_rx.recv() => {}
+            Some(resp) = ai_rx.recv() => {
+                app.ai_busy = false;
+                for l in resp.split('\n') { app.ai_line(l.to_string()); }
+            }
             else => break,
         }
         if app.quit {
@@ -365,8 +385,29 @@ fn handle_input(app: &mut App, ev: Event) {
             KeyCode::Enter => submit_command(app),
             _ => {}
         },
-        Mode::Ai => {} // M4
+        Mode::Ai => match code {
+            KeyCode::Char(c) => app.ai_input.push(c),
+            KeyCode::Backspace => {
+                app.ai_input.pop();
+            }
+            KeyCode::Enter => submit_ai(app),
+            _ => {}
+        },
     }
+}
+
+fn submit_ai(app: &mut App) {
+    let text = std::mem::take(&mut app.ai_input).trim().to_string();
+    if text.is_empty() || app.ai_busy {
+        return;
+    }
+    app.ai_line(format!("› {text}"));
+    app.ai_busy = true;
+    let kernel = Arc::clone(&app.kernel);
+    let tx = app.ai_tx.clone();
+    tokio::spawn(async move {
+        ai::run_turn(kernel, text, tx).await;
+    });
 }
 
 /// Encode a key press into the bytes a PTY expects.
@@ -500,14 +541,22 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
 
     match app.mode {
-        Mode::Kernel => render_kernel(f, app, rows[1]),
-        Mode::Terminal => render_terminal(f, app, rows[1]),
-        Mode::Ai => {
-            let body = Paragraph::new("AI mode\n\n(stub — filled in M4)")
-                .block(Block::default().borders(Borders::ALL).title(" AI "))
-                .wrap(Wrap { trim: true });
-            f.render_widget(body, rows[1]);
+        Mode::Kernel => {
+            render_console(f, rows[1], &app.km_output, &app.input, " output ", " command ")
         }
+        Mode::Terminal => render_terminal(f, app, rows[1]),
+        Mode::Ai => render_console(
+            f,
+            rows[1],
+            &app.ai_output,
+            &app.ai_input,
+            " conversation ",
+            if app.ai_busy {
+                " thinking… "
+            } else {
+                " message — Enter to send "
+            },
+        ),
     }
 
     let items: Vec<ListItem> = app
@@ -536,32 +585,36 @@ fn render_terminal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new("terminal unavailable").block(blk), area);
 }
 
-fn render_kernel(f: &mut Frame, app: &App, area: Rect) {
+/// A scrollback + input-line console, shared by the Kernel-manager and AI modes.
+fn render_console(
+    f: &mut Frame,
+    area: Rect,
+    lines: &VecDeque<String>,
+    input: &str,
+    out_title: &str,
+    in_title: &str,
+) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(area);
 
-    // Output scrollback (tail-anchored).
     let h = parts[0].height.saturating_sub(2) as usize;
-    let lines: Vec<ListItem> = app
-        .km_output
+    let items: Vec<ListItem> = lines
         .iter()
         .rev()
         .take(h.max(1))
         .rev()
         .map(|l| ListItem::new(l.clone()))
         .collect();
-    let out = List::new(lines).block(Block::default().borders(Borders::ALL).title(" output "));
+    let out = List::new(items).block(Block::default().borders(Borders::ALL).title(out_title.to_string()));
     f.render_widget(out, parts[0]);
 
-    // Command line.
-    let prompt = format!("› {}", app.input);
-    let input = Paragraph::new(prompt.clone())
-        .block(Block::default().borders(Borders::ALL).title(" command "));
-    f.render_widget(input, parts[1]);
-    // Cursor at end of input.
-    let cx = parts[1].x + 1 + (2 + app.input.chars().count()) as u16;
+    let prompt = format!("› {input}");
+    let line = Paragraph::new(prompt)
+        .block(Block::default().borders(Borders::ALL).title(in_title.to_string()));
+    f.render_widget(line, parts[1]);
+    let cx = parts[1].x + 1 + (2 + input.chars().count()) as u16;
     let cy = parts[1].y + 1;
     f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
 }
