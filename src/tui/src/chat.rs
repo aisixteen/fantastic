@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use fantastic_host::gateway::Runtime;
 use fantastic_host::parse_kv;
 use fantastic_kernel::AgentId;
 use ratatui::style::Color;
@@ -232,7 +233,44 @@ pub enum Route {
     Reflect(AgentId),
     /// Run a command in the live PTY and breathe its screen into the chat.
     Shell(String),
+    /// Drive the out-of-process workspace kernel over the gateway.
+    Workspace(WsCmd),
     Empty,
+}
+
+/// A command against the sovereign workspace kernel (the `@ws` target). The
+/// gateway lifecycle (`Up`/`Down`) plus a verb sent to the workspace ROOT.
+pub enum WsCmd {
+    /// Attach-or-spawn a workspace kernel in cwd with this runtime.
+    Up(Runtime),
+    /// Gracefully shut the workspace kernel down.
+    Down,
+    /// Send a verb payload to a workspace agent (root `kernel` for ROOT verbs).
+    Verb(AgentId, Value),
+}
+
+/// Parse `@ws up [rust|python|swift]` body into the runtime (default Rust). The
+/// body still carries the leading `up` verb, so the runtime is its 2nd token.
+fn ws_runtime(body: &str) -> Runtime {
+    match body.split_whitespace().nth(1).unwrap_or("") {
+        "python" => Runtime::Python,
+        "swift" => Runtime::Swift,
+        _ => Runtime::Rust,
+    }
+}
+
+/// Build a workspace verb payload `{"type":verb, ...k=v}` for the ROOT.
+fn ws_verb(body: &str) -> Route {
+    let mut toks = body.split_whitespace();
+    let verb = toks.next().unwrap_or("reflect");
+    let mut p = Map::new();
+    p.insert("type".into(), json!(verb));
+    for kv in toks {
+        if let Some((k, v)) = kv.split_once('=') {
+            p.insert(k.to_string(), parse_kv(v));
+        }
+    }
+    Route::Workspace(WsCmd::Verb(AgentId::from("kernel"), Value::Object(p)))
 }
 
 /// Resolve a chat input line against the sticky target. Returns the new sticky
@@ -276,6 +314,22 @@ pub fn route(line: &str, sticky: &str) -> (String, Route) {
             Route::Shell(body)
         };
         return ("sh".to_string(), route);
+    }
+
+    if target == "ws" {
+        // `@ws up [rt]` / `@ws down` are lifecycle; everything else is a verb to
+        // the workspace ROOT; bare `@ws` shows its tree.
+        let verb = body.split_whitespace().next().unwrap_or("");
+        let route = match verb {
+            "up" => Route::Workspace(WsCmd::Up(ws_runtime(&body))),
+            "down" => Route::Workspace(WsCmd::Down),
+            "" => Route::Workspace(WsCmd::Verb(
+                AgentId::from("kernel"),
+                json!({"type":"reflect","tree":"ids"}),
+            )),
+            _ => ws_verb(&body),
+        };
+        return ("ws".to_string(), route);
     }
 
     let id = AgentId::from(target.as_str());
@@ -494,6 +548,86 @@ mod tests {
         let (sticky, r) = route("@sh", "ai");
         assert_eq!(sticky, "sh");
         assert!(matches!(r, Route::Empty));
+    }
+
+    #[test]
+    fn route_at_ws_up_default_rust() {
+        let (sticky, r) = route("@ws up", "ai");
+        assert_eq!(sticky, "ws");
+        match r {
+            Route::Workspace(WsCmd::Up(rt)) => assert_eq!(rt, Runtime::Rust),
+            _ => panic!("expected Workspace(Up)"),
+        }
+    }
+
+    #[test]
+    fn route_at_ws_up_python() {
+        let (_s, r) = route("@ws up python", "ai");
+        match r {
+            Route::Workspace(WsCmd::Up(rt)) => assert_eq!(rt, Runtime::Python),
+            _ => panic!("expected Workspace(Up python)"),
+        }
+    }
+
+    #[test]
+    fn route_at_ws_down() {
+        let (sticky, r) = route("@ws down", "ai");
+        assert_eq!(sticky, "ws");
+        assert!(matches!(r, Route::Workspace(WsCmd::Down)));
+    }
+
+    #[test]
+    fn route_at_ws_verb_targets_kernel_root() {
+        let (sticky, r) = route("@ws list_agents", "ai");
+        assert_eq!(sticky, "ws");
+        match r {
+            Route::Workspace(WsCmd::Verb(id, payload)) => {
+                assert_eq!(id.as_str(), "kernel");
+                assert_eq!(payload["type"], "list_agents");
+            }
+            _ => panic!("expected Workspace(Verb)"),
+        }
+    }
+
+    #[test]
+    fn route_at_ws_verb_with_kv() {
+        let (_s, r) = route("@ws create_agent handler_module=web.tools port=8080", "ai");
+        match r {
+            Route::Workspace(WsCmd::Verb(id, payload)) => {
+                assert_eq!(id.as_str(), "kernel");
+                assert_eq!(payload["type"], "create_agent");
+                assert_eq!(payload["handler_module"], "web.tools");
+                assert_eq!(payload["port"], 8080);
+            }
+            _ => panic!("expected Workspace(Verb) with kv"),
+        }
+    }
+
+    #[test]
+    fn route_bare_at_ws_reflects_tree() {
+        let (sticky, r) = route("@ws", "ai");
+        assert_eq!(sticky, "ws");
+        match r {
+            Route::Workspace(WsCmd::Verb(id, payload)) => {
+                assert_eq!(id.as_str(), "kernel");
+                assert_eq!(payload["type"], "reflect");
+                assert_eq!(payload["tree"], "ids");
+            }
+            _ => panic!("expected Workspace(Verb reflect tree)"),
+        }
+    }
+
+    #[test]
+    fn route_bare_line_when_sticky_ws_is_verb() {
+        let (sticky, r) = route("reflect", "ws");
+        assert_eq!(sticky, "ws");
+        match r {
+            Route::Workspace(WsCmd::Verb(id, payload)) => {
+                assert_eq!(id.as_str(), "kernel");
+                assert_eq!(payload["type"], "reflect");
+            }
+            _ => panic!("expected Workspace(Verb) from sticky ws"),
+        }
     }
 
     #[test]
