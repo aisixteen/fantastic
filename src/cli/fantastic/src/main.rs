@@ -3,26 +3,34 @@
 //! *host*: it composes an in-proc "brain" kernel and drives everything through
 //! the one primitive — `kernel.send(target, payload)`.
 //!
-//! Modes (Shift+Tab cycles): AI / Terminal / Kernel-manager.
-//! - **Kernel manager** (M2): a command line whose sugar verbs drive the host
+//! Modes — Shift+Tab cycles, or click a header tab: AI / Terminal /
+//! Kernel-manager / Intro.
+//! - **AI**: chat a brain agent that drives the kernel via `send`.
+//! - **Terminal**: a real PTY (`$SHELL`).
+//! - **Kernel manager**: a command line whose sugar verbs drive the host
 //!   (`tree`, `reflect [id]`, `create <handler> [k=v…]`, `update <id> k=v…`,
 //!   `delete <id>`, `send <id> <verb> [k=v…]`).
-//! - AI / Terminal are stubs here (M3–M4).
+//! - **Intro**: a scripted retro "movie" of how Fantastic works (see `movie.rs`).
 //!
 //! Headless: `fantastic --smoke` (or non-tty stdout) composes the host, reflects
-//! the root, and exits — for CI/build verification without a terminal.
+//! the root, and exits — for CI/build verification without a terminal. One-shot
+//! `fantastic ai "<prompt>"` runs a single AI turn; `fantastic demo` plays the
+//! A→Z flow.
 
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Read, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fantastic_kernel::bootstrap::{self, BootstrapOptions};
 use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -32,6 +40,8 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 mod ai;
+mod intro;
+mod movie;
 mod term;
 use term::TerminalSession;
 
@@ -52,6 +62,10 @@ fn register_host_bundles() -> BundleRegistry {
     reg.register(
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
+    );
+    reg.register(
+        fantastic_anthropic_backend::HANDLER_MODULE,
+        fantastic_anthropic_backend::AnthropicBundle,
     );
     reg.register("ws_bridge.tools", fantastic_bridge::WsBridgeBundle);
     reg.register(
@@ -87,6 +101,7 @@ enum Mode {
     Ai,
     Terminal,
     Kernel,
+    Intro,
 }
 
 impl Mode {
@@ -94,16 +109,46 @@ impl Mode {
         match self {
             Mode::Ai => Mode::Terminal,
             Mode::Terminal => Mode::Kernel,
-            Mode::Kernel => Mode::Ai,
+            Mode::Kernel => Mode::Intro,
+            Mode::Intro => Mode::Ai,
         }
     }
-    fn idx(self) -> usize {
-        match self {
-            Mode::Ai => 0,
-            Mode::Terminal => 1,
-            Mode::Kernel => 2,
+}
+
+/// The mode tabs, in header order — the single source of truth shared by the
+/// header renderer (`brand_header`) and the click hit-test (`tab_at`), so their
+/// column math can never drift apart.
+const MODE_TABS: [(&str, Mode); 4] = [
+    ("AI", Mode::Ai),
+    ("Terminal", Mode::Terminal),
+    ("Kernel manager", Mode::Kernel),
+    ("Intro", Mode::Intro),
+];
+
+/// The frame row the tab labels render on (header line 2 of 3: bar / tabs / hint).
+const TAB_ROW: u16 = 1;
+/// Fixed prefix on the tab line: `"  █  "` (5) + `"FANTASTIC"` (9).
+const TAB_PREFIX: usize = 14;
+
+/// Hit-test a click at `(col, row)` against the mode tabs. Mirrors the exact
+/// span widths laid down by `brand_header`. Returns the clicked `Mode`, if any.
+fn tab_at(agent_count: usize, col: u16, row: u16) -> Option<Mode> {
+    if row != TAB_ROW {
+        return None;
+    }
+    let host = format!("    host: {agent_count} agents    ");
+    let mut x = TAB_PREFIX + host.chars().count();
+    for (i, (label, mode)) in MODE_TABS.iter().enumerate() {
+        let w = label.chars().count() + 2; // " label "
+        if (col as usize) >= x && (col as usize) < x + w {
+            return Some(*mode);
+        }
+        x += w;
+        if i < MODE_TABS.len() - 1 {
+            x += 3; // " · " separator
         }
     }
+    None
 }
 
 struct App {
@@ -122,7 +167,16 @@ struct App {
     ai_busy: bool,
     /// Terminal-proxy mode PTY (spawned at startup).
     term: Option<TerminalSession>,
+    /// Intro mode: the scripted movie + when it (re)started (for its clock).
+    movie: movie::Movie,
+    intro_since: Option<Instant>,
     quit: bool,
+    /// Exit affordances. `last_ctrl_c`: a second Ctrl+C within the window quits
+    /// (a single one still reaches the shell in terminal mode). `q_streak`:
+    /// count of rapid `q` auto-repeats (holding q) — normal typing resets it.
+    last_ctrl_c: Option<Instant>,
+    q_streak: u8,
+    last_q: Option<Instant>,
 }
 
 impl App {
@@ -256,9 +310,32 @@ async fn main() -> Result<()> {
         Some("--smoke") => {
             eprint!("{}", ansi_banner(booted.loaded.len()));
             let reply = kernel
-                .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+                .send(
+                    &AgentId::from("kernel"),
+                    json!({"type":"reflect","tree":"ids"}),
+                )
                 .await;
             println!("{}", serde_json::to_string_pretty(&reply)?);
+            return Ok(());
+        }
+        // Headless one-shot AI turn: `fantastic ai "<prompt>"`. Drives the same
+        // brain as AI mode (the universal `send` tool lets it reach the kernel),
+        // and prints the final response. Backend via FANTASTIC_AI_BACKEND
+        // (ollama default), model via FANTASTIC_AI_MODEL.
+        Some("ai") | Some("ask") => {
+            let prompt = args[1..].join(" ");
+            if prompt.trim().is_empty() {
+                eprintln!("usage: fantastic ai \"<prompt>\"");
+                return Ok(());
+            }
+            eprint!("{}", ansi_banner(booted.loaded.len()));
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let k = Arc::clone(&kernel);
+            let turn = tokio::spawn(async move { ai::run_turn(k, prompt, tx).await });
+            while let Some(line) = rx.recv().await {
+                println!("{line}");
+            }
+            let _ = turn.await;
             return Ok(());
         }
         _ => {}
@@ -266,7 +343,10 @@ async fn main() -> Result<()> {
     // No tty → headless smoke; tty → the TUI.
     if !io::stdout().is_terminal() {
         let reply = kernel
-            .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+            .send(
+                &AgentId::from("kernel"),
+                json!({"type":"reflect","tree":"ids"}),
+            )
             .await;
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
@@ -282,9 +362,15 @@ async fn demo_flow(kernel: &Arc<Kernel>) -> Result<()> {
 
     println!("── A · reflect the bare host ──");
     let t = kernel
-        .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"ids"}),
+        )
         .await;
-    println!("   agents: {}\n", t.get("tree").cloned().unwrap_or(Value::Null));
+    println!(
+        "   agents: {}\n",
+        t.get("tree").cloned().unwrap_or(Value::Null)
+    );
 
     println!("── B · assemble a web-serving kernel (the kernel-manager sugar) ──");
     let port = free_port();
@@ -293,17 +379,28 @@ async fn demo_flow(kernel: &Arc<Kernel>) -> Result<()> {
         .await;
     println!("   create file_bridge files → {}", short(&r));
     let r = kernel
-        .send(&AgentId::from("kernel"), json!({"type":"create_agent","handler_module":"web.tools","id":"web","port":port}))
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type":"create_agent","handler_module":"web.tools","id":"web","port":port}),
+        )
         .await;
     println!("   create web (port {port}) → {}", short(&r));
-    let r = kernel.send(&AgentId::from("web"), json!({"type":"boot"})).await;
+    let r = kernel
+        .send(&AgentId::from("web"), json!({"type":"boot"}))
+        .await;
     println!("   boot web → {}\n", short(&r));
 
     println!("── C · reflect the assembled host ──");
     let t = kernel
-        .send(&AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"}))
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"ids"}),
+        )
         .await;
-    println!("   agents: {}\n", t.get("tree").cloned().unwrap_or(Value::Null));
+    println!(
+        "   agents: {}\n",
+        t.get("tree").cloned().unwrap_or(Value::Null)
+    );
 
     println!("── D · HTTP GET / on the live host (it actually serves) ──");
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -336,7 +433,9 @@ async fn demo_flow(kernel: &Arc<Kernel>) -> Result<()> {
     }
 
     println!("\n── F · shutdown web ──");
-    let _ = kernel.send(&AgentId::from("web"), json!({"type":"shutdown"})).await;
+    let _ = kernel
+        .send(&AgentId::from("web"), json!({"type":"shutdown"}))
+        .await;
     println!("\n   that's the loop: compose host → assemble agents via `send` → serve + drive,");
     println!("   all from one product. AI mode adds a brain that drives this same `send`.");
     Ok(())
@@ -366,7 +465,10 @@ fn free_port() -> u16 {
 fn http_get(host: &str, port: u16, path: &str) -> Result<(String, usize, String)> {
     let mut s = std::net::TcpStream::connect((host, port))?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok();
-    write!(s, "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n")?;
+    write!(
+        s,
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )?;
     let mut buf = String::new();
     s.read_to_string(&mut buf)?;
     let status = buf.lines().next().unwrap_or("").to_string();
@@ -399,7 +501,8 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    intro::play(); // modular startup flourish — remove this line + intro.rs to disable
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // Spawn the terminal-proxy PTY at the body size.
@@ -419,12 +522,29 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         ai_tx,
         ai_busy: false,
         term: session,
+        movie: movie::Movie::storyboard(),
+        intro_since: None,
         quit: false,
+        last_ctrl_c: None,
+        q_streak: 0,
+        last_q: None,
     };
-    app.push_event("host kernel composed — Shift+Tab switches modes, Ctrl-Q quits".into());
+    app.push_event(
+        "host kernel composed — Shift+Tab switches modes · double Ctrl+C / hold q / Ctrl-Q to exit"
+            .into(),
+    );
     app.km_line("kernel manager — type a command, Enter to run. `tree` to list agents.".into());
-    app.ai_line("AI — type a message, Enter to send. Backend: FANTASTIC_AI_BACKEND (default ollama).".into());
+    app.ai_line(
+        "AI — type a message, Enter to send. Backend: FANTASTIC_AI_BACKEND (default ollama)."
+            .into(),
+    );
     term.draw(|f| ui(f, &app))?;
+
+    // ~16fps heartbeat that only matters in Intro mode (the movie's frame clock).
+    // In every other mode the tick `continue`s before the redraw, so it costs
+    // nothing — those modes still repaint on their own events.
+    let mut ticker = tokio::time::interval(Duration::from_millis(60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -437,6 +557,9 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             Some(resp) = ai_rx.recv() => {
                 app.ai_busy = false;
                 for l in resp.split('\n') { app.ai_line(l.to_string()); }
+            }
+            _ = ticker.tick() => {
+                if app.mode != Mode::Intro { continue; }
             }
             else => break,
         }
@@ -454,12 +577,53 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        term.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     term.show_cursor()?;
     Ok(())
 }
 
+/// Window in which a SECOND Ctrl+C counts as "exit the app".
+const DOUBLE_PRESS_MS: u64 = 1000;
+/// Inter-key gap below which consecutive `q` presses count as a hold (the
+/// cadence of terminal key auto-repeat).
+const Q_REPEAT_MS: u64 = 220;
+/// Number of rapid `q` repeats that trigger exit (≈ holding the key down).
+const Q_HOLD_STREAK: u8 = 6;
+
+/// True when a Ctrl+C at `now` should exit — i.e. a prior Ctrl+C (`last`) lands
+/// inside the double-press window. Pure: caller owns the state + the `now` clock.
+fn ctrl_c_exits(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|t| now.duration_since(t) < Duration::from_millis(DOUBLE_PRESS_MS))
+}
+
+/// The next `q`-hold streak given the previous streak + last-`q` time. A press
+/// within `Q_REPEAT_MS` of the previous extends the run (auto-repeat = holding);
+/// a slower press restarts at 1. Caller exits once the result hits
+/// `Q_HOLD_STREAK`. Pure: caller owns the state + the `now` clock.
+fn q_hold_streak(prev: u8, last: Option<Instant>, now: Instant) -> u8 {
+    let fast = last.is_some_and(|t| now.duration_since(t) < Duration::from_millis(Q_REPEAT_MS));
+    if fast {
+        prev.saturating_add(1)
+    } else {
+        1
+    }
+}
+
 fn handle_input(app: &mut App, ev: Event) {
+    // Mouse: a left-click on a header mode tab switches to that mode.
+    if let Event::Mouse(m) = ev {
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(mode) = tab_at(app.agent_count, m.column, m.row) {
+                app.mode = mode;
+                app.intro_since = (app.mode == Mode::Intro).then(Instant::now);
+            }
+        }
+        return;
+    }
     let Event::Key(KeyEvent {
         code,
         kind,
@@ -472,15 +636,51 @@ fn handle_input(app: &mut App, ev: Event) {
     if kind != KeyEventKind::Press {
         return;
     }
-    // Global keys. Ctrl-Q quits (NOT Ctrl-C — that must reach the shell in
-    // terminal mode). Shift+Tab cycles modes.
+    // Global keys. Ctrl-Q is the reliable quit. Shift+Tab cycles modes.
     if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
         app.quit = true;
         return;
     }
     if code == KeyCode::BackTab {
         app.mode = app.mode.next();
+        // Start (or stop) the movie clock as we enter/leave Intro.
+        app.intro_since = (app.mode == Mode::Intro).then(Instant::now);
         return;
+    }
+    // Ctrl+C: a SECOND press within the window exits the app. A single press
+    // still does its normal job — in terminal mode it's forwarded to the shell
+    // as SIGINT (0x03) — so this stays terminal-compatible. Other modes just arm
+    // the double-press and show the hint.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        let now = Instant::now();
+        if ctrl_c_exits(app.last_ctrl_c, now) {
+            app.quit = true;
+            return;
+        }
+        app.last_ctrl_c = Some(now);
+        app.push_event("press Ctrl+C again to exit".into());
+        if let Mode::Terminal = app.mode {
+            if let Some(ts) = app.term.as_mut() {
+                ts.write(&[0x03]);
+            }
+        }
+        return;
+    }
+    // Hold `q` to exit: physically holding the key fires rapid auto-repeats; a
+    // run of them in a short window quits. A normal `q` (followed by any other
+    // key, which resets the streak) types as usual, so prompts stay usable.
+    if let KeyCode::Char('q') = code {
+        if !modifiers.contains(KeyModifiers::CONTROL) {
+            let now = Instant::now();
+            app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
+            app.last_q = Some(now);
+            if app.q_streak >= Q_HOLD_STREAK {
+                app.quit = true;
+                return;
+            }
+        }
+    } else {
+        app.q_streak = 0;
     }
     match app.mode {
         Mode::Terminal => {
@@ -506,6 +706,12 @@ fn handle_input(app: &mut App, ev: Event) {
             KeyCode::Enter => submit_ai(app),
             _ => {}
         },
+        Mode::Intro => {
+            // Space/Enter replays the movie from the top.
+            if matches!(code, KeyCode::Char(' ') | KeyCode::Enter) {
+                app.intro_since = Some(Instant::now());
+            }
+        }
     }
 }
 
@@ -616,8 +822,8 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
         Span::styled("FANTASTIC", name),
         Span::styled(format!("    host: {} agents    ", app.agent_count), dim),
     ];
-    for (i, t) in ["AI", "Terminal", "Kernel manager"].iter().enumerate() {
-        let st = if i == app.mode.idx() {
+    for (i, (label, mode)) in MODE_TABS.iter().enumerate() {
+        let st = if *mode == app.mode {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -625,15 +831,18 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
         } else {
             dim
         };
-        l_push(&mut mid, format!(" {t} "), st);
-        if i < 2 {
+        l_push(&mut mid, format!(" {label} "), st);
+        if i < MODE_TABS.len() - 1 {
             mid.push(Span::styled(" · ", dim));
         }
     }
     vec![
         Line::from(Span::styled("  █", bar)),
         Line::from(mid),
-        Line::from(Span::styled("  █", bar)),
+        Line::from(vec![
+            Span::styled("  █  ", bar),
+            Span::styled("Shift+Tab: change mode", dim),
+        ]),
     ]
 }
 
@@ -654,9 +863,14 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
 
     match app.mode {
-        Mode::Kernel => {
-            render_console(f, rows[1], &app.km_output, &app.input, " output ", " command ")
-        }
+        Mode::Kernel => render_console(
+            f,
+            rows[1],
+            &app.km_output,
+            &app.input,
+            " output ",
+            " command ",
+        ),
         Mode::Terminal => render_terminal(f, app, rows[1]),
         Mode::Ai => render_console(
             f,
@@ -670,6 +884,13 @@ fn ui(f: &mut Frame, app: &App) {
                 " message — Enter to send "
             },
         ),
+        Mode::Intro => {
+            let elapsed = app
+                .intro_since
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            app.movie.render(f, rows[1], elapsed);
+        }
     }
 
     let items: Vec<ListItem> = app
@@ -679,8 +900,11 @@ fn ui(f: &mut Frame, app: &App) {
         .take(6)
         .map(|e| ListItem::new(e.clone()))
         .collect();
-    let log =
-        List::new(items).block(Block::default().borders(Borders::ALL).title(" kernel events "));
+    let log = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" kernel events "),
+    );
     f.render_widget(log, rows[2]);
 }
 
@@ -720,14 +944,85 @@ fn render_console(
         .rev()
         .map(|l| ListItem::new(l.clone()))
         .collect();
-    let out = List::new(items).block(Block::default().borders(Borders::ALL).title(out_title.to_string()));
+    let out = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(out_title.to_string()),
+    );
     f.render_widget(out, parts[0]);
 
     let prompt = format!("› {input}");
-    let line = Paragraph::new(prompt)
-        .block(Block::default().borders(Borders::ALL).title(in_title.to_string()));
+    let line = Paragraph::new(prompt).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(in_title.to_string()),
+    );
     f.render_widget(line, parts[1]);
     let cx = parts[1].x + 1 + (2 + input.chars().count()) as u16;
     let cy = parts[1].y + 1;
     f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_c_first_press_does_not_exit() {
+        // No prior Ctrl+C → never exits on the first press.
+        assert!(!ctrl_c_exits(None, Instant::now()));
+    }
+
+    #[test]
+    fn ctrl_c_double_press_within_window_exits() {
+        let t0 = Instant::now();
+        let within = t0 + Duration::from_millis(DOUBLE_PRESS_MS - 1);
+        assert!(ctrl_c_exits(Some(t0), within));
+    }
+
+    #[test]
+    fn ctrl_c_second_press_after_window_does_not_exit() {
+        // Too slow → the first press has lapsed; this is a fresh single press.
+        let t0 = Instant::now();
+        let after = t0 + Duration::from_millis(DOUBLE_PRESS_MS + 1);
+        assert!(!ctrl_c_exits(Some(t0), after));
+    }
+
+    #[test]
+    fn q_first_press_starts_streak_at_one() {
+        assert_eq!(q_hold_streak(0, None, Instant::now()), 1);
+    }
+
+    #[test]
+    fn q_fast_repeat_extends_streak() {
+        let t0 = Instant::now();
+        let fast = t0 + Duration::from_millis(Q_REPEAT_MS - 1);
+        assert_eq!(q_hold_streak(3, Some(t0), fast), 4);
+    }
+
+    #[test]
+    fn q_slow_press_resets_streak() {
+        // A deliberate, slow `q` (e.g. typing) restarts the run, so it never
+        // accumulates toward exit.
+        let t0 = Instant::now();
+        let slow = t0 + Duration::from_millis(Q_REPEAT_MS + 50);
+        assert_eq!(q_hold_streak(5, Some(t0), slow), 1);
+    }
+
+    #[test]
+    fn q_held_reaches_exit_threshold() {
+        // Simulate holding `q`: rapid repeats climb to the exit threshold.
+        let mut streak = 0u8;
+        let mut t = Instant::now();
+        let mut last = None;
+        for _ in 0..Q_HOLD_STREAK {
+            streak = q_hold_streak(streak, last, t);
+            last = Some(t);
+            t += Duration::from_millis(Q_REPEAT_MS - 100); // auto-repeat cadence
+        }
+        assert!(
+            streak >= Q_HOLD_STREAK,
+            "held q should reach exit, got {streak}"
+        );
+    }
 }

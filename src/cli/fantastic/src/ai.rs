@@ -15,13 +15,18 @@ const BRAIN_ID: &str = "brain";
 const FS_ID: &str = "ai_fs";
 
 /// (handler_module, default model) for the selected backend.
-/// `FANTASTIC_AI_BACKEND=ollama|nvidia` (default ollama — no key needed).
+/// `FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic` (default ollama — no key needed).
 fn backend() -> (&'static str, String) {
     match std::env::var("FANTASTIC_AI_BACKEND").as_deref() {
         Ok("nvidia") => (
             "nvidia_nim_backend.tools",
             std::env::var("FANTASTIC_AI_MODEL")
                 .unwrap_or_else(|_| "nvidia/llama-3_1-nemotron-ultra-253b-v1".to_string()),
+        ),
+        Ok("anthropic") => (
+            fantastic_anthropic_backend::HANDLER_MODULE,
+            std::env::var("FANTASTIC_AI_MODEL")
+                .unwrap_or_else(|_| fantastic_anthropic_backend::DEFAULT_MODEL.to_string()),
         ),
         _ => (
             "ollama_backend.tools",
@@ -53,16 +58,55 @@ async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
         return Err(format!("file_bridge: {e}"));
     }
     let (handler, model) = backend();
+    // ollama's default context (4096) is too small for the rebuilt-every-turn
+    // system block (primer + reflect + agent menu + howto) of a full host. Set a
+    // roomier window; `FANTASTIC_NUM_CTX` overrides. Cloud backends ignore it.
+    let num_ctx: u64 = std::env::var("FANTASTIC_NUM_CTX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16384);
     let brain = kernel
         .send(
             &AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":handler,"id":BRAIN_ID,"model":model,"file_bridge_id":FS_ID}),
+            json!({"type":"create_agent","handler_module":handler,"id":BRAIN_ID,"model":model,"file_bridge_id":FS_ID,"num_ctx":num_ctx}),
         )
         .await;
     if let Some(e) = err_of(&brain) {
         return Err(format!("brain: {e}"));
     }
+    // Key-requiring backends (nvidia/anthropic): provision the api_key from the
+    // environment if present. No fallback — if the key is absent we leave it
+    // unset and the first `send` returns a clean "api_key not set" error in the
+    // pane. ollama needs no key.
+    if let Some(key) = api_key_from_env() {
+        let r = kernel
+            .send(
+                &AgentId::from(BRAIN_ID),
+                json!({"type":"set_api_key","api_key":key}),
+            )
+            .await;
+        if let Some(e) = err_of(&r) {
+            return Err(format!("set_api_key: {e}"));
+        }
+    }
     Ok(backend_label())
+}
+
+/// The api_key for the selected backend, read from the environment. A generic
+/// `FANTASTIC_AI_KEY` wins; otherwise the provider-conventional var. `None` for
+/// ollama (no key) or when nothing is set.
+fn api_key_from_env() -> Option<String> {
+    if let Ok(k) = std::env::var("FANTASTIC_AI_KEY") {
+        if !k.trim().is_empty() {
+            return Some(k);
+        }
+    }
+    let var = match std::env::var("FANTASTIC_AI_BACKEND").as_deref() {
+        Ok("anthropic") => "ANTHROPIC_API_KEY",
+        Ok("nvidia") => "NVIDIA_API_KEY",
+        _ => return None,
+    };
+    std::env::var(var).ok().filter(|k| !k.trim().is_empty())
 }
 
 fn backend_label() -> String {
