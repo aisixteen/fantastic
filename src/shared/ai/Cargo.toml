@@ -13,3 +13,9 @@ tokio = { version = "1.40", features = ["rt", "macros", "sync"] }
 
 fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
 fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-anthropic-backend" }
+
+[dev-dependencies]
+# The provisioning integration test composes a REAL host kernel (full bundle
+# set) to drive `ensure_brain` up to — but never across — the model boundary.
+fantastic-host = { path = "../kernel" }
+tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "sync"] }

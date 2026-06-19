@@ -230,6 +230,8 @@ pub enum Route {
     Ai(String),
     Kernel(AgentId, Value),
     Reflect(AgentId),
+    /// Run a command in the live PTY and breathe its screen into the chat.
+    Shell(String),
     Empty,
 }
 
@@ -263,6 +265,17 @@ pub fn route(line: &str, sticky: &str) -> (String, Route) {
             Route::Ai(body)
         };
         return (target, route);
+    }
+
+    if target == "sh" || target == "shell" {
+        // Normalize the sticky target to `sh` so bare follow-up lines keep
+        // running in the live terminal.
+        let route = if body.is_empty() {
+            Route::Empty
+        } else {
+            Route::Shell(body)
+        };
+        return ("sh".to_string(), route);
     }
 
     let id = AgentId::from(target.as_str());
@@ -342,6 +355,61 @@ mod tests {
     }
 
     #[test]
+    fn on_event_streams_tokens_records_say_and_seals_done() {
+        let mut t = Transcript::new();
+        let seq = t.start_stream("brain", "you");
+        t.on_event(&json!({"type":"token","text":"He"}));
+        t.on_event(&json!({"type":"token","text":"llo"}));
+        t.on_event(&json!({"type":"say","text":"[tool]"}));
+        t.on_event(&json!({"type":"done"}));
+
+        // The live message is sealed Done with the concatenated tokens.
+        let live = t.msgs().iter().find(|m| m.seq == seq).expect("live msg");
+        assert!(live.state == State::Done, "live msg should end Done");
+        match &live.body {
+            Body::Text(s) => assert_eq!(s, "Hello"),
+            _ => panic!("expected a text body for the streamed msg"),
+        }
+        assert!(!t.has_live(), "done clears the live set");
+
+        // The `say` tool line was recorded as its own Note message.
+        let say = t
+            .msgs()
+            .iter()
+            .find(|m| matches!(&m.body, Body::Note(n) if n == "[tool]"))
+            .expect("a say/tool line should be recorded");
+        assert!(say.state == State::Done);
+        assert_eq!(say.from, "brain");
+    }
+
+    #[test]
+    fn interrupt_live_flips_state_to_interrupted() {
+        let mut t = Transcript::new();
+        let seq = t.start_stream("brain", "you");
+        t.on_event(&json!({"type":"token","text":"partial"}));
+        let hit = t.interrupt_live();
+        assert_eq!(hit, vec![seq]);
+        let m = t.msgs().iter().find(|m| m.seq == seq).expect("msg");
+        assert!(
+            m.state == State::Interrupted,
+            "live msg flips to Interrupted"
+        );
+        assert!(!t.has_live());
+    }
+
+    #[test]
+    fn color_for_you_is_white_and_hash_is_deterministic() {
+        assert_eq!(color_for("you"), Color::White);
+        // Same id → same color on repeated calls (determinism).
+        assert_eq!(color_for("brain"), color_for("brain"));
+        assert_eq!(color_for("core"), color_for("core"));
+        // Two unequal ids: non-`you` ids land in the colored palette (never the
+        // forced White of `you`), and the hash spreads them across it.
+        assert_ne!(color_for("brain"), Color::White);
+        assert_ne!(color_for("web"), Color::White);
+    }
+
+    #[test]
     fn route_at_ai_goes_to_ai_and_sets_sticky() {
         let (sticky, r) = route("@ai hello", "core");
         assert_eq!(sticky, "ai");
@@ -388,6 +456,43 @@ mod tests {
     fn route_empty_keeps_sticky() {
         let (sticky, r) = route("   ", "web");
         assert_eq!(sticky, "web");
+        assert!(matches!(r, Route::Empty));
+    }
+
+    #[test]
+    fn route_at_sh_runs_shell_and_sticks() {
+        let (sticky, r) = route("@sh make", "ai");
+        assert_eq!(sticky, "sh");
+        match r {
+            Route::Shell(cmd) => assert_eq!(cmd, "make"),
+            _ => panic!("expected Shell"),
+        }
+    }
+
+    #[test]
+    fn route_at_shell_alias_runs_shell() {
+        let (sticky, r) = route("@shell htop", "ai");
+        assert_eq!(sticky, "sh");
+        match r {
+            Route::Shell(cmd) => assert_eq!(cmd, "htop"),
+            _ => panic!("expected Shell"),
+        }
+    }
+
+    #[test]
+    fn route_bare_line_when_sticky_sh_runs_shell() {
+        let (sticky, r) = route("ls -la", "sh");
+        assert_eq!(sticky, "sh");
+        match r {
+            Route::Shell(cmd) => assert_eq!(cmd, "ls -la"),
+            _ => panic!("expected Shell"),
+        }
+    }
+
+    #[test]
+    fn route_at_sh_empty_is_empty_but_sticks() {
+        let (sticky, r) = route("@sh", "ai");
+        assert_eq!(sticky, "sh");
         assert!(matches!(r, Route::Empty));
     }
 

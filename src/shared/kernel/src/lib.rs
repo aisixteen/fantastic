@@ -143,3 +143,65 @@ pub fn parse_command(line: &str) -> Result<(AgentId, Value), String> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kv_coerces_bool_int_float_json_string() {
+        assert_eq!(parse_kv("true"), json!(true));
+        assert_eq!(parse_kv("False"), json!(false)); // case-insensitive
+        assert_eq!(parse_kv("42"), json!(42));
+        assert_eq!(parse_kv("1.5"), json!(1.5));
+        assert_eq!(
+            parse_kv("{\"type\":\"list_agents\"}"),
+            json!({"type":"list_agents"})
+        );
+        assert_eq!(parse_kv("[1,2,3]"), json!([1, 2, 3]));
+        assert_eq!(parse_kv("web.tools"), json!("web.tools"));
+        // a stray brace stays a string (only well-formed object/array literals parse).
+        assert_eq!(parse_kv("a{b"), json!("a{b"));
+    }
+
+    fn cmd(line: &str) -> (AgentId, Value) {
+        parse_command(line).unwrap()
+    }
+
+    #[test]
+    fn parse_command_maps_the_sugar() {
+        let (t, p) = cmd("tree");
+        assert!(t == AgentId::from("kernel"));
+        assert_eq!(p, json!({"type":"reflect","tree":"ids"}));
+
+        let (t, p) = cmd("reflect web");
+        assert!(t == AgentId::from("web"));
+        assert_eq!(p, json!({"type":"reflect"}));
+
+        let (t, p) = cmd("create web.tools port=8080");
+        assert!(t == AgentId::from("kernel"));
+        assert_eq!(
+            p,
+            json!({"type":"create_agent","handler_module":"web.tools","port":8080})
+        );
+
+        let (t, p) = cmd("update w foo=bar");
+        assert!(t == AgentId::from("kernel"));
+        assert_eq!(p, json!({"type":"update_agent","id":"w","foo":"bar"}));
+
+        let (t, p) = cmd("delete w");
+        assert!(t == AgentId::from("kernel"));
+        assert_eq!(p, json!({"type":"delete_agent","id":"w"}));
+
+        let (t, p) = cmd("send web boot");
+        assert!(t == AgentId::from("web"));
+        assert_eq!(p, json!({"type":"boot"}));
+    }
+
+    #[test]
+    fn parse_command_rejects_empty_and_unknown() {
+        assert!(parse_command("").is_err());
+        assert!(parse_command("   ").is_err());
+        assert!(parse_command("frobnicate x").is_err());
+    }
+}
