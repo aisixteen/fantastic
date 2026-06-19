@@ -1,0 +1,8 @@
+# The `fantastic` CLI product workspace — separate from the kernel workspace
+# (src/lib/rust) so the product owns its own deps (ratatui/crossterm) + lockfile
+# and path-depends into the kernel crates. Rooted explicitly so Cargo never walks
+# up into a parent workspace; the kernel workspace under `lib` is excluded.
+[workspace]
+members = ["shared/kernel", "shared/ai", "shared/term", "tui", "cli"]
+exclude = ["lib"]
+resolver = "2"

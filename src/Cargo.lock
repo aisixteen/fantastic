@@ -181,9 +181,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.64"
+version = "1.2.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad887fd958be91b5098c0248def011f4523ab786cd411be668777e55063501f"
+checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -240,7 +240,7 @@ dependencies = [
  "crossterm_winapi",
  "mio",
  "parking_lot",
- "rustix",
+ "rustix 0.38.44",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -382,34 +382,15 @@ name = "fantastic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fantastic-ai-core",
- "fantastic-anthropic-backend",
- "fantastic-bridge",
- "fantastic-core",
- "fantastic-file",
+ "fantastic-brain",
+ "fantastic-host",
  "fantastic-kernel",
- "fantastic-local-runner",
- "fantastic-nvidia-nim-backend",
- "fantastic-ollama-backend",
- "fantastic-proxy-agent",
- "fantastic-python-runtime",
- "fantastic-scheduler",
- "fantastic-ssh-runner",
- "fantastic-terminal-backend",
- "fantastic-tools",
- "fantastic-web",
- "fantastic-web-rest",
- "fantastic-web-ws",
- "fantastic-yaml-state",
- "portable-pty",
- "ratatui",
+ "fantastic-term",
+ "fantastic-tui",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tui-banner",
- "tui-term",
- "vt100",
 ]
 
 [[package]]
@@ -433,6 +414,16 @@ dependencies = [
  "fantastic-kernel",
  "futures-util",
  "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fantastic-brain"
+version = "0.1.0"
+dependencies = [
+ "fantastic-anthropic-backend",
+ "fantastic-kernel",
  "serde_json",
  "tokio",
 ]
@@ -468,6 +459,36 @@ dependencies = [
  "fantastic-io-bridge",
  "fantastic-kernel",
  "serde_json",
+]
+
+[[package]]
+name = "fantastic-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fantastic-ai-core",
+ "fantastic-anthropic-backend",
+ "fantastic-bridge",
+ "fantastic-core",
+ "fantastic-file",
+ "fantastic-kernel",
+ "fantastic-local-runner",
+ "fantastic-nvidia-nim-backend",
+ "fantastic-ollama-backend",
+ "fantastic-proxy-agent",
+ "fantastic-python-runtime",
+ "fantastic-scheduler",
+ "fantastic-ssh-runner",
+ "fantastic-terminal-backend",
+ "fantastic-tools",
+ "fantastic-web",
+ "fantastic-web-rest",
+ "fantastic-web-ws",
+ "fantastic-yaml-state",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -594,6 +615,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+ "tokio",
+ "vt100",
+]
+
+[[package]]
 name = "fantastic-terminal-backend"
 version = "0.1.0"
 dependencies = [
@@ -616,6 +647,24 @@ dependencies = [
  "fantastic-kernel",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "fantastic-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fantastic-brain",
+ "fantastic-host",
+ "fantastic-kernel",
+ "fantastic-term",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tui-banner",
+ "tui-term",
+ "vt100",
 ]
 
 [[package]]
@@ -663,6 +712,12 @@ dependencies = [
  "serde_json",
  "serde_yaml",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "filedescriptor"
@@ -1137,6 +1192,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1602,8 +1663,21 @@ dependencies = [
  "bitflags 2.13.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.4.15",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags 2.13.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.12.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1951,6 +2025,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.3.4",
+ "once_cell",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2504,7 +2591,7 @@ checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
 dependencies = [
  "either",
  "home",
- "rustix",
+ "rustix 0.38.44",
  "winsafe",
 ]
 

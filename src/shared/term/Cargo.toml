@@ -1,0 +1,14 @@
+[package]
+name = "fantastic-term"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic-term — the product's PTY/terminal session (a real $SHELL rendered server-side via vt100)."
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1.40", features = ["sync"] }
+portable-pty = "0.8"
+vt100 = "0.15"

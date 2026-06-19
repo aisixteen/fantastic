@@ -1,0 +1,24 @@
+[package]
+name = "fantastic-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic-tui — the ratatui terminal UI (AI / Terminal / Kernel-manager / Intro modes) over the host kernel."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1"
+ratatui = "0.29"
+# Terminal-proxy mode render + startup billboard.
+tui-banner = "0.2"
+tui-term = "0.2"
+vt100 = "0.15"
+
+fantastic-kernel = { path = "../lib/rust/crates/fantastic-kernel" }
+fantastic-host = { path = "../shared/kernel" }
+fantastic-brain = { path = "../shared/ai" }
+fantastic-term = { path = "../shared/term" }

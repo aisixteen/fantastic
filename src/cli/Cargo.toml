@@ -1,7 +1,25 @@
-# The `fantastic` CLI product workspace — separate from the kernel workspace
-# (src/lib/rust) so the product owns its own deps (ratatui/crossterm) + lockfile
-# and path-depends into the kernel crates. Rooted explicitly so Cargo never walks
-# up into a parent workspace.
-[workspace]
-members = ["fantastic"]
-resolver = "2"
+[package]
+name = "fantastic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic — the CLI product (AI coder + kernel manager) that embeds the fantastic kernel lib as a privileged host."
+
+[[bin]]
+name = "fantastic"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+fantastic-kernel = { path = "../lib/rust/crates/fantastic-kernel" }
+fantastic-host = { path = "../shared/kernel" }
+fantastic-brain = { path = "../shared/ai" }
+fantastic-term = { path = "../shared/term" }
+fantastic-tui = { path = "../tui" }

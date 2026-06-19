@@ -1,32 +1,22 @@
 [package]
-name = "fantastic"
+name = "fantastic-host"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "fantastic — the CLI product (AI coder + kernel manager) that embeds the fantastic kernel lib as a privileged host."
-
-[[bin]]
-name = "fantastic"
-path = "src/main.rs"
+description = "fantastic-host — composes the privileged in-proc host kernel (full bundle set) + the kernel-manager command sugar."
 
 [dependencies]
-tokio = { version = "1.40", features = ["full"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ratatui = "0.29"
-# Terminal-proxy mode: a real PTY rendered server-side.
-portable-pty = "0.8"
-vt100 = "0.15"
-tui-term = "0.2"
-# Startup billboard: zero-dep FIGlet engine + truecolor gradient (the intro).
-tui-banner = "0.2"
+tokio = { version = "1.40", features = ["full"] }
+# The gateway drives a sovereign workspace kernel over loopback HTTP. rustls (no
+# OpenSSL) keeps the build self-contained; we only ever hit 127.0.0.1 anyway.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Kernel lib + bundle set (path-deps into the kernel workspace at src/lib/rust).
-# The product is the privileged host: it registers the FULL set (incl runners +
+# The host is the privileged composer: it registers the FULL set (incl runners +
 # terminal) into its in-proc kernel.
 fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
 fantastic-core = { path = "../../lib/rust/crates/bundles/fantastic-core" }
@@ -47,3 +37,7 @@ fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-t
 fantastic-python-runtime = { path = "../../lib/rust/crates/bundles/fantastic-python-runtime" }
 fantastic-local-runner = { path = "../../lib/rust/crates/bundles/fantastic-local-runner" }
 fantastic-ssh-runner = { path = "../../lib/rust/crates/bundles/fantastic-ssh-runner" }
+
+[dev-dependencies]
+# Gateway discover() unit tests build fixture `.fantastic/` trees in temp dirs.
+tempfile = "3"

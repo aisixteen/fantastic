@@ -1,30 +1,21 @@
-//! `fantastic` — the CLI product: an AI coder + kernel manager for emerging
-//! software. It embeds the kernel as a pure library and is the privileged
-//! *host*: it composes an in-proc "brain" kernel and drives everything through
-//! the one primitive — `kernel.send(target, payload)`.
+//! `fantastic-tui` — the ratatui terminal UI for the product.
 //!
-//! Modes — Shift+Tab cycles, or click a header tab: AI / Terminal /
-//! Kernel-manager / Intro.
-//! - **AI**: chat a brain agent that drives the kernel via `send`.
+//! Modes — Shift+Tab cycles, or click a header tab: Chat / Terminal / Intro.
+//! - **Chat**: ONE transcript that unifies the AI brain and the kernel manager.
+//!   Every line routes by `@target`: `@ai …`/`@brain …` streams an AI turn;
+//!   `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a sugar command.
+//!   With no `@` the line goes to the sticky target. Per-source colored rails
+//!   keep agents distinct; AI turns stream live and Ctrl+C interrupts.
 //! - **Terminal**: a real PTY (`$SHELL`).
-//! - **Kernel manager**: a command line whose sugar verbs drive the host
-//!   (`tree`, `reflect [id]`, `create <handler> [k=v…]`, `update <id> k=v…`,
-//!   `delete <id>`, `send <id> <verb> [k=v…]`).
 //! - **Intro**: a scripted retro "movie" of how Fantastic works (see `movie.rs`).
-//!
-//! Headless: `fantastic --smoke` (or non-tty stdout) composes the host, reflects
-//! the root, and exits — for CI/build verification without a terminal. One-shot
-//! `fantastic ai "<prompt>"` runs a single AI turn; `fantastic demo` plays the
-//! A→Z flow.
 
 use std::collections::VecDeque;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fantastic_kernel::bootstrap::{self, BootstrapOptions};
-use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
+use fantastic_kernel::{AgentId, Kernel};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
@@ -35,82 +26,30 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
-use serde_json::{json, Map, Value};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-mod ai;
+mod chat;
 mod intro;
 mod movie;
-mod term;
-use term::TerminalSession;
-
-/// The privileged host bundle set. The product owns the runtime (runners +
-/// terminal + AI backends), so it always registers the full set into its host.
-fn register_host_bundles() -> BundleRegistry {
-    let mut reg = BundleRegistry::new();
-    reg.register("file_bridge.tools", fantastic_file::FileBundle);
-    reg.register("yaml_state.tools", fantastic_yaml_state::YamlStateBundle);
-    reg.register("web.tools", fantastic_web::WebBundle);
-    reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
-    reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
-    reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
-    reg.register(
-        "ollama_backend.tools",
-        fantastic_ollama_backend::OllamaBackendBundle,
-    );
-    reg.register(
-        "nvidia_nim_backend.tools",
-        fantastic_nvidia_nim_backend::NvidiaNimBundle,
-    );
-    reg.register(
-        fantastic_anthropic_backend::HANDLER_MODULE,
-        fantastic_anthropic_backend::AnthropicBundle,
-    );
-    reg.register("ws_bridge.tools", fantastic_bridge::WsBridgeBundle);
-    reg.register(
-        "relay_connector.tools",
-        fantastic_bridge::RelayConnectorBundle,
-    );
-    reg.register(
-        fantastic_proxy_agent::HANDLER_MODULE,
-        fantastic_proxy_agent::ProxyAgentBundle::new(),
-    );
-    reg.register(
-        fantastic_tools::HANDLER_MODULE,
-        fantastic_tools::ToolsBundle::new(),
-    );
-    reg.register(
-        "terminal_backend.tools",
-        fantastic_terminal_backend::TerminalBackendBundle,
-    );
-    reg.register(
-        "python_runtime.tools",
-        fantastic_python_runtime::PythonRuntimeBundle,
-    );
-    reg.register(
-        "local_runner.tools",
-        fantastic_local_runner::LocalRunnerBundle,
-    );
-    reg.register("ssh_runner.tools", fantastic_ssh_runner::SshRunnerBundle);
-    reg
-}
+use chat::{Body, Route, State, Transcript};
+use fantastic_brain as ai;
+use fantastic_term::TerminalSession;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    Ai,
+    Chat,
     Terminal,
-    Kernel,
     Intro,
 }
 
 impl Mode {
     fn next(self) -> Self {
         match self {
-            Mode::Ai => Mode::Terminal,
-            Mode::Terminal => Mode::Kernel,
-            Mode::Kernel => Mode::Intro,
-            Mode::Intro => Mode::Ai,
+            Mode::Chat => Mode::Terminal,
+            Mode::Terminal => Mode::Intro,
+            Mode::Intro => Mode::Chat,
         }
     }
 }
@@ -118,12 +57,16 @@ impl Mode {
 /// The mode tabs, in header order — the single source of truth shared by the
 /// header renderer (`brand_header`) and the click hit-test (`tab_at`), so their
 /// column math can never drift apart.
-const MODE_TABS: [(&str, Mode); 4] = [
-    ("AI", Mode::Ai),
+const MODE_TABS: [(&str, Mode); 3] = [
+    ("Chat", Mode::Chat),
     ("Terminal", Mode::Terminal),
-    ("Kernel manager", Mode::Kernel),
     ("Intro", Mode::Intro),
 ];
+
+/// The client_id the brain emits its streaming events to (our inbox key).
+const CLIENT_ID: &str = "fantastic";
+/// The brain agent id (kept in sync with `fantastic-brain`).
+const BRAIN_ID: &str = "brain";
 
 /// The frame row the tab labels render on (header line 2 of 3: bar / tabs / hint).
 const TAB_ROW: u16 = 1;
@@ -156,15 +99,15 @@ struct App {
     agent_count: usize,
     mode: Mode,
     events: VecDeque<String>,
-    /// Kernel-manager command line + scrollback.
+    /// Chat mode: the one unified transcript + its input line + sticky target.
+    chat: Transcript,
     input: String,
-    km_output: VecDeque<String>,
-    cmd_tx: mpsc::UnboundedSender<String>,
-    /// AI mode: conversation log + input + completion channel.
-    ai_input: String,
-    ai_output: VecDeque<String>,
-    ai_tx: mpsc::UnboundedSender<String>,
-    ai_busy: bool,
+    sticky: String,
+    chat_busy: bool,
+    /// Reply channel for one-shot kernel commands (reflect / sugar verbs).
+    cmd_tx: mpsc::UnboundedSender<(String, String)>,
+    /// True once the brain has been provisioned (so we only ensure it once).
+    brain_ready: bool,
     /// Terminal-proxy mode PTY (spawned at startup).
     term: Option<TerminalSession>,
     /// Intro mode: the scripted movie + when it (re)started (for its clock).
@@ -183,12 +126,6 @@ impl App {
     fn push_event(&mut self, line: String) {
         cap_push(&mut self.events, line, 500);
     }
-    fn km_line(&mut self, line: String) {
-        cap_push(&mut self.km_output, line, 1000);
-    }
-    fn ai_line(&mut self, line: String) {
-        cap_push(&mut self.ai_output, line, 1000);
-    }
 }
 
 fn cap_push(buf: &mut VecDeque<String>, line: String, cap: usize) {
@@ -196,73 +133,6 @@ fn cap_push(buf: &mut VecDeque<String>, line: String, cap: usize) {
         buf.pop_front();
     }
     buf.push_back(line);
-}
-
-/// k=v value coercion (mirrors the kernel CLI): bool → int → float → JSON
-/// object/array literal → string.
-fn parse_kv(v: &str) -> Value {
-    match v.to_ascii_lowercase().as_str() {
-        "true" => return json!(true),
-        "false" => return json!(false),
-        _ => {}
-    }
-    if let Ok(n) = v.parse::<i64>() {
-        return json!(n);
-    }
-    if let Ok(f) = v.parse::<f64>() {
-        return json!(f);
-    }
-    let looks_json =
-        (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('[') && v.ends_with(']'));
-    if looks_json {
-        if let Ok(parsed) = serde_json::from_str::<Value>(v) {
-            return parsed;
-        }
-    }
-    Value::String(v.to_string())
-}
-
-fn add_kvs(payload: &mut Map<String, Value>, kvs: &[&str]) {
-    for kv in kvs {
-        if let Some((k, v)) = kv.split_once('=') {
-            payload.insert(k.to_string(), parse_kv(v));
-        }
-    }
-}
-
-/// Parse a kernel-manager sugar command into `(target, payload)` for `send`.
-fn parse_command(line: &str) -> Result<(AgentId, Value), String> {
-    let toks: Vec<&str> = line.split_whitespace().collect();
-    let mut p = Map::new();
-    match toks.as_slice() {
-        [] => Err("empty".into()),
-        ["tree"] | ["reflect"] => {
-            Ok((AgentId::from("kernel"), json!({"type":"reflect","tree":"ids"})))
-        }
-        ["reflect", id] => Ok((AgentId::from(*id), json!({"type":"reflect"}))),
-        ["create", handler, kvs @ ..] => {
-            p.insert("type".into(), json!("create_agent"));
-            p.insert("handler_module".into(), json!(*handler));
-            add_kvs(&mut p, kvs);
-            Ok((AgentId::from("kernel"), Value::Object(p)))
-        }
-        ["update", id, kvs @ ..] => {
-            p.insert("type".into(), json!("update_agent"));
-            p.insert("id".into(), json!(*id));
-            add_kvs(&mut p, kvs);
-            Ok((AgentId::from("kernel"), Value::Object(p)))
-        }
-        ["delete", id] => Ok((AgentId::from("kernel"), json!({"type":"delete_agent","id":id}))),
-        ["send", id, verb, kvs @ ..] => {
-            p.insert("type".into(), json!(*verb));
-            add_kvs(&mut p, kvs);
-            Ok((AgentId::from(*id), Value::Object(p)))
-        }
-        _ => Err(format!(
-            "unknown: {} (try: tree | reflect [id] | create <handler> [k=v] | update <id> k=v | delete <id> | send <id> <verb> [k=v])",
-            toks[0]
-        )),
-    }
 }
 
 /// One-line render of a kernel state event for the log pane.
@@ -286,209 +156,22 @@ fn fmt_event(e: &Value) -> String {
     s
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
-
-    let booted = bootstrap::bootstrap(register_host_bundles(), BootstrapOptions::in_memory())?;
-    let kernel = Arc::clone(&booted.kernel);
-    for id in &booted.loaded {
-        let _ = kernel.send(id, json!({"type": "boot"})).await;
-    }
-
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        // A→Z headless demo: assemble → serve → terminal, printing each step.
-        Some("demo") => return demo_flow(&kernel).await,
-        // Compose host + reflect root + exit (CI/build check).
-        Some("--smoke") => {
-            eprint!("{}", ansi_banner(booted.loaded.len()));
-            let reply = kernel
-                .send(
-                    &AgentId::from("kernel"),
-                    json!({"type":"reflect","tree":"ids"}),
-                )
-                .await;
-            println!("{}", serde_json::to_string_pretty(&reply)?);
-            return Ok(());
-        }
-        // Headless one-shot AI turn: `fantastic ai "<prompt>"`. Drives the same
-        // brain as AI mode (the universal `send` tool lets it reach the kernel),
-        // and prints the final response. Backend via FANTASTIC_AI_BACKEND
-        // (ollama default), model via FANTASTIC_AI_MODEL.
-        Some("ai") | Some("ask") => {
-            let prompt = args[1..].join(" ");
-            if prompt.trim().is_empty() {
-                eprintln!("usage: fantastic ai \"<prompt>\"");
-                return Ok(());
-            }
-            eprint!("{}", ansi_banner(booted.loaded.len()));
-            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-            let k = Arc::clone(&kernel);
-            let turn = tokio::spawn(async move { ai::run_turn(k, prompt, tx).await });
-            while let Some(line) = rx.recv().await {
-                println!("{line}");
-            }
-            let _ = turn.await;
-            return Ok(());
-        }
-        _ => {}
-    }
-    // No tty → headless smoke; tty → the TUI.
-    if !io::stdout().is_terminal() {
-        let reply = kernel
-            .send(
-                &AgentId::from("kernel"),
-                json!({"type":"reflect","tree":"ids"}),
-            )
-            .await;
-        println!("{}", serde_json::to_string_pretty(&reply)?);
-        return Ok(());
-    }
-    run_tui(kernel, booted.loaded.len()).await
-}
-
-/// Headless A→Z demo of what the product drives: compose host → assemble a
-/// web-serving kernel via kernel-manager sugar → prove it serves over HTTP →
-/// run a terminal PTY command. Each step prints, so the loop is legible.
-async fn demo_flow(kernel: &Arc<Kernel>) -> Result<()> {
-    eprint!("{}", ansi_banner(1));
-
-    println!("── A · reflect the bare host ──");
-    let t = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"reflect","tree":"ids"}),
-        )
-        .await;
-    println!(
-        "   agents: {}\n",
-        t.get("tree").cloned().unwrap_or(Value::Null)
-    );
-
-    println!("── B · assemble a web-serving kernel (the kernel-manager sugar) ──");
-    let port = free_port();
-    let r = kernel
-        .send(&AgentId::from("kernel"), json!({"type":"create_agent","handler_module":"file_bridge.tools","id":"files","root":".","ingress_rule":"allow_all"}))
-        .await;
-    println!("   create file_bridge files → {}", short(&r));
-    let r = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"web.tools","id":"web","port":port}),
-        )
-        .await;
-    println!("   create web (port {port}) → {}", short(&r));
-    let r = kernel
-        .send(&AgentId::from("web"), json!({"type":"boot"}))
-        .await;
-    println!("   boot web → {}\n", short(&r));
-
-    println!("── C · reflect the assembled host ──");
-    let t = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"reflect","tree":"ids"}),
-        )
-        .await;
-    println!(
-        "   agents: {}\n",
-        t.get("tree").cloned().unwrap_or(Value::Null)
-    );
-
-    println!("── D · HTTP GET / on the live host (it actually serves) ──");
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    match http_get("127.0.0.1", port, "/") {
-        Ok((status, len, head)) => {
-            println!("   GET http://127.0.0.1:{port}/ → {status}  ({len} bytes)");
-            println!("   ‹{head}›\n");
-        }
-        Err(e) => println!("   GET failed: {e}\n"),
-    }
-
-    println!("── E · terminal PTY: run `uname -a` ──");
-    let (tx, _rx) = mpsc::unbounded_channel::<()>();
-    if let Ok(mut ts) = TerminalSession::spawn(12, 100, tx) {
-        ts.write(b"uname -a\r");
-        tokio::time::sleep(Duration::from_millis(1300)).await;
-        if let Ok(p) = ts.parser.lock() {
-            for line in p
-                .screen()
-                .contents()
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .take(5)
-            {
-                println!("   {line}");
-            }
-        }
-    } else {
-        println!("   (pty unavailable)");
-    }
-
-    println!("\n── F · shutdown web ──");
-    let _ = kernel
-        .send(&AgentId::from("web"), json!({"type":"shutdown"}))
-        .await;
-    println!("\n   that's the loop: compose host → assemble agents via `send` → serve + drive,");
-    println!("   all from one product. AI mode adds a brain that drives this same `send`.");
-    Ok(())
-}
-
-fn short(v: &Value) -> String {
-    if let Some(e) = v.get("error").and_then(Value::as_str) {
-        return format!("error: {e}");
-    }
-    if let Some(id) = v.get("id").and_then(Value::as_str) {
-        return format!("id={id}");
-    }
-    if v.get("booted").is_some() || v.get("already").is_some() {
-        return "ok".into();
-    }
-    v.to_string().chars().take(80).collect()
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .ok()
-        .and_then(|l| l.local_addr().ok())
-        .map(|a| a.port())
-        .unwrap_or(8099)
-}
-
-fn http_get(host: &str, port: u16, path: &str) -> Result<(String, usize, String)> {
-    let mut s = std::net::TcpStream::connect((host, port))?;
-    s.set_read_timeout(Some(Duration::from_secs(3))).ok();
-    write!(
-        s,
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut buf = String::new();
-    s.read_to_string(&mut buf)?;
-    let status = buf.lines().next().unwrap_or("").to_string();
-    let body = buf.split("\r\n\r\n").nth(1).unwrap_or("");
-    let head: String = body.chars().take(70).collect();
-    Ok((status, body.len(), head.replace('\n', " ")))
-}
-
-async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
+pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<String>();
     let _tok = kernel.add_state_subscriber(Arc::new(move |e: &Value| {
         let _ = evt_tx.send(fmt_event(e));
     }));
 
-    // Command results (async kernel.send completions) flow back here.
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<String>();
+    // One-shot kernel command replies flow back here as (source_id, text).
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
     // PTY output → repaint pings.
     let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
-    // AI turn completions.
-    let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<String>();
+
+    // The brain streams its per-turn events (token/say/status/done) to the
+    // `CLIENT_ID` inbox. Register a bounded channel matching `kernel.inboxes`'
+    // Sender type and drain it into the transcript.
+    let (brain_tx, mut brain_rx) = tokio::sync::mpsc::channel::<Value>(256);
+    kernel.inboxes.insert(AgentId::from(CLIENT_ID), brain_tx);
 
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
@@ -512,15 +195,14 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     let mut app = App {
         kernel,
         agent_count,
-        mode: Mode::Ai,
+        mode: Mode::Chat,
         events: VecDeque::new(),
+        chat: Transcript::new(),
         input: String::new(),
-        km_output: VecDeque::new(),
+        sticky: "ai".into(),
+        chat_busy: false,
         cmd_tx,
-        ai_input: String::new(),
-        ai_output: VecDeque::new(),
-        ai_tx,
-        ai_busy: false,
+        brain_ready: false,
         term: session,
         movie: movie::Movie::storyboard(),
         intro_since: None,
@@ -533,10 +215,13 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         "host kernel composed — Shift+Tab switches modes · double Ctrl+C / hold q / Ctrl-Q to exit"
             .into(),
     );
-    app.km_line("kernel manager — type a command, Enter to run. `tree` to list agents.".into());
-    app.ai_line(
-        "AI — type a message, Enter to send. Backend: FANTASTIC_AI_BACKEND (default ollama)."
-            .into(),
+    app.chat.push(
+        "system",
+        "you",
+        Body::Note(
+            "Chat — `@ai …` talks to the brain (streams live, Ctrl+C interrupts); `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a command. No `@` reuses the last target.".into(),
+        ),
+        State::Done,
     );
     term.draw(|f| ui(f, &app))?;
 
@@ -550,14 +235,16 @@ async fn run_tui(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         tokio::select! {
             Some(ev) = in_rx.recv() => handle_input(&mut app, ev),
             Some(line) = evt_rx.recv() => app.push_event(line),
-            Some(out) = cmd_rx.recv() => {
-                for l in out.split('\n') { app.km_line(l.to_string()); }
+            Some((from, text)) = cmd_rx.recv() => {
+                app.chat.push(&from, "you", Body::Text(text), State::Done);
+            }
+            Some(ev) = brain_rx.recv() => {
+                app.chat.on_event(&ev);
+                if !app.chat.has_live() {
+                    app.chat_busy = false;
+                }
             }
             Some(()) = redraw_rx.recv() => {}
-            Some(resp) = ai_rx.recv() => {
-                app.ai_busy = false;
-                for l in resp.split('\n') { app.ai_line(l.to_string()); }
-            }
             _ = ticker.tick() => {
                 if app.mode != Mode::Intro { continue; }
             }
@@ -659,10 +346,25 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         app.last_ctrl_c = Some(now);
         app.push_event("press Ctrl+C again to exit".into());
-        if let Mode::Terminal = app.mode {
-            if let Some(ts) = app.term.as_mut() {
-                ts.write(&[0x03]);
+        match app.mode {
+            // In the live PTY, forward SIGINT to the shell.
+            Mode::Terminal => {
+                if let Some(ts) = app.term.as_mut() {
+                    ts.write(&[0x03]);
+                }
             }
+            // In chat, interrupt an in-flight AI stream (do NOT exit).
+            Mode::Chat if app.chat.has_live() => {
+                app.chat.interrupt_live();
+                app.chat_busy = false;
+                let kernel = Arc::clone(&app.kernel);
+                tokio::spawn(async move {
+                    kernel
+                        .send(&AgentId::from(BRAIN_ID), json!({"type":"interrupt"}))
+                        .await;
+                });
+            }
+            _ => {}
         }
         return;
     }
@@ -690,20 +392,12 @@ fn handle_input(app: &mut App, ev: Event) {
                 }
             }
         }
-        Mode::Kernel => match code {
+        Mode::Chat => match code {
             KeyCode::Char(c) => app.input.push(c),
             KeyCode::Backspace => {
                 app.input.pop();
             }
-            KeyCode::Enter => submit_command(app),
-            _ => {}
-        },
-        Mode::Ai => match code {
-            KeyCode::Char(c) => app.ai_input.push(c),
-            KeyCode::Backspace => {
-                app.ai_input.pop();
-            }
-            KeyCode::Enter => submit_ai(app),
+            KeyCode::Enter => submit_chat(app),
             _ => {}
         },
         Mode::Intro => {
@@ -715,17 +409,88 @@ fn handle_input(app: &mut App, ev: Event) {
     }
 }
 
-fn submit_ai(app: &mut App) {
-    let text = std::mem::take(&mut app.ai_input).trim().to_string();
-    if text.is_empty() || app.ai_busy {
-        return;
+/// Submit the chat input line: resolve its `@`-route, update the sticky target,
+/// and dispatch — an AI turn streams into the transcript; a kernel command sends
+/// and routes its reply back via `cmd_tx`.
+fn submit_chat(app: &mut App) {
+    let line = std::mem::take(&mut app.input);
+    let (sticky, route) = chat::route(&line, &app.sticky);
+    app.sticky = sticky;
+    match route {
+        Route::Empty => {}
+        Route::Ai(text) => {
+            if app.chat_busy {
+                // Restore the line so the user doesn't lose it.
+                app.input = line;
+                return;
+            }
+            app.chat
+                .push("you", "ai", Body::Text(text.clone()), State::Done);
+            app.chat_busy = true;
+            // Open the live streaming message; events fill it via the inbox.
+            app.chat.start_stream(BRAIN_ID, "you");
+            let kernel = Arc::clone(&app.kernel);
+            let ensure = !app.brain_ready;
+            app.brain_ready = true;
+            tokio::spawn(async move {
+                if ensure {
+                    if let Err(e) = ai::ensure_brain(&kernel).await {
+                        // The interrupt path also clears `live`; surface the
+                        // provisioning error to the same inbox so it renders.
+                        if let Some(tx) = kernel.inboxes.get(&AgentId::from(CLIENT_ID)) {
+                            let _ = tx
+                                .send(json!({
+                                    "type":"say","source":BRAIN_ID,"client_id":CLIENT_ID,
+                                    "text": format!("✗ {e}"),
+                                }))
+                                .await;
+                            let _ = tx
+                                .send(
+                                    json!({"type":"done","source":BRAIN_ID,"client_id":CLIENT_ID}),
+                                )
+                                .await;
+                        }
+                        return;
+                    }
+                }
+                kernel
+                    .send(
+                        &AgentId::from(BRAIN_ID),
+                        json!({"type":"send","text":text,"client_id":CLIENT_ID}),
+                    )
+                    .await;
+            });
+        }
+        Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
+        Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
     }
-    app.ai_line(format!("› {text}"));
-    app.ai_busy = true;
+}
+
+/// Push a `you→target` prompt and fire a one-shot `kernel.send`; the rendered
+/// reply returns via `cmd_tx` as a `target→you` line.
+fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
+    let verb = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("send")
+        .to_string();
+    app.chat.push(
+        "you",
+        target.as_str(),
+        Body::Tool {
+            verb,
+            target: target.as_str().to_string(),
+            summary: String::new(),
+        },
+        State::Done,
+    );
     let kernel = Arc::clone(&app.kernel);
-    let tx = app.ai_tx.clone();
+    let tx = app.cmd_tx.clone();
+    let from = target.as_str().to_string();
     tokio::spawn(async move {
-        ai::run_turn(kernel, text, tx).await;
+        let reply = kernel.send(&target, payload).await;
+        let rendered = serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
+        let _ = tx.send((from, rendered));
     });
 }
 
@@ -770,41 +535,6 @@ fn term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
     let rows = size.height.saturating_sub(3 + 8 + 2).max(1);
     let cols = size.width.saturating_sub(2).max(1);
     (rows, cols)
-}
-
-fn submit_command(app: &mut App) {
-    let line = std::mem::take(&mut app.input);
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        return;
-    }
-    app.km_line(format!("› {line}"));
-    match parse_command(&line) {
-        Ok((target, payload)) => {
-            let kernel = Arc::clone(&app.kernel);
-            let tx = app.cmd_tx.clone();
-            tokio::spawn(async move {
-                let reply = kernel.send(&target, payload).await;
-                let rendered =
-                    serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
-                let _ = tx.send(rendered);
-            });
-        }
-        Err(e) => app.km_line(format!("  ✗ {e}")),
-    }
-}
-
-/// The classic banner as raw ANSI (for the headless/greeting path) — the exact
-/// neon-magenta `█` + bright-magenta bold FANTASTIC from the first commit.
-fn ansi_banner(agents: usize) -> String {
-    let nm = "\x1b[38;5;165m"; // neon magenta
-    let bm = "\x1b[95m"; // bright magenta
-    let b = "\x1b[1m";
-    let d = "\x1b[2m";
-    let r = "\x1b[0m";
-    format!(
-        "\n  {nm}█{r}\n  {nm}█{r}  {bm}{b}FANTASTIC{r}\n  {nm}█{r}     {d}host · {agents} agents{r}\n\n"
-    )
 }
 
 /// The classic Diia-style asymmetric banner from the very first commit: a
@@ -863,27 +593,8 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
 
     match app.mode {
-        Mode::Kernel => render_console(
-            f,
-            rows[1],
-            &app.km_output,
-            &app.input,
-            " output ",
-            " command ",
-        ),
+        Mode::Chat => render_chat(f, rows[1], app),
         Mode::Terminal => render_terminal(f, app, rows[1]),
-        Mode::Ai => render_console(
-            f,
-            rows[1],
-            &app.ai_output,
-            &app.ai_input,
-            " conversation ",
-            if app.ai_busy {
-                " thinking… "
-            } else {
-                " message — Enter to send "
-            },
-        ),
         Mode::Intro => {
             let elapsed = app
                 .intro_since
@@ -922,45 +633,105 @@ fn render_terminal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new("terminal unavailable").block(blk), area);
 }
 
-/// A scrollback + input-line console, shared by the Kernel-manager and AI modes.
-fn render_console(
-    f: &mut Frame,
-    area: Rect,
-    lines: &VecDeque<String>,
-    input: &str,
-    out_title: &str,
-    in_title: &str,
-) {
+/// The unified chat: a scrolling transcript with per-source colored `│` rails,
+/// plus the sticky-targeted input line below it.
+fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(area);
 
-    let h = parts[0].height.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = lines
-        .iter()
-        .rev()
-        .take(h.max(1))
-        .rev()
-        .map(|l| ListItem::new(l.clone()))
-        .collect();
-    let out = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(out_title.to_string()),
-    );
-    f.render_widget(out, parts[0]);
+    let title = if app.chat_busy {
+        " chat · thinking… (Ctrl+C interrupts) ".to_string()
+    } else {
+        " chat ".to_string()
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(parts[0]);
+    f.render_widget(block, parts[0]);
 
-    let prompt = format!("› {input}");
+    let lines = transcript_lines(app);
+    // Show the tail that fits the pane height.
+    let h = inner.height as usize;
+    let skip = lines.len().saturating_sub(h.max(1));
+    let view: Vec<Line> = lines.into_iter().skip(skip).collect();
+    f.render_widget(Paragraph::new(view).wrap(Wrap { trim: false }), inner);
+
+    // Input line, prefixed with the sticky target (e.g. `@ai ▸ `).
+    let prefix = format!("@{} ▸ ", app.sticky);
+    let prompt = Line::from(vec![
+        Span::styled(
+            prefix.clone(),
+            Style::default().fg(chat::color_for(&app.sticky)),
+        ),
+        Span::raw(app.input.clone()),
+    ]);
     let line = Paragraph::new(prompt).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(in_title.to_string()),
+            .title(" message — @target to retarget, Enter to send "),
     );
     f.render_widget(line, parts[1]);
-    let cx = parts[1].x + 1 + (2 + input.chars().count()) as u16;
+    let cx = parts[1].x + 1 + (prefix.chars().count() + app.input.chars().count()) as u16;
     let cy = parts[1].y + 1;
     f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
+}
+
+/// Flatten the transcript into styled lines: each message renders a colored `│`
+/// gutter in its source color, the source label, then the wrapped body. `you`
+/// is bold/white; tool/note lines are dim; a live stream shows a trailing `▌`.
+fn transcript_lines(app: &App) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut out: Vec<Line> = Vec::new();
+    for m in app.chat.msgs() {
+        let rail = chat::color_for(&m.from);
+        let gutter = Span::styled("│ ", Style::default().fg(rail));
+        let label_style = if m.from == "you" {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(rail).add_modifier(Modifier::BOLD)
+        };
+        let label = Span::styled(format!("{}: ", m.from), label_style);
+        match &m.body {
+            Body::Text(t) => {
+                let live = matches!(m.state, State::Streaming);
+                let mut body = t.clone();
+                if live {
+                    body.push('▌');
+                }
+                if matches!(m.state, State::Interrupted) {
+                    body.push_str(" ⊘");
+                }
+                let body_style = if m.from == "you" {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default()
+                };
+                out.push(Line::from(vec![
+                    gutter,
+                    label,
+                    Span::styled(body, body_style),
+                ]));
+            }
+            Body::Tool {
+                verb,
+                target,
+                summary,
+            } => {
+                let mut text = format!("→ {verb} {target}");
+                if !summary.is_empty() {
+                    text.push_str(&format!("  {summary}"));
+                }
+                out.push(Line::from(vec![gutter, Span::styled(text, dim)]));
+            }
+            Body::Note(n) => {
+                out.push(Line::from(vec![gutter, Span::styled(n.clone(), dim)]));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
