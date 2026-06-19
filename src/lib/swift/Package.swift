@@ -67,7 +67,7 @@ let package = Package(
         .library(name: "FantasticKernelEmbedded", targets: ["FantasticKernelEmbedded"]),
         .library(name: "FantasticKernelFull", targets: ["FantasticKernelFull"]),
 
-        .executable(name: "fantastic", targets: ["Fantastic"]),
+        .executable(name: "fantastic_kernel", targets: ["Fantastic"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),

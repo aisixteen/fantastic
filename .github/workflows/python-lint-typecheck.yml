@@ -12,7 +12,7 @@ jobs:
         # Project moved under `python/` to make room for a forthcoming
         # Rust port at the repo root. CI steps that touched the Python
         # tree now run with cwd = python/.
-        working-directory: python
+        working-directory: src/lib/python
     steps:
       - uses: actions/checkout@v4
 

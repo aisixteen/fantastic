@@ -48,8 +48,8 @@ fi
 
 # Resolve to repo root regardless of cwd.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SWIFT_DIR="$REPO_ROOT/swift"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SWIFT_DIR="$REPO_ROOT/src/lib/swift"
 DIST_DIR="$REPO_ROOT/dist"
 
 cd "$REPO_ROOT"
@@ -94,11 +94,11 @@ echo "==> building universal binary"
 (
     cd "$SWIFT_DIR"
     # `swift build` with two --arch flags produces a `lipo`'d
-    # universal binary at `.build/apple/Products/Release/fantastic`.
+    # universal binary at `.build/apple/Products/Release/fantastic_kernel`.
     swift build -c release --arch arm64 --arch x86_64
 )
 
-UNIVERSAL_BIN="$SWIFT_DIR/.build/apple/Products/Release/fantastic"
+UNIVERSAL_BIN="$SWIFT_DIR/.build/apple/Products/Release/fantastic_kernel"
 if [[ ! -x "$UNIVERSAL_BIN" ]]; then
     echo "error: universal binary not at expected path: $UNIVERSAL_BIN" >&2
     echo "       (Swift toolchain layout may have changed; check .build/)" >&2
@@ -140,7 +140,7 @@ mkdir -p "$DIST_DIR"
 STAGE="$DIST_DIR/stage"
 mkdir -p "$STAGE"
 
-cp "$UNIVERSAL_BIN" "$STAGE/fantastic"
+cp "$UNIVERSAL_BIN" "$STAGE/fantastic_kernel"
 
 # SwiftPM emits resource bundles as siblings of the executable when
 # a target uses `.copy(...)`. They MUST travel with the binary or

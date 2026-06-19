@@ -39,7 +39,7 @@ WORKDIR="${FANTASTIC_WORKDIR:-/work}"
 PORT="${FANTASTIC_PORT:-8088}"
 export FANTASTIC_JS_KERNEL_ZIP="${FANTASTIC_JS_KERNEL_ZIP:-/opt/fantastic/js_kernel.zip}"
 
-PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic}"
+PY="${FANTASTIC_PY:-/opt/fantastic/venv/bin/fantastic_kernel}"
 RUST="${FANTASTIC_RUST:-/opt/fantastic/bin/fantastic-rust}"
 SWIFT="${FANTASTIC_SWIFT:-/opt/fantastic/bin/fantastic-swift}"
 

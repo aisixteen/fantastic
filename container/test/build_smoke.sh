@@ -34,7 +34,7 @@ freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0))
 # way a project/LLM would, before the daemon boots it. The call legs (web_ws,
 # web_rest) are io_bridge derivations — SEALED by default — so we open them with
 # ingress_rule=allow_all, exactly as the operator must. $1=workdir $2=bin $3=root $4=port
-PYBIN=/opt/fantastic/venv/bin/fantastic
+PYBIN=/opt/fantastic/venv/bin/fantastic_kernel
 RUSTBIN=/opt/fantastic/bin/fantastic-rust
 SWIFTBIN=/opt/fantastic/bin/fantastic-swift
 compose_web() {
@@ -68,7 +68,7 @@ fi
 # All three runtimes are full HTTP servers (swift's web is swift-nio now), so
 # each appears in the one-shot reflect check AND the serve checks below.
 echo "== reflect.runtime per runtime =="
-for pair in "python:/opt/fantastic/venv/bin/fantastic" \
+for pair in "python:/opt/fantastic/venv/bin/fantastic_kernel" \
             "rust:/opt/fantastic/bin/fantastic-rust" \
             "swift:/opt/fantastic/bin/fantastic-swift"; do
   rt=${pair%%:*}; bin=${pair#*:}

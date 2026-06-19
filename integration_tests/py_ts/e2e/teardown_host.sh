@@ -26,5 +26,5 @@ else
 fi
 # Remove the workdir only once the daemon is confirmed dead (it writes there).
 [ -n "$TMP" ] && rm -rf "$TMP" && echo "removed $TMP"
-rm -f "$REPO/ts/dist/_e2e_canvas.html" 2>/dev/null || true
+rm -f "$REPO/src/lib/ts/dist/_e2e_canvas.html" 2>/dev/null || true
 echo "torn down"

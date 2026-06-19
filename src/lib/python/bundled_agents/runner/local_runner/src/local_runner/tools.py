@@ -16,7 +16,7 @@ Live state is read from two sibling files in the project's
 
 Record fields (set on create_agent):
   remote_path  — project root (absolute filesystem path)
-  remote_cmd   — `fantastic` CLI to invoke (default: "fantastic" from PATH)
+  remote_cmd   — `fantastic` CLI to invoke (default: "fantastic_kernel" from PATH)
   entry_path   — URL suffix appended to the live serve URL for
                  `get_webapp` (e.g. "<canvas_backend_id>/" so the
                  iframe lands directly on the project's canvas)
@@ -183,7 +183,7 @@ class LocalTransport(Transport):
 
     @property
     def remote_cmd(self) -> str:
-        return self.rec.get("remote_cmd", "fantastic")
+        return self.rec.get("remote_cmd", "fantastic_kernel")
 
     # poll-loop constants — read the module-level names so tests that
     # monkeypatch `local_runner.tools.LOCK_POLL_*` are honoured by core.
@@ -203,7 +203,7 @@ class LocalTransport(Transport):
         pid, port = _live_pid_port(self.remote_path)
         return {
             "remote_path": self.rec.get("remote_path"),
-            "remote_cmd": self.rec.get("remote_cmd", "fantastic"),
+            "remote_cmd": self.rec.get("remote_cmd", "fantastic_kernel"),
             "entry_path": self.rec.get("entry_path", ""),
             "running": pid is not None,
             "pid": pid,

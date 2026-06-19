@@ -27,9 +27,9 @@ PUSH="${PUSH:-0}"
 VERSION="${FANTASTIC_VERSION:-dev}"
 
 # ── prereq: the bundled JS runtime (copied prebuilt from ts/) ──────────────
-if [ ! -f "$REPO/ts/dist/js_kernel.zip" ]; then
-  echo "build.sh: ts/dist/js_kernel.zip missing — building it (cd ts && sh scripts/pack.sh)"
-  ( cd "$REPO/ts" && sh scripts/pack.sh )
+if [ ! -f "$REPO/src/lib/ts/dist/js_kernel.zip" ]; then
+  echo "build.sh: ts/dist/js_kernel.zip missing — building it (cd src/lib/ts && sh scripts/pack.sh)"
+  ( cd "$REPO/src/lib/ts" && sh scripts/pack.sh )
 fi
 
 # ── prereq: generate the descriptive head page from the repo readmes ───────

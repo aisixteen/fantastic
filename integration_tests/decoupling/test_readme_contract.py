@@ -75,12 +75,12 @@ def _readme_sources() -> list[tuple[Path, str]]:
     """
     out: list[tuple[Path, str]] = []
     for base in [
-        _REPO / "python" / "bundled_agents",
-        _REPO / "rust" / "crates" / "bundles",
+        _REPO / "src" / "lib" / "python" / "bundled_agents",
+        _REPO / "src" / "lib" / "rust" / "crates" / "bundles",
     ]:
         for f in base.glob("**/readme.md"):
             out.append((f, f.read_text(encoding="utf-8", errors="ignore")))
-    for f in (_REPO / "swift" / "Sources").glob("Fantastic*/**/*.swift"):
+    for f in (_REPO / "src" / "lib" / "swift" / "Sources").glob("Fantastic*/**/*.swift"):
         txt = f.read_text(encoding="utf-8", errors="ignore")
         for m in re.finditer(r"var readme:\s*String\?\s*\{(.*?)\n\s*\}", txt, re.S):
             out.append((f, m.group(1)))
@@ -97,9 +97,9 @@ def _sentence_lines() -> list[tuple[Path, int, str]]:
     """
     out: list[tuple[Path, int, str]] = []
     globs = [
-        (_REPO / "python" / "bundled_agents", "**/tools.py"),
-        (_REPO / "rust" / "crates" / "bundles", "**/*.rs"),
-        (_REPO / "swift" / "Sources", "Fantastic*/**/*.swift"),
+        (_REPO / "src" / "lib" / "python" / "bundled_agents", "**/tools.py"),
+        (_REPO / "src" / "lib" / "rust" / "crates" / "bundles", "**/*.rs"),
+        (_REPO / "src" / "lib" / "swift" / "Sources", "Fantastic*/**/*.swift"),
     ]
     _TEST_MARKERS = ("/tests.rs", "/tests/", "/examples/", "test_", "Tests/")
     for base, g in globs:
