@@ -4,6 +4,7 @@
 //! into its in-proc kernel and drives everything through the one primitive —
 //! `kernel.send(target, payload)`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -65,16 +66,52 @@ pub fn register_host_bundles() -> BundleRegistry {
     reg
 }
 
-/// Compose the privileged host kernel: bootstrap the full bundle set in-memory,
-/// then boot every loaded agent. Returns the kernel handle + the loaded agent
-/// ids (the product reflects/serves/drives through `kernel.send`).
+/// The app's own state home — `$FANTASTIC_HOME`, else the OS-native per-app data
+/// dir (`directories::ProjectDirs::data_dir()`: `~/.local/share/fantastic-tui` on
+/// Linux, `~/Library/Application Support/aisixteen.fantastic-tui` on macOS,
+/// `%APPDATA%\aisixteen\fantastic-tui\data` on Windows). This is the MANAGER
+/// kernel's workdir — its `.fantastic/` store is the app's hydration source. It
+/// is NOT the host/workspace dir: those use the cwd ([`Workspace`]). The dir is
+/// created if missing; falls back to `~/.fantastic-tui` then the temp dir.
+pub fn app_home() -> PathBuf {
+    if let Some(h) = std::env::var_os("FANTASTIC_HOME") {
+        let p = PathBuf::from(h);
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
+    let dir = directories::ProjectDirs::from("", "aisixteen", "fantastic-tui")
+        .map(|d| d.data_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fantastic-tui")))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Compose the privileged MANAGER kernel — disk-backed at [`app_home`], so the
+/// app **hydrates from `<app_home>/.fantastic`** and persists across runs (the
+/// brain's history, any app agents). Boots every loaded agent. The host /
+/// workspace kernels are separate processes rooted at the cwd ([`Workspace`]).
 pub async fn compose_manager() -> Result<(Arc<Kernel>, Vec<AgentId>)> {
+    let booted = bootstrap::bootstrap(
+        register_host_bundles(),
+        BootstrapOptions::daemon(app_home()),
+    )?;
+    boot_loaded(&booted.kernel, &booted.loaded).await;
+    Ok((Arc::clone(&booted.kernel), booted.loaded))
+}
+
+/// In-memory variant (no disk, no lock, no hydration) — for tests + the headful
+/// harness, which must not touch the real app home or contend on its lock.
+pub async fn compose_manager_in_memory() -> Result<(Arc<Kernel>, Vec<AgentId>)> {
     let booted = bootstrap::bootstrap(register_host_bundles(), BootstrapOptions::in_memory())?;
-    let kernel = Arc::clone(&booted.kernel);
-    for id in &booted.loaded {
+    boot_loaded(&booted.kernel, &booted.loaded).await;
+    Ok((Arc::clone(&booted.kernel), booted.loaded))
+}
+
+async fn boot_loaded(kernel: &Arc<Kernel>, loaded: &[AgentId]) {
+    for id in loaded {
         let _ = kernel.send(id, json!({"type":"boot"})).await;
     }
-    Ok((kernel, booted.loaded))
 }
 
 /// k=v value coercion (mirrors the kernel CLI): bool → int → float → JSON

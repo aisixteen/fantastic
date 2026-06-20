@@ -821,6 +821,10 @@ fn ui(f: &mut Frame, app: &App) {
     let clock = app.boot.elapsed().as_secs_f32();
     let full = f.area();
 
+    // Dark theme, always: force a black canvas so the app looks the same on a
+    // light or dark terminal — dark sky everywhere, content opaque on top.
+    fill_black(f.buffer_mut(), full);
+
     // STATE 1 — the intro movie plays full-screen (its own starfield + scenes).
     if app.intro_playing {
         let elapsed = app
@@ -1057,7 +1061,7 @@ mod e2e {
     fn test_app() -> App {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let (kernel, loaded) = rt
-            .block_on(fantastic_host::compose_manager())
+            .block_on(fantastic_host::compose_manager_in_memory())
             .expect("compose host kernel");
         let agent_count = loaded.len();
 

@@ -75,6 +75,7 @@ fn main() {
         .expect("openpty");
     let mut cmd = CommandBuilder::new(&bin);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("FANTASTIC_HOME", cwd.join("home")); // app state → temp, not the real home
     cmd.cwd(&cwd);
     let mut child = pair.slave.spawn_command(cmd).expect("spawn");
     drop(pair.slave);

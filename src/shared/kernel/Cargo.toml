@@ -11,6 +11,8 @@ description = "fantastic-host — composes the privileged in-proc host kernel (f
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 tokio = { version = "1.40", features = ["full"] }
+# OS-native per-app data dir (the app's state home) — XDG / Application Support / APPDATA.
+directories = "5"
 # The gateway drives a sovereign workspace kernel over loopback HTTP. rustls (no
 # OpenSSL) keeps the build self-contained; we only ever hit 127.0.0.1 anyway.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
