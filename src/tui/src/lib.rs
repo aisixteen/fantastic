@@ -1,13 +1,17 @@
 //! `fantastic-tui` — the ratatui terminal UI for the product.
 //!
-//! Modes — Shift+Tab cycles, or click a header tab: Chat / Terminal / Intro.
-//! - **Chat**: ONE transcript that unifies the AI brain and the kernel manager.
-//!   Every line routes by `@target`: `@ai …`/`@brain …` streams an AI turn;
-//!   `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a sugar command.
-//!   With no `@` the line goes to the sticky target. Per-source colored rails
-//!   keep agents distinct; AI turns stream live and Ctrl+C interrupts.
-//! - **Terminal**: a real PTY (`$SHELL`).
-//! - **Intro**: a scripted retro "movie" of how Fantastic works (see `movie.rs`).
+//! ONE unified chat surface. A single transcript unifies the AI brain and the
+//! kernel manager: every line routes by `@target`: `@ai …`/`@brain …` streams an
+//! AI turn; `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a sugar
+//! command. With no `@` the line goes to the sticky target. Per-source colored
+//! rails keep agents distinct; AI turns stream live and Ctrl+C interrupts.
+//!
+//! Two facilities live INSIDE the chat (no modes):
+//! - **Terminal**: `@sh <cmd>` runs a real PTY (`$SHELL`) as a breathing
+//!   viewport below the transcript. **Ctrl+F** focuses the PTY for full
+//!   interactivity (vim/htop/…); Esc or Ctrl+F releases focus back to chat.
+//! - **Intro**: `/intro` plays a scripted retro "movie" (see `movie.rs`); any
+//!   key stops it and returns to chat.
 
 use std::collections::VecDeque;
 use std::io::{self};
@@ -20,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -38,62 +42,10 @@ use fantastic_brain as ai;
 use fantastic_host::gateway::{self, KernelHandle};
 use fantastic_term::{used_rows, TerminalSession};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Chat,
-    Terminal,
-    Intro,
-}
-
-impl Mode {
-    fn next(self) -> Self {
-        match self {
-            Mode::Chat => Mode::Terminal,
-            Mode::Terminal => Mode::Intro,
-            Mode::Intro => Mode::Chat,
-        }
-    }
-}
-
-/// The mode tabs, in header order — the single source of truth shared by the
-/// header renderer (`brand_header`) and the click hit-test (`tab_at`), so their
-/// column math can never drift apart.
-const MODE_TABS: [(&str, Mode); 3] = [
-    ("Chat", Mode::Chat),
-    ("Terminal", Mode::Terminal),
-    ("Intro", Mode::Intro),
-];
-
 /// The client_id the brain emits its streaming events to (our inbox key).
 const CLIENT_ID: &str = "fantastic";
 /// The brain agent id (kept in sync with `fantastic-brain`).
 const BRAIN_ID: &str = "brain";
-
-/// The frame row the tab labels render on (header line 2 of 3: bar / tabs / hint).
-const TAB_ROW: u16 = 1;
-/// Fixed prefix on the tab line: `"  █  "` (5) + `"FANTASTIC"` (9).
-const TAB_PREFIX: usize = 14;
-
-/// Hit-test a click at `(col, row)` against the mode tabs. Mirrors the exact
-/// span widths laid down by `brand_header`. Returns the clicked `Mode`, if any.
-fn tab_at(agent_count: usize, col: u16, row: u16) -> Option<Mode> {
-    if row != TAB_ROW {
-        return None;
-    }
-    let host = format!("    host: {agent_count} agents    ");
-    let mut x = TAB_PREFIX + host.chars().count();
-    for (i, (label, mode)) in MODE_TABS.iter().enumerate() {
-        let w = label.chars().count() + 2; // " label "
-        if (col as usize) >= x && (col as usize) < x + w {
-            return Some(*mode);
-        }
-        x += w;
-        if i < MODE_TABS.len() - 1 {
-            x += 3; // " · " separator
-        }
-    }
-    None
-}
 
 /// Async results from the workspace-gateway tasks, delivered back into the
 /// `select!` loop. Spawned tasks own a cloned `KernelHandle` and report here.
@@ -111,7 +63,6 @@ enum WsEvent {
 struct App {
     kernel: Arc<Kernel>,
     agent_count: usize,
-    mode: Mode,
     events: VecDeque<String>,
     /// Chat mode: the one unified transcript + its input line + sticky target.
     chat: Transcript,
@@ -133,13 +84,19 @@ struct App {
     chat_term_grid: (u16, u16),
     /// True once the brain has been provisioned (so we only ensure it once).
     brain_ready: bool,
-    /// Terminal-proxy mode PTY (spawned at startup).
+    /// The shared live PTY (`$SHELL`), spawned at startup.
     term: Option<TerminalSession>,
-    /// Chat mode: render the live PTY as a breathing viewport below the
-    /// transcript (set once `@sh` runs a command in this session).
+    /// Render the live PTY as a breathing viewport below the transcript (set
+    /// once `@sh` runs a command in this session).
     term_active: bool,
-    /// Intro mode: the scripted movie + when it (re)started (for its clock).
+    /// While true, keystrokes are encoded straight to the PTY (full
+    /// interactivity); Esc / Ctrl+F release focus back to the chat input. Only
+    /// meaningful when a terminal viewport is active.
+    term_focused: bool,
+    /// The scripted intro movie + when it (re)started (for its frame clock).
     movie: movie::Movie,
+    /// True while `/intro` is playing over the chat body; any key stops it.
+    intro_playing: bool,
     intro_since: Option<Instant>,
     quit: bool,
     /// Exit affordances. `last_ctrl_c`: a second Ctrl+C within the window quits
@@ -218,14 +175,13 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     intro::play(); // modular startup flourish — remove this line + intro.rs to disable
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
-    // Spawn the terminal-proxy PTY at the body size.
-    let (trows, tcols) = term_grid(&term);
+    // Spawn the shared PTY sized to the chat breathing-viewport grid.
+    let (trows, tcols) = chat_term_grid(&term);
     let session = TerminalSession::spawn(trows, tcols, redraw_tx.clone()).ok();
 
     let mut app = App {
         kernel,
         agent_count,
-        mode: Mode::Chat,
         events: VecDeque::new(),
         chat: Transcript::new(),
         input: String::new(),
@@ -240,30 +196,29 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         brain_ready: false,
         term: session,
         term_active: false,
+        term_focused: false,
         movie: movie::Movie::storyboard(),
+        intro_playing: false,
         intro_since: None,
         quit: false,
         last_ctrl_c: None,
         q_streak: 0,
         last_q: None,
     };
-    app.push_event(
-        "host kernel composed — Shift+Tab switches modes · double Ctrl+C / hold q / Ctrl-Q to exit"
-            .into(),
-    );
+    app.push_event("host kernel composed — double Ctrl+C / hold q / Ctrl-Q to exit".into());
     app.chat.push(
         "system",
         "you",
         Body::Note(
-            "Chat — `@ai …` talks to the brain (streams live, Ctrl+C interrupts); `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a command. No `@` reuses the last target.".into(),
+            "Chat — `@ai …` talks to the brain (streams live, Ctrl+C interrupts); `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a command. `@sh <cmd>` runs a shell (Ctrl+F focuses it); `/intro` plays the movie. No `@` reuses the last target.".into(),
         ),
         State::Done,
     );
     term.draw(|f| ui(f, &app))?;
 
-    // ~16fps heartbeat that only matters in Intro mode (the movie's frame clock).
-    // In every other mode the tick `continue`s before the redraw, so it costs
-    // nothing — those modes still repaint on their own events.
+    // ~16fps heartbeat that only matters while `/intro` is playing (the movie's
+    // frame clock). Otherwise the tick `continue`s before the redraw, so it
+    // costs nothing — the chat repaints on its own events.
     let mut ticker = tokio::time::interval(Duration::from_millis(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -283,29 +238,21 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
             Some(()) = redraw_rx.recv() => {}
             _ = ticker.tick() => {
-                if app.mode != Mode::Intro { continue; }
+                if !app.intro_playing { continue; }
             }
             else => break,
         }
         if app.quit {
             break;
         }
-        // Keep the PTY grid matched to whichever pane currently hosts it. In
-        // Terminal mode the PTY fills the body; in Chat mode the breathing
-        // viewport gives the PTY the full chat-body height (so htop/vim get
-        // real room) while only `used_rows` of it are displayed.
-        if app.mode == Mode::Terminal {
-            let (r, c) = term_grid(&term);
+        // Keep the PTY grid matched to the breathing chat viewport: it gets the
+        // full chat-body height (so htop/vim get real room) while only
+        // `used_rows` of it are displayed below the transcript.
+        app.chat_term_grid = chat_term_grid(&term);
+        if app.term_active {
+            let (r, c) = app.chat_term_grid;
             if let Some(ts) = app.term.as_mut() {
                 ts.resize(r, c);
-            }
-        } else if app.mode == Mode::Chat {
-            app.chat_term_grid = chat_term_grid(&term);
-            if app.term_active {
-                let (r, c) = app.chat_term_grid;
-                if let Some(ts) = app.term.as_mut() {
-                    ts.resize(r, c);
-                }
             }
         }
         term.draw(|f| ui(f, &app))?;
@@ -348,17 +295,15 @@ fn q_hold_streak(prev: u8, last: Option<Instant>, now: Instant) -> u8 {
     }
 }
 
+/// True when a breathing terminal viewport is live (so Ctrl+F focus + PTY
+/// SIGINT routing are meaningful).
+fn term_live(app: &App) -> bool {
+    app.term_active && app.term.is_some()
+}
+
 fn handle_input(app: &mut App, ev: Event) {
-    // Mouse: a left-click on a header mode tab switches to that mode.
-    if let Event::Mouse(m) = ev {
-        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if let Some(mode) = tab_at(app.agent_count, m.column, m.row) {
-                app.mode = mode;
-                app.intro_since = (app.mode == Mode::Intro).then(Instant::now);
-            }
-        }
-        return;
-    }
+    // Mouse capture stays on so the alt-screen behaves, but there are no header
+    // tabs to hit-test anymore — mouse events are a no-op.
     let Event::Key(KeyEvent {
         code,
         kind,
@@ -371,22 +316,29 @@ fn handle_input(app: &mut App, ev: Event) {
     if kind != KeyEventKind::Press {
         return;
     }
-    // Global keys. Ctrl-Q is the reliable quit. Shift+Tab cycles modes.
-    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
+    // While the intro movie plays, ANY key stops it and returns to chat.
+    if app.intro_playing {
+        app.intro_playing = false;
+        app.intro_since = None;
+        return;
+    }
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-Q is the always-reliable quit (works even while the PTY is focused).
+    if ctrl && code == KeyCode::Char('q') {
         app.quit = true;
         return;
     }
-    if code == KeyCode::BackTab {
-        app.mode = app.mode.next();
-        // Start (or stop) the movie clock as we enter/leave Intro.
-        app.intro_since = (app.mode == Mode::Intro).then(Instant::now);
+    // Ctrl+F toggles PTY focus (only when a terminal viewport is live).
+    if ctrl && code == KeyCode::Char('f') {
+        if term_live(app) {
+            app.term_focused = !app.term_focused;
+        }
         return;
     }
     // Ctrl+C: a SECOND press within the window exits the app. A single press
-    // still does its normal job — in terminal mode it's forwarded to the shell
-    // as SIGINT (0x03) — so this stays terminal-compatible. Other modes just arm
-    // the double-press and show the hint.
-    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+    // still does its normal job: with a live terminal it's forwarded to the
+    // shell as SIGINT (0x03); otherwise it interrupts an in-flight AI stream.
+    if ctrl && code == KeyCode::Char('c') {
         let now = Instant::now();
         if ctrl_c_exits(app.last_ctrl_c, now) {
             app.quit = true;
@@ -394,40 +346,27 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         app.last_ctrl_c = Some(now);
         app.push_event("press Ctrl+C again to exit".into());
-        match app.mode {
-            // In the live PTY, forward SIGINT to the shell.
-            Mode::Terminal => {
-                if let Some(ts) = app.term.as_mut() {
-                    ts.write(&[0x03]);
-                }
+        if app.term_focused || term_live(app) {
+            if let Some(ts) = app.term.as_mut() {
+                ts.write(&[0x03]);
             }
-            // In chat with a breathing PTY, forward SIGINT to interrupt the
-            // running command (do NOT exit).
-            Mode::Chat if app.term_active => {
-                if let Some(ts) = app.term.as_mut() {
-                    ts.write(&[0x03]);
-                }
-            }
-            // In chat, interrupt an in-flight AI stream (do NOT exit).
-            Mode::Chat if app.chat.has_live() => {
-                app.chat.interrupt_live();
-                app.chat_busy = false;
-                let kernel = Arc::clone(&app.kernel);
-                tokio::spawn(async move {
-                    kernel
-                        .send(&AgentId::from(BRAIN_ID), json!({"type":"interrupt"}))
-                        .await;
-                });
-            }
-            _ => {}
+        } else if app.chat.has_live() {
+            app.chat.interrupt_live();
+            app.chat_busy = false;
+            let kernel = Arc::clone(&app.kernel);
+            tokio::spawn(async move {
+                kernel
+                    .send(&AgentId::from(BRAIN_ID), json!({"type":"interrupt"}))
+                    .await;
+            });
         }
         return;
     }
     // Hold `q` to exit: physically holding the key fires rapid auto-repeats; a
-    // run of them in a short window quits. A normal `q` (followed by any other
-    // key, which resets the streak) types as usual, so prompts stay usable.
+    // run of them in a short window quits. SUPPRESSED while the PTY is focused,
+    // where a typed `q` must reach the shell (only Ctrl+Q / double-Ctrl+C exit).
     if let KeyCode::Char('q') = code {
-        if !modifiers.contains(KeyModifiers::CONTROL) {
+        if !ctrl && !app.term_focused {
             let now = Instant::now();
             app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
             app.last_q = Some(now);
@@ -439,28 +378,28 @@ fn handle_input(app: &mut App, ev: Event) {
     } else {
         app.q_streak = 0;
     }
-    match app.mode {
-        Mode::Terminal => {
-            if let Some(ts) = app.term.as_mut() {
-                if let Some(bytes) = encode_key(code, modifiers) {
-                    ts.write(&bytes);
-                }
+    if app.term_focused {
+        // Full interactivity: encode the key straight to the PTY. Esc or Ctrl+F
+        // (handled above) release focus back to the chat input.
+        if code == KeyCode::Esc {
+            app.term_focused = false;
+            return;
+        }
+        if let Some(ts) = app.term.as_mut() {
+            if let Some(bytes) = encode_key(code, modifiers) {
+                ts.write(&bytes);
             }
         }
-        Mode::Chat => match code {
-            KeyCode::Char(c) => app.input.push(c),
-            KeyCode::Backspace => {
-                app.input.pop();
-            }
-            KeyCode::Enter => submit_chat(app),
-            _ => {}
-        },
-        Mode::Intro => {
-            // Space/Enter replays the movie from the top.
-            if matches!(code, KeyCode::Char(' ') | KeyCode::Enter) {
-                app.intro_since = Some(Instant::now());
-            }
+        return;
+    }
+    // Otherwise the keys edit the chat input line.
+    match code {
+        KeyCode::Char(c) => app.input.push(c),
+        KeyCode::Backspace => {
+            app.input.pop();
         }
+        KeyCode::Enter => submit_chat(app),
+        _ => {}
     }
 }
 
@@ -469,6 +408,13 @@ fn handle_input(app: &mut App, ev: Event) {
 /// and routes its reply back via `cmd_tx`.
 fn submit_chat(app: &mut App) {
     let line = std::mem::take(&mut app.input);
+    // `/intro` is a local command — play the scripted movie over the chat body
+    // (any key stops it). It never reaches the `@`-router.
+    if line.trim() == "/intro" {
+        app.intro_playing = true;
+        app.intro_since = Some(Instant::now());
+        return;
+    }
     let (sticky, route) = chat::route(&line, &app.sticky);
     app.sticky = sticky;
     match route {
@@ -742,20 +688,11 @@ fn encode_key(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// PTY grid size = the terminal-mode body pane (full width, minus header/events
-/// rows), inside its border.
-fn term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
-    let size = term.size().unwrap_or(Size::new(80, 24));
-    let rows = size.height.saturating_sub(3 + 8 + 2).max(1);
-    let cols = size.width.saturating_sub(2).max(1);
-    (rows, cols)
-}
-
-/// The chat-mode breathing-viewport grid `(rows, cols)`: the PTY is sized to the
+/// The chat breathing-viewport grid `(rows, cols)`: the PTY is sized to the
 /// FULL chat-body interior so full-screen TUIs get real room, even though only
-/// `used_rows` of it are displayed below the transcript. Subtracts the same
-/// header (3) + events (8) + body border (2) chrome `term_grid` does, then one
-/// more row for the viewport's `│ sh` header inside the chat body.
+/// `used_rows` of it are displayed below the transcript. Subtracts the header
+/// (3) + events (8) + body border (2) chrome, then one more row for the
+/// viewport's `│ sh` header inside the chat body and the input line (3).
 fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
     let size = term.size().unwrap_or(Size::new(80, 24));
     // Chat body interior height (Min(3) pane minus its border), minus the
@@ -767,7 +704,7 @@ fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16
 
 /// The classic Diia-style asymmetric banner from the very first commit: a
 /// neon-magenta `█` vertical bar with bright-magenta bold FANTASTIC, plus host
-/// status + the mode tabs on the middle line.
+/// status, the workspace chip, and a one-line route hint.
 fn brand_header(app: &App) -> Vec<Line<'static>> {
     let bar = Style::default().fg(Color::Indexed(165)); // neon magenta
     let name = Style::default()
@@ -775,25 +712,6 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
 
-    let mut mid = vec![
-        Span::styled("  █  ", bar),
-        Span::styled("FANTASTIC", name),
-        Span::styled(format!("    host: {} agents    ", app.agent_count), dim),
-    ];
-    for (i, (label, mode)) in MODE_TABS.iter().enumerate() {
-        let st = if *mode == app.mode {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            dim
-        };
-        l_push(&mut mid, format!(" {label} "), st);
-        if i < MODE_TABS.len() - 1 {
-            mid.push(Span::styled(" · ", dim));
-        }
-    }
     // Workspace status chip: `ws: none` (dim) or `ws: 127.0.0.1:<port>` in the
     // `ws` rail color, derived from the live gateway handle.
     let (ws_text, ws_style) = match &app.workspace {
@@ -805,18 +723,17 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
     };
     vec![
         Line::from(Span::styled("  █", bar)),
-        Line::from(mid),
         Line::from(vec![
             Span::styled("  █  ", bar),
-            Span::styled("Shift+Tab: change mode", dim),
-            Span::styled("    ", dim),
+            Span::styled("FANTASTIC", name),
+            Span::styled(format!("    host: {} agents    ", app.agent_count), dim),
             Span::styled(ws_text, ws_style),
         ]),
+        Line::from(vec![
+            Span::styled("  █  ", bar),
+            Span::styled("@ai · @sh · @ws · @kernel · /intro · Ctrl+F focus", dim),
+        ]),
     ]
-}
-
-fn l_push(line: &mut Vec<Span<'static>>, text: String, style: Style) {
-    line.push(Span::styled(text, style));
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -831,16 +748,14 @@ fn ui(f: &mut Frame, app: &App) {
 
     f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
 
-    match app.mode {
-        Mode::Chat => render_chat(f, rows[1], app),
-        Mode::Terminal => render_terminal(f, app, rows[1]),
-        Mode::Intro => {
-            let elapsed = app
-                .intro_since
-                .map(|t| t.elapsed().as_secs_f32())
-                .unwrap_or(0.0);
-            app.movie.render(f, rows[1], elapsed);
-        }
+    if app.intro_playing {
+        let elapsed = app
+            .intro_since
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        app.movie.render(f, rows[1], elapsed);
+    } else {
+        render_chat(f, rows[1], app);
     }
 
     let items: Vec<ListItem> = app
@@ -856,20 +771,6 @@ fn ui(f: &mut Frame, app: &App) {
             .title(" kernel events "),
     );
     f.render_widget(log, rows[2]);
-}
-
-fn render_terminal(f: &mut Frame, app: &App, area: Rect) {
-    let blk = Block::default()
-        .borders(Borders::ALL)
-        .title(" terminal · $SHELL — Ctrl-Q quits app ");
-    if let Some(ts) = &app.term {
-        if let Ok(p) = ts.parser.lock() {
-            let pt = tui_term::widget::PseudoTerminal::new(p.screen()).block(blk);
-            f.render_widget(pt, area);
-            return;
-        }
-    }
-    f.render_widget(Paragraph::new("terminal unavailable").block(blk), area);
 }
 
 /// The unified chat: a scrolling transcript with per-source colored `│` rails,
@@ -904,7 +805,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(1), Constraint::Length(vp_h)])
                     .split(inner);
-                render_chat_terminal(f, split[1], p.screen());
+                render_chat_terminal(f, split[1], p.screen(), app.term_focused);
                 split[0]
             } else {
                 inner
@@ -946,21 +847,33 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
 }
 
-/// Render the breathing PTY viewport: a colored `│ sh` rail header, then the
-/// `tui-term` widget of the vt100 screen below it. A short Rect shows the TOP
-/// of the screen — which is where shell output lives — so a few lines of output
-/// render compactly while a full-screen TUI fills the available height.
-fn render_chat_terminal(f: &mut Frame, area: Rect, screen: &vt100::Screen) {
+/// Render the breathing PTY viewport: a colored `│ sh` rail header (showing
+/// focus state), then the `tui-term` widget of the vt100 screen below it. A
+/// short Rect shows the TOP of the screen — which is where shell output lives —
+/// so a few lines of output render compactly while a full-screen TUI fills the
+/// available height. When `focused`, keystrokes pipe straight to the PTY.
+fn render_chat_terminal(f: &mut Frame, area: Rect, screen: &vt100::Screen, focused: bool) {
     let rail = chat::color_for("sh");
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
-    let header = Line::from(vec![Span::styled(
+    let mut spans = vec![Span::styled(
         "│ sh",
         Style::default().fg(rail).add_modifier(Modifier::BOLD),
-    )]);
-    f.render_widget(Paragraph::new(header), parts[0]);
+    )];
+    if focused {
+        spans.push(Span::styled(
+            " ● focused (Esc to release)",
+            Style::default().fg(rail),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "  (Ctrl+F to focus)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), parts[0]);
     let pt = tui_term::widget::PseudoTerminal::new(screen);
     f.render_widget(pt, parts[1]);
 }
@@ -1031,7 +944,6 @@ mod e2e {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::crossterm::event::MouseEvent;
 
     /// Build an `App` wired to a real host kernel, with dummy channels and no
     /// PTY. The kernel is composed via a blocking runtime so the helper itself
@@ -1052,7 +964,6 @@ mod e2e {
         App {
             kernel,
             agent_count,
-            mode: Mode::Chat,
             events: VecDeque::new(),
             chat: Transcript::new(),
             input: String::new(),
@@ -1067,13 +978,24 @@ mod e2e {
             brain_ready: false,
             term: None,
             term_active: false,
+            term_focused: false,
             movie: movie::Movie::storyboard(),
+            intro_playing: false,
             intro_since: None,
             quit: false,
             last_ctrl_c: None,
             q_streak: 0,
             last_q: None,
         }
+    }
+
+    fn ctrl(code: KeyCode) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: ratatui::crossterm::event::KeyEventState::NONE,
+        })
     }
 
     /// Flatten a rendered buffer to a single string (cell symbols, row order).
@@ -1132,37 +1054,68 @@ mod e2e {
     }
 
     #[test]
-    fn backtab_cycles_mode() {
+    fn slash_intro_plays_and_any_key_stops_it() {
         let mut app = test_app();
-        assert!(app.mode == Mode::Chat);
-        handle_input(&mut app, key(KeyCode::BackTab));
-        assert!(app.mode == Mode::Terminal, "Chat → Terminal on BackTab");
-        handle_input(&mut app, key(KeyCode::BackTab));
-        assert!(app.mode == Mode::Intro, "Terminal → Intro on BackTab");
+        assert!(!app.intro_playing);
+        // Type `/intro` and submit it.
+        for c in "/intro".chars() {
+            handle_input(&mut app, key(KeyCode::Char(c)));
+        }
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert!(app.intro_playing, "`/intro` submit starts the movie");
+        assert!(app.intro_since.is_some(), "the movie clock is armed");
+        assert!(app.input.is_empty(), "the input line is consumed");
+
+        // Any key stops it and returns to chat — and does NOT leak into input.
+        handle_input(&mut app, key(KeyCode::Char('z')));
+        assert!(!app.intro_playing, "any key stops the movie");
+        assert!(app.input.is_empty(), "the stop key does not edit input");
     }
 
     #[test]
-    fn header_tab_click_switches_mode() {
+    fn ctrl_f_toggles_focus_only_with_live_terminal() {
         let mut app = test_app();
-        assert!(app.mode == Mode::Chat);
-
-        // Find a column inside the "Intro" tab on the header tab row, reusing the
-        // exact hit-test the runtime uses, then click it.
-        let intro_col = (0u16..200)
-            .find(|&c| tab_at(app.agent_count, c, TAB_ROW) == Some(Mode::Intro))
-            .expect("an Intro tab column should exist on the header row");
-
-        let click = Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: intro_col,
-            row: TAB_ROW,
-            modifiers: KeyModifiers::NONE,
-        });
-        handle_input(&mut app, click);
+        // No terminal viewport → Ctrl+F is a no-op.
+        assert!(!app.term_focused);
+        handle_input(&mut app, ctrl(KeyCode::Char('f')));
         assert!(
-            app.mode == Mode::Intro,
-            "clicking the Intro header tab switches to Intro mode"
+            !app.term_focused,
+            "Ctrl+F does nothing without a live terminal viewport"
         );
+
+        // The toggle is gated on a live viewport (`term_active && term.is_some`).
+        // Spawning a real PTY in a unit test is awkward, so assert the gate
+        // directly: with no session, `term_live` is false regardless of the flag.
+        app.term_active = true;
+        assert!(
+            !term_live(&app),
+            "term_active alone is not a live viewport without a session"
+        );
+        handle_input(&mut app, ctrl(KeyCode::Char('f')));
+        assert!(
+            !app.term_focused,
+            "Ctrl+F still no-ops while there is no PTY session"
+        );
+    }
+
+    #[test]
+    fn focused_terminal_suppresses_q_hold_exit() {
+        // While focused, a held `q` must reach the PTY, NOT trip the exit streak.
+        let mut app = test_app();
+        app.term_focused = true;
+        for _ in 0..(Q_HOLD_STREAK + 2) {
+            handle_input(&mut app, key(KeyCode::Char('q')));
+        }
+        assert!(!app.quit, "held `q` while focused must not exit the app");
+        assert_eq!(app.q_streak, 0, "the exit streak never accumulates");
+    }
+
+    #[test]
+    fn esc_releases_terminal_focus() {
+        let mut app = test_app();
+        app.term_focused = true;
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert!(!app.term_focused, "Esc releases focus back to chat");
     }
 }
 
