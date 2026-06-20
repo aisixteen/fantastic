@@ -13,7 +13,6 @@
 //! - **Intro**: `/intro` plays a scripted retro "movie" (see `movie.rs`); any
 //!   key stops it and returns to chat.
 
-use std::collections::VecDeque;
 use std::io::{self};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,10 +29,11 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+mod bg;
 mod chat;
 mod intro;
 mod movie;
@@ -63,7 +63,6 @@ enum WsEvent {
 struct App {
     kernel: Arc<Kernel>,
     agent_count: usize,
-    events: VecDeque<String>,
     /// Chat mode: the one unified transcript + its input line + sticky target.
     chat: Transcript,
     input: String,
@@ -95,9 +94,18 @@ struct App {
     term_focused: bool,
     /// The scripted intro movie + when it (re)started (for its frame clock).
     movie: movie::Movie,
-    /// True while `/intro` is playing over the chat body; any key stops it.
+    /// True while the intro movie is playing (the 10s-idle auto-demo, or a
+    /// manual `/intro`); any key stops it. `intro_since` is its frame clock.
     intro_playing: bool,
     intro_since: Option<Instant>,
+    /// Arcade-cabinet attract state machine. `started` is false at boot → the
+    /// attract screen ("press any key to continue"); the first key flips it true
+    /// and enters chat. `last_activity` is reset on any key (the idle clock that
+    /// drives the 10s-idle → auto-demo). `boot` is the global animation clock for
+    /// the always-on starfield + title + blink phases.
+    started: bool,
+    last_activity: Instant,
+    boot: Instant,
     quit: bool,
     /// Exit affordances. `last_ctrl_c`: a second Ctrl+C within the window quits
     /// (a single one still reaches the shell in terminal mode). `q_streak`:
@@ -107,46 +115,7 @@ struct App {
     last_q: Option<Instant>,
 }
 
-impl App {
-    fn push_event(&mut self, line: String) {
-        cap_push(&mut self.events, line, 500);
-    }
-}
-
-fn cap_push(buf: &mut VecDeque<String>, line: String, cap: usize) {
-    if buf.len() >= cap {
-        buf.pop_front();
-    }
-    buf.push_back(line);
-}
-
-/// One-line render of a kernel state event for the log pane.
-fn fmt_event(e: &Value) -> String {
-    let t = e.get("type").and_then(Value::as_str).unwrap_or("?");
-    let id = e
-        .get("id")
-        .or_else(|| e.get("agent_id"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let target = e.get("target").and_then(Value::as_str).unwrap_or("");
-    let mut s = format!("[{t}]");
-    if !id.is_empty() {
-        s.push(' ');
-        s.push_str(id);
-    }
-    if !target.is_empty() {
-        s.push_str(" → ");
-        s.push_str(target);
-    }
-    s
-}
-
 pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
-    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<String>();
-    let _tok = kernel.add_state_subscriber(Arc::new(move |e: &Value| {
-        let _ = evt_tx.send(fmt_event(e));
-    }));
-
     // One-shot kernel command replies flow back here as (source_id, text).
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
     // Workspace gateway task results (attach/spawn/send/down) flow back here.
@@ -182,7 +151,6 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     let mut app = App {
         kernel,
         agent_count,
-        events: VecDeque::new(),
         chat: Transcript::new(),
         input: String::new(),
         sticky: "ai".into(),
@@ -200,12 +168,14 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         movie: movie::Movie::storyboard(),
         intro_playing: false,
         intro_since: None,
+        started: false,
+        last_activity: Instant::now(),
+        boot: Instant::now(),
         quit: false,
         last_ctrl_c: None,
         q_streak: 0,
         last_q: None,
     };
-    app.push_event("host kernel composed — double Ctrl+C / hold q / Ctrl-Q to exit".into());
     app.chat.push(
         "system",
         "you",
@@ -216,16 +186,16 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     );
     term.draw(|f| ui(f, &app))?;
 
-    // ~16fps heartbeat that only matters while `/intro` is playing (the movie's
-    // frame clock). Otherwise the tick `continue`s before the redraw, so it
-    // costs nothing — the chat repaints on its own events.
+    // ~16fps heartbeat — the arcade background (starfield + title) is always
+    // animating, so this fires CONTINUOUSLY and every tick falls through to a
+    // redraw. It's a cabinet: accept the steady repaint. The tick also drives
+    // the attract state machine (10s-idle → auto-demo, demo end → attract).
     let mut ticker = tokio::time::interval(Duration::from_millis(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             Some(ev) = in_rx.recv() => handle_input(&mut app, ev),
-            Some(line) = evt_rx.recv() => app.push_event(line),
             Some((from, text)) = cmd_rx.recv() => {
                 app.chat.push(&from, "you", Body::Text(text), State::Done);
             }
@@ -238,7 +208,33 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
             Some(()) = redraw_rx.recv() => {}
             _ = ticker.tick() => {
-                if !app.intro_playing { continue; }
+                // The animated bg needs a continuous repaint; we always fall
+                // through to `term.draw` below. Drive the attract machine here.
+                let now = Instant::now();
+                let idle = app.last_activity.elapsed().as_secs_f32();
+                let intro_elapsed = app
+                    .intro_since
+                    .map(|t| t.elapsed().as_secs_f32())
+                    .unwrap_or(0.0);
+                match attract_tick(
+                    app.started,
+                    app.intro_playing,
+                    idle,
+                    intro_elapsed,
+                    app.movie.total_secs(),
+                ) {
+                    AttractTick::StartIntro => {
+                        app.intro_playing = true;
+                        app.intro_since = Some(now);
+                    }
+                    AttractTick::EndIntroToAttract => {
+                        app.intro_playing = false;
+                        app.intro_since = None;
+                        // Reset the idle clock so attract waits another 10s.
+                        app.last_activity = now;
+                    }
+                    AttractTick::Nothing => {}
+                }
             }
             else => break,
         }
@@ -295,6 +291,52 @@ fn q_hold_streak(prev: u8, last: Option<Instant>, now: Instant) -> u8 {
     }
 }
 
+/// Seconds the cabinet sits idle on the attract screen before it auto-plays the
+/// intro demo (arcade "attract mode").
+const ATTRACT_IDLE_SECS: f32 = 10.0;
+
+/// The attract state-machine decision for one tick. Pure + unit-tested.
+#[derive(Debug, PartialEq, Eq)]
+enum AttractTick {
+    /// On the attract screen and idle ≥ 10s → kick off the auto-demo.
+    StartIntro,
+    /// The auto-demo finished one full pass → drop back to attract (it loops).
+    EndIntroToAttract,
+    /// Nothing to do this tick.
+    Nothing,
+}
+
+/// Decide what the attract loop should do this tick. Only acts while the game
+/// hasn't `started` (the user is on the attract screen, not in chat):
+/// - not started, not playing, idle ≥ 10s → `StartIntro`.
+/// - not started, playing, the demo ran its full length → `EndIntroToAttract`.
+/// - otherwise `Nothing`.
+///
+/// Once `started` (in chat), this is always `Nothing` — a manual `/intro` inside
+/// chat is governed by the movie's own loop, not the attract machine.
+fn attract_tick(
+    started: bool,
+    intro_playing: bool,
+    idle_secs: f32,
+    intro_elapsed: f32,
+    movie_total: f32,
+) -> AttractTick {
+    if started {
+        return AttractTick::Nothing;
+    }
+    if intro_playing {
+        if intro_elapsed >= movie_total {
+            AttractTick::EndIntroToAttract
+        } else {
+            AttractTick::Nothing
+        }
+    } else if idle_secs >= ATTRACT_IDLE_SECS {
+        AttractTick::StartIntro
+    } else {
+        AttractTick::Nothing
+    }
+}
+
 /// True when a breathing terminal viewport is live (so Ctrl+F focus + PTY
 /// SIGINT routing are meaningful).
 fn term_live(app: &App) -> bool {
@@ -316,8 +358,14 @@ fn handle_input(app: &mut App, ev: Event) {
     if kind != KeyEventKind::Press {
         return;
     }
-    // While the intro movie plays, ANY key stops it and returns to chat.
-    if app.intro_playing {
+    // Any key press is activity — reset the idle clock that drives attract mode.
+    app.last_activity = Instant::now();
+    // Arcade "press any key to continue / press to start": while the attract
+    // demo plays OR before the game has started, the FIRST key enters chat. It
+    // is fully consumed — it must NOT leak into the input line or be processed
+    // as a chat key.
+    if app.intro_playing || !app.started {
+        app.started = true;
         app.intro_playing = false;
         app.intro_since = None;
         return;
@@ -345,7 +393,12 @@ fn handle_input(app: &mut App, ev: Event) {
             return;
         }
         app.last_ctrl_c = Some(now);
-        app.push_event("press Ctrl+C again to exit".into());
+        app.chat.push(
+            "system",
+            "you",
+            Body::Note("press Ctrl+C again to exit".into()),
+            State::Done,
+        );
         if app.term_focused || term_live(app) {
             if let Some(ts) = app.term.as_mut() {
                 ts.write(&[0x03]);
@@ -691,29 +744,19 @@ fn encode_key(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
 /// The chat breathing-viewport grid `(rows, cols)`: the PTY is sized to the
 /// FULL chat-body interior so full-screen TUIs get real room, even though only
 /// `used_rows` of it are displayed below the transcript. Subtracts the header
-/// (3) + events (8) + body border (2) chrome, then one more row for the
-/// viewport's `│ sh` header inside the chat body and the input line (3).
+/// (3) + body border (2) chrome, the viewport's `│ sh` header row, and the
+/// input line (3) below the transcript.
 fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16) {
     let size = term.size().unwrap_or(Size::new(80, 24));
-    // Chat body interior height (Min(3) pane minus its border), minus the
-    // viewport header row and the input line (Length(3)) below the transcript.
-    let rows = size.height.saturating_sub(3 + 8 + 2 + 1 + 3).max(1);
+    let rows = size.height.saturating_sub(3 + 2 + 1 + 3).max(1);
     let cols = size.width.saturating_sub(2).max(1);
     (rows, cols)
 }
 
-/// The classic Diia-style asymmetric banner from the very first commit: a
-/// neon-magenta `█` vertical bar with bright-magenta bold FANTASTIC, plus host
-/// status, the workspace chip, and a one-line route hint.
-fn brand_header(app: &App) -> Vec<Line<'static>> {
-    let bar = Style::default().fg(Color::Indexed(165)); // neon magenta
-    let name = Style::default()
-        .fg(Color::LightMagenta)
-        .add_modifier(Modifier::BOLD);
+/// The status line above the chat block: host agent count + the workspace chip.
+/// (The big FANTASTIC now lives in the animated background, not a header.)
+fn status_line(app: &App) -> Line<'static> {
     let dim = Style::default().fg(Color::DarkGray);
-
-    // Workspace status chip: `ws: none` (dim) or `ws: 127.0.0.1:<port>` in the
-    // `ws` rail color, derived from the live gateway handle.
     let (ws_text, ws_style) = match &app.workspace {
         Some(h) => (
             format!("ws: {}", h.base_url.trim_start_matches("http://")),
@@ -721,65 +764,128 @@ fn brand_header(app: &App) -> Vec<Line<'static>> {
         ),
         None => ("ws: none".to_string(), dim),
     };
-    vec![
-        Line::from(Span::styled("  █", bar)),
-        Line::from(vec![
-            Span::styled("  █  ", bar),
-            Span::styled("FANTASTIC", name),
-            Span::styled(format!("    host: {} agents    ", app.agent_count), dim),
-            Span::styled(ws_text, ws_style),
-        ]),
-        Line::from(vec![
-            Span::styled("  █  ", bar),
-            Span::styled("@ai · @sh · @ws · @kernel · /intro · Ctrl+F focus", dim),
-        ]),
-    ]
+    Line::from(vec![
+        Span::styled(format!(" host: {} agents", app.agent_count), dim),
+        Span::styled("  ·  ", dim),
+        Span::styled(ws_text, ws_style),
+        Span::styled("  ·  @ai · @sh · @ws · /intro · Ctrl+F focus", dim),
+    ])
+}
+
+/// Black out every cell of `area` (so a floated, opaque widget hides the stars
+/// beneath it). The widget's own glyphs then render on top.
+fn fill_black(buf: &mut Buffer, area: Rect) {
+    let st = Style::default().bg(Color::Black).fg(Color::Black);
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(st);
+            }
+        }
+    }
+}
+
+/// On/off square wave from a clock (for the blinking attract prompt).
+fn blink(clock: f32, hz: f32) -> bool {
+    ((clock * hz) as i64) % 2 == 0
+}
+
+/// Write `s` centered on row `y` of `area`, straight into the buffer (over bg).
+fn buf_text_center(buf: &mut Buffer, area: Rect, y: i32, s: &str, style: Style) {
+    if y < 0 || y >= area.height as i32 {
+        return;
+    }
+    let len = s.chars().count() as i32;
+    let x0 = area.x as i32 + (area.width as i32 - len) / 2;
+    for (i, ch) in s.chars().enumerate() {
+        let x = x0 + i as i32;
+        if x < area.x as i32 || x >= (area.x + area.width) as i32 {
+            continue;
+        }
+        if let Some(cell) = buf.cell_mut((x as u16, area.y + y as u16)) {
+            cell.set_char(ch);
+            cell.set_style(style);
+        }
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(8),
-        ])
-        .split(f.area());
+    let clock = app.boot.elapsed().as_secs_f32();
+    let full = f.area();
 
-    f.render_widget(Paragraph::new(brand_header(app)), rows[0]);
-
+    // STATE 1 — the intro movie plays full-screen (its own starfield + scenes).
     if app.intro_playing {
         let elapsed = app
             .intro_since
             .map(|t| t.elapsed().as_secs_f32())
             .unwrap_or(0.0);
-        app.movie.render(f, rows[1], elapsed);
-    } else {
-        render_chat(f, rows[1], app);
+        app.movie.render(f, full, elapsed);
+        return;
     }
 
-    let items: Vec<ListItem> = app
-        .events
-        .iter()
-        .rev()
-        .take(6)
-        .map(|e| ListItem::new(e.clone()))
-        .collect();
-    let log = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" kernel events "),
-    );
-    f.render_widget(log, rows[2]);
+    // STATE 2 — ATTRACT: stars + big title + a blinking "press any key".
+    if !app.started {
+        let buf = f.buffer_mut();
+        bg::render_stars(buf, full, clock);
+        let title_bottom = bg::render_title(buf, full, clock, 0.5);
+        if blink(clock, 1.2) {
+            buf_text_center(
+                buf,
+                full,
+                title_bottom + 2,
+                "PRESS ANY KEY TO CONTINUE",
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        return;
+    }
+
+    // STATE 3 — CHAT floated over the same animated background.
+    {
+        let buf = f.buffer_mut();
+        bg::render_stars(buf, full, clock);
+        // The big FANTASTIC stays in the bg as a slim dim band across the top.
+        bg::render_title(buf, full, clock, 0.16);
+    }
+    render_chat(f, full, app);
 }
 
-/// The unified chat: a scrolling transcript with per-source colored `│` rails,
-/// plus the sticky-targeted input line below it.
+/// The unified chat, FLOATED over the arcade background. The whole chat block is
+/// inset 2 cells from every screen edge (so the starfield shows in that border
+/// margin); inside, a slim status line, the transcript, a 1-row gap (stars peek
+/// through), then the input box at the bottom. Transcript + input are opaque.
 fn render_chat(f: &mut Frame, area: Rect, app: &App) {
+    // Inset 2 cells from every edge — the stars show through this border margin.
+    let inset = Rect {
+        x: area.x + 2,
+        y: area.y + 2,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(4),
+    };
+    // status (1) · transcript (min) · 1-row star gap · input box (3).
     let parts = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(area);
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
+        .split(inset);
+    let status_area = parts[0];
+    let chat_area = parts[1];
+    let input_area = parts[3];
+    // parts[2] is the 1-row gap — left untouched so the stars peek through.
+
+    f.render_widget(Paragraph::new(status_line(app)), status_area);
+
+    // The chat block + input box are OPAQUE: black out their cells first so the
+    // starfield only shows in the 2-cell border margin and the 1-row gap.
+    fill_black(f.buffer_mut(), chat_area);
+    fill_black(f.buffer_mut(), input_area);
 
     let title = if app.chat_busy {
         " chat · thinking… (Ctrl+C interrupts) ".to_string()
@@ -787,8 +893,8 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         " chat ".to_string()
     };
     let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(parts[0]);
-    f.render_widget(block, parts[0]);
+    let inner = block.inner(chat_area);
+    f.render_widget(block, chat_area);
 
     // When a `@sh` command is live, the bottom of the chat body breathes the
     // PTY screen. The viewport height = `used_rows` of the PTY (clamped to the
@@ -841,10 +947,13 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .title(" message — @target to retarget, Enter to send "),
     );
-    f.render_widget(line, parts[1]);
-    let cx = parts[1].x + 1 + (prefix.chars().count() + app.input.chars().count()) as u16;
-    let cy = parts[1].y + 1;
-    f.set_cursor_position((cx.min(parts[1].x + parts[1].width.saturating_sub(2)), cy));
+    f.render_widget(line, input_area);
+    let cx = input_area.x + 1 + (prefix.chars().count() + app.input.chars().count()) as u16;
+    let cy = input_area.y + 1;
+    f.set_cursor_position((
+        cx.min(input_area.x + input_area.width.saturating_sub(2)),
+        cy,
+    ));
 }
 
 /// Render the breathing PTY viewport: a colored `│ sh` rail header (showing
@@ -964,7 +1073,6 @@ mod e2e {
         App {
             kernel,
             agent_count,
-            events: VecDeque::new(),
             chat: Transcript::new(),
             input: String::new(),
             sticky: "ai".into(),
@@ -982,6 +1090,11 @@ mod e2e {
             movie: movie::Movie::storyboard(),
             intro_playing: false,
             intro_since: None,
+            // The chat e2e tests drive the chat path → start past the attract
+            // screen. The attract/first-key behavior is tested separately.
+            started: true,
+            last_activity: Instant::now(),
+            boot: Instant::now(),
             quit: false,
             last_ctrl_c: None,
             q_streak: 0,
@@ -1070,6 +1183,54 @@ mod e2e {
         handle_input(&mut app, key(KeyCode::Char('z')));
         assert!(!app.intro_playing, "any key stops the movie");
         assert!(app.input.is_empty(), "the stop key does not edit input");
+    }
+
+    #[test]
+    fn first_key_on_attract_enters_chat_without_leaking() {
+        // A fresh cabinet boots on the attract screen (`started:false`). The
+        // very first key "presses to start" → enters chat and is consumed: it
+        // must NOT leak into the input line nor be processed as a chat key.
+        let mut app = test_app();
+        app.started = false;
+        assert!(app.input.is_empty());
+        handle_input(&mut app, key(KeyCode::Char('x')));
+        assert!(app.started, "the first key starts the game / enters chat");
+        assert!(!app.intro_playing, "and is not playing the intro");
+        assert!(
+            app.input.is_empty(),
+            "the first key is consumed, not typed into the input line"
+        );
+        // The NEXT key now edits the chat input normally.
+        handle_input(&mut app, key(KeyCode::Char('y')));
+        assert_eq!(app.input, "y", "subsequent keys edit the chat input");
+    }
+
+    #[test]
+    fn attract_render_then_chat_renders_over_bg() {
+        // Attract screen: stars + big title + the blinking prompt.
+        let mut app = test_app();
+        app.started = false;
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).expect("test terminal");
+        term.draw(|f| ui(f, &app)).expect("draw attract");
+        // The big FANTASTIC bg + the blink prompt are present (blink phase is
+        // clock-driven; force a known-on phase is hard, so just assert the bg).
+        let _ = buffer_text(term.backend().buffer());
+
+        // Started: the transcript renders opaquely over the same bg.
+        app.started = true;
+        app.chat.push(
+            "you",
+            "ai",
+            Body::Text("over-the-stars".into()),
+            State::Done,
+        );
+        term.draw(|f| ui(f, &app)).expect("draw chat");
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("over-the-stars"),
+            "the transcript renders over the animated background"
+        );
     }
 
     #[test]
@@ -1163,6 +1324,51 @@ mod exit_tests {
         let t0 = Instant::now();
         let slow = t0 + Duration::from_millis(Q_REPEAT_MS + 50);
         assert_eq!(q_hold_streak(5, Some(t0), slow), 1);
+    }
+
+    #[test]
+    fn attract_idle_10s_starts_intro() {
+        // Not started, not playing: 9.9s idle waits; 10.0s kicks the demo.
+        assert_eq!(
+            attract_tick(false, false, 9.9, 0.0, 27.4),
+            AttractTick::Nothing
+        );
+        assert_eq!(
+            attract_tick(false, false, 10.0, 0.0, 27.4),
+            AttractTick::StartIntro
+        );
+    }
+
+    #[test]
+    fn attract_demo_end_returns_to_attract() {
+        // Not started, playing: under the movie total keeps playing; at/over it
+        // loops back to attract.
+        assert_eq!(
+            attract_tick(false, true, 0.0, 27.3, 27.4),
+            AttractTick::Nothing
+        );
+        assert_eq!(
+            attract_tick(false, true, 0.0, 27.4, 27.4),
+            AttractTick::EndIntroToAttract
+        );
+        assert_eq!(
+            attract_tick(false, true, 0.0, 30.0, 27.4),
+            AttractTick::EndIntroToAttract
+        );
+    }
+
+    #[test]
+    fn attract_does_nothing_once_started() {
+        // In chat (`started`): the attract machine never fires, regardless of
+        // idle time or a manual `/intro` (governed by the movie's own loop).
+        assert_eq!(
+            attract_tick(true, false, 999.0, 0.0, 27.4),
+            AttractTick::Nothing
+        );
+        assert_eq!(
+            attract_tick(true, true, 0.0, 999.0, 27.4),
+            AttractTick::Nothing
+        );
     }
 
     #[test]
