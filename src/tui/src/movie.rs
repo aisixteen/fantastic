@@ -200,7 +200,14 @@ pub(crate) fn starfield(buf: &mut Buffer, area: Rect, clock: f32) {
         } else {
             Color::DarkGray
         };
-        plot(buf, area, x, by as i32, ch, Style::default().fg(col));
+        plot(
+            buf,
+            area,
+            x,
+            by as i32,
+            ch,
+            Style::default().fg(col).bg(Color::Black),
+        );
     }
 }
 

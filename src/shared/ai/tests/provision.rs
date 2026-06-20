@@ -4,7 +4,7 @@
 //! deterministic and needs no ollama/network/API key.
 
 use fantastic_brain::ensure_brain;
-use fantastic_host::compose_manager;
+use fantastic_host::compose_manager_in_memory as compose_manager;
 use fantastic_kernel::AgentId;
 use serde_json::json;
 

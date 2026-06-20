@@ -65,7 +65,7 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     let fs = kernel
         .send(
             &AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"file_bridge.tools","id":FS_ID,"root":".","ingress_rule":"allow_all"}),
+            json!({"type":"create_agent","handler_module":"file_bridge.tools","id":FS_ID,"root":".fantastic","ingress_rule":"allow_all"}),
         )
         .await;
     if let Some(e) = err_of(&fs) {

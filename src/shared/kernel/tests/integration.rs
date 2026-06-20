@@ -4,7 +4,7 @@
 //! exercise `compose_manager` + the kernel's own `reflect`/`list_agents` verbs,
 //! so they're fully deterministic and CI-safe.
 
-use fantastic_host::compose_manager;
+use fantastic_host::compose_manager_in_memory as compose_manager;
 use fantastic_kernel::AgentId;
 use serde_json::{json, Value};
 
