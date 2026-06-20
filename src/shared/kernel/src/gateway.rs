@@ -378,6 +378,324 @@ impl Workspace {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Container backend.
+//
+// A workspace kernel can also run as a podman/docker container, driven over the
+// SAME loopback-HTTP attach path as a native process: the workdir is
+// bind-mounted, so `<dir>/.fantastic/` lands on the host and the existing
+// `discover()` + `attach()` find the port + rest id and reflect-ping
+// `127.0.0.1:<port>`. The container is just a different *launcher*; everything
+// downstream is identical.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Default arm64 image. Overridable via `FANTASTIC_IMAGE`.
+const DEFAULT_IMAGE: &str = "fantastic:arm64";
+
+/// The minimal serve-surface seed steps, as pure data (argv vectors), in order:
+/// store (file_bridge persistence rooted at `.fantastic`) → web (binds `port`)
+/// → web_ws (the WS bus) → web_rest (REST door, id `rest`). The container path
+/// replays these through `--entrypoint sh -c`; mirrors the native `seed` chain.
+pub fn surface_steps(root: &str, port: u16) -> Vec<Vec<String>> {
+    vec![
+        vec![
+            root.to_string(),
+            "create_agent".into(),
+            "handler_module=file_bridge.tools".into(),
+            "id=store".into(),
+            "root=.fantastic".into(),
+            "ingress_rule=allow_all".into(),
+        ],
+        vec![
+            root.to_string(),
+            "create_agent".into(),
+            "handler_module=web.tools".into(),
+            "id=web".into(),
+            format!("port={port}"),
+        ],
+        vec![
+            "web".into(),
+            "create_agent".into(),
+            "handler_module=web_ws.tools".into(),
+            "id=web_ws".into(),
+            "ingress_rule=allow_all".into(),
+        ],
+        vec![
+            "web".into(),
+            "create_agent".into(),
+            "handler_module=web_rest.tools".into(),
+            "id=rest".into(),
+            "ingress_rule=allow_all".into(),
+        ],
+    ]
+}
+
+/// In-container `(kernel bin path, root agent id)` per runtime. The root differs:
+/// python roots at `kernel_state`; rust/swift at `core`.
+fn container_spec(runtime: Runtime) -> (&'static str, &'static str) {
+    match runtime {
+        Runtime::Rust => ("/opt/fantastic/bin/fantastic-rust", "core"),
+        Runtime::Python => ("/opt/fantastic/venv/bin/fantastic_kernel", "kernel_state"),
+        Runtime::Swift => ("/opt/fantastic/bin/fantastic-swift", "core"),
+    }
+}
+
+/// The `FANTASTIC_RUNTIME` env value each runtime carries into the container.
+fn runtime_str(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Rust => "rust",
+        Runtime::Python => "python",
+        Runtime::Swift => "swift",
+    }
+}
+
+/// Resolve a container engine: `FANTASTIC_CONTAINER_ENGINE` (a path or name,
+/// honored verbatim) → else a manual `$PATH` scan for `podman` (preferred) then
+/// `docker` → else `None`. The bool is `is_podman` (drives `--userns=keep-id`).
+fn container_engine() -> Option<(String, bool)> {
+    if let Ok(e) = std::env::var("FANTASTIC_CONTAINER_ENGINE") {
+        if !e.is_empty() {
+            let is_podman = !e.to_lowercase().contains("docker");
+            return Some((e, is_podman));
+        }
+    }
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for (name, is_podman) in [("podman", true), ("docker", false)] {
+        for dir in &path_dirs {
+            let cand = dir.join(name);
+            if cand.is_file() {
+                return Some((cand.to_string_lossy().into_owned(), is_podman));
+            }
+        }
+    }
+    None
+}
+
+/// The image to run: `FANTASTIC_IMAGE` env → else the default arm64 tag.
+fn image() -> String {
+    std::env::var("FANTASTIC_IMAGE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_string())
+}
+
+/// Whether the image is present on the engine's host. NEVER pulls — a missing
+/// image is a hard error the caller must resolve by building it. `image inspect`
+/// exits 0 iff present (works for both podman and docker).
+fn image_present(engine: &str, image: &str) -> bool {
+    std::process::Command::new(engine)
+        .args(["image", "inspect", image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Pure builder for the `run -d` daemon argv. `--userns=keep-id` only when
+/// podman (docker rejects it). Unit-tested so the exact vector is pinned.
+fn run_daemon_args(
+    name: &str,
+    port: u16,
+    abs_workdir: &str,
+    runtime_str: &str,
+    image: &str,
+    is_podman: bool,
+) -> Vec<String> {
+    let mut a = vec!["run".to_string(), "-d".into(), "--name".into(), name.into()];
+    if is_podman {
+        a.push("--userns=keep-id".into());
+    }
+    a.extend([
+        "-p".into(),
+        format!("127.0.0.1:{port}:{port}"),
+        "-v".into(),
+        format!("{abs_workdir}:/work"),
+        "-e".into(),
+        format!("FANTASTIC_RUNTIME={runtime_str}"),
+        "-e".into(),
+        format!("FANTASTIC_PORT={port}"),
+        image.into(),
+    ]);
+    a
+}
+
+/// Pure builder for the one-shot compose argv (`--entrypoint sh -c <script>`),
+/// which replays the surface steps into the bind-mounted /work. `--userns` only
+/// for podman.
+fn compose_args(abs_workdir: &str, image: &str, is_podman: bool, script: &str) -> Vec<String> {
+    let mut a = vec!["run".to_string(), "--rm".into()];
+    if is_podman {
+        a.push("--userns=keep-id".into());
+    }
+    a.extend([
+        "-v".into(),
+        format!("{abs_workdir}:/work"),
+        "-w".into(),
+        "/work".into(),
+        "--entrypoint".into(),
+        "sh".into(),
+        image.into(),
+        "-c".into(),
+        script.into(),
+    ]);
+    a
+}
+
+/// Sanitize a dir basename into a container-name-safe token (`[a-z0-9_-]`).
+fn sanitize_name(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "ws".into()
+    } else {
+        trimmed
+    }
+}
+
+impl Workspace {
+    /// Spawn the workspace kernel as a podman/docker container, then attach to it
+    /// over the SAME loopback-HTTP path as a native process (the workdir is
+    /// bind-mounted, so `.fantastic/` is on the host). Composes the serve surface
+    /// once (skipped if already present), `run -d` the daemon, polls `attach()`
+    /// for ~15s, writes `<dir>/.fantastic/launch.json`, and returns
+    /// `(handle, container_name)`. On timeout, stops the container and errors.
+    pub async fn spawn_container(&self, runtime: Runtime) -> Result<(KernelHandle, String)> {
+        let (engine, is_podman) = container_engine().ok_or_else(|| {
+            anyhow!(
+                "no container engine found (set FANTASTIC_CONTAINER_ENGINE, or put podman/docker \
+                 on PATH)"
+            )
+        })?;
+        let img = image();
+        if !image_present(&engine, &img) {
+            return Err(anyhow!(
+                "image {img} not present; build it (sh container/build.sh) — never pulled"
+            ));
+        }
+
+        let (bin, root) = container_spec(runtime);
+
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("create workspace dir {}", self.dir.display()))?;
+        let abs_dir = std::fs::canonicalize(&self.dir)
+            .with_context(|| format!("canonicalize workspace dir {}", self.dir.display()))?;
+        let abs_workdir = abs_dir.to_string_lossy().into_owned();
+
+        let port = free_loopback_port()?;
+        let basename = abs_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = format!("ft-ws-{}-{}", sanitize_name(&basename), port);
+
+        // Compose the surface only if the web agent isn't already on disk (the
+        // bind-mounted .fantastic survives across runs). `discover()` returning
+        // None ⇒ not seeded yet.
+        if self.discover().is_none() {
+            let steps = surface_steps(root, port);
+            let script = steps
+                .iter()
+                .map(|step| format!("{bin} {}", step.join(" ")))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            let args = compose_args(&abs_workdir, &img, is_podman, &script);
+            let out = run_engine_blocking(&engine, &args).await?;
+            if !out.status.success() {
+                return Err(anyhow!(
+                    "container compose failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+        }
+
+        // Launch the daemon detached, port-mapped to loopback.
+        let run_args = run_daemon_args(
+            &name,
+            port,
+            &abs_workdir,
+            runtime_str(runtime),
+            &img,
+            is_podman,
+        );
+        let out = run_engine_blocking(&engine, &run_args).await?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "container run failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+
+        // Poll the existing attach() — the bind-mounted .fantastic carries the
+        // port + rest id, and reflect-ping confirms the in-container web surface.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(handle) = self.attach().await? {
+                let launch = serde_json::json!({
+                    "container": name,
+                    "engine": engine,
+                    "port": port,
+                });
+                let fdir = self.fantastic_dir();
+                let _ = std::fs::create_dir_all(&fdir);
+                let _ = std::fs::write(
+                    fdir.join("launch.json"),
+                    serde_json::to_string_pretty(&launch).unwrap_or_default(),
+                );
+                return Ok((handle, name));
+            }
+            if std::time::Instant::now() >= deadline {
+                stop_container(&engine, &name);
+                return Err(anyhow!(
+                    "container {name} started but its web surface never answered on port {port}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// Run `<engine> <args...>` to completion on a blocking thread (best for the
+/// short-lived `run`/`compose` invocations), capturing output.
+async fn run_engine_blocking(engine: &str, args: &[String]) -> Result<std::process::Output> {
+    let engine = engine.to_string();
+    let args = args.to_vec();
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&engine)
+            .args(&args)
+            .output()
+            .with_context(|| format!("run {engine} {}", args.join(" ")))
+    })
+    .await
+    .context("join engine command")?
+}
+
+/// Best-effort stop + remove a container by name (`stop -t 8` then `rm -f`).
+/// Blocking; ignores errors (the container may already be gone).
+pub fn stop_container(engine: &str, name: &str) {
+    let _ = std::process::Command::new(engine)
+        .args(["stop", "-t", "8", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::process::Command::new(engine)
+        .args(["rm", "-f", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// HTTP reflect-ping: liveness = the web surface answers with status < 500.
 async fn reflect_ping(handle: &KernelHandle) -> bool {
     let url = reflect_url(&handle.base_url, &handle.rest_id, None);
@@ -644,5 +962,146 @@ mod tests {
             send_url(base, rest, "kernel"),
             "http://127.0.0.1:8771/web_rest_95803a/kernel"
         );
+    }
+
+    // ── container backend ────────────────────────────────────────────────
+
+    #[test]
+    fn surface_steps_order_and_content() {
+        let steps = surface_steps("core", 8800);
+        assert_eq!(steps.len(), 4, "exactly the 4 surface steps");
+
+        // 1: store (file_bridge rooted at .fantastic).
+        assert_eq!(
+            steps[0],
+            vec![
+                "core",
+                "create_agent",
+                "handler_module=file_bridge.tools",
+                "id=store",
+                "root=.fantastic",
+                "ingress_rule=allow_all",
+            ]
+        );
+        // 2: web with the port embedded.
+        assert_eq!(
+            steps[1],
+            vec![
+                "core",
+                "create_agent",
+                "handler_module=web.tools",
+                "id=web",
+                "port=8800",
+            ]
+        );
+        // 3: web_ws under web.
+        assert_eq!(
+            steps[2],
+            vec![
+                "web",
+                "create_agent",
+                "handler_module=web_ws.tools",
+                "id=web_ws",
+                "ingress_rule=allow_all",
+            ]
+        );
+        // 4: web_rest under web, id=rest (the REST door).
+        assert_eq!(
+            steps[3],
+            vec![
+                "web",
+                "create_agent",
+                "handler_module=web_rest.tools",
+                "id=rest",
+                "ingress_rule=allow_all",
+            ]
+        );
+        // The python root threads through unchanged.
+        assert_eq!(surface_steps("kernel_state", 9)[0][0], "kernel_state");
+    }
+
+    #[test]
+    fn container_spec_maps_each_runtime() {
+        assert_eq!(
+            container_spec(Runtime::Rust),
+            ("/opt/fantastic/bin/fantastic-rust", "core")
+        );
+        assert_eq!(
+            container_spec(Runtime::Python),
+            ("/opt/fantastic/venv/bin/fantastic_kernel", "kernel_state")
+        );
+        assert_eq!(
+            container_spec(Runtime::Swift),
+            ("/opt/fantastic/bin/fantastic-swift", "core")
+        );
+    }
+
+    #[test]
+    fn run_daemon_args_podman_has_userns_and_all_flags() {
+        let args = run_daemon_args(
+            "ft-ws-proj-8800",
+            8800,
+            "/abs/work",
+            "rust",
+            "fantastic:arm64",
+            true,
+        );
+        assert!(args.contains(&"-d".to_string()));
+        // --name <name> (adjacent).
+        let ni = args.iter().position(|a| a == "--name").unwrap();
+        assert_eq!(args[ni + 1], "ft-ws-proj-8800");
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"127.0.0.1:8800:8800".to_string()));
+        assert!(args.contains(&"-v".to_string()));
+        assert!(args.contains(&"/abs/work:/work".to_string()));
+        assert!(args.contains(&"FANTASTIC_RUNTIME=rust".to_string()));
+        assert!(args.contains(&"FANTASTIC_PORT=8800".to_string()));
+        assert!(args.contains(&"fantastic:arm64".to_string()));
+        assert!(
+            args.contains(&"--userns=keep-id".to_string()),
+            "podman carries --userns=keep-id"
+        );
+        // The image is the LAST arg (no trailing daemon args here).
+        assert_eq!(args.last().unwrap(), "fantastic:arm64");
+    }
+
+    #[test]
+    fn run_daemon_args_docker_omits_userns() {
+        let args = run_daemon_args(
+            "ft-ws-proj-8800",
+            8800,
+            "/abs/work",
+            "python",
+            "fantastic:arm64",
+            false,
+        );
+        assert!(
+            !args.contains(&"--userns=keep-id".to_string()),
+            "docker must NOT carry --userns=keep-id"
+        );
+        assert!(args.contains(&"FANTASTIC_RUNTIME=python".to_string()));
+    }
+
+    #[test]
+    fn compose_args_replays_script_via_entrypoint_sh() {
+        let args = compose_args("/abs/work", "fantastic:arm64", true, "bin a && bin b");
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"--userns=keep-id".to_string()));
+        assert!(args.contains(&"/abs/work:/work".to_string()));
+        assert!(args.contains(&"--entrypoint".to_string()));
+        assert!(args.contains(&"sh".to_string()));
+        assert!(args.contains(&"-c".to_string()));
+        assert_eq!(args.last().unwrap(), "bin a && bin b");
+        // docker variant drops --userns.
+        let d = compose_args("/abs/work", "img", false, "x");
+        assert!(!d.contains(&"--userns=keep-id".to_string()));
+    }
+
+    #[test]
+    fn sanitize_name_lowers_and_strips() {
+        assert_eq!(sanitize_name("My Proj.dir"), "my-proj-dir");
+        assert_eq!(sanitize_name("--weird--"), "weird");
+        assert_eq!(sanitize_name("///"), "ws");
     }
 }
