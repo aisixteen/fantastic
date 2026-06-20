@@ -123,11 +123,26 @@ fn runtime_from_args(args: &[String]) -> Result<Runtime> {
     Ok(Runtime::Rust)
 }
 
-/// `fantastic up [--runtime rust]` — attach to (or spawn) the workspace kernel
-/// in cwd, then print attached/spawned + the base URL + the agent tree.
+/// `fantastic up [--container] [--image X] [--runtime rust]` — attach to (or
+/// spawn) the workspace kernel in cwd, then print attached/spawned + the base
+/// URL + the agent tree. `--container` runs it as a podman/docker container
+/// (same loopback-HTTP attach path); without it, the kernel is a native process.
 async fn cmd_up(args: &[String]) -> Result<()> {
     let runtime = runtime_from_args(args)?;
     let ws = Workspace::new(std::env::current_dir()?);
+
+    if args.iter().any(|a| a == "--container") {
+        // Honor `--image X` by setting the env the gateway reads (single source).
+        if let Some(img) = flag_value(args, "--image") {
+            std::env::set_var("FANTASTIC_IMAGE", img);
+        }
+        let (handle, name) = ws.spawn_container(runtime).await?;
+        println!("container {name} at {}", handle.base_url);
+        let tree = handle.reflect(None).await?;
+        println!("{}", serde_json::to_string_pretty(&tree)?);
+        return Ok(());
+    }
+
     let was_running = ws.attach().await?.is_some();
     let handle = ws.attach_or_spawn(runtime).await?;
     println!(
@@ -138,6 +153,14 @@ async fn cmd_up(args: &[String]) -> Result<()> {
     let tree = handle.reflect(None).await?;
     println!("{}", serde_json::to_string_pretty(&tree)?);
     Ok(())
+}
+
+/// Read `--flag <value>` out of the subcommand args (None if absent).
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// `fantastic k <id> <verb> [k=v ...]` — attach-or-spawn, send the verb over
@@ -163,10 +186,25 @@ async fn cmd_k(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `fantastic down` — if a kernel is attachable, ask the root to
-/// `shutdown_kernel` (graceful) and report; else say none running.
+/// `fantastic down` — container-aware. If `<cwd>/.fantastic/launch.json` records
+/// a `container`, stop+remove it via its engine and drop launch.json. Otherwise
+/// fall back to the native graceful `shutdown_kernel`.
 async fn cmd_down() -> Result<()> {
-    let ws = Workspace::new(std::env::current_dir()?);
+    let cwd = std::env::current_dir()?;
+    let launch_path = cwd.join(".fantastic").join("launch.json");
+    if let Ok(s) = std::fs::read_to_string(&launch_path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&s) {
+            if let Some(name) = v.get("container").and_then(Value::as_str) {
+                let engine = v.get("engine").and_then(Value::as_str).unwrap_or("podman");
+                fantastic_host::gateway::stop_container(engine, name);
+                let _ = std::fs::remove_file(&launch_path);
+                println!("stopped container {name}");
+                return Ok(());
+            }
+        }
+    }
+
+    let ws = Workspace::new(cwd);
     match ws.attach().await? {
         Some(handle) => {
             let reply = handle
