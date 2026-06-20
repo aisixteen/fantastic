@@ -14,7 +14,6 @@ tokio = { version = "1.40", features = ["full"] }
 anyhow = "1"
 ratatui = "0.29"
 # Terminal-proxy mode render + startup billboard.
-tui-banner = "0.2"
 tui-term = "0.2"
 vt100 = "0.15"
 

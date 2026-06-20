@@ -35,7 +35,6 @@ use tokio::sync::mpsc;
 
 mod bg;
 mod chat;
-mod intro;
 mod movie;
 use chat::{Body, Route, State, Transcript, WsCmd};
 use fantastic_brain as ai;
@@ -838,7 +837,7 @@ fn ui(f: &mut Frame, app: &App) {
         let buf = f.buffer_mut();
         bg::render_stars(buf, full, clock);
         let reveal = (app.attract_since.elapsed().as_secs_f32() / 1.5).clamp(0.0, 1.0);
-        let title_bottom = bg::render_title(buf, full, clock, 0.5, reveal);
+        let title_bottom = bg::render_title(buf, full, reveal);
         if blink(clock, 1.2) {
             buf_text_center(
                 buf,
