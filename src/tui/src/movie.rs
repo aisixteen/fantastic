@@ -46,6 +46,12 @@ impl Movie {
         }
     }
 
+    /// Total run length of the storyboard (sum of scene durations) in seconds.
+    /// The attract loop uses this to know when the demo has finished one pass.
+    pub fn total_secs(&self) -> f32 {
+        self.scenes.iter().map(|s| s.dur()).sum()
+    }
+
     /// Render the movie at `elapsed` seconds into `area` of the frame.
     pub fn render(&self, f: &mut Frame, area: Rect, elapsed: f32) {
         let durs: Vec<f32> = self.scenes.iter().map(|s| s.dur()).collect();
@@ -172,8 +178,10 @@ fn ease(t: f32) -> f32 {
     }
 }
 
-/// Twinkling, drifting starfield (deterministic).
-fn starfield(buf: &mut Buffer, area: Rect, clock: f32) {
+/// Twinkling, drifting starfield (deterministic). `pub(crate)` so the arcade
+/// background (`bg::render_stars`) reuses the exact same field — the attract
+/// screen, the chat screen, and the intro cutscene all share one starfield.
+pub(crate) fn starfield(buf: &mut Buffer, area: Rect, clock: f32) {
     let w = area.width.max(1) as u32;
     let h = area.height.max(1) as u32;
     let n = ((w * h) / 35).clamp(20, 220);
@@ -580,7 +588,16 @@ fn pp(buf: &mut Buffer, area: Rect, x: f32, y: f32, ch: char, st: Style) {
 
 #[cfg(test)]
 mod tests {
-    use super::scene_at;
+    use super::{scene_at, Movie};
+
+    #[test]
+    fn total_secs_sums_scene_durations() {
+        let m = Movie::storyboard();
+        // The sum of every scene's `dur()` — matches `scene_at` looping at total.
+        let expect: f32 = m.scenes.iter().map(|s| s.dur()).sum();
+        assert!((m.total_secs() - expect).abs() < 1e-6);
+        assert!(m.total_secs() > 0.0, "storyboard has positive run length");
+    }
 
     #[test]
     fn picks_scene_and_local_progress() {
