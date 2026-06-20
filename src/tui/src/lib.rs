@@ -29,7 +29,7 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -106,6 +106,10 @@ struct App {
     started: bool,
     last_activity: Instant,
     boot: Instant,
+    /// When the attract screen last (re)appeared — set at boot and reset every
+    /// time the cabinet drops back to attract (after a demo pass). Drives the
+    /// top→bottom "power-on" reveal of the big FANTASTIC on the attract screen.
+    attract_since: Instant,
     quit: bool,
     /// Exit affordances. `last_ctrl_c`: a second Ctrl+C within the window quits
     /// (a single one still reaches the shell in terminal mode). `q_streak`:
@@ -141,7 +145,6 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
-    intro::play(); // modular startup flourish — remove this line + intro.rs to disable
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // Spawn the shared PTY sized to the chat breathing-viewport grid.
@@ -171,6 +174,7 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         started: false,
         last_activity: Instant::now(),
         boot: Instant::now(),
+        attract_since: Instant::now(),
         quit: false,
         last_ctrl_c: None,
         q_streak: 0,
@@ -232,6 +236,8 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                         app.intro_since = None;
                         // Reset the idle clock so attract waits another 10s.
                         app.last_activity = now;
+                        // Re-arm the title reveal so it re-appears top→bottom.
+                        app.attract_since = now;
                     }
                     AttractTick::Nothing => {}
                 }
@@ -773,9 +779,11 @@ fn status_line(app: &App) -> Line<'static> {
 }
 
 /// Black out every cell of `area` (so a floated, opaque widget hides the stars
-/// beneath it). The widget's own glyphs then render on top.
+/// beneath it). The widget's own glyphs then render on top. The fill fg is
+/// White (not Black) so any UNSTYLED span (e.g. the raw input text) renders
+/// visibly over the panel instead of inheriting an invisible black fg.
 fn fill_black(buf: &mut Buffer, area: Rect) {
-    let st = Style::default().bg(Color::Black).fg(Color::Black);
+    let st = Style::default().bg(Color::Black).fg(Color::White);
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -824,11 +832,13 @@ fn ui(f: &mut Frame, app: &App) {
         return;
     }
 
-    // STATE 2 — ATTRACT: stars + big title + a blinking "press any key".
+    // STATE 2 — ATTRACT: stars + the big title appearing top→bottom over ~1.5s
+    // + a blinking "press any key".
     if !app.started {
         let buf = f.buffer_mut();
         bg::render_stars(buf, full, clock);
-        let title_bottom = bg::render_title(buf, full, clock, 0.5);
+        let reveal = (app.attract_since.elapsed().as_secs_f32() / 1.5).clamp(0.0, 1.0);
+        let title_bottom = bg::render_title(buf, full, clock, 0.5, reveal);
         if blink(clock, 1.2) {
             buf_text_center(
                 buf,
@@ -843,12 +853,11 @@ fn ui(f: &mut Frame, app: &App) {
         return;
     }
 
-    // STATE 3 — CHAT floated over the same animated background.
+    // STATE 3 — CHAT floated over the same animated background (starfield only,
+    // no title band).
     {
         let buf = f.buffer_mut();
         bg::render_stars(buf, full, clock);
-        // The big FANTASTIC stays in the bg as a slim dim band across the top.
-        bg::render_title(buf, full, clock, 0.16);
     }
     render_chat(f, full, app);
 }
@@ -882,19 +891,11 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
 
     f.render_widget(Paragraph::new(status_line(app)), status_area);
 
-    // The chat block + input box are OPAQUE: black out their cells first so the
-    // starfield only shows in the 2-cell border margin and the 1-row gap.
+    // The transcript + input box are OPAQUE: black out their cells first so the
+    // starfield only shows in the 2-cell border margin and the 1-row gap. There
+    // are no borders — the panels render directly into their areas.
     fill_black(f.buffer_mut(), chat_area);
     fill_black(f.buffer_mut(), input_area);
-
-    let title = if app.chat_busy {
-        " chat · thinking… (Ctrl+C interrupts) ".to_string()
-    } else {
-        " chat ".to_string()
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(chat_area);
-    f.render_widget(block, chat_area);
 
     // When a `@sh` command is live, the bottom of the chat body breathes the
     // PTY screen. The viewport height = `used_rows` of the PTY (clamped to the
@@ -904,23 +905,23 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
             if let Ok(p) = ts.parser.lock() {
                 // Leave the transcript at least one row; the viewport claims
                 // the rest, up to `used_rows` (+ its header).
-                let max_body = inner.height.saturating_sub(2).max(1);
+                let max_body = chat_area.height.saturating_sub(2).max(1);
                 let used = used_rows(&p, max_body).clamp(1, max_body);
-                let vp_h = (used + 1).min(inner.height.saturating_sub(1));
+                let vp_h = (used + 1).min(chat_area.height.saturating_sub(1));
                 let split = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(1), Constraint::Length(vp_h)])
-                    .split(inner);
+                    .split(chat_area);
                 render_chat_terminal(f, split[1], p.screen(), app.term_focused);
                 split[0]
             } else {
-                inner
+                chat_area
             }
         } else {
-            inner
+            chat_area
         }
     } else {
-        inner
+        chat_area
     };
 
     let lines = transcript_lines(app);
@@ -933,25 +934,22 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         transcript_area,
     );
 
-    // Input line, prefixed with the sticky target (e.g. `@ai ▸ `).
+    // Input line, prefixed with the sticky target (e.g. `@ai ▸ `). Rendered
+    // borderless directly into `input_area`; the typed text is explicitly White
+    // so it shows over the black panel.
     let prefix = format!("@{} ▸ ", app.sticky);
     let prompt = Line::from(vec![
         Span::styled(
             prefix.clone(),
             Style::default().fg(chat::color_for(&app.sticky)),
         ),
-        Span::raw(app.input.clone()),
+        Span::styled(app.input.clone(), Style::default().fg(Color::White)),
     ]);
-    let line = Paragraph::new(prompt).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" message — @target to retarget, Enter to send "),
-    );
-    f.render_widget(line, input_area);
-    let cx = input_area.x + 1 + (prefix.chars().count() + app.input.chars().count()) as u16;
-    let cy = input_area.y + 1;
+    f.render_widget(Paragraph::new(prompt), input_area);
+    let cx = input_area.x + (prefix.chars().count() + app.input.chars().count()) as u16;
+    let cy = input_area.y;
     f.set_cursor_position((
-        cx.min(input_area.x + input_area.width.saturating_sub(2)),
+        cx.min(input_area.x + input_area.width.saturating_sub(1)),
         cy,
     ));
 }
@@ -1095,6 +1093,7 @@ mod e2e {
             started: true,
             last_activity: Instant::now(),
             boot: Instant::now(),
+            attract_since: Instant::now(),
             quit: false,
             last_ctrl_c: None,
             q_streak: 0,
