@@ -15,9 +15,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 
-use crate::intro::{self, Bitmap};
-use std::sync::OnceLock;
-
 /// A single movie scene.
 trait Scene {
     /// Play length in seconds.
@@ -36,7 +33,6 @@ impl Movie {
     pub fn storyboard() -> Self {
         Movie {
             scenes: vec![
-                Box::new(Title),
                 Box::new(Send),
                 Box::new(Reflect),
                 Box::new(Compose),
@@ -230,59 +226,9 @@ fn chrome(buf: &mut Buffer, area: Rect, idx: usize, total: usize, clock: f32) {
     }
 }
 
-// ── the cached big letterform (rendered once) ───────────────────────
-
-fn title_bitmap() -> Option<&'static Bitmap> {
-    static BMP: OnceLock<Option<Bitmap>> = OnceLock::new();
-    BMP.get_or_init(intro::letterform).as_ref()
-}
-
 // ── scenes ──────────────────────────────────────────────────────────
 
-/// 1 — TITLE: starfield + gradient FANTASTIC + blinking subtitle.
-struct Title;
-impl Scene for Title {
-    fn dur(&self) -> f32 {
-        3.6
-    }
-    fn render(&self, buf: &mut Buffer, area: Rect, t: f32, clock: f32) {
-        starfield(buf, area, clock);
-        let mut title_bottom = area.height as i32 / 2;
-        if let Some(bm) = title_bitmap() {
-            let maxw = area.width as f32 * 0.72;
-            let maxh = area.height as f32 * 0.5;
-            let scale = (maxw / bm.w as f32).min(maxh / bm.h as f32).min(1.0);
-            let tw = ((bm.w as f32 * scale) as usize).max(1);
-            let th = ((bm.h as f32 * scale) as usize).max(1);
-            let on = intro::downscale(bm, tw, th);
-            let ox = (area.width as i32 - tw as i32) / 2;
-            let oy = (area.height as i32 / 2 - th as i32 / 2 - 1).max(0);
-            // A soft "power-on" reveal: rows appear top→bottom over the first 60%.
-            let revealed = ((t / 0.6).clamp(0.0, 1.0) * th as f32).ceil() as usize;
-            for ty in 0..th.min(revealed) {
-                let (r, g, b) = intro::gradient(ty as f32 / (th.max(2) - 1) as f32);
-                let st = bold(Color::Rgb(r, g, b));
-                for tx in 0..tw {
-                    if on[ty * tw + tx] {
-                        plot(buf, area, ox + tx as i32, oy + ty as i32, '█', st);
-                    }
-                }
-            }
-            title_bottom = oy + th as i32;
-        }
-        if t > 0.55 && blink(clock, 2.5) {
-            text_center(
-                buf,
-                area,
-                title_bottom + 1,
-                "EVERYTHING IS AN AGENT",
-                bold(Color::Cyan),
-            );
-        }
-    }
-}
-
-/// 2 — SEND: a packet eases along the wire from [core] to [web].
+/// SEND: a packet eases along the wire from [core] to [web].
 struct Send;
 impl Scene for Send {
     fn dur(&self) -> f32 {
@@ -347,7 +293,7 @@ impl Scene for Send {
     }
 }
 
-/// 3 — REFLECT: an agent box self-describes (typewriter).
+/// REFLECT: an agent box self-describes (typewriter).
 struct Reflect;
 impl Scene for Reflect {
     fn dur(&self) -> f32 {
@@ -410,7 +356,7 @@ impl Scene for Reflect {
     }
 }
 
-/// 4 — COMPOSE: nodes pop in and wire up into a living system.
+/// COMPOSE: nodes pop in and wire up into a living system.
 struct Compose;
 impl Scene for Compose {
     fn dur(&self) -> f32 {
@@ -466,7 +412,7 @@ impl Scene for Compose {
     }
 }
 
-/// 5 — BRAIN: the brain fires packets to other agents (it drives `send` too).
+/// BRAIN: the brain fires packets to other agents (it drives `send` too).
 struct Brain;
 impl Scene for Brain {
     fn dur(&self) -> f32 {
@@ -524,7 +470,7 @@ impl Scene for Brain {
     }
 }
 
-/// 6 — CREDITS: a color-cycling marquee scroller.
+/// CREDITS: a color-cycling marquee scroller.
 struct Credits;
 impl Scene for Credits {
     fn dur(&self) -> f32 {

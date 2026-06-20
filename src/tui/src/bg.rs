@@ -5,10 +5,10 @@
 //! These draw STRAIGHT into `f.buffer_mut()` (no widgets) so that real widgets
 //! (transcript, input box) render opaquely on top of them. The starfield reuses
 //! the movie's deterministic seeded starfield (`movie::starfield`) so the bg and
-//! the intro cutscene look identical; the title mirrors the movie Title scene's
-//! bitmap drawing (`intro::{letterform,downscale,gradient}`), scaled by
-//! `max_scale` so the attract screen can draw it large while the chat screen
-//! draws it small + dim as a top band.
+//! the intro cutscene look identical; the title is built from
+//! `intro::{letterform,downscale,gradient}`, scaled by `max_scale` and revealed
+//! top→bottom by `reveal` so the attract screen can draw it large and "power it
+//! on" row-by-row.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -44,9 +44,18 @@ pub(crate) fn render_stars(buf: &mut Buffer, area: Rect, clock: f32) {
 /// The big magenta-gradient FANTASTIC, centered horizontally near the top of
 /// `area`. `max_scale` bounds the size: ~0.5 draws the large attract billboard;
 /// a small value (e.g. 0.16) draws a slim dim title band for the chat screen.
-/// Returns the bottom row (area-relative) the title occupies, so callers can
-/// place text beneath it. Mirrors the movie Title scene's bitmap draw.
-pub(crate) fn render_title(buf: &mut Buffer, area: Rect, _clock: f32, max_scale: f32) -> i32 {
+/// `reveal ∈ [0,1]` is a top→bottom "power-on" wipe: only the top `ceil(reveal *
+/// th)` rows are drawn (so the title appears row-by-row); `reveal >= 1.0` draws
+/// the whole bitmap. Returns the bottom row (area-relative) the title occupies
+/// (the FULL bottom, so callers can place text beneath it even mid-reveal).
+/// Mirrors the movie Title scene's bitmap draw.
+pub(crate) fn render_title(
+    buf: &mut Buffer,
+    area: Rect,
+    _clock: f32,
+    max_scale: f32,
+    reveal: f32,
+) -> i32 {
     let Some(bm) = title_bitmap() else {
         return 0;
     };
@@ -68,7 +77,9 @@ pub(crate) fn render_title(buf: &mut Buffer, area: Rect, _clock: f32, max_scale:
     };
     // Dim the small chat-screen band so it reads as background, not foreground.
     let dim = max_scale < 0.3;
-    for ty in 0..th {
+    // Top→bottom reveal: only the top `ceil(reveal * th)` rows are drawn.
+    let revealed = (reveal.clamp(0.0, 1.0) * th as f32).ceil() as usize;
+    for ty in 0..th.min(revealed) {
         let (r, g, b) = intro::gradient(ty as f32 / (th.max(2) - 1) as f32);
         let (r, g, b) = if dim {
             (r / 2, g / 2, b / 2)
@@ -85,4 +96,33 @@ pub(crate) fn render_title(buf: &mut Buffer, area: Rect, _clock: f32, max_scale:
         }
     }
     oy + th as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Count the `█` title cells rendered into a fresh buffer at a given reveal.
+    fn glyphs_at(reveal: f32) -> usize {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render_title(&mut buf, area, 0.0, 0.5, reveal);
+        buf.content().iter().filter(|c| c.symbol() == "█").count()
+    }
+
+    #[test]
+    fn reveal_wipes_top_to_bottom() {
+        // A 0.0 reveal draws nothing; partial draws some; >=1.0 draws the full
+        // title — and the row-by-row wipe is monotonic (more reveal ≥ less).
+        let none = glyphs_at(0.0);
+        let half = glyphs_at(0.5);
+        let full = glyphs_at(1.0);
+        assert_eq!(none, 0, "reveal 0 draws no title rows");
+        assert!(full > 0, "a full reveal draws the title");
+        assert!(
+            half <= full,
+            "a partial reveal draws no more than the full one"
+        );
+        assert!(half > none, "a partial reveal draws more than nothing");
+    }
 }
