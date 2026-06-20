@@ -95,7 +95,7 @@ fn gradient(t: f32) -> (u8, u8, u8) {
 
 /// Draw the crisp block-font FANTASTIC, centered, scaled to the terminal. The
 /// integer `scale` = as large as fits the width, capped so the title is never
-/// taller than ~half the smaller screen dimension (dynamic, recomputed each
+/// taller than ~30% of the smaller screen dimension (dynamic, recomputed each
 /// frame). `reveal ∈ [0,1]` wipes it on top→bottom (the title "powers on").
 /// Returns the bottom row (area-relative) the title occupies.
 pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
@@ -105,11 +105,11 @@ pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
     if w == 0 || area.width < 4 || area.height < 3 {
         return 0;
     }
-    // Dynamic integer scale: fit ≤92% of the width, but cap the height at half
-    // the smaller screen dimension. Always ≥ 1 (so it shows even when cramped).
+    // Dynamic integer scale: fit ≤92% of the width, but cap the height at ~30%
+    // of the smaller screen dimension. Always ≥ 1 (so it shows even when cramped).
     let avail_w = (area.width as usize * 92) / 100;
-    let half_min = (area.width.min(area.height) as usize) / 2;
-    let scale = (avail_w / w).min((half_min / h).max(1)).max(1);
+    let cap = (area.width.min(area.height) as usize) * 3 / 10;
+    let scale = (avail_w / w).min((cap / h).max(1)).max(1);
     let tw = w * scale;
     let th = h * scale;
     let ox = (area.width as i32 - tw as i32) / 2;
