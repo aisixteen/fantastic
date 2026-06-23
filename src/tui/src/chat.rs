@@ -218,12 +218,35 @@ impl Transcript {
                     );
                 }
             }
-            "done" => {
+            "done" | "job_done" | "closed" => {
                 if let Some(seq) = self.live.remove(&source) {
                     self.set_state(seq, State::Done);
                 }
             }
-            _ => {}
+            // Transient control events carry no content worth retaining.
+            "queued" | "context" => {}
+            other => {
+                // Any OTHER event a watched command target emits (scheduler ticks,
+                // terminal output, progress, …) — surface it live as a dim activity
+                // line so a `@<id>` command renders like `@ai`, not just its final
+                // reply. Prefer a human field, else a compact one-line JSON.
+                let summary = ev
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| ev.get("data").and_then(Value::as_str))
+                    .or_else(|| ev.get("message").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        let s = serde_json::to_string(ev).unwrap_or_default();
+                        s.chars().take(200).collect()
+                    });
+                self.push(
+                    &source,
+                    &to,
+                    Body::Note(format!("[{other}] {summary}")),
+                    State::Done,
+                );
+            }
         }
     }
 }

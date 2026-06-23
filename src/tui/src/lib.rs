@@ -287,20 +287,31 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                 app.tabs.deliver(&from).push(&from, "you", Body::Text(text), State::Done);
             }
             Some(ev) = brain_rx.recv() => {
-                // LIVE TOKEN STREAM. The brain's inbox is mirrored to us via `watch`,
-                // and ai-core serializes turns (its own send_id queue) — it emits each
-                // turn IN ORDER on this one channel: `queued → token… → done`. So we
-                // render tokens live and seal on the ordered `done` (which always
-                // follows that turn's last token — no client-side race, no cross-turn
-                // split). `done` is the turn boundary that drains the queue.
+                // LIVE EVENT STREAM, shared by `@ai` AND `@<id>` commands. Any agent
+                // we `watch` mirrors its self-emitted events here; each carries a
+                // `source` naming the emitter. We render it live into THAT source's
+                // room via the same `on_event` (token append · say/activity note ·
+                // done seal). The brain (`source == BRAIN_ID`) additionally drives the
+                // AI turn lifecycle (phase indicator + queue drain on the ordered
+                // `done`); command targets just render — their final reply arrives via
+                // `cmd_rx` and there is no turn queue to drain.
                 let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                if ty == "status" {
+                let source = ev
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or(BRAIN_ID)
+                    .to_string();
+                let is_ai = source == BRAIN_ID;
+                // Room: the brain renders in the `ai` room; every other agent renders
+                // in the room named by its id (the `@<id>` room).
+                let room = if is_ai { "ai" } else { source.as_str() };
+                if is_ai && ty == "status" {
                     if let Some(p) = ev.get("phase").and_then(Value::as_str) {
                         app.ai_phase = Some(p.to_string());
                     }
                 }
-                app.tabs.deliver("ai").on_event(&ev); // token append · say · done seal
-                if ty == "done" {
+                app.tabs.deliver(room).on_event(&ev);
+                if is_ai && ty == "done" {
                     finish_ai_turn(&mut app);
                 }
             }
@@ -991,6 +1002,12 @@ fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
     let tx = app.cmd_tx.clone();
     let from = target.as_str().to_string();
     tokio::spawn(async move {
+        // Mirror the target's own inbox into our client inbox FIRST, so any
+        // events it emits while handling the verb (token/say/status/done, or a
+        // generic activity event) render LIVE in its room via `brain_rx` —
+        // exactly the path `@ai` uses. Idempotent. Targets that just return a
+        // reply emit nothing; their reply still renders below.
+        kernel.watch(&target, AgentId::from(CLIENT_ID)).await;
         let reply = kernel.send(&target, payload).await;
         let rendered = serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
         let _ = tx.send((from, rendered));
