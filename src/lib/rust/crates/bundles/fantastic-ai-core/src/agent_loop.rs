@@ -3,11 +3,12 @@
 //! tools. Shared by every backend; per-backend knobs ride on
 //! [`BackendConfig`].
 
-use crate::assembly::{assemble_messages, send_tool_def};
+use crate::assembly::assemble_messages;
 use crate::events::{emit_done, emit_status, to_caller, CallerRoute};
 use crate::history::save_history;
 use crate::provider::{Provider, ProviderEvent};
 use crate::state::BackendState;
+use crate::tool_parse::{parse_tool_calls, render_tool_call};
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -20,17 +21,30 @@ use std::sync::Arc;
 pub struct BackendConfig {
     /// How streaming events reach the caller.
     pub route: CallerRoute,
-    /// Serialize tool_call arguments to a JSON string in the persisted
-    /// assistant turn (OpenAI shape — NIM). When `false`, arguments are
-    /// embedded as a JSON object (ollama / Python reference shape).
-    pub tool_args_as_json: bool,
     /// Dispatch a batch of tool_calls in parallel (ollama) vs serially
     /// (NIM). Both preserve model-emitted order in the appended
-    /// `role:tool` messages.
+    /// `role:tool` message.
     pub parallel_tools: bool,
     /// Backend error-message prefix (e.g. `"ollama_backend"`), used by the
     /// context-projection seam's `too_small` / config-error messages.
     pub name: &'static str,
+}
+
+/// Project the internal message list to what the model actually reads — pure
+/// text, every role a chat template renders. Tool replies are stored as
+/// `role:tool` (so projection/recall tool-pairing stays intact) but mapped to
+/// `role:user` here, because many templates (incl. tiny local models) don't
+/// render a `tool` role at all. Strips any non-text keys.
+fn render_for_model(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+            let out_role = if role == "tool" { "user" } else { role };
+            let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
+            json!({"role": out_role, "content": content})
+        })
+        .collect()
 }
 
 /// Shared references bound for the duration of one generation. Cuts the
@@ -57,9 +71,13 @@ struct ToolCall {
 async fn run_pass(
     ctx: &LoopCtx<'_>,
     messages: &[Value],
-    tools: &[Value],
 ) -> Result<(String, Vec<ToolCall>), String> {
-    let mut stream = ctx.provider.chat(messages, tools).await?;
+    // RAW tool-calling: the provider streams pure text; the SHARED parser splits
+    // content tokens from `<tool_call>` envelopes (no native tools array).
+    // `render_for_model` projects stored turns to plain text every template renders.
+    let model_messages = render_for_model(messages);
+    let raw = ctx.provider.chat(&model_messages).await?;
+    let mut stream = parse_tool_calls(raw);
     let mut content_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut first_text_chunk = true;
@@ -103,23 +121,10 @@ async fn run_pass(
     Ok((content_parts.join(""), tool_calls))
 }
 
-/// Encode one tool-call into the assistant-turn `tool_calls` shape.
-fn assistant_tool_call(c: &ToolCall, tool_args_as_json: bool) -> Value {
-    let arguments = if tool_args_as_json {
-        json!(serde_json::to_string(&c.args).unwrap_or_else(|_| "{}".to_string()))
-    } else {
-        c.args.clone()
-    };
-    json!({
-        "id": c.id,
-        "type": "function",
-        "function": {"name": c.name, "arguments": arguments},
-    })
-}
-
 /// Dispatch one tool-call: emit entry/exit status, run the kernel.send,
-/// emit the `say` summary, and return the appended `role:tool` message.
-async fn dispatch_one(ctx: &LoopCtx<'_>, c: &ToolCall) -> Value {
+/// emit the `say` summary, and return `(name, reply_json_str)` for the
+/// caller to fold into the single `<tool_response>` turn.
+async fn dispatch_one(ctx: &LoopCtx<'_>, c: &ToolCall) -> (String, String) {
     let target = c
         .args
         .get("target_id")
@@ -202,12 +207,7 @@ async fn dispatch_one(ctx: &LoopCtx<'_>, c: &ToolCall) -> Value {
     )
     .await;
 
-    json!({
-        "role": "tool",
-        "tool_call_id": c.id,
-        "name": c.name,
-        "content": reply_str,
-    })
+    (c.name.clone(), reply_str)
 }
 
 /// The core streaming + tool-call loop. Runs inside the spawned task so
@@ -262,7 +262,6 @@ pub async fn run_generation(
                 .to_string());
         }
     };
-    let tools = vec![send_tool_def()];
     let mut last_text;
     let mut iteration = 0usize;
     loop {
@@ -279,28 +278,34 @@ pub async fn run_generation(
             )
             .await;
         }
-        let (content, tool_calls) = run_pass(&ctx, &model_messages, &tools).await?;
+        let (content, tool_calls) = run_pass(&ctx, &model_messages).await?;
         last_text = content;
 
         if tool_calls.is_empty() {
             break;
         }
 
-        // Record the assistant turn with its tool_calls (to BOTH lists).
-        let assistant_calls: Vec<Value> = tool_calls
+        // Record the assistant turn as TEXT — its prose plus the `<tool_call>`
+        // envelope(s) it emitted (no structured `tool_calls` field; raw,
+        // single-truth). Next turn the model re-reads its own call as text.
+        let call_tags: Vec<String> = tool_calls
             .iter()
-            .map(|c| assistant_tool_call(c, cfg.tool_args_as_json))
+            .map(|c| render_tool_call(&c.name, &c.args))
             .collect();
-        let assistant_turn = json!({
-            "role": "assistant",
-            "content": last_text,
-            "tool_calls": assistant_calls,
-        });
+        let joined = call_tags.join("\n");
+        let assistant_text = if last_text.is_empty() {
+            joined
+        } else if joined.is_empty() {
+            last_text.clone()
+        } else {
+            format!("{last_text}\n{joined}")
+        };
+        let assistant_turn = json!({"role": "assistant", "content": assistant_text});
         model_messages.push(assistant_turn.clone());
         messages.push(assistant_turn);
 
         // Dispatch the batch (parallel or serial), order preserved.
-        let results: Vec<Value> = if cfg.parallel_tools {
+        let results: Vec<(String, String)> = if cfg.parallel_tools {
             let futures = tool_calls.iter().map(|c| dispatch_one(&ctx, c));
             futures_util::future::join_all(futures).await
         } else {
@@ -311,10 +316,20 @@ pub async fn run_generation(
             out
         };
 
+        // ONE `role:tool` turn carrying every reply as `<tool_response>` text —
+        // mapped to role:user by `render_for_model` at the next pass. A single
+        // turn keeps role alternation clean for every chat template.
+        let tool_content = results
+            .iter()
+            .map(|(name, reply)| format!("<tool_response name=\"{name}\">{reply}</tool_response>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tool_turn = json!({"role": "tool", "content": tool_content});
+
         // Menu invalidates AFTER each tool batch.
         *state.menu.lock().expect("menu poisoned") = None;
-        model_messages.extend(results.clone());
-        messages.extend(results);
+        model_messages.push(tool_turn.clone());
+        messages.push(tool_turn);
     }
 
     // Done.

@@ -39,12 +39,6 @@ public struct AIBackendConfig: Sendable {
     /// carry no `id`.
     public var stateless: Bool
 
-    /// NIM-only: when the provider yields finalized `.toolCall`s, splice
-    /// them into the persisted assistant turn's `tool_calls` array
-    /// (sorted by id). Ollama / FM never emit tool-calls today, so this
-    /// is a no-op for them regardless.
-    public var persistToolCalls: Bool
-
     /// NIM-only: the `done` event on the ERROR path still carries the
     /// `accumulated` field (NIM's old `emitDone` always included it).
     /// Ollama / FM omit `accumulated` from error-path `done` events.
@@ -57,12 +51,6 @@ public struct AIBackendConfig: Sendable {
     /// simply stops reading and emits the normal success-shaped `done`
     /// with whatever it accumulated, persisting that partial turn.
     public var emitInterruptedError: Bool
-
-    /// Encode each tool-call's `arguments` as a JSON STRING in the
-    /// assistant turn fed back to the provider (OpenAI shape — NIM).
-    /// When `false` (ollama / FM / Python reference), arguments stay a
-    /// JSON object. Mirrors Rust's `BackendConfig.tool_args_as_json`.
-    public var toolArgsAsJson: Bool
 
     /// Dispatch a batch of tool-calls concurrently (ollama / FM) vs
     /// serially (NIM). Either way the appended `role:tool` messages keep
@@ -100,10 +88,8 @@ public struct AIBackendConfig: Sendable {
         sentence: String,
         verbs: JSON,
         stateless: Bool = false,
-        persistToolCalls: Bool = false,
         includeAccumulatedOnError: Bool = false,
         emitInterruptedError: Bool = false,
-        toolArgsAsJson: Bool = false,
         parallelTools: Bool = true,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
@@ -116,10 +102,8 @@ public struct AIBackendConfig: Sendable {
         self.sentence = sentence
         self.verbs = verbs
         self.stateless = stateless
-        self.persistToolCalls = persistToolCalls
         self.includeAccumulatedOnError = includeAccumulatedOnError
         self.emitInterruptedError = emitInterruptedError
-        self.toolArgsAsJson = toolArgsAsJson
         self.parallelTools = parallelTools
         self.reflectExtra = reflectExtra
         self.backendStateExtra = backendStateExtra

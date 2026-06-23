@@ -14,7 +14,8 @@ refresh_menu/reflect) PLUS the NIM-specific bits, all wired through
   key is set; `require_provider=True` makes `send` failfast cleanly.
 - Free tier rate-limits at ~40 RPM/model. `_stream_with_rate_limit_retry`
   (passed as `stream_wrapper`) retries once on a pre-stream HTTP 429.
-- OpenAI wants tool_call arguments as a JSON string → `tool_args_as_json=True`.
+- Tool-calling is RAW (owned by ai_core): the provider streams plain text and
+  ai_core parses the `<tool_call>` envelope — no native tools array.
 - `error_mapper` turns a provider httpx.HTTPStatusError into a clean
   caller-facing error inside `send`.
 
@@ -35,7 +36,6 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
-    SEND_TOOL,
     _assemble,
     _build_menu,
     _current,
@@ -132,7 +132,7 @@ async def _stream_with_rate_limit_retry(
     while True:
         yielded_anything = False
         try:
-            async for chunk in provider.chat(messages, tools=[SEND_TOOL]):
+            async for chunk in provider.chat(messages):
                 yielded_anything = True
                 yield chunk
             return
@@ -209,7 +209,7 @@ def _build():
     from nvidia_nim_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
-        sentence="NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling).",
+        sentence="NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
         default_model=DEFAULT_MODEL,
         default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,
@@ -218,7 +218,6 @@ def _build():
         extra_verbs={"set_api_key": _set_api_key, "clear_api_key": _clear_api_key},
         reflect_extra=_reflect_extra,
         stream_wrapper=_stream_with_rate_limit_retry,
-        tool_args_as_json=True,
         require_provider=True,
         provider_missing_error="nvidia_nim_backend: api_key not set; call set_api_key first",
         error_mapper=_map_error,

@@ -92,7 +92,7 @@ public enum AIStrategies {
         ]
         var parts = ""
         do {
-            let stream = provider.chat(messages: prompt, tools: [])
+            let stream = provider.chat(messages: prompt)
             for try await chunk in stream {
                 if case .token(let t) = chunk { parts += t }
             }

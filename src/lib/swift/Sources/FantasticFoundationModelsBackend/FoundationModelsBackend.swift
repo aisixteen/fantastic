@@ -52,7 +52,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 kind: "foundation_models_backend",
                 provider: "apple_foundation_models",
                 sentence:
-                    "Apple Foundation Models LLM agent (on-device, native tool-calling).",
+                    "Apple Foundation Models LLM agent (on-device; raw prompt-and-parse tool-calling).",
                 verbs: [
                     "send":
                         "args: text, client_id?. Atomic stateless call: (system + tools + text) → streaming reply.",
@@ -120,6 +120,8 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         foundation_models_backend — Apple on-device Foundation Models LLM backend; thin over FantasticAICore.
         Verbs: send/history/interrupt/backend_state. Same LLM backend contract as \
         ollama_backend; runs stateless against the native on-device model.
+        Tool-calling is RAW: no Apple @Generable Tool — the model generates text and \
+        FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
         Durable memory: on boot, mem+data yaml_state agents are auto-mounted and their \
         contents spliced into the model instructions on every send (always-on; no explicit recall needed).
         """

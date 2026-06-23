@@ -1,16 +1,15 @@
 //! Provider — the streaming-chat seam every LLM backend implements.
 //!
-//! A provider is a thin streaming adapter: it takes OpenAI-style
-//! messages + the universal `send` tool and yields either content
-//! tokens or FINALIZED tool-calls. It holds no agent state — the
-//! queue / lock / history all live in [`crate::state`] /
-//! [`crate::agent_loop`].
+//! A provider is a PURE RAW-TEXT streamer: it takes plain chat messages
+//! (role system/user/assistant, text content) and yields content tokens
+//! ([`ProviderEvent::Token`]) only. It does NOT do tool-calling — Fantastic
+//! NEVER uses a provider's native tool API. Tool-calling is owned by the base
+//! class ([`crate::tool_parse`] parses the `<tool_call>` envelope out of this
+//! text stream). The provider holds no agent state — the queue / lock / history
+//! all live in [`crate::state`] / [`crate::agent_loop`].
 //!
-//! Each backend's `chat()` FINALIZES tool-calls before yielding: the
-//! ollama provider yields one `ToolCall` per NDJSON chunk (arguments
-//! already parsed); the NIM provider aggregates per-index SSE argument
-//! fragments internally and yields one finalized `ToolCall` once the
-//! stream ends. The shared loop consumes both identically.
+//! `ProviderEvent::ToolCall` exists only as the parser's output type (and a
+//! test pass-through); a real backend `chat()` yields only `Token`.
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -40,11 +39,12 @@ pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, String>>;
 /// backend; the only per-backend seam the shared machinery talks to.
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Stream a completion for `messages` (OpenAI-style) given the
-    /// available `tools` (the universal `send` tool). Returns a stream
-    /// that yields tokens + finalized tool-calls in order, or an error
-    /// describing a transport/HTTP failure.
-    async fn chat(&self, messages: &[Value], tools: &[Value]) -> Result<ProviderStream, String>;
+    /// Stream a plain-text completion for `messages` (role
+    /// system/user/assistant, text content). Yields `ProviderEvent::Token`
+    /// content tokens in order, or an error describing a transport/HTTP
+    /// failure. NO tools — the base class teaches the `send` tool in the
+    /// prompt and parses the call from this text stream.
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String>;
 
     /// The upstream model id this provider talks to.
     fn model(&self) -> String;

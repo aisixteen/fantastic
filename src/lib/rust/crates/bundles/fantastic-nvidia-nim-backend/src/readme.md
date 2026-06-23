@@ -1,11 +1,20 @@
 # nvidia_nim_backend — NVIDIA NIM LLM agent
 OpenAI-compatible LLM backend. Thin Provider + Bundle over
 `fantastic-ai-core`: this crate supplies only the NIM `Provider`
-(HTTPS + Bearer auth + SSE + per-index tool-call argument aggregation
-+ 429 rate-limit retry) and a thin `Bundle` that dispatches every verb
+(HTTPS + Bearer auth + SSE streaming raw text + 429 rate-limit retry)
+and a thin `Bundle` that dispatches every verb
 through `fantastic-ai-core`. The FIFO lock, menu cache, prompt
 assembly, agentic loop, and history persistence all live in
 `fantastic-ai-core`.
+
+## Tool-calling is RAW (no native OpenAI tools)
+This backend NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
+`delta.tool_calls`. The NIM `Provider` streams plain `content` text; the shared
+`fantastic-ai-core` layer teaches the `send` tool's text envelope in the system prompt
+and parses the call out of the stream (`tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results return as `<tool_response>…</tool_response>` text. Identical across the
+ollama / nvidia / anthropic backends.
 
 This crate implements the **LLM backend contract** defined in
 `fantastic-ai-core`'s module header. The provider connection differs

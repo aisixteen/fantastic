@@ -1,8 +1,7 @@
 # anthropic_backend — Anthropic (Claude) LLM agent
 Anthropic Messages-API LLM backend. Thin Provider + Bundle over
 `fantastic-ai-core`: this crate supplies only the Anthropic `Provider`
-(HTTPS + `x-api-key` auth + event-typed SSE + `tool_use` block
-aggregation + OpenAI↔Anthropic message/tool translation + 429
+(HTTPS + `x-api-key` auth + event-typed SSE streaming raw text + 429
 rate-limit retry) and a thin `Bundle` that dispatches every verb
 through `fantastic-ai-core`. The FIFO lock, menu cache, prompt
 assembly, agentic loop, and history persistence all live in
@@ -15,15 +14,15 @@ but verbs and emitted events are byte-for-byte identical, so any
 client can swap providers by changing one `handler_module` field on
 the agent's record — no client-side change.
 
-ai-core hands the provider OpenAI-shaped messages + the universal
-`send` tool. This backend TRANSLATES on the wire: the `system` role
-becomes Anthropic's top-level `system` param; `assistant`
-`tool_calls` become `tool_use` content blocks; `role:tool` results
-become a `user` message with a `tool_result` block; and the
-`{type:function, function:{…}}` tool becomes `{name, description,
-input_schema}`. The reverse — Anthropic's `content_block_delta`
-(`text_delta` / `input_json_delta`) + `tool_use` blocks — is
-aggregated back into ai-core's finalized `ProviderEvent`s.
+## Tool-calling is RAW (no native Anthropic tool_use)
+This backend NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use` blocks.
+The Anthropic `Provider` streams plain `text_delta` content; the shared
+`fantastic-ai-core` layer teaches the `send` tool's text envelope in the system prompt
+and parses the call out of the stream (`tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results return as `<tool_response>…</tool_response>` text. Wire translation is now just
+the `system` role → Anthropic's top-level `system` param + alternating user/assistant
+TEXT turns. Identical across the ollama / nvidia / anthropic backends.
 
 **Streaming routing**: this backend uses per-client-inbox routing
 (`CallerRoute::PerClientInbox`). Every stream event is emitted on the

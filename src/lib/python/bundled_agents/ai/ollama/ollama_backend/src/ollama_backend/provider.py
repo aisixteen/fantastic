@@ -1,9 +1,12 @@
-"""OllamaProvider — native streaming chat with tool-call support."""
+"""OllamaProvider — pure raw-text streaming chat (NO native tool API).
+
+Tool-calling is owned by ai_core (it parses `<tool_call>` text out of this
+stream). This provider just streams the model's text tokens.
+"""
 
 from __future__ import annotations
 
-import secrets
-from typing import AsyncIterator, Union
+from typing import AsyncIterator
 
 DEFAULT_ENDPOINT = "http://localhost:11434"
 DEFAULT_MODEL = "gemma4:e2b"
@@ -38,43 +41,25 @@ class OllamaProvider:
             self._client = ollama.AsyncClient(host=self._endpoint)
         return self._client
 
-    async def chat(
-        self, messages: list[dict], tools: list[dict]
-    ) -> AsyncIterator[Union[str, dict]]:
-        """Stream from ollama with tool-call support.
-
-        Yields str for content tokens, dict for tool_calls:
-            {"tool_call": {"id":..., "name":..., "arguments":{...}}}
-        """
+    async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
+        """Stream raw text tokens from ollama — NO tools array. ai_core parses
+        any `<tool_call>` envelope out of the text stream."""
         client = self._get_client()
         options: dict = {"temperature": self._temperature}
         if self._num_ctx:
             options["num_ctx"] = self._num_ctx
-        kwargs = {"options": options}
         stream = await client.chat(
             model=self._model,
             messages=messages,
-            tools=tools,
             stream=True,
-            **kwargs,
+            options=options,
         )
-        # ollama sometimes returns these fields as `null` (not absent), so
-        # `.get(key, default)` is not enough — use `or default` to normalize
-        # null -> default. This is protocol normalization, not bug masking.
+        # ollama sometimes returns `content` as `null` (not absent), so normalize
+        # null -> "" with `or ""`. This is protocol normalization, not bug masking.
         async for chunk in stream:
-            msg = chunk.get("message") or {}
-            content = msg.get("content") or ""
+            content = (chunk.get("message") or {}).get("content") or ""
             if content:
                 yield content
-            for call in msg.get("tool_calls") or []:
-                fn = call.get("function") or {}
-                yield {
-                    "tool_call": {
-                        "id": call.get("id") or f"call_{secrets.token_hex(4)}",
-                        "name": fn.get("name") or "",
-                        "arguments": fn.get("arguments") or {},
-                    }
-                }
 
     @property
     def model(self) -> str:

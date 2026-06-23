@@ -1,19 +1,20 @@
-//! ollama_backend — local LLM (ollama) bundle. Streams tokens +
-//! tool-calls. Thin shell over `fantastic-ai-core`: this crate supplies
-//! only the ollama `Provider` (NDJSON transport) + a `Bundle` that
-//! dispatches every verb through ai-core. The per-client chat threads,
-//! FIFO lock, menu cache, prompt assembly, agentic loop, status phase
-//! machine, and history persistence all live in ai-core.
+//! ollama_backend — local LLM (ollama) bundle. Streams raw text tokens.
+//! Thin shell over `fantastic-ai-core`: this crate supplies only the ollama
+//! `Provider` (NDJSON transport) + a `Bundle` that dispatches every verb through
+//! ai-core. The per-client chat threads, FIFO lock, menu cache, prompt assembly,
+//! agentic loop (incl. RAW tool-call parsing), status phase machine, and history
+//! persistence all live in ai-core.
 //!
 //! See `fantastic_ai_core`'s module header for the canonical LLM backend
 //! contract (verbs + events).
 //!
 //! ### HTTP
 //!
-//! `POST {endpoint}/api/chat` with `{model, messages, tools?,
-//! stream:true}` → line-delimited JSON; each line carries
-//! `{message:{content?, tool_calls?}}`. Ollama's `arguments` field is
-//! a parsed JSON object — do not re-parse.
+//! `POST {endpoint}/api/chat` with `{model, messages, stream:true}` →
+//! line-delimited JSON; each line carries `{message:{content?}}`. NO `tools`
+//! array is sent and NO `tool_calls` are read — tool-calling is RAW
+//! prompt-and-parse owned by ai-core (the model emits a `<tool_call>` envelope
+//! in the content text).
 
 #![deny(missing_docs)]
 
@@ -25,7 +26,6 @@ use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "ollama_backend.tools";
@@ -45,31 +45,18 @@ pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 /// Default model id (overridable via the agent record's `model` field).
 pub const DEFAULT_MODEL: &str = "gemma4:e2b";
 
-/// Per-backend config: cli round-trip routing, ollama tool-args shape
-/// (object, not JSON string), parallel tool dispatch.
+/// Per-backend config: cli round-trip routing, parallel tool dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
-    tool_args_as_json: false,
     parallel_tools: true,
     name: "ollama_backend",
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
 
-fn mint_tool_call_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
-    format!("tc_{:06x}", (mix as u32) & 0xff_ffff)
-}
-
-/// Provider for ollama's `/api/chat`. Decodes the NDJSON stream into
-/// finalized `ProviderEvent`s — one `ToolCall` per chunk's tool_calls
-/// entry (arguments already a parsed object).
+/// Provider for ollama's `/api/chat`. PURE RAW TEXT — decodes the NDJSON stream
+/// into `ProviderEvent::Token` content only. NO native tools array is sent and
+/// NO `tool_calls` are read; ai-core parses the `<tool_call>` envelope from text.
 struct OllamaProvider {
     endpoint: String,
     model: String,
@@ -81,11 +68,10 @@ impl Provider for OllamaProvider {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value], tools: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
         let body = json!({
             "model": self.model,
             "messages": messages,
-            "tools": tools,
             "stream": true,
         });
         let client = reqwest::Client::new();
@@ -139,27 +125,10 @@ fn decode_chunk_into(parsed: &Value, out: &mut Vec<Result<ProviderEvent, String>
     let Some(msg) = parsed.get("message") else {
         return;
     };
+    // RAW: content text ONLY. ai-core parses any `<tool_call>` envelope out of it.
     if let Some(content) = msg.get("content").and_then(Value::as_str) {
         if !content.is_empty() {
             out.push(Ok(ProviderEvent::Token(content.to_string())));
-        }
-    }
-    if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
-        for call in calls {
-            let fnobj = call.get("function").cloned().unwrap_or(Value::Null);
-            let name = fnobj
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            // ollama's `arguments` is a parsed dict — DO NOT re-parse.
-            let args = fnobj.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(mint_tool_call_id);
-            out.push(Ok(ProviderEvent::ToolCall { id, name, args }));
         }
     }
 }
@@ -240,7 +209,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .to_string();
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Ollama-backed LLM agent (native tool-calling).",
+        "sentence": "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
         "model": model,
         "endpoint": endpoint,
         "file_bridge_id": file_bridge_id,

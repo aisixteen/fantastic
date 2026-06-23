@@ -106,7 +106,7 @@ pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> S
              decisions, facts, preferences, and unresolved tasks. Output ONLY the summary."}),
         json!({"role": "user", "content": rendered}),
     ];
-    let stream = match provider.chat(&prompt, &[]).await {
+    let stream = match provider.chat(&prompt).await {
         Ok(s) => s,
         Err(_) => return STUB_SUMMARY.to_string(),
     };

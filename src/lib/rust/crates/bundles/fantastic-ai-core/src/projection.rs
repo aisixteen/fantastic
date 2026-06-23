@@ -205,16 +205,10 @@ pub async fn derive_reaction(
         if m.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) else {
-            continue;
-        };
-        for tc in tcs {
-            let args = tc.get("function").and_then(|f| f.get("arguments"));
-            let args: Value = match args {
-                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-                Some(v) => v.clone(),
-                None => json!({}),
-            };
+        // Tool calls now live as `<tool_call>` text inside the assistant content —
+        // extract them with the same shared parser the loop uses.
+        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+        for (_name, args) in crate::tool_parse::extract_tool_calls(content) {
             let target = args.get("target_id").and_then(Value::as_str);
             let ptype = args
                 .get("payload")

@@ -199,13 +199,10 @@ extension AIBackend {
         var persisted = false
         var recallCount: Int64 = 0
         for m in store.dropFirst(idx) {
-            guard m["role"].asString == "assistant", let tcs = m["tool_calls"].asArray else {
-                continue
-            }
-            for tc in tcs {
-                let rawArgs = tc["function"]["arguments"]
-                var args = rawArgs
-                if let s = rawArgs.asString { args = (try? JSON.parse(s)) ?? .object([:]) }
+            guard m["role"].asString == "assistant" else { continue }
+            // Tool calls now live as `<tool_call>` text inside the assistant
+            // content — extract them with the same shared parser the loop uses.
+            for (_, args) in extractToolCalls(m["content"].asString ?? "") {
                 let target = args["target_id"].asString
                 let ptype = args["payload"]["type"].asString
                 if target == key && ptype == "recall" {
@@ -224,19 +221,13 @@ extension AIBackend {
 
     // MARK: - verbs
 
-    /// Compact ONE stored turn for a `recall` reply: bulky tool-call JSON → a
-    /// short marker, content capped — so paging back can't itself blow the
-    /// window. Bounds the REPLY only, never the store.
+    /// Compact ONE stored turn for a `recall` reply: content capped so paging
+    /// back can't itself blow the window. Turns are now pure text (tool
+    /// calls/replies are inline `<tool_call>`/`<tool_response>` text), so this
+    /// is just a cap. Bounds the REPLY only, never the store.
     private func recallRender(_ m: JSON) -> String {
         var s = m["content"].asString ?? ""
-        if s.isEmpty {
-            if let tcs = m["tool_calls"].asArray {
-                let names = tcs.compactMap { $0["function"]["name"].asString }
-                s = "[tool_calls: \(names.joined(separator: ", "))]"
-            } else {
-                s = m.serialize()
-            }
-        }
+        if s.isEmpty { s = m.serialize() }
         return String(s.prefix(2000))
     }
 

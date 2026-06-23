@@ -17,7 +17,6 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
-    SEND_TOOL,
     _assemble,
     _build_menu,
     _current,
@@ -49,7 +48,7 @@ def _build():
     from anthropic_backend.provider import DEFAULT_ENDPOINT, DEFAULT_MODEL
 
     return build(
-        sentence="Anthropic-backed LLM agent (native tool-calling).",
+        sentence="Anthropic-backed LLM agent (raw prompt-and-parse tool-calling).",
         default_model=DEFAULT_MODEL,
         default_endpoint=DEFAULT_ENDPOINT,
         make_provider=make_provider,

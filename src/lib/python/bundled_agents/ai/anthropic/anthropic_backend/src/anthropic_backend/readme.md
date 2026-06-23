@@ -1,8 +1,17 @@
 # anthropic_backend — Claude LLM agent
-Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, native tool-calls, menu cache. Persistence via `file_bridge_id`.
+Talks to the Anthropic Messages API (default model `claude-opus-4-8`). Key read from `ANTHROPIC_KEY` (or `ANTHROPIC_API_KEY`) in the environment / `.env`. Per-client chat threads, FIFO lock, raw prompt-and-parse tool-calling, menu cache. Persistence via `file_bridge_id`.
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue/FIFO lock/menu cache, prompt assembly, the agentic `_run` loop, and all verb bodies live in `ai_core.core`; this module supplies the `AnthropicProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+
+## Tool-calling is RAW (no native Anthropic tool_use)
+This backend NEVER sends Anthropic `tools`/`input_schema` nor reads `tool_use` blocks.
+The `AnthropicProvider` streams plain `text_delta` content; the shared `ai_core` layer
+teaches the `send` tool's text envelope in the system prompt and parses the call out of
+the stream (`ai_core.tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results come back as `<tool_response>…</tool_response>` text. Identical across the
+ollama / nvidia / anthropic backends.
 
 ## Calling this agent as a workflow unit
 `send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO

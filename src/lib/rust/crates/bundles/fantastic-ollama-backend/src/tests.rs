@@ -169,20 +169,14 @@ async fn send_streams_tokens_and_emits_done() {
 }
 
 #[tokio::test]
-async fn ndjson_tool_call_parses_args_object() {
+async fn raw_tool_call_in_content_parses_and_dispatches() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    // First response: a tool_call (ollama ships `arguments` as a parsed
-    // OBJECT — not a JSON string). Second response: final text.
+    // RAW: ollama streams plain CONTENT text containing the `<tool_call>` envelope;
+    // ai-core's shared parser extracts it and dispatches. Second response: final text.
     let with_tool = ndjson_body(&[json!({
         "message": {
-            "tool_calls": [{
-                "id": "call_a",
-                "function": {
-                    "name": "send",
-                    "arguments": {"target_id": "core", "payload": {"type": "list_agents"}}
-                }
-            }]
+            "content": "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"
         },
         "done": true
     })]);
@@ -221,10 +215,7 @@ async fn ndjson_tool_call_parses_args_object() {
                 .and_then(Value::as_str)
                 == Some("core")
     });
-    assert!(
-        dispatched,
-        "expected aggregated tool args -> core: {events:#?}"
-    );
+    assert!(dispatched, "expected parsed tool args -> core: {events:#?}");
 }
 
 #[tokio::test]

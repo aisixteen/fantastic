@@ -59,25 +59,14 @@ pub async fn history(
     json!({"messages": messages, "client_id": client_id})
 }
 
-/// Compact ONE stored turn for a `recall` reply: bulky tool-call JSON → a
-/// short marker, content capped — so paging back can't itself blow the
-/// window. Bounds the REPLY only, never the store.
+/// Compact ONE stored turn for a `recall` reply: content capped so paging back
+/// can't itself blow the window. Turns are now pure text (tool calls/replies are
+/// inline `<tool_call>`/`<tool_response>` text), so this is just a cap. Bounds
+/// the REPLY only, never the store.
 fn recall_render(m: &Value) -> String {
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
     let s = if content.is_empty() {
-        if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
-            let names: Vec<&str> = tcs
-                .iter()
-                .filter_map(|tc| {
-                    tc.get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(Value::as_str)
-                })
-                .collect();
-            format!("[tool_calls: {}]", names.join(", "))
-        } else {
-            serde_json::to_string(m).unwrap_or_default()
-        }
+        serde_json::to_string(m).unwrap_or_default()
     } else {
         content.to_string()
     };

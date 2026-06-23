@@ -518,16 +518,14 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
         nt._providers.pop(nid, None)
 
 
-# ─── tool_call argument shape ─────────────────────────────────
+# ─── tool_call round-trip (RAW text shape) ─────────────────────
 
 
-async def test_assistant_tool_calls_serialize_arguments_to_json_string(
-    seeded_kernel, store_agent
-):
-    """OpenAI-flavored backends require tool_call.function.arguments as
-    a JSON string. We hand-roll the assistant message inside _run, so
-    verify the serialization happens correctly when the second iteration
-    inspects message history."""
+async def test_prior_tool_call_replayed_as_text_to_model(seeded_kernel, store_agent):
+    """RAW: the second iteration must SEE the prior call + reply as plain TEXT —
+    the assistant's `<tool_call>` inline, and the reply as a user-role
+    `<tool_response>` (no native `tool_calls`/`role:tool` structured fields, since
+    many models — incl. tiny local ones — don't render a `tool` role)."""
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     seen_messages: list[list[dict]] = []
 
@@ -558,17 +556,20 @@ async def test_assistant_tool_calls_serialize_arguments_to_json_string(
     finally:
         nt._providers.pop(nid, None)
 
-    # Second call must have seen the assistant turn with the previously
-    # emitted tool_call. arguments should be a JSON-encoded string.
-    second_history = seen_messages[1]
-    assistant_turns = [m for m in second_history if m.get("role") == "assistant"]
-    assert assistant_turns, "no assistant turn re-played to second iteration"
-    tcs = assistant_turns[-1].get("tool_calls") or []
-    assert tcs, "tool_calls missing from re-played assistant turn"
-    args = tcs[0]["function"]["arguments"]
-    assert isinstance(args, str), f"OpenAI-shape requires string args, got {type(args)}"
-    decoded = json.loads(args)
-    assert decoded == {"target_id": "kernel_state", "payload": {"type": "list_agents"}}
+    # The model-facing messages on the 2nd pass are pure text turns.
+    second = seen_messages[1]
+    assert all(m.get("role") in ("system", "user", "assistant") for m in second), (
+        f"raw mode renders no role:tool / no structured tool_calls: {second}"
+    )
+    assert all("tool_calls" not in m for m in second)
+    assistant = [m for m in second if m.get("role") == "assistant"][-1]
+    assert (
+        "<tool_call>" in assistant["content"] and "list_agents" in assistant["content"]
+    )
+    # the reply came back as a user-role <tool_response>
+    assert any(
+        m["role"] == "user" and "<tool_response" in m.get("content", "") for m in second
+    )
 
 
 # ─── rate-limit retry ──────────────────────────────────────────

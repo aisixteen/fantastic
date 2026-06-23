@@ -1,8 +1,18 @@
 # ollama_backend — local LLM agent
-Talks to a local ollama. Per-client chat threads, FIFO lock, native tool-calls, menu cache. Persistence via `file_bridge_id`.
+Talks to a local ollama. Per-client chat threads, FIFO lock, raw prompt-and-parse tool-calling, menu cache. Persistence via `file_bridge_id`.
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue/FIFO lock/menu cache, prompt assembly, the agentic `_run` loop, and all verb bodies live in `ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+
+## Tool-calling is RAW (no native ollama tools)
+This backend NEVER sends ollama's `tools` array nor reads `message.tool_calls`. The
+`OllamaProvider` streams pure `content` text; the shared `ai_core` layer teaches the
+`send` tool's text envelope in the system prompt and parses the call back out of the
+stream (`ai_core.tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results come back as `<tool_response>…</tool_response>` text. Model-agnostic — works even
+with models ollama marks `completion`-only. Identical across the ollama / nvidia /
+anthropic backends.
 
 ## Calling this agent as a workflow unit
 `send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO

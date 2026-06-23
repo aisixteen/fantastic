@@ -2,16 +2,18 @@
 
 The real providers (OllamaProvider, AnthropicProvider, NvidiaNimProvider)
 live in their own bundles; this ABC documents the contract the shared
-`core._run` loop relies on. A provider is a thin streaming adapter: it
-takes OpenAI-style messages + the universal `send` tool and yields either
-content tokens (str) or completed tool-calls (dict). It holds no agent
-state — the queue / lock / history all live in `ai_core.core`.
+`core._run` loop relies on. A provider is a PURE RAW-TEXT streamer: it takes
+plain chat messages (role system/user/assistant, text content) and yields
+content tokens (str). It does NOT do tool-calling — Fantastic NEVER uses a
+provider's native tool API. Tool-calling is owned by the base class
+(`ai_core.tool_parse` parses `<tool_call>` text out of this stream). The
+provider holds no agent state — queue / lock / history live in `ai_core.core`.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Union
+from typing import AsyncIterator
 
 
 class Provider(ABC):
@@ -22,18 +24,11 @@ class Provider(ABC):
     """
 
     @abstractmethod
-    def chat(
-        self, messages: list[dict], tools: list[dict] | None = None
-    ) -> AsyncIterator[Union[str, dict]]:
-        """Stream a completion for `messages` (OpenAI-style: role
-        system/user/assistant with optional `tool_calls`, plus role:tool
-        results) given the available `tools` (the universal SEND tool).
-
-        An async generator yielding, in order:
-          - `str` — a content token (streamed to the caller live).
-          - `{"tool_call": {"id": str, "name": str, "arguments": dict}}`
-            — one completed tool-call (arguments already a dict, even for
-            wire formats that stream argument fragments).
+    def chat(self, messages: list[dict]) -> AsyncIterator[str]:
+        """Stream a plain-text completion for `messages` (role
+        system/user/assistant, text content). An async generator yielding
+        `str` content tokens in order. NO tools — the base class teaches the
+        `send` tool in the prompt and parses the call from this text stream.
         """
         raise NotImplementedError
 
