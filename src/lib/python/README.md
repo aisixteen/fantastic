@@ -36,6 +36,21 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   reply | None` (from outside any handler) or `agent.send(...)`
   (from inside) resolves the target via the flat index and
   dispatches.
+- **streams** — `send` returns ONE JSON reply and `emit` fires ONE event;
+  for BYTES that don't fit a single message (a file, an image, a live feed)
+  agents speak a chunked **stream** protocol over the binary channel (raw
+  bytes both ways, never base64) — a PULL with a cursor + backpressure,
+  addressed by id, NOT the event system. Three duck-typed verbs:
+  `read_stream {path, offset?} → ({path, offset, next_offset, eof, size},
+  bytes)` (the **SOURCE** — pull one chunk, advance the stateless cursor by
+  `next_offset` until `eof`); `write_stream {path, offset?, truncate?}` +
+  body `bytes → {written, offset, size}` (the **SINK** — push one chunk);
+  `pump {source, source_path, sink, sink_path?, chunk?} → {bytes, chunks}`
+  (the **PUMP** — a server-side SOURCE→SINK copy that only coordinates and
+  never touches the bytes, so fs→fs, `network_bridge`→`file_bridge`,
+  anywhere→anywhere copy identically; each end self-gates/clamps). A consumer
+  is storage-agnostic — it pulls/pushes by id. `file_bridge` is the reference
+  SOURCE+SINK; the served `/<id>/file/<path>` octet route is read_stream-only.
 - **Cascade delete** — `delete_agent` walks the subtree depth-first
   via `_children`. Each descendant runs its `on_delete` hook (kills
   PTY / drains uvicorn / closes clients — PROCESS state only)

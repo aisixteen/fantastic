@@ -214,6 +214,14 @@ HTTP + WebSocket:
   Opt-in chunked uploads (`upload_id` + `chunk_index` + `total_chunks` +
   `final` in the header) reassemble server-side; per-WS state means
   abandoned uploads drop on disconnect.
+- **Streams** — byte-heavy transfers ride the binary channel as a chunked
+  PULL (raw bytes, never base64), NOT events: `read_stream {path, offset?}
+  → (header{next_offset, eof, size}, bytes)` (the **SOURCE** — one chunk,
+  stateless cursor via `next_offset`); `write_stream {path, offset?,
+  truncate?}` + body bytes (the **SINK**); `pump {source, source_path, sink,
+  sink_path?}` (the **PUMP** — a server-side SOURCE→SINK copy by id that never
+  touches the bytes). `file_bridge` is the reference SOURCE+SINK; the
+  `/<id>/file/<path>` route is read_stream-only.
 - **REST** `POST /<rest_id>/<target_id>` body=payload → `kernel.send` → JSON.
   `GET /<rest_id>/_reflect[/<target_id>]` for static discovery.
 - **`.fantastic/`** — disk-mode workdir state. Python-compatible
