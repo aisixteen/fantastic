@@ -15,10 +15,11 @@ Two layers:
      CLOSURE FACTORY: each backend calls it with its own Provider builder +
      constants and gets back a `(VERBS, handler)` pair whose verb closures
      capture THAT backend's `Backend`. So `sentence`, the provider builder,
-     the OpenAI-vs-anthropic tool-args shape, the optional rate-limit
-     stream wrapper, and the error-message prefix are per-backend; the
-     state above is shared. An ollama agent and an anthropic agent in the
-     same kernel each use their own provider and never clobber each other.
+     the optional rate-limit stream wrapper, and the error-message prefix
+     are per-backend; the state above is shared. An ollama agent and an
+     anthropic agent in the same kernel each use their own provider and
+     never clobber each other. Tool-calling is uniform + RAW for all of them
+     (owned by this base class via `tool_parse`, not any native provider API).
 
 `SEND_TIMEOUT` is read LIVE off the calling bundle module (each bundle
 re-exports it) so a test's `monkeypatch.setattr("<bundle>.tools.SEND_TIMEOUT",
@@ -34,9 +35,9 @@ backends + the TS ai_view before the next major bump:
      agent, so switching upstream_id still starts a fresh conversation.
      Future: history travels with the chat tile, backends become
      stateless-modulo-streaming.
-  2. Tool-call streaming protocol — current contract is one
-     tool_call per chunk (ollama) vs argument fragments aggregated
-     across chunks (OpenAI/NIM). Pick one and version it.
+  2. (resolved) Tool-call protocol is now RAW + uniform: every provider
+     streams plain text; the shared `tool_parse` parses one `<tool_call>`
+     envelope contract for all backends. No native provider tool API.
   3. Multi-modal binary frames — image/audio payloads currently
      have no defined wire shape. Needs the WS binary frame channel
      (also blocks terminal_backend's image-paste).
@@ -66,6 +67,11 @@ from ai_core.context import (
 )
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
+from ai_core.tool_parse import (
+    extract_tool_calls,
+    render_tool_call,
+    stream_tool_calls,
+)
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -142,7 +148,6 @@ class Backend:
     extra_verbs: dict = field(default_factory=dict)
     reflect_extra: Callable[[str, Any], Awaitable[dict] | dict] | None = None
     stream_wrapper: Callable | None = None
-    tool_args_as_json: bool = False
     require_provider: bool = False  # nvidia: send failfasts when make_provider -> None
     provider_missing_error: str | None = None
 
@@ -273,33 +278,24 @@ def _lock_for(self_id: str) -> asyncio.Lock:
     return _locks[self_id]
 
 
-SEND_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "send",
-        "description": (
-            "Send a message to any agent in the Fantastic substrate. "
-            "Universal verb on every agent: reflect (returns identity + state; "
-            "add readme:true for the agent's full guide, and reflect the ROOT "
-            "agent with readme:true for the whole-system guide). "
-            "Discover agents by sending list_agents to the kernel_state agent."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target_id": {
-                    "type": "string",
-                    "description": "Agent id to send the payload to (e.g. 'kernel_state', 'cli', 'terminal_xxx').",
-                },
-                "payload": {
-                    "type": "object",
-                    "description": '{"type": "<verb>", ...fields}. Universal verb: reflect.',
-                },
-            },
-            "required": ["target_id", "payload"],
-        },
-    },
-}
+# NOTE: there is NO native tool schema. Tool-calling is RAW prompt-and-parse,
+# owned by this base class: the `send` tool + its text envelope are taught in
+# `_SEND_HOWTO`, the model emits the call as text, and `ai_core.tool_parse`
+# parses it back out of the stream. Providers NEVER receive a tools array.
+
+
+def _render_for_model(messages: list[dict]) -> list[dict]:
+    """Project the internal message list to what the model actually reads — pure
+    text, every role a chat template renders. We store tool replies as `role:tool`
+    (so the projection/recall machinery's tool-pairing stays intact), but map them
+    to `role:user` here because many templates (incl. tiny local models) don't render
+    a `tool` role at all. Strips any non-text keys (e.g. legacy `tool_calls`)."""
+    out: list[dict] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        out.append({"role": "user" if role == "tool" else role, "content": content})
+    return out
 
 
 # ─── persistence (routed through file_bridge_id) ────────────────
@@ -447,6 +443,17 @@ def _render_menu(menu: list[dict]) -> str:
 
 _SEND_HOWTO = """## How to use the `send` tool
 You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
+
+To CALL it, emit EXACTLY this on its own — a `<tool_call>` tag wrapping one JSON object:
+<tool_call>{"name": "send", "arguments": {"target_id": "<id>", "payload": {"type": "<verb>", ...fields}}}</tool_call>
+Rules:
+- Emit the tag verbatim; put NOTHING else on that line. You may emit several tags to
+  batch calls. Any text OUTSIDE the tags is shown to the user as your message.
+- After a call, you receive a `<tool_response>...</tool_response>` with the reply. READ it,
+  then either call again or write your final answer (no tag) to finish.
+- Example — list the agents:
+  <tool_call>{"name": "send", "arguments": {"target_id": "kernel_state", "payload": {"type": "list_agents"}}}</tool_call>
+
 - ORIENT FIRST. For anything beyond the menu's verb names — especially the
   browser frontend (panels/views), persistence, or how agents are wired — read
   the full system guide in ONE call BEFORE acting:
@@ -598,8 +605,8 @@ def _recent_n(rec: dict) -> int:
 
 def _make_summarizer(provider):
     """Closure over the backend provider: summarize a span of turns to a string.
-    tools=[] (the summarizer can't tool-call); input is capped so summarizing can't
-    itself blow the window."""
+    A plain text completion (no tools — providers stream raw text); input is capped
+    so summarizing can't itself blow the window."""
 
     async def _summarize(msgs: list[dict]) -> str:
         rendered = "\n".join(
@@ -617,7 +624,7 @@ def _make_summarizer(provider):
             {"role": "user", "content": rendered},
         ]
         parts: list[str] = []
-        async for chunk in provider.chat(prompt, tools=[]):
+        async for chunk in provider.chat(prompt):
             if isinstance(chunk, str):
                 parts.append(chunk)
         return "".join(parts)
@@ -815,12 +822,19 @@ async def _run(
         content_parts: list[str] = []
         tool_calls: list[dict] = []
         first_chunk = True
-        # An optional per-backend stream wrapper (nvidia's 429 retry)
-        # wraps provider.chat(); default is the raw provider stream.
+        # RAW tool-calling: the provider streams pure text; the SHARED parser
+        # (`stream_tool_calls`) splits content tokens from `<tool_call>` envelopes —
+        # NO native tools array is ever sent. `_render_for_model` projects our stored
+        # turns to plain text every chat template renders. An optional per-backend
+        # stream wrapper (nvidia's 429 retry) wraps the raw provider stream.
+        model_messages = _render_for_model(messages)
         if cfg.stream_wrapper is not None:
-            stream = cfg.stream_wrapper(provider, messages, kernel, self_id, client_id)
+            raw = cfg.stream_wrapper(
+                provider, model_messages, kernel, self_id, client_id
+            )
         else:
-            stream = provider.chat(messages, tools=[SEND_TOOL])
+            raw = provider.chat(model_messages)
+        stream = stream_tool_calls(raw)
         async for chunk in stream:
             if isinstance(chunk, str):
                 if first_chunk:
@@ -849,26 +863,17 @@ async def _run(
         if not tool_calls:
             break
 
-        # Record assistant turn carrying its tool_calls. ollama wants
-        # `arguments` as a dict; OpenAI-flavored backends (nvidia) want a
-        # JSON string — `cfg.tool_args_as_json` selects.
-        assistant_turn = {
-            "role": "assistant",
-            "content": last_text,
-            "tool_calls": [
-                {
-                    "id": c["id"],
-                    "type": "function",
-                    "function": {
-                        "name": c["name"],
-                        "arguments": json.dumps(c["arguments"])
-                        if cfg.tool_args_as_json
-                        else c["arguments"],
-                    },
-                }
-                for c in tool_calls
-            ],
-        }
+        # Record the assistant turn as TEXT — its prose plus the `<tool_call>`
+        # envelope(s) it emitted, exactly as a raw text turn. No structured
+        # `tool_calls` field anywhere (raw, single-truth): next turn the model
+        # re-reads its own call as text.
+        call_tags = "\n".join(
+            render_tool_call(c["name"], c["arguments"]) for c in tool_calls
+        )
+        assistant_text = (
+            last_text + ("\n" if last_text and call_tags else "") + call_tags
+        )
+        assistant_turn = {"role": "assistant", "content": assistant_text}
         messages.append(assistant_turn)
         new_turns.append(assistant_turn)
 
@@ -914,17 +919,22 @@ async def _run(
             await _emit_status(
                 kernel, self_id, client_id, "tool_calling", tool=tool_entry_done
             )
-            return {
-                "role": "tool",
-                "tool_call_id": c["id"],
-                "name": c["name"],
-                "content": reply_str,
-            }
+            return {"name": c["name"], "reply": reply_str}
 
         results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
         _invalidate_menu(self_id)
-        messages.extend(results)
-        new_turns.extend(results)
+        # ONE `role:tool` turn carrying every reply as `<tool_response>` text — fed
+        # back to the model (mapped to role:user by `_render_for_model`). Kept as a
+        # single turn so role alternation stays clean for every chat template.
+        tool_msg = {
+            "role": "tool",
+            "content": "\n".join(
+                f'<tool_response name="{r["name"]}">{r["reply"]}</tool_response>'
+                for r in results
+            ),
+        }
+        messages.append(tool_msg)
+        new_turns.append(tool_msg)
 
     # Status before the back-compat `done` event so subscribers can
     # observe the final phase transition first.
@@ -1143,12 +1153,10 @@ async def _status(id, payload, kernel):
 
 
 def _recall_render(m: dict) -> str:
-    """Compact ONE stored turn for a recall reply: bulky tool-call JSON → a short marker,
-    content capped — so paging back can't itself blow the window. Bounds the REPLY only."""
+    """Compact ONE stored turn for a recall reply: content capped so paging back can't
+    itself blow the window. Turns are now pure text (tool calls/replies are inline
+    `<tool_call>`/`<tool_response>` text), so this is just a cap. Bounds the REPLY only."""
     content = m.get("content")
-    if not content and m.get("tool_calls"):
-        names = [(tc.get("function") or {}).get("name") for tc in m["tool_calls"]]
-        content = "[tool_calls: " + ", ".join(n for n in names if n) + "]"
     s = content if isinstance(content, str) else json.dumps(content, default=str)
     return s[:2000]
 
@@ -1206,16 +1214,10 @@ async def _derive_reaction(id, kernel) -> dict | None:
     for m in store[idx:]:
         if m.get("role") != "assistant":
             continue
-        for tc in m.get("tool_calls") or []:
-            fn = tc.get("function") or {}
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, ValueError):
-                    args = {}
-            if not isinstance(args, dict):
-                args = {}
+        # Tool calls now live as `<tool_call>` text inside the assistant content —
+        # extract them with the same shared parser the loop uses.
+        for call in extract_tool_calls(m.get("content") or ""):
+            args = call.get("arguments") or {}
             payload = args.get("payload")
             ptype = payload.get("type") if isinstance(payload, dict) else None
             if args.get("target_id") == id and ptype == "recall":
@@ -1261,7 +1263,6 @@ def build(
     extra_verbs: dict | None = None,
     reflect_extra: Callable | None = None,
     stream_wrapper: Callable | None = None,
-    tool_args_as_json: bool = False,
     require_provider: bool = False,
     provider_missing_error: str | None = None,
     error_mapper: Callable | None = None,
@@ -1290,8 +1291,6 @@ def build(
         the reflect reply (nvidia: {"has_api_key": ...}).
       stream_wrapper: fn(provider, messages, kernel, id, client_id) ->
         async-iter, wrapping provider.chat() (nvidia: 429 retry).
-      tool_args_as_json: True serializes tool_call arguments to a JSON
-        string in the persisted assistant turn (OpenAI shape, nvidia).
       require_provider: True makes `send` failfast when make_provider
         returns None (nvidia: api_key not set yet).
       provider_missing_error: the error string for that failfast.
@@ -1308,7 +1307,6 @@ def build(
         extra_verbs=extra_verbs or {},
         reflect_extra=reflect_extra,
         stream_wrapper=stream_wrapper,
-        tool_args_as_json=tool_args_as_json,
         require_provider=require_provider,
         provider_missing_error=provider_missing_error,
     )

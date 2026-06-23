@@ -49,7 +49,7 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn chat(&self, _messages: &[Value], _tools: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, _messages: &[Value]) -> Result<ProviderStream, String> {
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
@@ -91,7 +91,6 @@ fn scripts() -> std::sync::MutexGuard<'static, ScriptMap> {
 
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
-    tool_args_as_json: false,
     parallel_tools: true,
     name: "mock_backend",
 };
@@ -375,7 +374,7 @@ fn body(n: usize, size: usize) -> Vec<Value> {
 struct SummaryProvider(&'static str);
 #[async_trait]
 impl Provider for SummaryProvider {
-    async fn chat(&self, _m: &[Value], _t: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, _m: &[Value]) -> Result<ProviderStream, String> {
         let ev = Ok(ProviderEvent::Token(self.0.to_string()));
         Ok(Box::pin(futures_util::stream::iter(vec![ev])))
     }
@@ -538,19 +537,26 @@ async fn tool_call_dispatches_and_persists_full_history() {
         "expected a say(tool core) event: {events:#?}"
     );
 
-    // Persisted history must include the tool turns (full messages[1:]).
+    // Persisted history must include the tool turns (full messages[1:]) — RAW
+    // text shape: a role:tool turn carrying the `<tool_response>` text, and an
+    // assistant turn carrying the `<tool_call>` inline (no structured field).
     let h = kernel
         .send(&backend, json!({"type": "history", "client_id": client_id}))
         .await;
     let msgs = h["messages"].as_array().unwrap();
     assert!(
-        msgs.iter().any(|m| m["role"] == "tool"),
-        "expected a role:tool message in persisted history: {msgs:#?}"
+        msgs.iter().any(|m| m["role"] == "tool"
+            && m["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<tool_response")),
+        "expected a role:tool <tool_response> message: {msgs:#?}"
     );
     assert!(
-        msgs.iter()
-            .any(|m| m["role"] == "assistant" && m.get("tool_calls").is_some()),
-        "expected an assistant turn carrying tool_calls: {msgs:#?}"
+        msgs.iter().any(|m| m["role"] == "assistant"
+            && m["content"].as_str().unwrap_or("").contains("<tool_call>")
+            && m["content"].as_str().unwrap_or("").contains("list_agents")),
+        "expected an assistant turn carrying a <tool_call>: {msgs:#?}"
     );
 }
 

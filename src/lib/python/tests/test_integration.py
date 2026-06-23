@@ -9,7 +9,7 @@ class _FakeProvider:
     def __init__(self, scripts):
         self._scripts = list(scripts)
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages):
         items = self._scripts.pop(0) if self._scripts else []
         for x in items:
             yield x

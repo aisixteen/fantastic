@@ -52,6 +52,7 @@ pub mod projection;
 pub mod provider;
 pub mod state;
 pub mod strategies;
+pub mod tool_parse;
 pub mod verbs;
 
 pub use agent_loop::{run_generation, BackendConfig};

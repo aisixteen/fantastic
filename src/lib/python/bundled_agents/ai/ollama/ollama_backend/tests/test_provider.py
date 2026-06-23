@@ -28,46 +28,41 @@ def _patched_client(stream_items):
 
 
 async def test_chat_yields_content_tokens():
-    p = OllamaProvider()
-    chunks = [_mk_chunk(content="hello "), _mk_chunk(content="world")]
-    with patch("ollama.AsyncClient", return_value=_patched_client(chunks)):
-        out = []
-        async for x in p.chat([{"role": "user", "content": "hi"}], tools=[]):
-            out.append(x)
-    assert out == ["hello ", "world"]
-
-
-async def test_chat_yields_tool_call_dict():
+    """The provider is PURE RAW TEXT — it yields only str content tokens (a
+    `<tool_call>` envelope rides the text and is parsed by ai_core, not here)."""
     p = OllamaProvider()
     chunks = [
-        _mk_chunk(content="working… "),
-        _mk_chunk(
-            tool_calls=[
-                {
-                    "id": "call_abc",
-                    "function": {"name": "send", "arguments": {"target_id": "x"}},
-                }
-            ]
-        ),
+        _mk_chunk(content="hello "),
+        _mk_chunk(content='<tool_call>{"name":"send"}</tool_call>'),
     ]
     with patch("ollama.AsyncClient", return_value=_patched_client(chunks)):
         out = []
-        async for x in p.chat([{"role": "user", "content": "go"}], tools=[]):
+        async for x in p.chat([{"role": "user", "content": "hi"}]):
             out.append(x)
-    # First chunk is text; second yields a tool_call dict.
-    assert out[0] == "working… "
-    assert isinstance(out[1], dict)
-    assert out[1]["tool_call"]["name"] == "send"
-    assert out[1]["tool_call"]["arguments"] == {"target_id": "x"}
+    # Both are plain strings — the provider does NOT interpret the tool envelope.
+    assert out == ["hello ", '<tool_call>{"name":"send"}</tool_call>']
+    assert all(isinstance(x, str) for x in out)
 
 
-async def test_chat_handles_null_tool_calls():
-    """ollama returns `null` (not absent) for tool_calls when none — must normalize to []."""
+async def test_chat_no_tools_arg_in_request():
+    """No native `tools` array is ever sent to ollama (raw prompt-and-parse)."""
     p = OllamaProvider()
-    chunks = [{"message": {"content": "ok", "tool_calls": None}}]
+    client = _patched_client([_mk_chunk(content="ok")])
+    with patch("ollama.AsyncClient", return_value=client):
+        async for _ in p.chat([{"role": "user", "content": "hi"}]):
+            pass
+    _, kwargs = client.chat.call_args
+    assert "tools" not in kwargs
+    assert kwargs["stream"] is True
+
+
+async def test_chat_handles_null_content():
+    """ollama returns `null` (not absent) for content sometimes — normalize to '' (skip)."""
+    p = OllamaProvider()
+    chunks = [{"message": {"content": None}}, {"message": {"content": "ok"}}]
     with patch("ollama.AsyncClient", return_value=_patched_client(chunks)):
         out = []
-        async for x in p.chat([{"role": "user", "content": "hi"}], tools=[]):
+        async for x in p.chat([{"role": "user", "content": "hi"}]):
             out.append(x)
     assert out == ["ok"]
 

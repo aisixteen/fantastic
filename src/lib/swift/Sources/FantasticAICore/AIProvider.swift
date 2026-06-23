@@ -8,12 +8,13 @@
 // agent state — the history / lock / cancellation all live in the
 // shared `AIBackend` machinery.
 //
-// Each backend's `chat()` FINALIZES tool-calls before yielding: the
-// ollama provider would yield one `.toolCall` per NDJSON chunk; the
-// NIM provider aggregates per-index SSE argument fragments internally
-// and yields finalized `.toolCall`s once the stream ends; the FM
-// provider streams cumulative on-device snapshots as `.token`s. The
-// shared loop consumes all three identically.
+// A provider is a PURE RAW-TEXT streamer: it yields `.token`s only and
+// does NOT do tool-calling — Fantastic NEVER uses a provider's native tool
+// API. Tool-calling is owned by the base class (`ToolParse` extracts the
+// `<tool_call>` envelope from this text stream). `.toolCall` exists only as
+// the parser's output type (and a test pass-through); a real backend
+// `chat()` yields only `.token`. The shared loop consumes all backends
+// identically.
 //
 // IMPORTANT: this module is provider-agnostic and MUST NOT import
 // any provider SDK. In particular it MUST NOT import FoundationModels
@@ -42,12 +43,12 @@ public protocol AIProvider: Sendable {
     /// The upstream model id this provider talks to.
     var model: String { get }
 
-    /// Stream a completion for `messages` (already assembled by the
-    /// shared core: history snapshot + the new user turn) given the
-    /// available `tools`. Returns a stream yielding tokens + finalized
-    /// tool-calls in order. Transport / HTTP failures are surfaced by
-    /// having the stream finish with a thrown error.
-    func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error>
+    /// Stream a plain-text completion for `messages` (already assembled by
+    /// the shared core: history snapshot + the new user turn). Returns a
+    /// stream yielding `.token`s in order. NO tools — the base class teaches
+    /// the `send` tool in the prompt and parses the call from this text
+    /// stream. Transport / HTTP failures finish the stream with a thrown error.
+    func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error>
 
     /// Cooperative stop hook. Called when an `interrupt` targets an
     /// in-flight stream. Providers that can proactively tear down an

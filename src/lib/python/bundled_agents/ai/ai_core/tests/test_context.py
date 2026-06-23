@@ -44,7 +44,7 @@ def _ctx(bud: int, recent_n: int = 4, summarize=_fake_summary) -> ProjectionCtx:
 
 
 class _FakeProvider:
-    async def chat(self, messages, tools):
+    async def chat(self, messages):
         yield "FAKESUMMARY"
 
 
@@ -284,19 +284,13 @@ async def test_seam_unknown_strategy_errors_without_event():
 
 
 def _send_turn(target, payload):
-    """An assistant tool-call turn in OpenAI shape (as the store records it)."""
+    """An assistant tool-call turn in RAW text shape (as the store records it now):
+    the `<tool_call>` envelope inline in the assistant content."""
+    from ai_core.tool_parse import render_tool_call
+
     return {
         "role": "assistant",
-        "tool_calls": [
-            {
-                "id": "c1",
-                "type": "function",
-                "function": {
-                    "name": "send",
-                    "arguments": json.dumps({"target_id": target, "payload": payload}),
-                },
-            }
-        ],
+        "content": render_tool_call("send", {"target_id": target, "payload": payload}),
     }
 
 

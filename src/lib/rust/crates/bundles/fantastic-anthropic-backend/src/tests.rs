@@ -111,45 +111,29 @@ fn readme_present_and_titled() {
 }
 
 #[test]
-fn translate_messages_splits_system_and_blocks() {
+fn translate_messages_splits_system_and_text_turns() {
+    // RAW: tool calls/replies are inline TEXT; ai-core mapped tool replies to
+    // role:user before we see them. So translation is pure text turns.
     let messages = vec![
         json!({"role":"system","content":"sys-a"}),
         json!({"role":"system","content":"sys-b"}),
         json!({"role":"user","content":"hi"}),
-        json!({"role":"assistant","content":"thinking","tool_calls":[
-            {"id":"toolu_1","type":"function","function":{"name":"send","arguments":{"target_id":"core","payload":{"type":"list_agents"}}}}
-        ]}),
-        json!({"role":"tool","tool_call_id":"toolu_1","content":"[]"}),
+        json!({"role":"assistant","content":"thinking <tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"}),
+        json!({"role":"tool","content":"<tool_response name=\"send\">[]</tool_response>"}),
     ];
     let (system, out) = translate_messages(&messages);
     assert_eq!(system.as_deref(), Some("sys-a\n\nsys-b"));
-    // system is hoisted out; the remaining 3 turns map across.
     assert_eq!(out.len(), 3);
     assert_eq!(out[0]["role"], "user");
-    // assistant turn → text block + tool_use block (input is an OBJECT).
+    // assistant turn → a plain TEXT turn carrying the <tool_call> inline.
     assert_eq!(out[1]["role"], "assistant");
-    let blocks = out[1]["content"].as_array().unwrap();
-    assert_eq!(blocks[0]["type"], "text");
-    assert_eq!(blocks[1]["type"], "tool_use");
-    assert_eq!(blocks[1]["id"], "toolu_1");
-    assert_eq!(blocks[1]["input"]["target_id"], "core");
-    // tool result → a user message carrying a tool_result block.
+    assert!(out[1]["content"].as_str().unwrap().contains("<tool_call>"));
+    // role:tool → a plain user TEXT turn carrying the <tool_response>.
     assert_eq!(out[2]["role"], "user");
-    assert_eq!(out[2]["content"][0]["type"], "tool_result");
-    assert_eq!(out[2]["content"][0]["tool_use_id"], "toolu_1");
-}
-
-#[test]
-fn translate_tools_maps_to_input_schema() {
-    let tools = vec![fantastic_ai_core::assembly::send_tool_def()];
-    let out = translate_tools(&tools);
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0]["name"], "send");
-    assert!(out[0]["description"].is_string());
-    assert_eq!(out[0]["input_schema"]["type"], "object");
-    assert!(out[0]["input_schema"]["properties"]["target_id"].is_object());
-    // Anthropic does NOT use the OpenAI `{type:function, function:{...}}` wrapper.
-    assert!(out[0].get("function").is_none());
+    assert!(out[2]["content"]
+        .as_str()
+        .unwrap()
+        .contains("<tool_response"));
 }
 
 #[tokio::test]
@@ -297,7 +281,7 @@ async fn send_streams_tokens_via_event_typed_sse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_use_input_json_delta_aggregation() {
+async fn raw_tool_call_in_text_split_across_deltas() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
@@ -306,15 +290,15 @@ async fn tool_use_input_json_delta_aggregation() {
         .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
         .await;
 
-    // First call: a tool_use block whose `input` arrives as two
-    // `input_json_delta` fragments that only JSON-parse once joined.
+    // RAW: the `<tool_call>` envelope arrives as plain `text_delta` fragments
+    // split across two deltas — ai-core's shared parser buffers + extracts it.
     let tool_body = sse(&[
         json!({"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}),
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"send","input":{}}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"target_id\":\"co"}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"re\",\"payload\":{\"type\":\"list_agents\"}}"}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"re\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"}}),
         json!({"type":"content_block_stop","index":0}),
-        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
         json!({"type":"message_stop"}),
     ]);
     // Second call: the final assistant answer after the tool ran.
@@ -392,7 +376,7 @@ async fn tool_use_input_json_delta_aggregation() {
     let _ = join.await.unwrap();
     assert!(
         tool_invoked,
-        "expected the input_json_delta-aggregated tool_call to dispatch against 'core'",
+        "expected the text-streamed <tool_call> to parse + dispatch against 'core'",
     );
 }
 

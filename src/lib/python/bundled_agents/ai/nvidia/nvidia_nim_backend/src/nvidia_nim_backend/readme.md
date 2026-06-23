@@ -1,8 +1,17 @@
 # nvidia_nim_backend — NVIDIA NIM LLM agent
-OpenAI-compatible LLM backend. api_key stored out-of-band via `file_bridge_id` sidecar; rate-limit retry. Same surface as ollama_backend.
+OpenAI-compatible LLM backend. api_key stored out-of-band via `file_bridge_id` sidecar; rate-limit retry; raw prompt-and-parse tool-calling. Same surface as ollama_backend.
 
 ## Implementation
 This bundle is a thin binding over the shared `ai_core` lib. The queue/FIFO lock/menu cache, prompt assembly, the agentic `_run` loop, and all verb bodies live in `ai_core.core`; this module supplies the `NvidiaNimProvider` builder and the NIM-specific extras below, and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+
+## Tool-calling is RAW (no native OpenAI tools)
+This backend NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
+`delta.tool_calls`. The `NvidiaNimProvider` streams plain `content` text; the shared
+`ai_core` layer teaches the `send` tool's text envelope in the system prompt and parses
+the call out of the stream (`ai_core.tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results come back as `<tool_response>…</tool_response>` text. Identical across the
+ollama / nvidia / anthropic backends.
 
 ## NIM-specific verbs
 - `set_api_key {api_key}` — persists the key to the store-relative `agents/<id>/api_key` via `file_bridge_id` (wire it to the `.fantastic` store; never in agent.json; no `.fantastic/.fantastic/…` double-nest). Drops the cached provider so the next `send` reads the key fresh. Failfast if `file_bridge_id` is unset or key is empty.

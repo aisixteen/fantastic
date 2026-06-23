@@ -10,6 +10,16 @@ Reference implementation for the **LLM backend contract** defined in
 apple_fm, …) speaks the same contract, so any caller retargets by
 changing one record field — no caller-side change.
 
+## Tool-calling is RAW (no native ollama tools)
+This backend NEVER sends ollama's `tools` array nor reads `message.tool_calls`.
+`OllamaProvider` streams pure `content` text; the shared `fantastic-ai-core` layer
+teaches the `send` tool's text envelope in the system prompt and parses the call back
+out of the stream (`tool_parse`): the model emits
+`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
+results return as `<tool_response>…</tool_response>` text. Model-agnostic — works even
+with models ollama marks `completion`-only. Identical across the ollama / nvidia /
+anthropic backends.
+
 ## Calling this agent as a workflow unit
 `send {type:"send", text, client_id?}` runs ONE inference turn (per-backend FIFO
 lock). It is SHARED COMPUTE reached by id: a scheduler, a host job, a

@@ -55,11 +55,9 @@ pub const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 5;
 /// Per-agent retry budget on 429 before any chunk has been yielded.
 pub const RATE_LIMIT_MAX_RETRIES: u32 = 1;
 
-/// Per-backend config: per-client-inbox routing, OpenAI tool-args shape
-/// (JSON string), serial tool dispatch.
+/// Per-backend config: per-client-inbox routing, serial tool dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::PerClientInbox,
-    tool_args_as_json: true,
     parallel_tools: false,
     name: "nvidia_nim_backend",
 };
@@ -190,28 +188,19 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
     }
 }
 
-/// One pending (streamed) tool-call: arguments accumulate as STRING
-/// fragments that JSON-parse only once concatenated.
-#[derive(Default)]
-struct PendingToolCall {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
 #[async_trait]
 impl Provider for NimProvider {
     fn model(&self) -> String {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value], tools: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+        // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
+        // envelope out of the streamed text.
         let body = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
-            "tools": tools,
-            "tool_choice": "auto",
         });
         // Retry-once-on-429 (before any chunk yielded). Emits a
         // rate-limit say + status during the backoff.
@@ -275,16 +264,15 @@ impl Provider for NimProvider {
     }
 }
 
-/// Drain the SSE body, split into `data:` lines, parse JSON, build
-/// finalized provider events (content tokens in order, then one
-/// finalized ToolCall per index with aggregated arguments).
+/// Drain the SSE body, split into `data:` lines, parse JSON, emit content
+/// tokens in order. PURE RAW TEXT — no native `tool_calls` are read; ai-core
+/// parses the `<tool_call>` envelope out of the token text.
 async fn consume_sse(
     resp: reqwest::Response,
 ) -> Result<Vec<Result<ProviderEvent, String>>, String> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-    let mut pending: HashMap<u32, PendingToolCall> = HashMap::new();
     let mut done_marker_seen = false;
 
     while let Some(chunk_res) = stream.next().await {
@@ -326,60 +314,10 @@ async fn consume_sse(
                     out.push(Ok(ProviderEvent::Token(content.to_string())));
                 }
             }
-            if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
-                for tc in tcs {
-                    let idx = tc
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .map(|v| v as u32)
-                        .unwrap_or(0);
-                    let slot = pending.entry(idx).or_default();
-                    if let Some(id) = tc.get("id").and_then(Value::as_str) {
-                        if !id.is_empty() {
-                            slot.id = id.to_string();
-                        }
-                    }
-                    if let Some(fn_obj) = tc.get("function") {
-                        if let Some(name) = fn_obj.get("name").and_then(Value::as_str) {
-                            if !name.is_empty() {
-                                slot.name = name.to_string();
-                            }
-                        }
-                        if let Some(args) = fn_obj.get("arguments").and_then(Value::as_str) {
-                            slot.arguments.push_str(args);
-                        }
-                    }
-                }
-            }
         }
         if done_marker_seen {
             break;
         }
-    }
-
-    // Finalize tool-calls: parse the accumulated arguments string.
-    let mut idxs: Vec<u32> = pending.keys().copied().collect();
-    idxs.sort_unstable();
-    for i in idxs {
-        let slot = pending.remove(&i).unwrap();
-        if slot.name.is_empty() {
-            continue;
-        }
-        let parsed: Value = if slot.arguments.is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&slot.arguments).unwrap_or(json!({}))
-        };
-        let id = if slot.id.is_empty() {
-            format!("call_{:08x}", i)
-        } else {
-            slot.id
-        };
-        out.push(Ok(ProviderEvent::ToolCall {
-            id,
-            name: slot.name,
-            args: parsed,
-        }));
     }
 
     Ok(out)
@@ -473,7 +411,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .to_string();
     json!({
         "id": agent_id.as_str(),
-        "sentence": "NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling).",
+        "sentence": "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
         "model": model,
         "endpoint": endpoint,
         "file_bridge_id": file_bridge_id_v,

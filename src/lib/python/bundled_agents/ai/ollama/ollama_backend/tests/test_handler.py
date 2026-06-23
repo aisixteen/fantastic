@@ -22,7 +22,7 @@ class _FakeProvider:
         self._scripts = list(scripts)
         self.calls = 0
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages):
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
         for x in items:
@@ -122,7 +122,7 @@ class _RecordProvider:
         self.calls = 0
         self.last_messages = None
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages):
         self.last_messages = list(messages)  # snapshot — _run mutates the list later
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
@@ -277,11 +277,13 @@ async def test_run_persists_history(seeded_kernel, store_agent):
 
 
 async def test_run_persists_full_tool_call_round_trip(seeded_kernel, store_agent):
-    """Lossless persistence of tool turns to the chat yaml_state:
-      1. the assistant turn that emitted tool_calls (name + arguments intact),
-      2. the role:tool reply linked by tool_call_id,
+    """Lossless persistence of tool turns to the chat yaml_state — RAW text shape:
+      1. the assistant turn carrying its `<tool_call>` envelope inline (text),
+      2. the role:tool reply carrying the `<tool_response>` text,
       3. the final assistant turn that closed the loop.
-    The audit trail for malformed tool-calls."""
+    The audit trail for tool-calls."""
+    from ai_core.tool_parse import extract_tool_calls
+
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider(
         [
@@ -310,10 +312,14 @@ async def test_run_persists_full_tool_call_round_trip(seeded_kernel, store_agent
     assert roles == ["user", "assistant", "tool", "assistant"], (
         f"roles malformed: {roles}\nfull: {data}"
     )
-    tc = data[1]["tool_calls"][0]
-    assert tc["function"]["name"] == "send"
-    assert tc["function"]["arguments"]["target_id"] == "kernel_state"
-    assert data[2]["tool_call_id"] == "call_X" and data[2]["name"] == "send"
+    # assistant turn carries the call as <tool_call> text — parse it back out
+    calls = extract_tool_calls(data[1]["content"])
+    assert calls and calls[0]["name"] == "send"
+    assert calls[0]["arguments"]["target_id"] == "kernel_state"
+    # tool reply is <tool_response> text content
+    assert (
+        "<tool_response" in data[2]["content"] and "kernel_state" in data[2]["content"]
+    )
     assert data[3] == {"role": "assistant", "content": "Done."}
 
 
@@ -554,7 +560,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.20)
@@ -635,7 +641,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
     order: list[str] = []
 
     class _SerialProvider:
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -793,7 +799,7 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             self.calls += 1
             if self.calls == 1:
                 # While we're "thinking", measure queue depth.
@@ -844,7 +850,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
     captured_status: list[dict] = []
 
     class _SlowProvider:
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             r = await seeded_kernel.send(oid, {"type": "status", "client_id": "alice"})
             captured_status.append(r)
             yield "ok"
@@ -876,7 +882,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
         def __init__(self):
             self.calls = 0
 
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             self.calls += 1
             if self.calls == 1:
                 # bob runs first; alice gets queued behind him
@@ -927,7 +933,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     snap_holder: list[dict] = []
 
     class _RedactProvider:
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             snap_holder.append(await seeded_kernel.send(oid, {"type": "status"}))
             yield "ok"
 
@@ -952,7 +958,7 @@ async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agen
     oid = await _make_ollama(seeded_kernel, store_agent)
 
     class _SlowProvider:
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             await asyncio.sleep(2.0)
             yield "never"
 
@@ -987,7 +993,7 @@ async def test_status_done_emits_with_reason_timeout(
     monkeypatch.setattr(ot, "SEND_TIMEOUT", 0.05)
 
     class _ForeverProvider:
-        async def chat(self, messages, tools):
+        async def chat(self, messages):
             await asyncio.sleep(5.0)
             yield "never"
 

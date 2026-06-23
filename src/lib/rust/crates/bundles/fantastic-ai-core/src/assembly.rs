@@ -113,6 +113,17 @@ pub fn render_menu(menu: &[Value]) -> String {
 /// whole-system guide before guessing the wiring.
 pub const SEND_HOWTO: &str = r#"## How to use the `send` tool
 You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
+
+To CALL it, emit EXACTLY this on its own — a `<tool_call>` tag wrapping one JSON object:
+<tool_call>{"name": "send", "arguments": {"target_id": "<id>", "payload": {"type": "<verb>", ...fields}}}</tool_call>
+Rules:
+- Emit the tag verbatim; put NOTHING else on that line. You may emit several tags to
+  batch calls. Any text OUTSIDE the tags is shown to the user as your message.
+- After a call, you receive a `<tool_response>...</tool_response>` with the reply. READ it,
+  then either call again or write your final answer (no tag) to finish.
+- Example — list the agents:
+  <tool_call>{"name": "send", "arguments": {"target_id": "core", "payload": {"type": "list_agents"}}}</tool_call>
+
 - ORIENT FIRST. For anything beyond the menu's verb names — especially the
   browser frontend (panels/views), persistence, or how agents are wired — read
   the full system guide in ONE call BEFORE acting:
@@ -128,30 +139,10 @@ You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
   send tool reaches every agent in the system.
 "#;
 
-/// The universal `send` tool definition handed to the provider.
-pub fn send_tool_def() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "send",
-            "description": "Send a message to any agent in the Fantastic substrate. Universal verb on every agent: reflect (returns identity + state). Discover agents by sending list_agents to the core agent.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_id": {
-                        "type": "string",
-                        "description": "Agent id to send the payload to (e.g. 'core', 'cli', 'terminal_xxx').",
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "{\"type\": \"<verb>\", ...fields}. Universal verb: reflect.",
-                    },
-                },
-                "required": ["target_id", "payload"],
-            },
-        },
-    })
-}
+// NOTE: there is NO native tool schema. Tool-calling is RAW prompt-and-parse,
+// owned by the base class: the `send` tool + its `<tool_call>` text envelope are
+// taught in `SEND_HOWTO`, the model emits the call as text, and
+// `crate::tool_parse` parses it back out of the stream. Providers get NO tools.
 
 /// Build the per-turn message list: rebuilt system block (primer + self
 /// reflect + lazy menu + howto), persisted history, then the user turn.

@@ -1,11 +1,10 @@
 //! anthropic_backend — Anthropic (Claude) Messages-API LLM bundle.
 //! Thin shell over `fantastic-ai-core`: this crate supplies only the
 //! Anthropic `Provider` (HTTPS + `x-api-key` + `anthropic-version`
-//! header + event-typed SSE + `tool_use`-block aggregation + the
-//! OpenAI↔Anthropic message/tool translation + 429 retry) plus a
-//! `Bundle` that dispatches every verb through ai-core. The FIFO lock,
-//! menu cache, prompt assembly, agentic loop, status phase machine, and
-//! history persistence live in ai-core.
+//! header + event-typed SSE, RAW TEXT + 429 retry) plus a `Bundle` that
+//! dispatches every verb through ai-core. The FIFO lock, menu cache, prompt
+//! assembly, agentic loop (incl. RAW tool-call parsing), status phase machine,
+//! and history persistence live in ai-core.
 //!
 //! See `fantastic_ai_core`'s module header for the canonical LLM backend
 //! contract. Anthropic-local extras:
@@ -15,14 +14,11 @@
 //! - `reflect` includes `has_api_key: bool` (never the value)
 //! - `x-api-key` HTTP client cache (dropped on key change), 429 retry.
 //!
-//! Wire translation (ai-core speaks OpenAI; Anthropic differs):
-//! - `system` role → top-level `system` param (concatenated)
-//! - `assistant.tool_calls` → `tool_use` content blocks
-//! - `role:tool` result → a `user` msg with a `tool_result` block
-//! - `{type:function, function:{name,description,parameters}}` tool →
-//!   `{name, description, input_schema}`
-//! - response `content_block_delta`(`text_delta`/`input_json_delta`) +
-//!   `tool_use` blocks → ai-core `ProviderEvent::Token` / `ToolCall`.
+//! Wire translation: ai-core's plain messages → Anthropic's top-level `system`
+//! param + alternating user/assistant TEXT turns. NO native tools — Fantastic
+//! NEVER uses Anthropic `tool_use`; tool-calling is RAW prompt-and-parse owned
+//! by ai-core (the model emits a `<tool_call>` envelope in the text). Response
+//! `content_block_delta`(`text_delta`) → `ProviderEvent::Token`.
 
 #![deny(missing_docs)]
 
@@ -72,12 +68,9 @@ pub const RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 5;
 /// Per-agent retry budget on 429 before any chunk has been yielded.
 pub const RATE_LIMIT_MAX_RETRIES: u32 = 1;
 
-/// Per-backend config: per-client-inbox routing; Anthropic `tool_use.input`
-/// is a JSON OBJECT (not a string), so the replayed assistant `tool_calls`
-/// carry the object directly (`tool_args_as_json: false`); serial dispatch.
+/// Per-backend config: per-client-inbox routing; serial dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::PerClientInbox,
-    tool_args_as_json: false,
     parallel_tools: false,
     name: "anthropic_backend",
 };
@@ -187,101 +180,37 @@ async fn clear_api_key_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value 
     json!({"ok": true, "deleted": deleted})
 }
 
-// ── OpenAI → Anthropic translation ──────────────────────────────────
+// ── plain messages → Anthropic translation ──────────────────────────
 
-/// Coerce a `function.arguments` field (string OR object) into a JSON object.
-fn args_to_object(v: Option<&Value>) -> Value {
-    match v {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-        Some(other) => other.clone(),
-        None => json!({}),
-    }
-}
-
-/// Split ai-core's OpenAI-shaped messages into Anthropic's top-level
-/// `system` string + the `messages` array (with `tool_use` / `tool_result`
-/// content blocks). System blocks are concatenated; empty assistant turns
-/// (no text, no tool_calls) are dropped (Anthropic rejects empty content).
+/// Split ai-core's messages into Anthropic's top-level `system` string + the
+/// `messages` array of plain user/assistant TEXT turns. Tool calls/replies are
+/// already inline text (`<tool_call>`/`<tool_response>`); ai-core's
+/// `render_for_model` mapped tool replies to user-role text before we see them,
+/// so there is NO tool_use/tool_result translation. System blocks concatenate;
+/// empty turns are dropped (Anthropic rejects empty content).
 fn translate_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
     let mut system: Option<String> = None;
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+        let content = m.get("content").and_then(Value::as_str).unwrap_or("");
         match role {
             "system" => {
-                let c = m.get("content").and_then(Value::as_str).unwrap_or("");
                 system = Some(match system.take() {
-                    Some(prev) if !prev.is_empty() => format!("{prev}\n\n{c}"),
-                    _ => c.to_string(),
+                    Some(prev) if !prev.is_empty() => format!("{prev}\n\n{content}"),
+                    _ => content.to_string(),
                 });
             }
-            "user" => {
-                let c = m.get("content").and_then(Value::as_str).unwrap_or("");
-                out.push(json!({"role": "user", "content": c}));
+            "user" | "tool" => {
+                out.push(json!({"role": "user", "content": content}));
             }
-            "assistant" => {
-                let mut blocks: Vec<Value> = Vec::new();
-                if let Some(text) = m.get("content").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        blocks.push(json!({"type": "text", "text": text}));
-                    }
-                }
-                if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
-                    for tc in tcs {
-                        let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
-                        let func = tc.get("function").cloned().unwrap_or(Value::Null);
-                        let name = func.get("name").and_then(Value::as_str).unwrap_or("");
-                        let input = args_to_object(func.get("arguments"));
-                        blocks.push(json!({
-                            "type": "tool_use", "id": id, "name": name, "input": input,
-                        }));
-                    }
-                }
-                if !blocks.is_empty() {
-                    out.push(json!({"role": "assistant", "content": blocks}));
-                }
-            }
-            "tool" => {
-                let tool_use_id = m.get("tool_call_id").and_then(Value::as_str).unwrap_or("");
-                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-                out.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": content,
-                    }],
-                }));
+            "assistant" if !content.is_empty() => {
+                out.push(json!({"role": "assistant", "content": content}));
             }
             _ => {}
         }
     }
     (system, out)
-}
-
-/// `{type:function, function:{name, description, parameters}}` →
-/// `{name, description, input_schema}`.
-fn translate_tools(tools: &[Value]) -> Vec<Value> {
-    tools
-        .iter()
-        .filter_map(|t| {
-            let func = t.get("function")?;
-            let name = func.get("name").and_then(Value::as_str)?;
-            let description = func
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let schema = func
-                .get("parameters")
-                .cloned()
-                .unwrap_or_else(|| json!({"type": "object"}));
-            Some(json!({
-                "name": name,
-                "description": description,
-                "input_schema": schema,
-            }))
-        })
-        .collect()
 }
 
 // ── Anthropic provider (x-api-key + event-typed SSE + 429 retry) ─────
@@ -306,25 +235,16 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> u64 {
     }
 }
 
-/// One pending (streamed) `tool_use` block, keyed by content-block index.
-/// `input` arrives as `partial_json` STRING fragments that JSON-parse only
-/// once concatenated.
-#[derive(Default)]
-struct PendingToolUse {
-    id: String,
-    name: String,
-    partial_json: String,
-}
-
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn model(&self) -> String {
         self.model.clone()
     }
 
-    async fn chat(&self, messages: &[Value], tools: &[Value]) -> Result<ProviderStream, String> {
+    async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+        // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
+        // envelope out of the streamed text.
         let (system, anthropic_messages) = translate_messages(messages);
-        let anthropic_tools = translate_tools(tools);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("max_tokens".into(), json!(self.max_tokens));
@@ -332,10 +252,6 @@ impl Provider for AnthropicProvider {
         body.insert("messages".into(), json!(anthropic_messages));
         if let Some(sys) = system {
             body.insert("system".into(), json!(sys));
-        }
-        if !anthropic_tools.is_empty() {
-            body.insert("tools".into(), json!(anthropic_tools));
-            body.insert("tool_choice".into(), json!({"type": "auto"}));
         }
         let body = Value::Object(body);
 
@@ -401,18 +317,15 @@ impl Provider for AnthropicProvider {
 }
 
 /// Drain the event-typed SSE body. Anthropic frames each event as an
-/// `event:` line + a `data:` JSON line; the JSON carries its own `type`,
-/// so we dispatch on that and ignore the `event:` lines. Tokens
-/// (`text_delta`) and finalized tool-calls (one per `tool_use` block,
-/// closed at its `content_block_stop`) are pushed in arrival order.
+/// `event:` line + a `data:` JSON line; the JSON carries its own `type`, so we
+/// dispatch on that. PURE RAW TEXT — only `text_delta` tokens are emitted; no
+/// native `tool_use` is read (ai-core parses the `<tool_call>` envelope).
 async fn consume_sse(
     resp: reqwest::Response,
 ) -> Result<Vec<Result<ProviderEvent, String>>, String> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-    // content-block index → pending tool_use (text blocks aren't tracked).
-    let mut pending: HashMap<u64, PendingToolUse> = HashMap::new();
     let mut stop = false;
 
     while let Some(chunk_res) = stream.next().await {
@@ -438,63 +351,13 @@ async fn consume_sse(
                 Err(_) => continue,
             };
             match obj.get("type").and_then(Value::as_str).unwrap_or("") {
-                "content_block_start" => {
-                    let idx = obj.get("index").and_then(Value::as_u64).unwrap_or(0);
-                    let block = obj.get("content_block").cloned().unwrap_or(Value::Null);
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let id = block.get("id").and_then(Value::as_str).unwrap_or("");
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-                        pending.insert(
-                            idx,
-                            PendingToolUse {
-                                id: id.to_string(),
-                                name: name.to_string(),
-                                partial_json: String::new(),
-                            },
-                        );
-                    }
-                }
                 "content_block_delta" => {
-                    let idx = obj.get("index").and_then(Value::as_u64).unwrap_or(0);
                     let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
-                    match delta.get("type").and_then(Value::as_str).unwrap_or("") {
-                        "text_delta" => {
-                            if let Some(t) = delta.get("text").and_then(Value::as_str) {
-                                if !t.is_empty() {
-                                    out.push(Ok(ProviderEvent::Token(t.to_string())));
-                                }
+                    if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
+                        if let Some(t) = delta.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                out.push(Ok(ProviderEvent::Token(t.to_string())));
                             }
-                        }
-                        "input_json_delta" => {
-                            if let Some(slot) = pending.get_mut(&idx) {
-                                if let Some(pj) = delta.get("partial_json").and_then(Value::as_str)
-                                {
-                                    slot.partial_json.push_str(pj);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "content_block_stop" => {
-                    let idx = obj.get("index").and_then(Value::as_u64).unwrap_or(0);
-                    if let Some(slot) = pending.remove(&idx) {
-                        if !slot.name.is_empty() {
-                            let args: Value = if slot.partial_json.is_empty() {
-                                json!({})
-                            } else {
-                                serde_json::from_str(&slot.partial_json).unwrap_or(json!({}))
-                            };
-                            let id = if slot.id.is_empty() {
-                                format!("toolu_{:08x}", idx)
-                            } else {
-                                slot.id
-                            };
-                            out.push(Ok(ProviderEvent::ToolCall {
-                                id,
-                                name: slot.name,
-                                args,
-                            }));
                         }
                     }
                 }
@@ -617,7 +480,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         .to_string();
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Anthropic (Claude) Messages-API LLM agent (native tool-calling).",
+        "sentence": "Anthropic (Claude) Messages-API LLM agent (raw prompt-and-parse tool-calling).",
         "model": model,
         "endpoint": endpoint,
         "max_tokens": max_tokens,

@@ -27,7 +27,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
             AIBackendConfig(
                 kind: "ollama_backend",
                 provider: "ollama",
-                sentence: "Ollama-backed LLM agent (native tool-calling).",
+                sentence: "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
                 verbs: [
                     "send": "args: text, client_id?. Streams a response.",
                     "history": "args: client_id?. Returns prior turns.",
@@ -60,7 +60,8 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         ollama_backend — local LLM agent; thin over FantasticAICore.
-        Per-client chat threads, FIFO lock, native tool-calls; verbs: send, history, interrupt, backend_state.
+        Per-client chat threads, FIFO lock; verbs: send, history, interrupt, backend_state.
+        Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
         """
     }
 
@@ -83,24 +84,24 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// Ollama `/api/chat` streaming provider — `.token` per NDJSON chunk
-/// carrying `message.content`, plus a finalized `.toolCall` per
-/// `message.tool_calls` entry (arguments already a parsed object).
-/// Mirrors Rust's ollama provider so the shared agentic loop drives it
-/// identically.
+/// Ollama `/api/chat` streaming provider — PURE RAW TEXT: `.token` per NDJSON
+/// chunk carrying `message.content`. NO native `tools` array is sent and NO
+/// `tool_calls` are read; ai-core parses the `<tool_call>` envelope from the
+/// content text. Mirrors Rust/Python ollama providers.
 struct OllamaProvider: AIProvider {
     let host: String
     let model: String
 
-    func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
+    func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let host = host
         let model = model
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // RAW: no native `tools` array — ai-core parses the `<tool_call>`
+                // envelope out of the streamed content text.
                 let body: JSON = .object([
                     "model": .string(model),
                     "messages": .array(messages),
-                    "tools": .array(tools),
                     "stream": .bool(true),
                 ])
                 var req = HTTPClientRequest(url: "\(host)/api/chat")
@@ -116,30 +117,6 @@ struct OllamaProvider: AIProvider {
                         let msg = parsed["message"]
                         if let delta = msg["content"].asString, !delta.isEmpty {
                             continuation.yield(.token(delta))
-                        }
-                        // ollama's `arguments` is already a parsed object;
-                        // ids are absent, so mint one. Shape the chunk as
-                        // the OpenAI-style `{id, function:{name, arguments}}`
-                        // the shared loop expects.
-                        if let calls = msg["tool_calls"].asArray {
-                            for call in calls {
-                                let fn = call["function"]
-                                let name = fn["name"].asString ?? "send"
-                                let args = fn["arguments"]
-                                let id =
-                                    call["id"].asString
-                                    ?? "call_\(UUID().uuidString.prefix(8))"
-                                continuation.yield(
-                                    .toolCall(
-                                        .object([
-                                            "id": .string(id),
-                                            "type": .string("function"),
-                                            "function": .object([
-                                                "name": .string(name),
-                                                "arguments": args,
-                                            ]),
-                                        ])))
-                            }
                         }
                         if parsed["done"].asBool == true {
                             break

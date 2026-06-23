@@ -1,15 +1,14 @@
 // NVIDIA NIM (OpenAI-compatible) LLM backend.
 //
 // Mirrors Rust's `fantastic-nvidia-nim-backend::NvidiaNimBundle`.
-// Talks to NIM via HTTPS POST + Bearer auth; streams tokens via
-// Server-Sent Events; aggregates tool-call deltas across SSE chunks.
+// Talks to NIM via HTTPS POST + Bearer auth; streams RAW TEXT tokens via
+// Server-Sent Events. NO native tool-calling — ai-core parses the
+// `<tool_call>` envelope from the streamed text.
 //
 // All the agent machinery (history, epoch cancellation, verb
-// dispatch, token/done events) lives in the shared
+// dispatch, token/done events, raw tool-call parsing) lives in the shared
 // `FantasticAICore.AIBackend`. This file keeps only NIM-specific
-// wire: the Bearer/SSE/429 provider + the api_key refusal + the
-// tool-call aggregation that the shared core persists into the
-// assistant turn (config `persistToolCalls`).
+// wire: the Bearer/SSE/429 provider + the api_key refusal.
 
 import AsyncHTTPClient
 import FantasticAICore
@@ -32,7 +31,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                 kind: "nvidia_nim_backend",
                 provider: "nvidia_nim",
                 sentence:
-                    "NVIDIA NIM-backed LLM agent (OpenAI-compatible, native tool-calling).",
+                    "NVIDIA NIM-backed LLM agent (OpenAI-compatible; raw prompt-and-parse tool-calling).",
                 verbs: [
                     "send": "args: text, client_id?. Streams a response via SSE.",
                     "history": "args: client_id?. Returns prior turns.",
@@ -41,13 +40,9 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                         "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
                 ] as JSON,
-                // NIM persists finalized tool-calls into the assistant
-                // turn, and its `done` error path keeps `accumulated`.
-                persistToolCalls: true,
+                // NIM's `done` error path keeps `accumulated`; dispatch the
+                // batch serially (matches the Rust NIM port).
                 includeAccumulatedOnError: true,
-                // OpenAI shape: tool-call arguments are a JSON string;
-                // dispatch the batch serially (matches the Rust NIM port).
-                toolArgsAsJson: true,
                 parallelTools: false,
                 reflectExtra: { agent in
                     [
@@ -86,6 +81,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
         """
         nvidia_nim_backend — NVIDIA NIM LLM agent (OpenAI-compatible); thin over FantasticAICore.
         Verbs: send, history, interrupt, backend_state; api_key stored in agent meta (set via update_agent); 429 rate-limit retry.
+        Tool-calling is RAW: no native OpenAI tools — provider streams text, FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
         """
     }
 
@@ -108,15 +104,15 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// NIM `/v1/chat/completions` SSE provider — Bearer auth, 429 retry
-/// with exponential backoff (1s, 2s, 4s), per-index tool-call delta
-/// aggregation finalized into `.toolCall` chunks at stream end.
+/// NIM `/v1/chat/completions` SSE provider — Bearer auth, 429 retry with
+/// exponential backoff (1s, 2s, 4s). PURE RAW TEXT: yields `.token`s only; no
+/// native tool-calls (ai-core parses the `<tool_call>` envelope from the text).
 struct NvidiaNimProvider: AIProvider {
     let host: String
     let model: String
     let apiKey: String
 
-    func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
+    func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let host = host
         let model = model
         let apiKey = apiKey
@@ -128,29 +124,16 @@ struct NvidiaNimProvider: AIProvider {
                 req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
                 req.headers.add(name: "Accept", value: "text/event-stream")
 
+                // RAW: no native `tools` array — ai-core parses the `<tool_call>`
+                // envelope out of the streamed content text.
                 var body: OrderedDictionary<String, JSON> = [:]
                 body["model"] = .string(model)
                 body["messages"] = .array(messages)
                 body["stream"] = .bool(true)
-                if !tools.isEmpty {
-                    // OpenAI tool shape.
-                    let wrapped = tools.map { t -> JSON in
-                        .object([
-                            "type": .string("function"),
-                            "function": .object([
-                                "name": t["name"],
-                                "description": t["description"],
-                                "parameters": t["parameters"],
-                            ]),
-                        ])
-                    }
-                    body["tools"] = .array(wrapped)
-                }
                 req.body = .bytes(ByteBuffer(string: JSON.object(body).serialize()))
 
                 var attempt = 0
                 let maxAttempts = 3
-                var toolCallsAccum: OrderedDictionary<Int, OrderedDictionary<String, JSON>> = [:]
 
                 while attempt < maxAttempts {
                     attempt += 1
@@ -174,31 +157,9 @@ struct NvidiaNimProvider: AIProvider {
                             guard let data = payload.data(using: .utf8),
                                 let parsed = try? JSON.parse(data)
                             else { continue }
-                            let choice = parsed["choices"][0]
-                            let delta = choice["delta"]
+                            let delta = parsed["choices"][0]["delta"]
                             if let chunk = delta["content"].asString {
                                 continuation.yield(.token(chunk))
-                            }
-                            if let calls = delta["tool_calls"].asArray {
-                                for call in calls {
-                                    guard let idx = call["index"].asInt else { continue }
-                                    var existing = toolCallsAccum[Int(idx)] ?? [:]
-                                    if let id = call["id"].asString {
-                                        existing["id"] = .string(id)
-                                    }
-                                    if let fn = call["function"].asObject {
-                                        var fnExisting = existing["function"]?.asObject ?? [:]
-                                        if let nm = fn["name"]?.asString {
-                                            fnExisting["name"] = .string(nm)
-                                        }
-                                        if let args = fn["arguments"]?.asString {
-                                            let prev = fnExisting["arguments"]?.asString ?? ""
-                                            fnExisting["arguments"] = .string(prev + args)
-                                        }
-                                        existing["function"] = .object(fnExisting)
-                                    }
-                                    toolCallsAccum[Int(idx)] = existing
-                                }
                             }
                         }
                         break  // success — exit retry loop
@@ -206,12 +167,6 @@ struct NvidiaNimProvider: AIProvider {
                         continuation.finish(throwing: error)
                         return
                     }
-                }
-
-                // Finalize aggregated tool-calls (in index order; the
-                // shared core re-sorts by id for the persisted turn).
-                for (_, call) in toolCallsAccum {
-                    continuation.yield(.toolCall(.object(call)))
                 }
                 continuation.finish()
             }

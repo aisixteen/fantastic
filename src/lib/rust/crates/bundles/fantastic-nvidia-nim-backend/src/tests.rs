@@ -336,7 +336,7 @@ async fn rate_limit_retry_once_then_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_call_argument_aggregation_across_chunks() {
+async fn raw_tool_call_in_content_split_across_chunks() {
     let server = MockServer::start().await;
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
@@ -345,16 +345,14 @@ async fn tool_call_argument_aggregation_across_chunks() {
         .send(&nim, json!({"type": "set_api_key", "api_key": "nvapi-x"}))
         .await;
 
-    // First call (tool fires): two SSE chunks split the arguments
-    // string. The model wants `send(target_id='core', payload={...})`.
-    let args_part_1 = "{\\\"target_id\\\":\\\"co";
-    let args_part_2 = "re\\\",\\\"payload\\\":{\\\"type\\\":\\\"list_agents\\\"}}";
-    let sse_with_tool = format!(
-        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_x\",\"function\":{{\"name\":\"send\",\"arguments\":\"{}\"}}}}]}}}}]}}\n\n\
-data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{}\"}}}}]}}}}]}}\n\n\
-data: [DONE]\n\n",
-        args_part_1, args_part_2,
-    );
+    // RAW: the `<tool_call>` envelope arrives as plain CONTENT deltas split across
+    // two SSE chunks — ai-core's shared parser buffers across chunks and extracts
+    // the call. The model wants `send(target_id='core', payload={...})`.
+    let part_1 = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co";
+    let part_2 = "re\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
+    let line_1 = json!({"choices":[{"delta":{"content": part_1}}]}).to_string();
+    let line_2 = json!({"choices":[{"delta":{"content": part_2}}]}).to_string();
+    let sse_with_tool = format!("data: {line_1}\n\ndata: {line_2}\n\ndata: [DONE]\n\n");
     // After tool runs, the model returns a final assistant turn.
     let sse_final = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n";
 

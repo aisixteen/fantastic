@@ -1,8 +1,9 @@
-"""NvidiaNimProvider — OpenAI-compatible SSE parsing + tool_call argument
-aggregation across delta chunks (provider-level, not agent-level).
+"""NvidiaNimProvider — OpenAI-compatible SSE parsing, PURE RAW TEXT.
 
-We don't hit the real NIM endpoint; we feed the provider a scripted
-SSE byte stream via httpx.MockTransport and assert the yield shape."""
+The provider streams only `str` content tokens — NO native tool-calling. Tool
+calls ride the text as `<tool_call>` envelopes and are parsed by ai_core, not
+here. We don't hit the real NIM endpoint; we feed a scripted SSE byte stream via
+httpx.MockTransport and assert the yield shape."""
 
 from __future__ import annotations
 
@@ -65,6 +66,23 @@ async def test_chat_yields_text_chunks_in_order():
     assert out == ["Hello", ", ", "world", "!"]
 
 
+async def test_chat_passes_tool_call_text_through_untouched():
+    """A `<tool_call>` envelope in the content stream is just text to the provider —
+    it does NOT interpret it (ai_core parses it downstream)."""
+    body = _sse(
+        '{"choices":[{"delta":{"content":"working "}}]}',
+        '{"choices":[{"delta":{"content":"<tool_call>{\\"name\\":\\"send\\"}</tool_call>"}}]}',
+        "[DONE]",
+    )
+    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    try:
+        out = await _collect(p)
+    finally:
+        await p.aclose()
+    assert out == ["working ", '<tool_call>{"name":"send"}</tool_call>']
+    assert all(isinstance(x, str) for x in out)
+
+
 async def test_chat_handles_done_marker_and_stops():
     """Anything after [DONE] is ignored."""
     body = _sse(
@@ -110,112 +128,10 @@ async def test_chat_ignores_empty_choices_arrays():
     assert out == ["ok"]
 
 
-# ─── tool_call aggregation ─────────────────────────────────────
-
-
-async def test_chat_aggregates_streamed_tool_call_args():
-    """OpenAI streams `function.arguments` split across N deltas under
-    the same `index`. Provider must accumulate and emit ONE tool_call
-    dict with the full parsed arguments."""
-    body = _sse(
-        # First delta carries id + name + first arg fragment.
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"send","arguments":"{\\"tar"}}]}}]}',
-        # Second carries another fragment.
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"get_id\\":\\"kernel_state\\",\\"payload\\":{\\"type\\":\\""}}]}}]}',
-        # Third closes it out.
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"list_agents\\"}}"}}]}}]}',
-        "[DONE]",
-    )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
-    try:
-        out = await _collect(p)
-    finally:
-        await p.aclose()
-    assert len(out) == 1
-    assert isinstance(out[0], dict)
-    tc = out[0]["tool_call"]
-    assert tc["id"] == "call_x"
-    assert tc["name"] == "send"
-    assert tc["arguments"] == {
-        "target_id": "kernel_state",
-        "payload": {"type": "list_agents"},
-    }
-
-
-async def test_chat_yields_text_then_tool_call():
-    """Text deltas appear in-stream; tool_calls are yielded after the
-    stream ends (provider aggregates them per index)."""
-    body = _sse(
-        '{"choices":[{"delta":{"content":"thinking..."}}]}',
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"send","arguments":"{\\"target_id\\":\\"kernel_state\\",\\"payload\\":{}}"}}]}}]}',
-        "[DONE]",
-    )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
-    try:
-        out = await _collect(p)
-    finally:
-        await p.aclose()
-    # Text chunk first, then the dict tool_call.
-    assert out[0] == "thinking..."
-    assert isinstance(out[1], dict)
-    tc = out[1]["tool_call"]
-    assert tc["name"] == "send"
-    assert tc["arguments"] == {"target_id": "kernel_state", "payload": {}}
-
-
-async def test_chat_aggregates_two_independent_tool_calls():
-    """Two indices in parallel → two tool_call yields, in index order
-    isn't guaranteed by the provider but both must show up."""
-    body = _sse(
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"send","arguments":"{\\"target_id\\":\\"kernel_state\\",\\"payload\\":{}}"}}]}}]}',
-        '{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"send","arguments":"{\\"target_id\\":\\"cli\\",\\"payload\\":{}}"}}]}}]}',
-        "[DONE]",
-    )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
-    try:
-        out = await _collect(p)
-    finally:
-        await p.aclose()
-    assert len(out) == 2
-    targets = sorted(o["tool_call"]["arguments"]["target_id"] for o in out)
-    assert targets == ["cli", "kernel_state"]
-
-
-async def test_chat_skips_tool_call_without_name():
-    """Defensive: stream that never delivered a `function.name` shouldn't
-    yield a malformed tool_call (we can't dispatch nameless calls)."""
-    body = _sse(
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"arguments":"{}"}}]}}]}',
-        "[DONE]",
-    )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
-    try:
-        out = await _collect(p)
-    finally:
-        await p.aclose()
-    assert out == []
-
-
-async def test_chat_recovers_from_unparseable_tool_call_args():
-    """Malformed argument JSON falls back to {} so the agent loop can
-    still observe the call and decide what to do."""
-    body = _sse(
-        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"x","function":{"name":"send","arguments":"{not-json"}}]}}]}',
-        "[DONE]",
-    )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
-    try:
-        out = await _collect(p)
-    finally:
-        await p.aclose()
-    assert len(out) == 1
-    assert out[0]["tool_call"]["arguments"] == {}
-
-
 # ─── transport / auth ──────────────────────────────────────────
 
 
-async def test_chat_sends_bearer_auth_and_model_in_body():
+async def test_chat_sends_bearer_auth_and_model_in_body_and_no_tools():
     received: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -233,15 +149,16 @@ async def test_chat_sends_bearer_auth_and_model_in_body():
         transport=httpx.MockTransport(handler),
     )
     try:
-        await _collect(p, tools=[{"type": "function", "function": {"name": "send"}}])
+        await _collect(p)
     finally:
         await p.aclose()
 
     assert received["auth"] == "Bearer nvapi-secret"
     assert "nvidia/llama-3_1-nemotron-ultra-253b-v1" in received["body"]
     assert '"stream": true' in received["body"] or '"stream":true' in received["body"]
-    # tools were forwarded.
-    assert '"send"' in received["body"]
+    # RAW: NO native tools array is ever sent.
+    assert '"tools"' not in received["body"]
+    assert '"tool_choice"' not in received["body"]
 
 
 async def test_chat_raises_on_http_error():

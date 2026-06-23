@@ -47,7 +47,7 @@ private final class MockProvider: AIProvider, @unchecked Sendable {
         self.chunkDelayNanos = chunkDelayNanos
     }
 
-    func chat(messages: [JSON], tools: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
+    func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let throwsError = throwsError
         let chunkDelayNanos = chunkDelayNanos
         lock.lock()
@@ -146,7 +146,6 @@ private final class MockFileBridge: AgentBundle, @unchecked Sendable {
 
 private func baseConfig(
     stateless: Bool = false,
-    persistToolCalls: Bool = false,
     includeAccumulatedOnError: Bool = false,
     emitInterruptedError: Bool = false,
     provider: @escaping @Sendable () -> ProviderResult
@@ -159,7 +158,6 @@ private func baseConfig(
             "send": "s", "history": "h", "interrupt": "i", "backend_state": "b",
         ] as JSON,
         stateless: stateless,
-        persistToolCalls: persistToolCalls,
         includeAccumulatedOnError: includeAccumulatedOnError,
         emitInterruptedError: emitInterruptedError,
         reflectExtra: { _ in ["extra": .string("yes")] },
@@ -328,14 +326,15 @@ struct AIBackendTests {
             ].asArray ?? []
         #expect(msgs.count == 4)
         #expect(msgs[0]["role"].asString == "user")
-        // The assistant turn that triggered the tool carries its call.
+        // RAW: the assistant turn carries its call as `<tool_call>` text inline
+        // (no structured tool_calls field).
         #expect(msgs[1]["role"].asString == "assistant")
-        let tc = msgs[1]["tool_calls"].asArray ?? []
-        #expect(tc.count == 1)
-        #expect(tc[0]["id"].asString == "a")
-        // The kernel reply rides back as a role:tool message.
+        #expect(msgs[1]["tool_calls"].asArray == nil)
+        #expect(msgs[1]["content"].asString?.contains("<tool_call>") == true)
+        #expect(msgs[1]["content"].asString?.contains("reflect") == true)
+        // The kernel reply rides back as a role:tool `<tool_response>` text turn.
         #expect(msgs[2]["role"].asString == "tool")
-        #expect(msgs[2]["tool_call_id"].asString == "a")
+        #expect(msgs[2]["content"].asString?.contains("<tool_response") == true)
         #expect(msgs[2]["content"].asString?.contains("core") == true)
         // The final no-tool pass is the answer.
         #expect(msgs[3]["role"].asString == "assistant")

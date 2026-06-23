@@ -80,6 +80,17 @@ func renderMenu(_ menu: [JSON]) -> String {
 let SEND_HOWTO = """
     ## How to use the `send` tool
     You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
+
+    To CALL it, emit EXACTLY this on its own — a `<tool_call>` tag wrapping one JSON object:
+    <tool_call>{"name": "send", "arguments": {"target_id": "<id>", "payload": {"type": "<verb>", ...fields}}}</tool_call>
+    Rules:
+    - Emit the tag verbatim; put NOTHING else on that line. You may emit several tags to
+      batch calls. Any text OUTSIDE the tags is shown to the user as your message.
+    - After a call, you receive a `<tool_response>...</tool_response>` with the reply. READ it,
+      then either call again or write your final answer (no tag) to finish.
+    - Example — list the agents:
+      <tool_call>{"name": "send", "arguments": {"target_id": "core", "payload": {"type": "list_agents"}}}</tool_call>
+
     - ORIENT FIRST. For anything beyond the menu's verb names — especially the
       browser frontend (panels/views), persistence, or how agents are wired — read
       the full system guide in ONE call BEFORE acting:
@@ -95,35 +106,7 @@ let SEND_HOWTO = """
       send tool reaches every agent in the system.
     """
 
-/// The universal `send` tool definition handed to OpenAI-shaped
-/// providers (ollama / NIM). FM builds the equivalent as a native
-/// `@Generable` Tool. Same shape as Rust `send_tool_def` / Python
-/// `SEND_TOOL`.
-func sendToolDef() -> JSON {
-    .object([
-        "type": .string("function"),
-        "function": .object([
-            "name": .string("send"),
-            "description": .string(
-                "Send a message to any agent in the Fantastic substrate. Universal verb on every agent: reflect (returns identity + state). Discover agents by sending list_agents to the core agent."
-            ),
-            "parameters": .object([
-                "type": .string("object"),
-                "properties": .object([
-                    "target_id": .object([
-                        "type": .string("string"),
-                        "description": .string(
-                            "Agent id to send the payload to (e.g. 'core', 'cli', 'terminal_xxx')."
-                        ),
-                    ]),
-                    "payload": .object([
-                        "type": .string("object"),
-                        "description": .string(
-                            "{\"type\": \"<verb>\", ...fields}. Universal verb: reflect."),
-                    ]),
-                ]),
-                "required": .array([.string("target_id"), .string("payload")]),
-            ]),
-        ]),
-    ])
-}
+// NOTE: there is NO native tool schema. Tool-calling is RAW prompt-and-parse,
+// owned by the base class: the `send` tool + its `<tool_call>` text envelope are
+// taught in `SEND_HOWTO`, the model emits the call as text, and `ToolParse`
+// parses it back out of the stream. Providers get NO tools array.

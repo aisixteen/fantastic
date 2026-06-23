@@ -210,12 +210,6 @@ public final class AIBackend: @unchecked Sendable {
         let messageId = "msg_\(UUID().uuidString.prefix(8))"
         let userMessageId = "msg_\(UUID().uuidString.prefix(8))"
 
-        // The single universal `send` tool — reaches every agent + verb
-        // (matches Python `[SEND_TOOL]` / Rust `vec![send_tool_def()]`).
-        // No `list_for_llm` registry: capability is discovered via the
-        // assembled menu + reflect, dispatched through this one tool.
-        let tools = [sendToolDef()]
-
         // Enqueue this submission. Only ONE generation runs at a time per
         // agent (FIFO) — concurrent callers queue in arrival order, which
         // also keeps the file_bridge-persisted history race-free.
@@ -260,7 +254,6 @@ public final class AIBackend: @unchecked Sendable {
                 clientId: clientId,
                 st: st,
                 userText: text,
-                tools: tools,
                 kernel: kernel
             )
             st.clearCurrent()
@@ -284,7 +277,6 @@ public final class AIBackend: @unchecked Sendable {
         clientId: String,
         st: AIAgentRunState,
         userText: String,
-        tools: [JSON],
         kernel: Kernel
     ) async {
         let agentId = agent.id
@@ -369,7 +361,11 @@ public final class AIBackend: @unchecked Sendable {
             var passToolCalls: [JSON] = []
             var firstToken = true
             do {
-                let stream = provider.chat(messages: messages, tools: tools)
+                // RAW tool-calling: the provider streams pure text; the SHARED
+                // parser splits content tokens from `<tool_call>` envelopes (no
+                // native tools). `renderForModel` projects stored turns to plain
+                // text every chat template renders.
+                let stream = parseToolCalls(provider.chat(messages: renderForModel(messages)))
                 for try await chunk in stream {
                     if Date() > deadline {
                         await provider.stop()
@@ -442,14 +438,17 @@ public final class AIBackend: @unchecked Sendable {
             // No tools (or interrupted) → this pass is the final answer.
             if passToolCalls.isEmpty || cancelled { break loop }
 
-            // Record the assistant turn carrying its tool-calls (the
-            // provider's own OpenAI-shaped chunks, echoed verbatim so the
-            // next pass sees a well-formed conversation), then dispatch
-            // each call through the kernel and feed the replies back.
+            // Record the assistant turn as TEXT — its prose plus the
+            // `<tool_call>` envelope(s) it emitted (no structured `tool_calls`
+            // field; raw, single-truth). Next pass the model re-reads its own
+            // call as text.
+            let callTags = passToolCalls.map { renderToolCallChunk($0) }.joined(separator: "\n")
+            let assistantText =
+                passText.isEmpty
+                ? callTags : (callTags.isEmpty ? passText : passText + "\n" + callTags)
             let assistantTurnWithTools: JSON = .object([
                 "role": .string("assistant"),
-                "content": .string(passText),
-                "tool_calls": .array(passToolCalls),
+                "content": .string(assistantText),
             ])
             messages.append(assistantTurnWithTools)
             newTurns.append(assistantTurnWithTools)
@@ -461,10 +460,18 @@ public final class AIBackend: @unchecked Sendable {
                 agentId: agentId, clientId: clientId, phase: "tool_calling", st: st,
                 extraDetail: toolDetail.map { ["tool": $0] } ?? [:], kernel: kernel)
 
+            // Dispatch, then fold every reply into ONE `role:tool` turn carrying
+            // `<tool_response>` text (mapped to role:user by `renderForModel`).
             let results = await dispatchToolCalls(
                 passToolCalls, parallel: config.parallelTools, kernel: kernel)
-            messages.append(contentsOf: results)
-            newTurns.append(contentsOf: results)
+            let toolContent = results.map {
+                "<tool_response name=\"\($0.0)\">\($0.1)</tool_response>"
+            }.joined(separator: "\n")
+            let toolTurn: JSON = .object([
+                "role": .string("tool"), "content": .string(toolContent),
+            ])
+            messages.append(toolTurn)
+            newTurns.append(toolTurn)
 
             // The population may have changed (a tool created/deleted an
             // agent) — rebuild the menu before the next pass.
@@ -478,7 +485,7 @@ public final class AIBackend: @unchecked Sendable {
         // base (with just the user turn) as the persisted record.
         let finalRows =
             persistBase + newTurns
-            + [assistantTurn(id: messageId, content: lastText, toolCalls: [])]
+            + [assistantTurn(id: messageId, content: lastText)]
         await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: finalRows)
 
         await emitStatus(
@@ -668,8 +675,7 @@ public final class AIBackend: @unchecked Sendable {
     /// through the kernel and shape the `role:tool` reply message. The
     /// call's `function.arguments` may be a JSON string (OpenAI/NIM) or a
     /// parsed object (ollama) — both resolve to `{target_id, payload}`.
-    private func dispatchToolCall(_ call: JSON, kernel: Kernel) async -> JSON {
-        let id = call["id"].asString ?? ""
+    private func dispatchToolCall(_ call: JSON, kernel: Kernel) async -> (String, String) {
         let fn = call["function"]
         let name = fn["name"].asString ?? "send"
         let rawArgs = fn["arguments"]
@@ -687,34 +693,59 @@ public final class AIBackend: @unchecked Sendable {
         } else {
             reply = await kernel.send(AgentId(target), payload)
         }
-        return .object([
-            "role": .string("tool"),
-            "tool_call_id": .string(id),
-            "name": .string(name),
-            "content": .string(reply.serialize()),
-        ])
+        return (name, reply.serialize())
     }
 
-    /// Dispatch a batch of tool-calls, preserving model-emitted order in
-    /// the returned `role:tool` messages. Concurrent when `parallel`
-    /// (ollama / FM), serial otherwise (NIM).
+    /// Dispatch a batch of tool-calls, preserving model-emitted order in the
+    /// returned `(name, replyJSON)` pairs. Concurrent when `parallel` (ollama /
+    /// FM), serial otherwise (NIM).
     private func dispatchToolCalls(
         _ calls: [JSON], parallel: Bool, kernel: Kernel
-    ) async -> [JSON] {
+    ) async -> [(String, String)] {
         if !parallel {
-            var out: [JSON] = []
+            var out: [(String, String)] = []
             for c in calls {
                 out.append(await dispatchToolCall(c, kernel: kernel))
             }
             return out
         }
-        return await withTaskGroup(of: (Int, JSON).self) { group in
+        return await withTaskGroup(of: (Int, (String, String)).self) { group in
             for (i, c) in calls.enumerated() {
                 group.addTask { (i, await self.dispatchToolCall(c, kernel: kernel)) }
             }
-            var indexed: [(Int, JSON)] = []
+            var indexed: [(Int, (String, String))] = []
             for await r in group { indexed.append(r) }
             return indexed.sorted { $0.0 < $1.0 }.map { $0.1 }
+        }
+    }
+
+    /// Render one OpenAI-shaped tool-call chunk back into the `<tool_call>`
+    /// text envelope for persistence in the assistant turn.
+    private func renderToolCallChunk(_ call: JSON) -> String {
+        let fn = call["function"]
+        let name = fn["name"].asString ?? "send"
+        let rawArgs = fn["arguments"]
+        let args: JSON
+        if let s = rawArgs.asString {
+            args = (try? JSON.parse(s)) ?? .object([:])
+        } else if rawArgs.asObject != nil {
+            args = rawArgs
+        } else {
+            args = .object([:])
+        }
+        return renderToolCall(name: name, arguments: args)
+    }
+
+    /// Project the internal message list to what the model reads — pure text,
+    /// every role a chat template renders. Tool replies are stored as
+    /// `role:tool` (so projection/recall tool-pairing stays intact) but mapped
+    /// to `role:user` here, because many templates (incl. tiny local models)
+    /// don't render a `tool` role. Keeps only role + content.
+    private func renderForModel(_ messages: [JSON]) -> [JSON] {
+        messages.map { m in
+            let role = m["role"].asString ?? ""
+            let outRole = role == "tool" ? "user" : role
+            return .object(["role": .string(outRole), "content": m["content"]])
         }
     }
 
@@ -773,19 +804,12 @@ public final class AIBackend: @unchecked Sendable {
         return .object(row)
     }
 
-    private func assistantTurn(id: String, content: String, toolCalls: [JSON]) -> JSON {
+    private func assistantTurn(id: String, content: String) -> JSON {
         var row: OrderedDictionary<String, JSON> = [:]
         if config.stateless { row["id"] = .string(id) }
         row["role"] = .string("assistant")
         row["content"] = .string(content)
         row["complete"] = .bool(true)
-        if config.persistToolCalls && !toolCalls.isEmpty {
-            // Sort by id to match the prior NIM ordering exactly.
-            let sorted = toolCalls.sorted { lhs, rhs in
-                (lhs["id"].asString ?? "") < (rhs["id"].asString ?? "")
-            }
-            row["tool_calls"] = .array(sorted)
-        }
         return .object(row)
     }
 
