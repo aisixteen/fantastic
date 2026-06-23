@@ -93,10 +93,11 @@ fn gradient(t: f32) -> (u8, u8, u8) {
     }
 }
 
-/// Draw the crisp block-font FANTASTIC, centered, scaled to the terminal. The
-/// integer `scale` = as large as fits the width, capped so the title is never
-/// taller than ~30% of the smaller screen dimension (dynamic, recomputed each
-/// frame). `reveal ∈ [0,1]` wipes it on top→bottom (the title "powers on").
+/// Draw the crisp block-font FANTASTIC, centered, scaled to the terminal. Width is
+/// integer-scaled to fit; height is packed with **half-block** glyphs (`▀▄█`, two
+/// glyph rows per terminal row) so the title isn't vertically stretched — terminal
+/// cells are ~2:1, so packing two rows per cell ≈ corrects the aspect (~1.5–2×
+/// shorter than full-block). `reveal ∈ [0,1]` wipes it on top→bottom (powers on).
 /// Returns the bottom row (area-relative) the title occupies.
 pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
     let rows = word_rows();
@@ -105,29 +106,41 @@ pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
     if w == 0 || area.width < 4 || area.height < 3 {
         return 0;
     }
-    // Dynamic integer scale: fit ≤92% of the width, but cap the height at ~30%
-    // of the smaller screen dimension. Always ≥ 1 (so it shows even when cramped).
+    // Integer scale fits ≤92% width, capped at ~30% of the smaller screen dim.
+    // Half-block packing then halves the rendered HEIGHT (the stretch fix) without
+    // changing the width — same footprint, ~1.5–2× shorter.
     let avail_w = (area.width as usize * 92) / 100;
     let cap = (area.width.min(area.height) as usize) * 3 / 10;
     let scale = (avail_w / w).min((cap / h).max(1)).max(1);
-    let tw = w * scale;
-    let th = h * scale;
+    let tw = w * scale; // terminal cols
+    let sh = h * scale; // scaled glyph sub-rows (2 per terminal row)
+    let trows = sh.div_ceil(2); // terminal rows after half-block packing
     let ox = (area.width as i32 - tw as i32) / 2;
-    let oy = ((area.height as i32 - th as i32) / 2 - 1).max(0);
-    let revealed = (reveal.clamp(0.0, 1.0) * th as f32).ceil() as usize;
-    for ty in 0..th.min(revealed) {
-        let (r, g, b) = gradient(ty as f32 / (th.max(2) - 1) as f32);
+    let oy = ((area.height as i32 - trows as i32) / 2 - 1).max(0);
+    let revealed = (reveal.clamp(0.0, 1.0) * trows as f32).ceil() as usize;
+    // Is scaled sub-row `sub`, terminal col `tx`, a lit block cell?
+    let lit = |sub: usize, tx: usize| -> bool {
+        let by = sub / scale;
+        by < h && rows[by][tx / scale]
+    };
+    for ry in 0..trows.min(revealed) {
+        let (r, g, b) = gradient(ry as f32 / (trows.max(2) - 1) as f32);
         let st = Style::default()
             .fg(Color::Rgb(r, g, b))
             .add_modifier(Modifier::BOLD);
-        let sy = ty / scale;
         for tx in 0..tw {
-            if rows[sy][tx / scale] {
-                plot(buf, area, ox + tx as i32, oy + ty as i32, '█', st);
-            }
+            let top = lit(2 * ry, tx);
+            let bot = 2 * ry + 1 < sh && lit(2 * ry + 1, tx);
+            let ch = match (top, bot) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => continue,
+            };
+            plot(buf, area, ox + tx as i32, oy + ry as i32, ch, st);
         }
     }
-    oy + th as i32
+    oy + trows as i32
 }
 
 #[cfg(test)]
@@ -138,7 +151,10 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         render_title(&mut buf, area, reveal);
-        buf.content().iter().filter(|c| c.symbol() == "█").count()
+        buf.content()
+            .iter()
+            .filter(|c| matches!(c.symbol(), "█" | "▀" | "▄"))
+            .count()
     }
 
     #[test]

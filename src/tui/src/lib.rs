@@ -1,10 +1,13 @@
 //! `fantastic-tui` — the ratatui terminal UI for the product.
 //!
-//! ONE unified chat surface. A single transcript unifies the AI brain and the
-//! kernel manager: every line routes by `@target`: `@ai …`/`@brain …` streams an
-//! AI turn; `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a sugar
-//! command. With no `@` the line goes to the sticky target. Per-source colored
-//! rails keep agents distinct; AI turns stream live and Ctrl+C interrupts.
+//! A chat **per character**, and you tab between them ([`chat::Tabs`]). Each
+//! addressee owns its own room: `@ai`/`@brain` streams an AI turn; `@<agent>`
+//! reflects it; `@<agent> <verb> [k=v…]` sends a sugar command and opens that
+//! agent's room; `@sh`/`@ws` are the shell + workspace rooms. The input is a smart
+//! `@sender` field ([`chat::Composer`]): Tab-complete, Shift-Tab to turn between
+//! rooms, Backspace into the sender, **nogo** on an unknown character. Per-source
+//! colored rails keep agents distinct; AI turns stream live, queue, and Ctrl+C
+//! interrupts.
 //!
 //! Two facilities live INSIDE the chat (no modes):
 //! - **Terminal**: `@sh <cmd>` runs a real PTY (`$SHELL`) as a breathing
@@ -13,6 +16,7 @@
 //! - **Intro**: `/intro` plays a scripted retro "movie" (see `movie.rs`); any
 //!   key stops it and returns to chat.
 
+use std::collections::VecDeque;
 use std::io::{self};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,8 +39,9 @@ use tokio::sync::mpsc;
 
 mod bg;
 mod chat;
+mod input;
 mod movie;
-use chat::{Body, Route, State, Transcript, WsCmd};
+use chat::{Body, Composer, Route, State, Tabs, WsCmd};
 use fantastic_brain as ai;
 use fantastic_host::gateway::{self, KernelHandle};
 use fantastic_term::{used_rows, TerminalSession};
@@ -45,6 +50,40 @@ use fantastic_term::{used_rows, TerminalSession};
 const CLIENT_ID: &str = "fantastic";
 /// The brain agent id (kept in sync with `fantastic-brain`).
 const BRAIN_ID: &str = "brain";
+/// The base "characters" present at boot, in tab order: the brain, the shell, the
+/// workspace kernel. Any agent you address opens its own room after these.
+const BASE_TABS: [&str; 3] = ["ai", "sh", "ws"];
+
+/// Collect agent ids from a reflect tree (handles `id` + `children`/`agents`).
+fn collect_ids(v: &Value, out: &mut Vec<String>) {
+    if let Some(id) = v.get("id").and_then(Value::as_str) {
+        let id = id.to_string();
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    for key in ["children", "agents"] {
+        if let Some(arr) = v.get(key).and_then(Value::as_array) {
+            for c in arr {
+                collect_ids(c, out);
+            }
+        }
+    }
+}
+
+/// Reflect the manager kernel's id-tree into a flat list of addressable agents
+/// (the extra "characters" for Tab-complete / Shift-Tab / nogo validation).
+async fn agent_ids(kernel: &Arc<Kernel>) -> Vec<String> {
+    let tree = kernel
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"ids"}),
+        )
+        .await;
+    let mut ids = vec!["kernel".to_string()];
+    collect_ids(&tree, &mut ids);
+    ids
+}
 
 /// Async results from the workspace-gateway tasks, delivered back into the
 /// `select!` loop. Spawned tasks own a cloned `KernelHandle` and report here.
@@ -62,10 +101,26 @@ enum WsEvent {
 struct App {
     kernel: Arc<Kernel>,
     agent_count: usize,
-    /// Chat mode: the one unified transcript + its input line + sticky target.
-    chat: Transcript,
-    input: String,
-    sticky: String,
+    /// One chat **per character**: `@ai`/`@sh`/`@ws` + any agent you address, each
+    /// its own room; Shift-Tab turns between them.
+    tabs: Tabs,
+    /// The smart input line — an editable `@sender` field + the message.
+    composer: Composer,
+    /// The active input control — `Chat` normally, or a setup-flow Select/Field
+    /// while `/setup` · `/model` is running.
+    control: input::Control,
+    /// The running connector-setup wizard, if any.
+    flow: Option<input::SetupFlow>,
+    /// Kernel agent ids (cached at boot) — the extra "characters" you can address
+    /// + Tab-complete beyond the base rooms.
+    known_agents: Vec<String>,
+    /// AI turns typed while a turn is in flight queue here and fire in order.
+    pending: VecDeque<String>,
+    /// The final AI-turn result is sent here from the spawned send task.
+    ai_tx: mpsc::UnboundedSender<String>,
+    /// The live phase of the in-flight AI turn (sending → thinking → generating),
+    /// shown as a status indicator until tokens stream in. `None` when idle.
+    ai_phase: Option<String>,
     chat_busy: bool,
     /// The live out-of-process workspace kernel (over the loopback gateway), if
     /// one has been brought `up`. `None` until an explicit `@ws up`.
@@ -118,9 +173,27 @@ struct App {
     last_q: Option<Instant>,
 }
 
+impl App {
+    /// Every addressable character: the open rooms (base + spawned tabs) plus the
+    /// known kernel agents. Drives Tab-complete, Shift-Tab roll, and the nogo
+    /// check on send.
+    fn known_senders(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.tabs.ids().to_vec();
+        for a in &self.known_agents {
+            if !v.contains(a) {
+                v.push(a.clone());
+            }
+        }
+        v
+    }
+}
+
 pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     // One-shot kernel command replies flow back here as (source_id, text).
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
+    // The final result of an AI turn (the blocking `response`, or `✗ error`) — the
+    // authoritative turn boundary. Renders into the `@ai` room + drives the queue.
+    let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<String>();
     // Workspace gateway task results (attach/spawn/send/down) flow back here.
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<WsEvent>();
     // PTY output → repaint pings.
@@ -150,12 +223,20 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     let (trows, tcols) = chat_term_grid(&term);
     let session = TerminalSession::spawn(trows, tcols, redraw_tx.clone()).ok();
 
+    // Cache the manager kernel's agent ids as addressable "characters".
+    let known_agents = agent_ids(&kernel).await;
+
     let mut app = App {
         kernel,
         agent_count,
-        chat: Transcript::new(),
-        input: String::new(),
-        sticky: "ai".into(),
+        tabs: Tabs::new(&BASE_TABS),
+        composer: Composer::new("ai"),
+        control: input::Control::Chat,
+        flow: None,
+        known_agents,
+        pending: VecDeque::new(),
+        ai_tx,
+        ai_phase: None,
         chat_busy: false,
         workspace: None,
         ws_busy: false,
@@ -179,11 +260,11 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         q_streak: 0,
         last_q: None,
     };
-    app.chat.push(
+    app.tabs.deliver("ai").push(
         "system",
         "you",
         Body::Note(
-            "Chat — `@ai …` talks to the brain (streams live, Ctrl+C interrupts); `@<agent>` reflects it; `@<agent> <verb> [k=v…]` sends a command. `@sh <cmd>` runs a shell (Ctrl+F focuses it); `/intro` plays the movie. No `@` reuses the last target.".into(),
+            "Rooms — one chat per character. `@ai` is the brain (streams live, Ctrl+C interrupts), `@sh` a shell (Ctrl+F focuses it), `@ws` the workspace kernel; `@<agent> <verb> [k=v…]` opens any agent's room. Shift-Tab turns between rooms; Tab completes a name; `/intro` plays the movie.".into(),
         ),
         State::Done,
     );
@@ -200,12 +281,35 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         tokio::select! {
             Some(ev) = in_rx.recv() => handle_input(&mut app, ev),
             Some((from, text)) = cmd_rx.recv() => {
-                app.chat.push(&from, "you", Body::Text(text), State::Done);
+                // A kernel reply lands in that agent's room (unread if you're away).
+                app.tabs.deliver(&from).push(&from, "you", Body::Text(text), State::Done);
             }
             Some(ev) = brain_rx.recv() => {
-                app.chat.on_event(&ev);
-                if !app.chat.has_live() {
+                // The brain's inbox is mirrored to us via `watch`. We use ONLY the
+                // `status` events here (the live phase indicator). Token/done events
+                // are NOT rendered live — the answer is sealed atomically from the
+                // send-completion (`ai_rx`). Live token-append races with the
+                // queue's cross-turn boundaries (the shared `brain` stream key) and
+                // SPLITS answers; correct token streaming needs per-turn stream ids
+                // in the kernel protocol (a follow-up).
+                if ev.get("type").and_then(Value::as_str) == Some("status") {
+                    if let Some(p) = ev.get("phase").and_then(Value::as_str) {
+                        app.ai_phase = Some(p.to_string());
+                    }
+                }
+            }
+            Some(out) = ai_rx.recv() => {
+                // Authoritative end of an AI turn: seal the `@ai` live line with the
+                // final response (filling it if nothing streamed) and clear the
+                // phase. Then — Claude-Code style, AI-only — any messages queued
+                // mid-turn are CONCATENATED with `\n` and sent as ONE next turn.
+                app.tabs.deliver("ai").close_stream(BRAIN_ID, &out);
+                app.ai_phase = None;
+                if app.pending.is_empty() {
                     app.chat_busy = false;
+                } else {
+                    let joined = app.pending.drain(..).collect::<Vec<_>>().join("\n");
+                    fire_ai_turn(&mut app, joined);
                 }
             }
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
@@ -348,6 +452,13 @@ fn term_live(app: &App) -> bool {
     app.term_active && app.term.is_some()
 }
 
+/// True when the terminal viewport is BOTH live and on-screen — i.e. you're in
+/// the `@sh` room. The PTY is shared, but it must only render + capture keys in
+/// its own room, never bleed into `@ai`/`@ws`/agent rooms.
+fn term_visible(app: &App) -> bool {
+    term_live(app) && app.tabs.active_id() == "sh"
+}
+
 fn handle_input(app: &mut App, ev: Event) {
     // Mouse capture stays on so the alt-screen behaves, but there are no header
     // tabs to hit-test anymore — mouse events are a no-op.
@@ -381,9 +492,10 @@ fn handle_input(app: &mut App, ev: Event) {
         app.quit = true;
         return;
     }
-    // Ctrl+F toggles PTY focus (only when a terminal viewport is live).
+    // Ctrl+F toggles PTY focus (only when the terminal viewport is on-screen — in
+    // the `@sh` room).
     if ctrl && code == KeyCode::Char('f') {
-        if term_live(app) {
+        if term_visible(app) {
             app.term_focused = !app.term_focused;
         }
         return;
@@ -398,18 +510,22 @@ fn handle_input(app: &mut App, ev: Event) {
             return;
         }
         app.last_ctrl_c = Some(now);
-        app.chat.push(
+        app.tabs.active_mut().push(
             "system",
             "you",
             Body::Note("press Ctrl+C again to exit".into()),
             State::Done,
         );
-        if app.term_focused || term_live(app) {
+        let ai_live = app.tabs.chat("ai").is_some_and(|c| c.has_live());
+        // SIGINT goes to the shell only when its viewport is the one in front
+        // (the `@sh` room / focused); elsewhere Ctrl+C interrupts the AI stream.
+        if app.term_focused || term_visible(app) {
             if let Some(ts) = app.term.as_mut() {
                 ts.write(&[0x03]);
             }
-        } else if app.chat.has_live() {
-            app.chat.interrupt_live();
+        } else if ai_live {
+            app.tabs.deliver("ai").interrupt_live();
+            app.pending.clear();
             app.chat_busy = false;
             let kernel = Arc::clone(&app.kernel);
             tokio::spawn(async move {
@@ -450,81 +566,233 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         return;
     }
-    // Otherwise the keys edit the chat input line.
+    // A setup flow (`/setup` · `/model`) owns the input while active — its dynamic
+    // control (Select / Field) handles the keys instead of the composer.
+    if !matches!(app.control, input::Control::Chat) {
+        handle_flow_key(app, code);
+        return;
+    }
+    // Otherwise the keys edit the smart composer (`@sender` field + message).
     match code {
-        KeyCode::Char(c) => app.input.push(c),
-        KeyCode::Backspace => {
-            app.input.pop();
+        KeyCode::Char(c) => app.composer.type_char(c),
+        KeyCode::Backspace => app.composer.backspace(),
+        KeyCode::Tab => {
+            // Complete the `@sender` against every known character; if it lands on
+            // an open room, turn to face it.
+            app.composer.complete(&app.known_senders());
+            if app.tabs.ids().contains(&app.composer.sender) {
+                app.tabs.focus(&app.composer.sender);
+            }
+        }
+        KeyCode::BackTab => {
+            // Shift-Tab: turn to the next OPEN room (rolls over the characters you
+            // know); the composer follows. New agents are reached by name + Tab.
+            app.tabs.cycle(true);
+            let id = app.tabs.active_id().to_string();
+            app.composer.set_sender(&id);
         }
         KeyCode::Enter => submit_chat(app),
         _ => {}
     }
 }
 
-/// Submit the chat input line: resolve its `@`-route, update the sticky target,
-/// and dispatch — an AI turn streams into the transcript; a kernel command sends
-/// and routes its reply back via `cmd_tx`.
+/// Submit the composed line: validate the `@sender` (a **nogo** if it names no
+/// known character), enter that room, then dispatch — an AI turn streams into the
+/// `@ai` room; a kernel command sends and routes its reply back via `cmd_tx`.
 fn submit_chat(app: &mut App) {
-    let line = std::mem::take(&mut app.input);
-    // `/intro` is a local command — play the scripted movie over the chat body
-    // (any key stops it). It never reaches the `@`-router.
-    if line.trim() == "/intro" {
-        app.intro_playing = true;
-        app.intro_since = Some(Instant::now());
+    // Local slash commands on the message body (never reach the `@`-router).
+    match app.composer.message.trim() {
+        "/intro" => {
+            app.composer.take_message();
+            app.intro_playing = true;
+            app.intro_since = Some(Instant::now());
+            return;
+        }
+        "/setup" => {
+            app.composer.take_message();
+            let (flow, ctrl) = input::SetupFlow::start_setup();
+            app.flow = Some(flow);
+            app.control = ctrl;
+            return;
+        }
+        "/model" => {
+            app.composer.take_message();
+            // Pre-fill from the existing connector (or fall back to a full setup).
+            let cfg = fantastic_host::ai_config();
+            let (flow, ctrl) = match cfg.backend {
+                Some(b) => input::SetupFlow::start_model(
+                    &b,
+                    cfg.model.as_deref().unwrap_or(""),
+                    cfg.key_present,
+                ),
+                None => input::SetupFlow::start_setup(),
+            };
+            app.flow = Some(flow);
+            app.control = ctrl;
+            return;
+        }
+        _ => {}
+    }
+    // Nogo: you can't talk to a character who isn't there.
+    let known = app.known_senders();
+    if !app.composer.is_valid(&known) {
+        app.composer.nogo = true;
         return;
     }
-    let (sticky, route) = chat::route(&line, &app.sticky);
-    app.sticky = sticky;
+    let sender = app.composer.sender.clone();
+    let message = app.composer.take_message();
+    // Reconstruct the routable line `@sender body` and resolve it.
+    let line = format!("@{sender} {message}");
+    let (target, route) = chat::route(&line, &sender);
+    // Entering the addressed room (creates its tab if new) + keep the composer
+    // pointed there.
+    app.tabs.focus(&target);
+    app.composer.set_sender(&target);
     match route {
         Route::Empty => {}
         Route::Ai(text) => {
-            if app.chat_busy {
-                // Restore the line so the user doesn't lose it.
-                app.input = line;
-                return;
-            }
-            app.chat
+            app.tabs
+                .deliver("ai")
                 .push("you", "ai", Body::Text(text.clone()), State::Done);
-            app.chat_busy = true;
-            // Open the live streaming message; events fill it via the inbox.
-            app.chat.start_stream(BRAIN_ID, "you");
-            let kernel = Arc::clone(&app.kernel);
-            let ensure = !app.brain_ready;
-            app.brain_ready = true;
-            tokio::spawn(async move {
-                if ensure {
-                    if let Err(e) = ai::ensure_brain(&kernel).await {
-                        // The interrupt path also clears `live`; surface the
-                        // provisioning error to the same inbox so it renders.
-                        if let Some(tx) = kernel.inboxes.get(&AgentId::from(CLIENT_ID)) {
-                            let _ = tx
-                                .send(json!({
-                                    "type":"say","source":BRAIN_ID,"client_id":CLIENT_ID,
-                                    "text": format!("✗ {e}"),
-                                }))
-                                .await;
-                            let _ = tx
-                                .send(
-                                    json!({"type":"done","source":BRAIN_ID,"client_id":CLIENT_ID}),
-                                )
-                                .await;
-                        }
-                        return;
-                    }
-                }
-                kernel
-                    .send(
-                        &AgentId::from(BRAIN_ID),
-                        json!({"type":"send","text":text,"client_id":CLIENT_ID}),
-                    )
-                    .await;
-            });
+            // The DRY stand-in brain: if no connector is configured, answer with
+            // setup guidance instead of provisioning a real brain (which would
+            // error). The real brain runs only once a connector is Ready.
+            if let Some(guide) = ai::dry_reply(&ai::config_status(), None) {
+                app.tabs
+                    .deliver("ai")
+                    .push("brain", "you", Body::Text(guide), State::Done);
+            } else if app.chat_busy {
+                // A turn is in flight — queue this one; it fires on `done`.
+                app.pending.push_back(text);
+            } else {
+                fire_ai_turn(app, text);
+            }
         }
         Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
         Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
         Route::Shell(cmd) => run_shell(app, cmd),
         Route::Workspace(cmd) => dispatch_workspace(app, cmd),
     }
+}
+
+/// Drive the active setup flow with a key. Esc cancels back to chat; Select uses
+/// ↑/↓ + Enter; Field uses chars/Backspace + Enter. Enter submits the control,
+/// advancing the wizard or finishing it.
+fn handle_flow_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.control = input::Control::Chat;
+            app.flow = None;
+        }
+        KeyCode::Up => app.control.select_up(),
+        KeyCode::Down => app.control.select_down(),
+        KeyCode::Char(c) => app.control.type_char(c),
+        KeyCode::Backspace => app.control.backspace(),
+        KeyCode::Enter => {
+            let value = app.control.submitted_value();
+            let Some(flow) = app.flow.as_mut() else {
+                app.control = input::Control::Chat;
+                return;
+            };
+            match flow.submit(value) {
+                input::Advance::Next(ctrl) => app.control = ctrl,
+                input::Advance::Done(draft) => finish_setup(app, draft),
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Persist a completed connector draft (settings + OS keychain), update the live
+/// env, re-provision the brain (drop the old one), and confirm in the `@ai` room.
+fn finish_setup(app: &mut App, draft: input::Draft) {
+    app.control = input::Control::Chat;
+    app.flow = None;
+    let key = (!draft.key.trim().is_empty()).then_some(draft.key.as_str());
+    let note = match fantastic_host::set_ai_connector(&draft.backend, &draft.model, key) {
+        Ok(()) => {
+            // Update the live env so the re-provisioned brain reads the new config.
+            std::env::set_var("FANTASTIC_AI_BACKEND", &draft.backend);
+            std::env::set_var("FANTASTIC_AI_MODEL", &draft.model);
+            if let Some(k) = key {
+                std::env::set_var("FANTASTIC_AI_KEY", k);
+            }
+            // Re-provision: drop the old brain + history so the next `@ai`
+            // re-ensures with the new model/key (a stale brain keeps the old one).
+            app.brain_ready = false;
+            let kernel = Arc::clone(&app.kernel);
+            tokio::spawn(async move {
+                for id in [BRAIN_ID, "ai_fs"] {
+                    let _ = kernel
+                        .send(
+                            &AgentId::from("kernel"),
+                            json!({"type":"delete_agent","id":id}),
+                        )
+                        .await;
+                }
+            });
+            format!(
+                "connector set: {} · {} — @ai is ready.",
+                draft.backend, draft.model
+            )
+        }
+        Err(e) => format!("✗ {e}"),
+    };
+    app.tabs
+        .deliver("ai")
+        .push("brain", "you", Body::Text(note), State::Done);
+    app.tabs.focus("ai");
+    app.composer.set_sender("ai");
+}
+
+/// Start one AI turn: open a live streaming message in the `@ai` room, ensure the
+/// brain once, then send. The blocking reply's `response` (or `✗ error`) is the
+/// authoritative result — sent back via `ai_tx` to close the live `@ai` line.
+/// This works for EVERY backend regardless of how (or whether) it routes stream
+/// events to us: ollama emits tokens to its own inbox, not ours, so relying on
+/// streamed events alone would hang the line forever.
+fn fire_ai_turn(app: &mut App, text: String) {
+    app.chat_busy = true;
+    app.ai_phase = Some("sending".to_string());
+    app.tabs.deliver("ai").start_stream(BRAIN_ID, "you");
+    let kernel = Arc::clone(&app.kernel);
+    let ai_tx = app.ai_tx.clone();
+    let ensure = !app.brain_ready;
+    app.brain_ready = true;
+    tokio::spawn(async move {
+        if ensure {
+            if let Err(e) = ai::ensure_brain(&kernel).await {
+                let _ = ai_tx.send(format!("✗ {e}"));
+                return;
+            }
+            // The ollama backend emits its stream to the brain's OWN inbox
+            // (cli-round-trip route), not ours — so mirror the brain's inbox into
+            // our `CLIENT_ID` inbox to receive live tokens + status. Once.
+            kernel
+                .watch(&AgentId::from(BRAIN_ID), AgentId::from(CLIENT_ID))
+                .await;
+        }
+        let reply = kernel
+            .send(
+                &AgentId::from(BRAIN_ID),
+                json!({"type":"send","text":text,"client_id":CLIENT_ID}),
+            )
+            .await;
+        let out = if let Some(resp) = reply.get("response").and_then(Value::as_str) {
+            resp.to_string()
+        } else if let Some(e) = reply.get("error").and_then(Value::as_str) {
+            // A configured-but-unreachable model → the DRY stand-in's "set another"
+            // guidance instead of a raw error.
+            if ai::is_unreachable(e) {
+                ai::dry_reply(&ai::config_status(), Some(e)).unwrap_or_else(|| format!("✗ {e}"))
+            } else {
+                format!("✗ {e}")
+            }
+        } else {
+            serde_json::to_string(&reply).unwrap_or_default()
+        };
+        let _ = ai_tx.send(out);
+    });
 }
 
 /// Drive the out-of-process workspace kernel over the gateway. Lifecycle
@@ -537,7 +805,7 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
             if app.ws_busy {
                 return;
             }
-            app.chat.push(
+            app.tabs.deliver("ws").push(
                 "ws",
                 "you",
                 Body::Tool {
@@ -568,11 +836,15 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
         }
         WsCmd::Down => {
             let Some(handle) = app.workspace.clone() else {
-                app.chat
-                    .push("ws", "you", Body::Note("no workspace".into()), State::Done);
+                app.tabs.deliver("ws").push(
+                    "ws",
+                    "you",
+                    Body::Note("no workspace".into()),
+                    State::Done,
+                );
                 return;
             };
-            app.chat.push(
+            app.tabs.deliver("ws").push(
                 "ws",
                 "you",
                 Body::Tool {
@@ -589,7 +861,7 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
         }
         WsCmd::Verb(target, payload) => {
             let Some(handle) = app.workspace.clone() else {
-                app.chat.push(
+                app.tabs.deliver("ws").push(
                     "ws",
                     "you",
                     Body::Note("no workspace — try `@ws up`".into()),
@@ -602,7 +874,7 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
                 .and_then(Value::as_str)
                 .unwrap_or("send")
                 .to_string();
-            app.chat.push(
+            app.tabs.deliver("ws").push(
                 "you",
                 "ws",
                 Body::Tool {
@@ -634,21 +906,25 @@ fn handle_ws_event(app: &mut App, ev: WsEvent) {
             );
             app.workspace = Some(handle);
             app.ws_busy = false;
-            app.chat.push("ws", "you", Body::Note(note), State::Done);
+            app.tabs
+                .deliver("ws")
+                .push("ws", "you", Body::Note(note), State::Done);
         }
         WsEvent::Reply(v) => {
             let rendered = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
-            app.chat
+            app.tabs
+                .deliver("ws")
                 .push("ws", "you", Body::Text(rendered), State::Done);
         }
         WsEvent::Error(e) => {
             app.ws_busy = false;
-            app.chat
+            app.tabs
+                .deliver("ws")
                 .push("ws", "you", Body::Note(format!("✗ ws: {e}")), State::Done);
         }
         WsEvent::Down => {
             app.workspace = None;
-            app.chat.push(
+            app.tabs.deliver("ws").push(
                 "ws",
                 "you",
                 Body::Note("workspace stopped".into()),
@@ -666,7 +942,7 @@ fn run_shell(app: &mut App, cmd: String) {
         let (rows, cols) = app.chat_term_grid;
         app.term = TerminalSession::spawn(rows, cols, app.redraw_tx.clone()).ok();
     }
-    app.chat.push(
+    app.tabs.deliver("sh").push(
         "sh",
         "you",
         Body::Tool {
@@ -692,7 +968,7 @@ fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
         .and_then(Value::as_str)
         .unwrap_or("send")
         .to_string();
-    app.chat.push(
+    app.tabs.deliver(target.as_str()).push(
         "you",
         target.as_str(),
         Body::Tool {
@@ -758,23 +1034,41 @@ fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16
     (rows, cols)
 }
 
-/// The status line above the chat block: host agent count + the workspace chip.
-/// (The big FANTASTIC now lives in the animated background, not a header.)
+/// The tab bar above the chat: one chip per open room (`@ai`, `@sh`, `@ws`, and
+/// any agent you've addressed). The active room is bold + underlined; a room that
+/// got a message while you were away carries a `•` unread dot. Shift-Tab turns
+/// between them. (The big FANTASTIC lives in the animated background.)
 fn status_line(app: &App) -> Line<'static> {
     let dim = Style::default().fg(Color::DarkGray);
-    let (ws_text, ws_style) = match &app.workspace {
-        Some(h) => (
-            format!("ws: {}", h.base_url.trim_start_matches("http://")),
-            Style::default().fg(chat::color_for("ws")),
-        ),
-        None => ("ws: none".to_string(), dim),
+    let mut spans = vec![Span::styled(" ", dim)];
+    for (i, id) in app.tabs.ids().iter().enumerate() {
+        let active = i == app.tabs.active_index();
+        let col = chat::color_for(id);
+        if app.tabs.is_unread(id) {
+            spans.push(Span::styled("•", Style::default().fg(Color::Yellow)));
+        }
+        let st = if active {
+            Style::default()
+                .fg(col)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(col).add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(format!("@{id}"), st));
+        spans.push(Span::styled("  ", dim));
+    }
+    let ws = match &app.workspace {
+        Some(h) => format!("ws:{}", h.base_url.trim_start_matches("http://")),
+        None => "ws:none".to_string(),
     };
-    Line::from(vec![
-        Span::styled(format!(" host: {} agents", app.agent_count), dim),
-        Span::styled("  ·  ", dim),
-        Span::styled(ws_text, ws_style),
-        Span::styled("  ·  @ai · @sh · @ws · /intro · Ctrl+F focus", dim),
-    ])
+    spans.push(Span::styled(
+        format!(
+            " ·  {ws}  ·  {} agents  ·  ⇧⇥ rooms · Ctrl+F",
+            app.agent_count
+        ),
+        dim,
+    ));
+    Line::from(spans)
 }
 
 /// Black out every cell of `area` (so a floated, opaque widget hides the stars
@@ -869,6 +1163,46 @@ fn ui(f: &mut Frame, app: &App) {
 /// inset 2 cells from every screen edge (so the starfield shows in that border
 /// margin); inside, a slim status line, the transcript, a 1-row gap (stars peek
 /// through), then the input box at the bottom. Transcript + input are opaque.
+/// The 3-row chat header banner (mirrors the headless `ansi_banner`): a neon
+/// magenta vertical bar down the left, `FANTASTIC` on the middle row, and the live
+/// tab bar on the bottom row. Opaque (the stars don't show through it).
+fn render_chat_header(f: &mut Frame, area: Rect, app: &App) {
+    fill_black(f.buffer_mut(), area);
+    let bar = Color::Indexed(165); // neon magenta — matches ansi_banner's 38;5;165
+    let buf = f.buffer_mut();
+    // The vertical bar, full height of the header (3 rows).
+    for dy in 0..area.height {
+        if let Some(c) = buf.cell_mut((area.x, area.y + dy)) {
+            c.set_char('█');
+            c.set_style(Style::default().fg(bar));
+        }
+    }
+    // `FANTASTIC` on the middle row, bright magenta + bold, two cells past the bar.
+    let title = "FANTASTIC";
+    let tx = area.x + 3;
+    let ty = area.y + 1;
+    let title_st = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    for (i, ch) in title.chars().enumerate() {
+        let x = tx + i as u16;
+        if x < area.x + area.width {
+            if let Some(c) = buf.cell_mut((x, ty)) {
+                c.set_char(ch);
+                c.set_style(title_st);
+            }
+        }
+    }
+    // The live tab bar on the bottom row, past the bar.
+    let bar_row = Rect {
+        x: area.x + 3,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(3),
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(status_line(app)), bar_row);
+}
+
 fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     // Inset 2 cells from every edge — the stars show through this border margin.
     let inset = Rect {
@@ -877,33 +1211,38 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(4),
     };
-    // status (1) · transcript (min) · 1-row star gap · input box (3).
+    // header (3) · transcript (min) · bottom region (dynamic). The bottom is the
+    // chat input normally; it grows into a setup-flow panel when a `/setup` or
+    // `/model` flow is active (a select list needs room for its options).
+    let bottom_h: u16 = match &app.control {
+        input::Control::Select { options, .. } => {
+            (options.len() as u16 + 4).clamp(5, inset.height.saturating_sub(6).max(5))
+        }
+        _ => 4, // Chat: 1 star-gap + 3-row input. Field: title + field + hint.
+    };
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
             Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(bottom_h),
         ])
         .split(inset);
-    let status_area = parts[0];
+    let header_area = parts[0];
     let chat_area = parts[1];
-    let input_area = parts[3];
-    // parts[2] is the 1-row gap — left untouched so the stars peek through.
+    let bottom = parts[2];
 
-    f.render_widget(Paragraph::new(status_line(app)), status_area);
+    render_chat_header(f, header_area, app);
 
-    // The transcript + input box are OPAQUE: black out their cells first so the
-    // starfield only shows in the 2-cell border margin and the 1-row gap. There
-    // are no borders — the panels render directly into their areas.
+    // The transcript is OPAQUE: black it out first so the starfield only shows in
+    // the 2-cell border margin and (in Chat mode) the 1-row gap.
     fill_black(f.buffer_mut(), chat_area);
-    fill_black(f.buffer_mut(), input_area);
 
-    // When a `@sh` command is live, the bottom of the chat body breathes the
-    // PTY screen. The viewport height = `used_rows` of the PTY (clamped to the
-    // body) + 1 for its `│ sh` header; the transcript scrolls in what remains.
-    let transcript_area = if app.term_active {
+    // When a `@sh` command is live AND you're in the `@sh` room, the bottom of the
+    // chat body breathes the PTY screen. The viewport height = `used_rows` of the
+    // PTY (clamped to the body) + 1 for its `│ sh` header; the transcript scrolls
+    // in what remains. In every OTHER room the PTY is hidden (it never bleeds).
+    let transcript_area = if term_visible(app) {
         if let Some(ts) = &app.term {
             if let Ok(p) = ts.parser.lock() {
                 // Leave the transcript at least one row; the viewport claims
@@ -928,33 +1267,144 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let lines = transcript_lines(app);
-    // Show the tail that fits the pane height.
+    // Show the tail that fits the pane height, BOTTOM-anchored like a chat app:
+    // the newest message sits just above the input, and a short conversation
+    // leaves the empty space (starfield) at the TOP rather than a gap in the
+    // middle. Count VISUAL rows (a long line wraps to several), accumulating from
+    // the bottom up, so the newest entries are never clipped off the bottom edge.
     let h = transcript_area.height as usize;
-    let skip = lines.len().saturating_sub(h.max(1));
-    let view: Vec<Line> = lines.into_iter().skip(skip).collect();
+    let aw = transcript_area.width.max(1) as usize;
+    let rows_of = |l: &Line| -> usize { l.width().div_ceil(aw).max(1) };
+    let mut used = 0usize;
+    let mut start = lines.len();
+    for (i, l) in lines.iter().enumerate().rev() {
+        let r = rows_of(l);
+        if used + r > h && i + 1 < start {
+            break; // keep at least the newest line even if it alone overflows
+        }
+        used += r;
+        start = i;
+    }
+    let pad = h.saturating_sub(used);
+    let mut view: Vec<Line> = vec![Line::from(""); pad];
+    view.extend(lines.into_iter().skip(start));
     f.render_widget(
         Paragraph::new(view).wrap(Wrap { trim: false }),
         transcript_area,
     );
 
-    // Input line, prefixed with the sticky target (e.g. `@ai ▸ `). Rendered
-    // borderless directly into `input_area`; the typed text is explicitly White
-    // so it shows over the black panel.
-    let prefix = format!("@{} ▸ ", app.sticky);
+    // Bottom region: the chat composer, or the active setup-flow control.
+    match &app.control {
+        input::Control::Chat => {
+            // 1 star-gap row (stars peek through) + the 3-row opaque input box.
+            let b = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(bottom);
+            let input_area = b[1];
+            fill_black(f.buffer_mut(), input_area);
+            render_composer(f, input_area, app);
+        }
+        ctrl => {
+            fill_black(f.buffer_mut(), bottom);
+            render_flow(f, bottom, ctrl);
+        }
+    }
+}
+
+/// The smart composer: an editable `@<sender>` field + ` ▸ ` + the message. The
+/// sender lights its character color; while you're editing it (or it names no
+/// known character → a nogo) it's underlined / flashes red. Borderless; the
+/// message text is explicit White over the black panel.
+fn render_composer(f: &mut Frame, input_area: Rect, app: &App) {
+    let c = &app.composer;
+    let valid = c.is_valid(&app.known_senders());
+    let sender_col = if c.nogo || !valid {
+        Color::Red
+    } else {
+        chat::color_for(&c.sender)
+    };
+    let sender_st = if c.editing_sender {
+        Style::default()
+            .fg(sender_col)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(sender_col).add_modifier(Modifier::BOLD)
+    };
     let prompt = Line::from(vec![
-        Span::styled(
-            prefix.clone(),
-            Style::default().fg(chat::color_for(&app.sticky)),
-        ),
-        Span::styled(app.input.clone(), Style::default().fg(Color::White)),
+        Span::styled(format!("@{}", c.sender), sender_st),
+        Span::styled(" ▸ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(c.message.clone(), Style::default().fg(Color::White)),
     ]);
     f.render_widget(Paragraph::new(prompt), input_area);
-    let cx = input_area.x + (prefix.chars().count() + app.input.chars().count()) as u16;
-    let cy = input_area.y;
+    let cx = if c.editing_sender {
+        input_area.x + 1 + c.sender.chars().count() as u16
+    } else {
+        input_area.x + (1 + c.sender.chars().count() + 3 + c.message.chars().count()) as u16
+    };
     f.set_cursor_position((
         cx.min(input_area.x + input_area.width.saturating_sub(1)),
-        cy,
+        input_area.y,
     ));
+}
+
+/// Render the active setup-flow control: an arrow-key option list, or a (maskable)
+/// text field — a Claude-Code-style dynamic input.
+fn render_flow(f: &mut Frame, area: Rect, ctrl: &input::Control) {
+    let mag = Color::Indexed(165);
+    let dim = Style::default().fg(Color::DarkGray);
+    let title_st = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    match ctrl {
+        input::Control::Select {
+            title,
+            options,
+            cursor,
+        } => {
+            let mut lines = vec![Line::from(Span::styled(format!("⚙ {title}"), title_st))];
+            for (i, opt) in options.iter().enumerate() {
+                let st = if i == *cursor {
+                    Style::default().fg(mag).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                let mark = if i == *cursor { "▸ " } else { "  " };
+                lines.push(Line::from(vec![
+                    Span::styled(mark, st),
+                    Span::styled(opt.clone(), st),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(
+                "↑↓ select · enter · esc cancel",
+                dim,
+            )));
+            f.render_widget(Paragraph::new(lines), area);
+        }
+        input::Control::Field {
+            title,
+            value,
+            masked,
+        } => {
+            let shown = if *masked {
+                "•".repeat(value.chars().count())
+            } else {
+                value.clone()
+            };
+            let lines = vec![
+                Line::from(Span::styled(format!("⚙ {title}"), title_st)),
+                Line::from(vec![
+                    Span::styled(" ▸ ", dim),
+                    Span::styled(shown, Style::default().fg(Color::White)),
+                ]),
+                Line::from(Span::styled("enter · esc cancel", dim)),
+            ];
+            f.render_widget(Paragraph::new(lines), area);
+            let cx = area.x + 3 + value.chars().count() as u16;
+            f.set_cursor_position((cx.min(area.x + area.width.saturating_sub(1)), area.y + 1));
+        }
+        input::Control::Chat => {}
+    }
 }
 
 /// Render the breathing PTY viewport: a colored `│ sh` rail header (showing
@@ -994,7 +1444,7 @@ fn render_chat_terminal(f: &mut Frame, area: Rect, screen: &vt100::Screen, focus
 fn transcript_lines(app: &App) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let mut out: Vec<Line> = Vec::new();
-    for m in app.chat.msgs() {
+    for m in app.tabs.active().msgs() {
         let rail = chat::color_for(&m.from);
         let gutter = Span::styled("│ ", Style::default().fg(rail));
         let label_style = if m.from == "you" {
@@ -1008,23 +1458,51 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
         match &m.body {
             Body::Text(t) => {
                 let live = matches!(m.state, State::Streaming);
-                let mut body = t.clone();
-                if live {
-                    body.push('▌');
-                }
-                if matches!(m.state, State::Interrupted) {
-                    body.push_str(" ⊘");
-                }
-                let body_style = if m.from == "you" {
-                    Style::default().fg(Color::White)
+                if live && t.is_empty() {
+                    // No tokens yet — show the turn phase (sending → thinking →
+                    // generating) with a spinner; tokens replace it as they stream.
+                    let phase = app.ai_phase.as_deref().unwrap_or("thinking");
+                    out.push(Line::from(vec![
+                        gutter,
+                        label,
+                        Span::styled(format!("⟳ {phase}…"), dim.add_modifier(Modifier::ITALIC)),
+                    ]));
                 } else {
-                    Style::default()
-                };
-                out.push(Line::from(vec![
-                    gutter,
-                    label,
-                    Span::styled(body, body_style),
-                ]));
+                    let body_style = if m.from == "you" {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default()
+                    };
+                    // Preserve embedded newlines: one rendered line per text line
+                    // (so poems / lists / code keep their breaks). The first line
+                    // carries the `from:` label; continuation lines indent under it.
+                    let segs: Vec<&str> = t.split('\n').collect();
+                    let pad = " ".repeat(m.from.chars().count() + 2); // under "from: "
+                    let last = segs.len() - 1;
+                    for (i, seg) in segs.iter().enumerate() {
+                        let mut seg = (*seg).to_string();
+                        if i == last {
+                            if live {
+                                seg.push('▌');
+                            }
+                            if matches!(m.state, State::Interrupted) {
+                                seg.push_str(" ⊘");
+                            }
+                        }
+                        if i == 0 {
+                            out.push(Line::from(vec![
+                                gutter.clone(),
+                                label.clone(),
+                                Span::styled(seg, body_style),
+                            ]));
+                        } else {
+                            out.push(Line::from(vec![
+                                gutter.clone(),
+                                Span::styled(format!("{pad}{seg}"), body_style),
+                            ]));
+                        }
+                    }
+                }
             }
             Body::Tool {
                 verb,
@@ -1068,15 +1546,21 @@ mod e2e {
         // Dummy channels: hold the receivers so the senders stay live (a dropped
         // receiver would make `send` error, but the e2e paths never rely on it).
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let (ai_tx, _ai_rx) = mpsc::unbounded_channel::<String>();
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel::<WsEvent>();
         let (redraw_tx, _redraw_rx) = mpsc::unbounded_channel::<()>();
 
         App {
             kernel,
             agent_count,
-            chat: Transcript::new(),
-            input: String::new(),
-            sticky: "ai".into(),
+            tabs: Tabs::new(&BASE_TABS),
+            composer: Composer::new("ai"),
+            control: input::Control::Chat,
+            flow: None,
+            known_agents: vec!["kernel".into(), "core".into()],
+            pending: VecDeque::new(),
+            ai_tx,
+            ai_phase: None,
             chat_busy: false,
             workspace: None,
             ws_busy: false,
@@ -1130,9 +1614,10 @@ mod e2e {
     #[test]
     fn renders_transcript_text_and_rail_glyph() {
         let mut app = test_app();
-        app.chat
+        app.tabs
+            .deliver("ai")
             .push("you", "ai", Body::Text("ping-from-you".into()), State::Done);
-        app.chat.push(
+        app.tabs.deliver("ai").push(
             "brain",
             "you",
             Body::Text("pong-from-ai".into()),
@@ -1159,13 +1644,78 @@ mod e2e {
     }
 
     #[test]
-    fn typed_char_appends_to_input() {
+    fn multiline_answer_renders_one_line_per_break() {
+        // A message body with embedded `\n` must render as separate transcript
+        // lines (poems / lists / code keep their breaks), not one collapsed line.
         let mut app = test_app();
-        assert!(app.input.is_empty());
+        app.tabs.deliver("ai").push(
+            "brain",
+            "you",
+            Body::Text("alpha\nbeta\ngamma".into()),
+            State::Done,
+        );
+        let texts: Vec<String> = transcript_lines(&app)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Each segment lands on its OWN line (beta's line has no alpha, etc.).
+        assert!(texts.iter().any(|t| t.contains("alpha")), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("beta") && !t.contains("alpha")),
+            "beta should be on its own line: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("gamma") && !t.contains("beta")),
+            "gamma should be on its own line: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn typed_char_appends_to_composer_message() {
+        let mut app = test_app();
+        assert!(app.composer.message.is_empty());
         handle_input(&mut app, key(KeyCode::Char('x')));
-        assert_eq!(app.input, "x");
+        assert_eq!(app.composer.message, "x");
         handle_input(&mut app, key(KeyCode::Char('y')));
-        assert_eq!(app.input, "xy");
+        assert_eq!(app.composer.message, "xy");
+    }
+
+    #[test]
+    fn shift_tab_turns_between_rooms() {
+        let mut app = test_app();
+        assert_eq!(app.tabs.active_id(), "ai");
+        handle_input(&mut app, key(KeyCode::BackTab));
+        assert_eq!(
+            app.tabs.active_id(),
+            "sh",
+            "Shift-Tab turns to the next room"
+        );
+        assert_eq!(app.composer.sender, "sh", "and the composer follows");
+    }
+
+    #[test]
+    fn nogo_blocks_send_to_unknown_character() {
+        let mut app = test_app();
+        // Retype the sender to a character that doesn't exist.
+        app.composer.set_sender("ghost");
+        for ch in "hello".chars() {
+            handle_input(&mut app, key(KeyCode::Char(ch)));
+        }
+        handle_input(&mut app, key(KeyCode::Enter));
+        assert!(app.composer.nogo, "send to an unknown character is a nogo");
+        assert_eq!(
+            app.composer.message, "hello",
+            "the message is kept, not sent"
+        );
     }
 
     #[test]
@@ -1179,12 +1729,18 @@ mod e2e {
         handle_input(&mut app, key(KeyCode::Enter));
         assert!(app.intro_playing, "`/intro` submit starts the movie");
         assert!(app.intro_since.is_some(), "the movie clock is armed");
-        assert!(app.input.is_empty(), "the input line is consumed");
+        assert!(
+            app.composer.message.is_empty(),
+            "the input line is consumed"
+        );
 
         // Any key stops it and returns to chat — and does NOT leak into input.
         handle_input(&mut app, key(KeyCode::Char('z')));
         assert!(!app.intro_playing, "any key stops the movie");
-        assert!(app.input.is_empty(), "the stop key does not edit input");
+        assert!(
+            app.composer.message.is_empty(),
+            "the stop key does not edit input"
+        );
     }
 
     #[test]
@@ -1194,17 +1750,20 @@ mod e2e {
         // must NOT leak into the input line nor be processed as a chat key.
         let mut app = test_app();
         app.started = false;
-        assert!(app.input.is_empty());
+        assert!(app.composer.message.is_empty());
         handle_input(&mut app, key(KeyCode::Char('x')));
         assert!(app.started, "the first key starts the game / enters chat");
         assert!(!app.intro_playing, "and is not playing the intro");
         assert!(
-            app.input.is_empty(),
+            app.composer.message.is_empty(),
             "the first key is consumed, not typed into the input line"
         );
         // The NEXT key now edits the chat input normally.
         handle_input(&mut app, key(KeyCode::Char('y')));
-        assert_eq!(app.input, "y", "subsequent keys edit the chat input");
+        assert_eq!(
+            app.composer.message, "y",
+            "subsequent keys edit the chat input"
+        );
     }
 
     #[test]
@@ -1221,7 +1780,7 @@ mod e2e {
 
         // Started: the transcript renders opaquely over the same bg.
         app.started = true;
-        app.chat.push(
+        app.tabs.deliver("ai").push(
             "you",
             "ai",
             Body::Text("over-the-stars".into()),

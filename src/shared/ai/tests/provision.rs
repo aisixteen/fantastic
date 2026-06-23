@@ -14,6 +14,12 @@ const BRAIN_ID: &str = "brain";
 /// agent reflects with its `handler_module` — without ever touching the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_brain_provisions_and_is_idempotent() {
+    // Hermetic: the brain requires explicit backend+model (no guessing). Set them
+    // here so provisioning proceeds deterministically — create_agent only records
+    // the agent (handler + model), it never reaches the model/network.
+    std::env::set_var("FANTASTIC_AI_BACKEND", "ollama");
+    std::env::set_var("FANTASTIC_AI_MODEL", "test-model");
+
     let (kernel, _loaded) = compose_manager().await.expect("compose host kernel");
 
     // First provision. If it fails for an *environmental* reason in CI, assert

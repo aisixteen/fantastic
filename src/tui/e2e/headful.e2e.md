@@ -43,6 +43,9 @@ Then read every `NN_*.txt` frame in the out dir, compare to the scenario's
 - `attract.md` — the arcade title card (legible FANTASTIC + starfield + prompt).
 - `chat_kernel.md` — enter chat, `@kernel list_agents`, reply renders.
 - `terminal_sh.md` — `@sh` breathing PTY viewport.
+- `rooms.md` — per-character rooms: paste into `@ai`/`@kernel`/`@sh`, Shift-Tab
+  between them; the `@sh` viewport stays in its room (no bleed). Needs a `shift-tab`
+  key (CSI Z) in the harness.
 - `intro_movie.md` — `/intro` plays the movie (streamed).
 - `workspace_ws.md` — `@ws up`/`list`/`down` spawns + drives + stops a real kernel.
 

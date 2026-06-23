@@ -31,6 +31,7 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "enter" => vec![b'\r'],
         "esc" => vec![0x1b],
         "tab" => vec![b'\t'],
+        "backtab" | "shift-tab" => vec![0x1b, b'[', b'Z'], // CSI Z → crossterm BackTab
         "backspace" => vec![0x7f],
         "ctrl-c" => vec![0x03],
         "ctrl-f" => vec![0x06],
