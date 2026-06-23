@@ -389,9 +389,6 @@ impl Workspace {
 // downstream is identical.
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Default arm64 image. Overridable via `FANTASTIC_IMAGE`.
-const DEFAULT_IMAGE: &str = "fantastic:arm64";
-
 /// The minimal serve-surface seed steps, as pure data (argv vectors), in order:
 /// store (file_bridge persistence rooted at `.fantastic`) → web (binds `port`)
 /// → web_ws (the WS bus) → web_rest (REST door, id `rest`). The container path
@@ -473,12 +470,14 @@ fn container_engine() -> Option<(String, bool)> {
     None
 }
 
-/// The image to run: `FANTASTIC_IMAGE` env → else the default arm64 tag.
-fn image() -> String {
+/// The container image to run — `FANTASTIC_IMAGE`, REQUIRED. By default, no
+/// defaults: we never guess a tag that could run (or pull) an image you didn't
+/// name. Unset → a clear error.
+fn image() -> Result<String> {
     std::env::var("FANTASTIC_IMAGE")
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_IMAGE.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow!("set FANTASTIC_IMAGE — the container image is never guessed"))
 }
 
 /// Whether the image is present on the engine's host. NEVER pulls — a missing
@@ -578,7 +577,7 @@ impl Workspace {
                  on PATH)"
             )
         })?;
-        let img = image();
+        let img = image()?;
         if !image_present(&engine, &img) {
             return Err(anyhow!(
                 "image {img} not present; build it (sh container/build.sh) — never pulled"
