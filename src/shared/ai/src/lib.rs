@@ -11,38 +11,45 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
+pub mod dry;
+pub use dry::{config_status, dry_reply, is_unreachable, Status};
+
 const BRAIN_ID: &str = "brain";
 const FS_ID: &str = "ai_fs";
 
 /// Pure core of [`backend`]: pick `(handler_module, model)` from the selected
 /// backend + optional model override. Extracted so it's unit-testable without
 /// mutating process env.
-fn backend_for(backend: Option<&str>, model: Option<&str>) -> (&'static str, String) {
-    match backend {
-        Some("nvidia") => (
-            "nvidia_nim_backend.tools",
-            model
-                .map(String::from)
-                .unwrap_or_else(|| "nvidia/llama-3_1-nemotron-ultra-253b-v1".to_string()),
-        ),
-        Some("anthropic") => (
-            fantastic_anthropic_backend::HANDLER_MODULE,
-            model
-                .map(String::from)
-                .unwrap_or_else(|| fantastic_anthropic_backend::DEFAULT_MODEL.to_string()),
-        ),
-        _ => (
-            "ollama_backend.tools",
-            model
-                .map(String::from)
-                .unwrap_or_else(|| "llama3.2".to_string()),
-        ),
-    }
+/// **Hermetic: nothing is guessed.** Both the backend AND the model must be set
+/// explicitly. An unset/blank/unknown value is a clear error naming the env var —
+/// never a default that reaches a network or disk (no "llama3.2", no model picked
+/// for you). This is a configurable tool, not a SaaS with opinions.
+fn backend_for(
+    backend: Option<&str>,
+    model: Option<&str>,
+) -> Result<(&'static str, String), String> {
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .ok_or("set FANTASTIC_AI_MODEL — the tool never guesses a model")?
+        .to_string();
+    let handler = match backend.map(str::trim) {
+        Some("ollama") => "ollama_backend.tools",
+        Some("nvidia") => "nvidia_nim_backend.tools",
+        Some("anthropic") => fantastic_anthropic_backend::HANDLER_MODULE,
+        Some(other) if !other.is_empty() => {
+            return Err(format!(
+                "unknown FANTASTIC_AI_BACKEND={other} (expected ollama|nvidia|anthropic)"
+            ))
+        }
+        _ => return Err("set FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic".to_string()),
+    };
+    Ok((handler, model))
 }
 
-/// (handler_module, default model) for the selected backend.
-/// `FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic` (default ollama — no key needed).
-fn backend() -> (&'static str, String) {
+/// `(handler_module, model)` from the explicitly-configured `FANTASTIC_AI_BACKEND`
+/// + `FANTASTIC_AI_MODEL`. Errors clearly if either is unset — nothing is guessed.
+fn backend() -> Result<(&'static str, String), String> {
     let b = std::env::var("FANTASTIC_AI_BACKEND").ok();
     let m = std::env::var("FANTASTIC_AI_MODEL").ok();
     backend_for(b.as_deref(), m.as_deref())
@@ -56,11 +63,15 @@ fn err_of(v: &Value) -> Option<String> {
 /// agent bound to it. Idempotent — a re-create returns the existing record.
 /// Returns the backend label (handler · model) for display.
 pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
+    // Resolve the explicit config FIRST — fail fast with a clear message if the
+    // backend/model isn't set, BEFORE creating any agents. Nothing is guessed.
+    let (handler, model) = backend()?;
+    let label = format!("{} · {}", handler.trim_end_matches(".tools"), model);
     let probe = kernel
         .send(&AgentId::from(BRAIN_ID), json!({"type": "reflect"}))
         .await;
     if err_of(&probe).is_none() {
-        return Ok(backend_label());
+        return Ok(label);
     }
     let fs = kernel
         .send(
@@ -71,7 +82,6 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     if let Some(e) = err_of(&fs) {
         return Err(format!("file_bridge: {e}"));
     }
-    let (handler, model) = backend();
     // ollama's default context (4096) is too small for the rebuilt-every-turn
     // system block (primer + reflect + agent menu + howto) of a full host. Set a
     // roomier window; `FANTASTIC_NUM_CTX` overrides. Cloud backends ignore it.
@@ -103,7 +113,7 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
             return Err(format!("set_api_key: {e}"));
         }
     }
-    Ok(backend_label())
+    Ok(label)
 }
 
 /// Pure core of [`api_key_from_env`]: the generic key wins (if non-blank), else
@@ -144,11 +154,6 @@ fn api_key_from_env() -> Option<String> {
     )
 }
 
-fn backend_label() -> String {
-    let (h, m) = backend();
-    format!("{} · {}", h.trim_end_matches(".tools"), m)
-}
-
 /// Run one user turn through the brain; `tx` receives the rendered result.
 pub async fn run_turn(kernel: Arc<Kernel>, text: String, tx: UnboundedSender<String>) {
     if let Err(e) = ensure_brain(&kernel).await {
@@ -175,35 +180,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backend_defaults_to_ollama() {
-        assert_eq!(
-            backend_for(None, None),
-            ("ollama_backend.tools", "llama3.2".to_string())
+    fn backend_requires_explicit_backend_and_model_no_guessing() {
+        // Nothing set → a clear error, NOT a guessed model/provider.
+        assert!(backend_for(None, None).is_err());
+        // Backend set but model missing → still an error (no "llama3.2" guess).
+        let e = backend_for(Some("ollama"), None).unwrap_err();
+        assert!(
+            e.contains("FANTASTIC_AI_MODEL"),
+            "names the missing var: {e}"
         );
-        // an unknown backend also falls back to ollama.
-        assert_eq!(backend_for(Some("bogus"), None).0, "ollama_backend.tools");
+        // Model set but backend missing → error naming the backend var.
+        let e = backend_for(None, Some("gemma4:12b")).unwrap_err();
+        assert!(
+            e.contains("FANTASTIC_AI_BACKEND"),
+            "names the missing var: {e}"
+        );
+        // A blank model is treated as unset (no guess).
+        assert!(backend_for(Some("ollama"), Some("   ")).is_err());
     }
 
     #[test]
-    fn backend_selects_provider_and_honors_model_override() {
+    fn backend_resolves_only_when_both_set_explicitly() {
         assert_eq!(
-            backend_for(Some("nvidia"), None).0,
-            "nvidia_nim_backend.tools"
+            backend_for(Some("ollama"), Some("gemma4:12b")).unwrap(),
+            ("ollama_backend.tools", "gemma4:12b".to_string())
         );
         assert_eq!(
-            backend_for(Some("anthropic"), None).0,
+            backend_for(Some("nvidia"), Some("x")).unwrap(),
+            ("nvidia_nim_backend.tools", "x".to_string())
+        );
+        assert_eq!(
+            backend_for(Some("anthropic"), Some("claude-x")).unwrap().0,
             fantastic_anthropic_backend::HANDLER_MODULE
         );
-        assert_eq!(
-            backend_for(Some("anthropic"), None).1,
-            fantastic_anthropic_backend::DEFAULT_MODEL
-        );
-        // an explicit model overrides the per-backend default, for any backend.
-        assert_eq!(
-            backend_for(Some("ollama"), Some("gemma4:12b")).1,
-            "gemma4:12b"
-        );
-        assert_eq!(backend_for(Some("nvidia"), Some("x")).1, "x");
+        // An unknown backend is an explicit error, never a fallback to ollama.
+        assert!(backend_for(Some("bogus"), Some("m")).is_err());
     }
 
     #[test]

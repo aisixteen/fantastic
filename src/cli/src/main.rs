@@ -40,10 +40,15 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // ── Gateway subcommands (the kernel MANAGER's bare reach). These drive a
-    // sovereign workspace kernel over loopback HTTP — they do NOT compose the
-    // in-proc host kernel, so handle them BEFORE the heavy `compose_manager`.
+    // Hydrate persisted settings (`<app_home>/settings.json`) into the AI env —
+    // before anything reads the backend/model — so the tool works across runs
+    // without re-exporting env. An explicit env still overrides the file.
+    fantastic_host::hydrate_ai_env();
+
+    // ── Config + gateway subcommands. These don't compose the in-proc host
+    // kernel, so handle them BEFORE the heavy `compose_manager`.
     match args.first().map(String::as_str) {
+        Some("config") => return cmd_config(&args[1..]),
         Some("up") => return cmd_up(&args[1..]).await,
         Some("k") => return cmd_k(&args[1..]).await,
         Some("down") => return cmd_down().await,
@@ -69,8 +74,9 @@ async fn main() -> Result<()> {
         }
         // Headless one-shot AI turn: `fantastic ai "<prompt>"`. Drives the same
         // brain as AI mode (the universal `send` tool lets it reach the kernel),
-        // and prints the final response. Backend via FANTASTIC_AI_BACKEND
-        // (ollama default), model via FANTASTIC_AI_MODEL.
+        // and prints the final response. Backend + model are REQUIRED and explicit
+        // (FANTASTIC_AI_BACKEND=ollama|nvidia|anthropic, FANTASTIC_AI_MODEL=<id>);
+        // nothing is guessed — unset → a clear `✗ set FANTASTIC_AI_…` message.
         Some("ai") | Some("ask") => {
             let prompt = args[1..].join(" ");
             if prompt.trim().is_empty() {
@@ -218,6 +224,57 @@ async fn cmd_down() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `fantastic config show | set <key> <value>` — the persisted, hydrated settings
+/// at `<app_home>/settings.json`. Dotted keys nest (e.g. `ai.model`). This is how
+/// you set/reset the AI backend + model once, instead of exporting env each run.
+fn cmd_config(args: &[String]) -> Result<()> {
+    let mut s = fantastic_host::load_settings();
+    match args.first().map(String::as_str) {
+        None | Some("show") => {
+            println!("# {}", fantastic_host::settings_path().display());
+            println!("{}", serde_json::to_string_pretty(&s)?);
+        }
+        Some("set") => {
+            let key = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: config set <key> <value>"))?;
+            let value = args.get(2).cloned().unwrap_or_default();
+            // The API key NEVER goes into settings.json — route it to the OS
+            // keychain for the configured backend ("raw key is retarded").
+            if key == "ai.key" {
+                let backend = fantastic_host::ai_config().backend.ok_or_else(|| {
+                    anyhow::anyhow!("set ai.backend first (config set ai.backend …)")
+                })?;
+                fantastic_host::secret::set_key(&backend, &value)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                println!("stored {backend} key in the OS keychain (not on disk)");
+                return Ok(());
+            }
+            // Coerce ints (e.g. ai.num_ctx); everything else stays a string.
+            let val = value
+                .parse::<u64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| json!(value));
+            fantastic_host::settings_set(&mut s, key, val);
+            fantastic_host::save_settings(&s)?;
+            println!(
+                "set {key} = {value}  →  {}",
+                fantastic_host::settings_path().display()
+            );
+        }
+        Some("clear") => {
+            fantastic_host::clear_ai_connector().map_err(|e| anyhow::anyhow!(e))?;
+            println!("cleared the AI connector (settings + keychain key)");
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "unknown config subcommand `{other}` (use: show | set <key> <value> | clear)"
+            )
+        }
+    }
+    Ok(())
 }
 
 /// Headless A→Z demo of what the product drives: compose host → assemble a

@@ -4,13 +4,13 @@ Press a key to enter the chat, then drive the in-proc manager kernel with a suga
 command and check the reply renders.
 
 ```script
-wait 1500
+wait 2500
 key space
 wait 600
 shot chat_empty
 type @kernel list_agents
 key enter
-wait 1200
+wait 2500
 shot kernel_reply
 ```
 

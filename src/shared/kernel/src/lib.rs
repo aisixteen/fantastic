@@ -13,6 +13,7 @@ use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
 use serde_json::{json, Map, Value};
 
 pub mod gateway;
+pub mod secret;
 pub use gateway::{KernelHandle, Runtime, Workspace};
 
 /// The privileged host bundle set. The product owns the runtime (runners +
@@ -85,6 +86,146 @@ pub fn app_home() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Persisted product settings file: `<app_home>/settings.json`. Hydrated config
+/// (currently the AI backend + model) lives here so the tool works across runs
+/// without re-exporting env every launch. An explicit env var always OVERRIDES
+/// the file; nothing here is ever guessed.
+pub fn settings_path() -> PathBuf {
+    app_home().join("settings.json")
+}
+
+/// Read the persisted settings (`{}` if absent/unreadable).
+pub fn load_settings() -> Value {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Write the settings file (pretty JSON), creating the home dir if needed.
+pub fn save_settings(v: &Value) -> std::io::Result<()> {
+    let p = settings_path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(p, serde_json::to_string_pretty(v).unwrap_or_default())
+}
+
+/// Set a dotted key (e.g. `ai.model`) in `root`, auto-creating intermediate maps.
+pub fn settings_set(root: &mut Value, key: &str, val: Value) {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut cur = root;
+    for (i, p) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            if !cur.is_object() {
+                *cur = json!({});
+            }
+            cur[*p] = val.clone();
+        } else {
+            if !cur.get(*p).map(Value::is_object).unwrap_or(false) {
+                cur[*p] = json!({});
+            }
+            cur = cur.get_mut(*p).unwrap();
+        }
+    }
+}
+
+/// Hydrate the AI env (`FANTASTIC_AI_BACKEND/MODEL/NUM_CTX`) from the persisted
+/// settings — ONLY for vars not already set, so an explicit env always wins.
+/// Nothing is guessed: an absent setting leaves the var unset → the brain fails
+/// loud as designed. Call once at process start, before any backend read.
+pub fn hydrate_ai_env() {
+    let s = load_settings();
+    let ai = s.get("ai");
+    let set = |k: &str, v: Option<&str>| {
+        if std::env::var_os(k).is_none() {
+            if let Some(v) = v.filter(|v| !v.is_empty()) {
+                std::env::set_var(k, v);
+            }
+        }
+    };
+    let str_at = |k: &str| ai.and_then(|a| a.get(k)).and_then(Value::as_str);
+    let backend = str_at("backend");
+    set("FANTASTIC_AI_BACKEND", backend);
+    set("FANTASTIC_AI_MODEL", str_at("model"));
+    if std::env::var_os("FANTASTIC_NUM_CTX").is_none() {
+        if let Some(n) = ai.and_then(|a| a.get("num_ctx")).and_then(Value::as_u64) {
+            std::env::set_var("FANTASTIC_NUM_CTX", n.to_string());
+        }
+    }
+    // Load the connector's key from the OS keychain into the env (if unset there),
+    // so the brain provisioner's `api_key_from_env` picks it up. The key is NEVER
+    // read from settings.json — only the keychain.
+    if std::env::var_os("FANTASTIC_AI_KEY").is_none() {
+        if let Some(b) = backend.filter(|b| !b.is_empty()) {
+            if let Some(key) = secret::get_key(b) {
+                std::env::set_var("FANTASTIC_AI_KEY", key);
+            }
+        }
+    }
+}
+
+/// A read view of the AI connector config — model/backend from settings, and
+/// whether a key is present in the keychain (NEVER the raw key).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AiConfig {
+    pub backend: Option<String>,
+    pub model: Option<String>,
+    pub key_present: bool,
+}
+
+/// Read the configured AI connector (CRUD: read). Key is reported as a bool only.
+pub fn ai_config() -> AiConfig {
+    let s = load_settings();
+    let ai = s.get("ai");
+    let str_at = |k: &str| {
+        ai.and_then(|a| a.get(k))
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(String::from)
+    };
+    let backend = str_at("backend");
+    let key_present = backend.as_deref().map(secret::has_key).unwrap_or(false);
+    AiConfig {
+        model: str_at("model"),
+        backend,
+        key_present,
+    }
+}
+
+/// Set/replace the AI connector (CRUD: create/update): persist backend+model to
+/// settings, and the key (if given) to the OS keychain. Fails loud if a key is
+/// given but no keychain is available — nothing half-written.
+pub fn set_ai_connector(backend: &str, model: &str, key: Option<&str>) -> Result<(), String> {
+    if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
+        secret::set_key(backend, k)?; // keychain first — fail loud before persisting
+    }
+    let mut s = load_settings();
+    settings_set(&mut s, "ai.backend", json!(backend));
+    settings_set(&mut s, "ai.model", json!(model));
+    save_settings(&s).map_err(|e| format!("settings: {e}"))?;
+    Ok(())
+}
+
+/// Delete the AI connector (CRUD: delete): drop `ai.*` from settings + the key
+/// from the keychain.
+pub fn clear_ai_connector() -> Result<(), String> {
+    let s = load_settings();
+    if let Some(b) = s
+        .get("ai")
+        .and_then(|a| a.get("backend"))
+        .and_then(Value::as_str)
+    {
+        secret::delete_key(b)?;
+    }
+    let mut s = s;
+    if let Value::Object(map) = &mut s {
+        map.remove("ai");
+    }
+    save_settings(&s).map_err(|e| format!("settings: {e}"))?;
+    Ok(())
 }
 
 /// Compose the privileged MANAGER kernel — disk-backed at [`app_home`], so the

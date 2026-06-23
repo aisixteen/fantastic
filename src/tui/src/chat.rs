@@ -7,7 +7,7 @@
 //! target. Per-source colored rails ([`color_for`]) keep agents visually
 //! distinct. The model is `serde`-ready for later persistence (in-mem for now).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use fantastic_host::gateway::Runtime;
 use fantastic_host::parse_kv;
@@ -131,10 +131,37 @@ impl Transcript {
         seqs
     }
 
+    /// Close a live streaming message for `source` at turn's end: if it never
+    /// received any streamed text (a backend that doesn't route tokens to us, e.g.
+    /// ollama), fill it with `fallback` (the final response); then seal it Done. A
+    /// no-op when there's no live stream (a streamed `done` already sealed it) — so
+    /// streaming backends don't double-render.
+    pub fn close_stream(&mut self, source: &str, fallback: &str) {
+        if let Some(&seq) = self.live.get(source) {
+            let empty = self
+                .msgs
+                .iter()
+                .find(|m| m.seq == seq)
+                .map(|m| matches!(&m.body, Body::Text(t) if t.is_empty()))
+                .unwrap_or(false);
+            if empty {
+                self.append_text(seq, fallback);
+            }
+            self.set_state(seq, State::Done);
+            self.live.remove(source);
+        }
+    }
+
     /// Route a backend event (`token`/`say`/`status`/`done`) into the
     /// transcript. The event's `source` (falling back to `from`) names the
     /// agent; events with no live message for that source are tolerated
     /// (a `token` lazily opens one).
+    ///
+    /// The live-token renderer. Currently UNUSED by the product (answers are
+    /// sealed atomically from the send-completion to keep ordering correct with
+    /// the AI queue); retained + tested for when per-turn stream ids let token
+    /// streaming render without splitting answers.
+    #[allow(dead_code)]
     pub fn on_event(&mut self, ev: &Value) {
         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
         let source = ev
@@ -201,6 +228,210 @@ impl Transcript {
             }
             _ => {}
         }
+    }
+}
+
+/// One chat **per character**: each addressee (`@ai`, `@sh`, `@ws`, or any agent
+/// you address) owns its own [`Transcript`], and you tab between them. Addressing
+/// someone *enters* their room (focus); Shift-Tab turns to face the next one. A
+/// tab that receives a message while you're elsewhere is marked **unread**.
+pub struct Tabs {
+    order: Vec<String>,
+    chats: HashMap<String, Transcript>,
+    active: usize,
+    unread: HashSet<String>,
+}
+
+impl Tabs {
+    /// Seed the base "characters" (kept in this order; the first is active).
+    pub fn new(base: &[&str]) -> Self {
+        let order: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        let chats = order
+            .iter()
+            .map(|id| (id.clone(), Transcript::new()))
+            .collect();
+        Tabs {
+            order,
+            chats,
+            active: 0,
+            unread: HashSet::new(),
+        }
+    }
+
+    /// Tab ids in display/cycle order.
+    pub fn ids(&self) -> &[String] {
+        &self.order
+    }
+
+    /// The id of the character you're currently facing.
+    pub fn active_id(&self) -> &str {
+        &self.order[self.active]
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// True if `id` got a message while it wasn't the active tab.
+    pub fn is_unread(&self, id: &str) -> bool {
+        self.unread.contains(id)
+    }
+
+    /// The active character's transcript.
+    pub fn active(&self) -> &Transcript {
+        &self.chats[&self.order[self.active]]
+    }
+
+    pub fn active_mut(&mut self) -> &mut Transcript {
+        let id = self.order[self.active].clone();
+        self.chats.get_mut(&id).expect("active tab exists")
+    }
+
+    /// Borrow a tab's transcript (read-only); `None` if no such tab yet.
+    pub fn chat(&self, id: &str) -> Option<&Transcript> {
+        self.chats.get(id)
+    }
+
+    /// Create `id`'s tab if it doesn't exist yet (appended after the base tabs).
+    fn ensure(&mut self, id: &str) {
+        if !self.chats.contains_key(id) {
+            self.order.push(id.to_string());
+            self.chats.insert(id.to_string(), Transcript::new());
+        }
+    }
+
+    /// **Enter** `id`'s room: create its tab if new, make it active, clear its
+    /// unread mark. This is what addressing a character does.
+    pub fn focus(&mut self, id: &str) {
+        self.ensure(id);
+        self.active = self.order.iter().position(|t| t == id).unwrap();
+        self.unread.remove(id);
+    }
+
+    /// Deliver a message into `id`'s transcript (creating its tab if new). If `id`
+    /// isn't the tab you're facing, it's marked **unread**. Returns the transcript
+    /// so the caller can `push`/`on_event` into it.
+    pub fn deliver(&mut self, id: &str) -> &mut Transcript {
+        self.ensure(id);
+        if self.order[self.active] != id {
+            self.unread.insert(id.to_string());
+        }
+        self.chats.get_mut(id).expect("ensured")
+    }
+
+    /// Turn to the next/previous character (wraps). Clears the arrived-at tab's
+    /// unread mark. Shift-Tab drives this.
+    pub fn cycle(&mut self, forward: bool) {
+        let n = self.order.len();
+        if n == 0 {
+            return;
+        }
+        self.active = if forward {
+            (self.active + 1) % n
+        } else {
+            (self.active + n - 1) % n
+        };
+        let id = self.order[self.active].clone();
+        self.unread.remove(&id);
+    }
+}
+
+/// The smart input line: an editable **`@<sender>`** field + the message body.
+/// You edit/delete the sender (not just the message), Tab-complete it against the
+/// known characters, Shift-Tab roll through them; a send is a **nogo** if the
+/// sender isn't known. Pure + fully unit-tested (no terminal needed).
+pub struct Composer {
+    /// The current addressee (no leading `@`).
+    pub sender: String,
+    /// The message body being typed.
+    pub message: String,
+    /// True while the cursor is in the `@sender` field (vs the message body).
+    pub editing_sender: bool,
+    /// Set when a send was rejected because the sender is unknown (for a flash).
+    pub nogo: bool,
+}
+
+impl Composer {
+    pub fn new(sender: &str) -> Self {
+        Composer {
+            sender: sender.to_string(),
+            message: String::new(),
+            editing_sender: false,
+            nogo: false,
+        }
+    }
+
+    /// Type a printable char into the focused field. `@` at the start of an empty
+    /// message jumps to (re)editing the sender; a space commits the sender back to
+    /// the message body.
+    pub fn type_char(&mut self, c: char) {
+        self.nogo = false;
+        if !self.editing_sender && self.message.is_empty() && c == '@' {
+            // Retarget from scratch: jump into the sender field and clear it.
+            self.editing_sender = true;
+            self.sender.clear();
+            return;
+        }
+        if self.editing_sender {
+            if c == ' ' {
+                self.editing_sender = false;
+            } else {
+                self.sender.push(c);
+            }
+        } else {
+            self.message.push(c);
+        }
+    }
+
+    /// Backspace: delete from the message; once it's empty, step into and trim the
+    /// `@sender` field — so you can edit the addressee, not just the text.
+    pub fn backspace(&mut self) {
+        self.nogo = false;
+        if self.editing_sender {
+            self.sender.pop();
+        } else if self.message.pop().is_none() {
+            self.editing_sender = true;
+            self.sender.pop();
+        }
+    }
+
+    /// Tab-complete the `@sender` against `known` (only while editing it).
+    /// Completes to the first known id that extends the current fragment; if the
+    /// fragment already names a known character, commit to the message. Returns
+    /// true if anything changed.
+    pub fn complete(&mut self, known: &[String]) -> bool {
+        if !self.editing_sender {
+            return false;
+        }
+        if let Some(hit) = known
+            .iter()
+            .find(|k| k.len() > self.sender.len() && k.starts_with(self.sender.as_str()))
+        {
+            self.sender = hit.clone();
+            return true;
+        }
+        if known.contains(&self.sender) {
+            self.editing_sender = false;
+            return true;
+        }
+        false
+    }
+
+    /// Force the sender (e.g. after a tab switch) and leave the message untouched.
+    pub fn set_sender(&mut self, sender: &str) {
+        self.sender = sender.to_string();
+        self.editing_sender = false;
+        self.nogo = false;
+    }
+
+    /// Is the current sender a known character? A send is a **nogo** otherwise.
+    pub fn is_valid(&self, known: &[String]) -> bool {
+        known.contains(&self.sender)
+    }
+
+    /// Take the message (clearing it). The sender stays (sticky addressee).
+    pub fn take_message(&mut self) -> String {
+        std::mem::take(&mut self.message)
     }
 }
 
@@ -640,5 +871,156 @@ mod tests {
             }
             _ => panic!("expected Kernel"),
         }
+    }
+
+    // ── Tabs (per-character chats) ──────────────────────────────────────
+
+    #[test]
+    fn tabs_seed_base_in_order_first_active() {
+        let t = Tabs::new(&["ai", "sh", "ws"]);
+        assert_eq!(t.ids(), ["ai", "sh", "ws"]);
+        assert_eq!(t.active_id(), "ai");
+        assert_eq!(t.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_focus_existing_and_create_new() {
+        let mut t = Tabs::new(&["ai", "sh", "ws"]);
+        t.focus("sh");
+        assert_eq!(t.active_id(), "sh");
+        // a brand-new character appends a tab and enters it.
+        t.focus("web");
+        assert_eq!(t.active_id(), "web");
+        assert_eq!(t.ids(), ["ai", "sh", "ws", "web"]);
+    }
+
+    #[test]
+    fn tabs_cycle_wraps_both_ways() {
+        let mut t = Tabs::new(&["ai", "sh", "ws"]);
+        t.cycle(true);
+        assert_eq!(t.active_id(), "sh");
+        t.cycle(true);
+        t.cycle(true);
+        assert_eq!(t.active_id(), "ai"); // wrapped
+        t.cycle(false);
+        assert_eq!(t.active_id(), "ws"); // wrapped backward
+    }
+
+    #[test]
+    fn tabs_deliver_marks_unread_only_when_not_active() {
+        let mut t = Tabs::new(&["ai", "sh", "ws"]);
+        // facing ai; a message into sh marks sh unread.
+        t.deliver("sh")
+            .push("sh", "you", Body::Text("hi".into()), State::Done);
+        assert!(t.is_unread("sh"));
+        assert!(!t.is_unread("ai"));
+        // entering sh clears its unread.
+        t.focus("sh");
+        assert!(!t.is_unread("sh"));
+        // a message into the active tab is never unread.
+        t.deliver("sh")
+            .push("sh", "you", Body::Text("yo".into()), State::Done);
+        assert!(!t.is_unread("sh"));
+    }
+
+    #[test]
+    fn tabs_cycle_clears_arrived_unread() {
+        let mut t = Tabs::new(&["ai", "sh", "ws"]);
+        t.deliver("sh")
+            .push("sh", "you", Body::Text("hi".into()), State::Done);
+        assert!(t.is_unread("sh"));
+        t.cycle(true); // turn to sh
+        assert_eq!(t.active_id(), "sh");
+        assert!(!t.is_unread("sh"));
+    }
+
+    // ── Composer (smart @sender + message) ──────────────────────────────
+
+    fn known() -> Vec<String> {
+        ["ai", "sh", "ws", "web"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn composer_types_into_message_by_default() {
+        let mut c = Composer::new("ai");
+        for ch in "hey".chars() {
+            c.type_char(ch);
+        }
+        assert_eq!(c.sender, "ai");
+        assert_eq!(c.message, "hey");
+        assert!(!c.editing_sender);
+    }
+
+    #[test]
+    fn composer_backspace_steps_from_message_into_sender() {
+        let mut c = Composer::new("ai");
+        c.type_char('h');
+        c.backspace(); // clears message
+        assert_eq!(c.message, "");
+        c.backspace(); // empty message → edit sender, trims it
+        assert!(c.editing_sender);
+        assert_eq!(c.sender, "a");
+        c.backspace();
+        assert_eq!(c.sender, "");
+    }
+
+    #[test]
+    fn composer_at_in_empty_message_edits_sender() {
+        let mut c = Composer::new("ai");
+        c.type_char('@'); // jump to editing sender; clears it for a fresh target
+        assert!(c.editing_sender);
+        assert_eq!(c.sender, "");
+        // typing now builds a fresh sender; space commits to the message body.
+        for ch in "web".chars() {
+            c.type_char(ch);
+        }
+        assert_eq!(c.sender, "web");
+        c.type_char(' ');
+        assert!(!c.editing_sender);
+    }
+
+    #[test]
+    fn composer_tab_completes_sender() {
+        let mut c = Composer::new("");
+        c.editing_sender = true;
+        c.sender = "w".into();
+        assert!(c.complete(&known())); // "w" → "ws" (first match)
+        assert_eq!(c.sender, "ws");
+        // an exact known name commits to the message instead.
+        c.sender = "web".into();
+        c.editing_sender = true;
+        assert!(c.complete(&known()));
+        assert!(!c.editing_sender);
+    }
+
+    #[test]
+    fn composer_tab_complete_noop_when_no_match() {
+        let mut c = Composer::new("");
+        c.editing_sender = true;
+        c.sender = "zzz".into();
+        assert!(!c.complete(&known()));
+        assert_eq!(c.sender, "zzz"); // unchanged
+    }
+
+    #[test]
+    fn composer_validity_gates_send() {
+        let mut c = Composer::new("ai");
+        assert!(c.is_valid(&known()));
+        c.set_sender("ghost");
+        assert!(!c.is_valid(&known())); // nogo
+    }
+
+    #[test]
+    fn composer_take_message_clears_but_keeps_sender() {
+        let mut c = Composer::new("kernel");
+        for ch in "list_agents".chars() {
+            c.type_char(ch);
+        }
+        assert_eq!(c.take_message(), "list_agents");
+        assert_eq!(c.message, "");
+        assert_eq!(c.sender, "kernel"); // sticky addressee
     }
 }

@@ -13,6 +13,9 @@ anyhow = "1"
 tokio = { version = "1.40", features = ["full"] }
 # OS-native per-app data dir (the app's state home) — XDG / Application Support / APPDATA.
 directories = "5"
+# OS-native secret store for connector API keys (macOS Keychain / Linux Secret
+# Service / Windows Credential Manager) — keys NEVER touch settings.json on disk.
+keyring = "3"
 # The gateway drives a sovereign workspace kernel over loopback HTTP. rustls (no
 # OpenSSL) keeps the build self-contained; we only ever hit 127.0.0.1 anyway.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
