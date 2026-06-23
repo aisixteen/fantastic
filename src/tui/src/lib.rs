@@ -201,8 +201,10 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     // The brain streams its per-turn events (token/say/status/done) to the
     // `CLIENT_ID` inbox. Register a bounded channel matching `kernel.inboxes`'
-    // Sender type and drain it into the transcript.
-    let (brain_tx, mut brain_rx) = tokio::sync::mpsc::channel::<Value>(256);
+    // Sender type and drain it into the transcript. A roomy bound so a fast
+    // token BURST isn't dropped on `try_send` before the ~16fps loop drains it
+    // (a dropped `done` would hang the turn).
+    let (brain_tx, mut brain_rx) = tokio::sync::mpsc::channel::<Value>(8192);
     kernel.inboxes.insert(AgentId::from(CLIENT_ID), brain_tx);
 
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
@@ -285,32 +287,29 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                 app.tabs.deliver(&from).push(&from, "you", Body::Text(text), State::Done);
             }
             Some(ev) = brain_rx.recv() => {
-                // The brain's inbox is mirrored to us via `watch`. We use ONLY the
-                // `status` events here (the live phase indicator). Token/done events
-                // are NOT rendered live — the answer is sealed atomically from the
-                // send-completion (`ai_rx`). Live token-append races with the
-                // queue's cross-turn boundaries (the shared `brain` stream key) and
-                // SPLITS answers; correct token streaming needs per-turn stream ids
-                // in the kernel protocol (a follow-up).
-                if ev.get("type").and_then(Value::as_str) == Some("status") {
+                // LIVE TOKEN STREAM. The brain's inbox is mirrored to us via `watch`,
+                // and ai-core serializes turns (its own send_id queue) — it emits each
+                // turn IN ORDER on this one channel: `queued → token… → done`. So we
+                // render tokens live and seal on the ordered `done` (which always
+                // follows that turn's last token — no client-side race, no cross-turn
+                // split). `done` is the turn boundary that drains the queue.
+                let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+                if ty == "status" {
                     if let Some(p) = ev.get("phase").and_then(Value::as_str) {
                         app.ai_phase = Some(p.to_string());
                     }
                 }
+                app.tabs.deliver("ai").on_event(&ev); // token append · say · done seal
+                if ty == "done" {
+                    finish_ai_turn(&mut app);
+                }
             }
             Some(out) = ai_rx.recv() => {
-                // Authoritative end of an AI turn: seal the `@ai` live line with the
-                // final response (filling it if nothing streamed) and clear the
-                // phase. Then — Claude-Code style, AI-only — any messages queued
-                // mid-turn are CONCATENATED with `\n` and sent as ONE next turn.
+                // ERROR path only: a turn that failed produced no `done` event (the
+                // send returned an error), so the spawned task sends the error/dry
+                // text here. Seal the live line with it and end the turn.
                 app.tabs.deliver("ai").close_stream(BRAIN_ID, &out);
-                app.ai_phase = None;
-                if app.pending.is_empty() {
-                    app.chat_busy = false;
-                } else {
-                    let joined = app.pending.drain(..).collect::<Vec<_>>().join("\n");
-                    fire_ai_turn(&mut app, joined);
-                }
+                finish_ai_turn(&mut app);
             }
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
             Some(()) = redraw_rx.recv() => {}
@@ -745,12 +744,25 @@ fn finish_setup(app: &mut App, draft: input::Draft) {
     app.composer.set_sender("ai");
 }
 
+/// End the current AI turn: clear the phase, then — Claude-Code style, AI-only —
+/// fire the messages queued mid-turn as ONE concatenated next turn, or go idle.
+/// Called from the watched `done` (success) or `ai_rx` (error) — exactly once per
+/// turn, since a turn yields a `done` XOR an error.
+fn finish_ai_turn(app: &mut App) {
+    app.ai_phase = None;
+    if app.pending.is_empty() {
+        app.chat_busy = false;
+    } else {
+        let joined = app.pending.drain(..).collect::<Vec<_>>().join("\n");
+        fire_ai_turn(app, joined);
+    }
+}
+
 /// Start one AI turn: open a live streaming message in the `@ai` room, ensure the
-/// brain once, then send. The blocking reply's `response` (or `✗ error`) is the
-/// authoritative result — sent back via `ai_tx` to close the live `@ai` line.
-/// This works for EVERY backend regardless of how (or whether) it routes stream
-/// events to us: ollama emits tokens to its own inbox, not ours, so relying on
-/// streamed events alone would hang the line forever.
+/// brain once (mirroring its inbox to ours so we receive the live token stream),
+/// then send. SUCCESS is rendered LIVE off the watched stream and sealed by the
+/// ordered `done` event (handled in the `brain_rx` arm); only an ERROR (no `done`)
+/// is reported back via `ai_tx`.
 fn fire_ai_turn(app: &mut App, text: String) {
     app.chat_busy = true;
     app.ai_phase = Some("sending".to_string());
@@ -767,7 +779,7 @@ fn fire_ai_turn(app: &mut App, text: String) {
             }
             // The ollama backend emits its stream to the brain's OWN inbox
             // (cli-round-trip route), not ours — so mirror the brain's inbox into
-            // our `CLIENT_ID` inbox to receive live tokens + status. Once.
+            // our `CLIENT_ID` inbox to receive the live token stream + status. Once.
             kernel
                 .watch(&AgentId::from(BRAIN_ID), AgentId::from(CLIENT_ID))
                 .await;
@@ -778,20 +790,17 @@ fn fire_ai_turn(app: &mut App, text: String) {
                 json!({"type":"send","text":text,"client_id":CLIENT_ID}),
             )
             .await;
-        let out = if let Some(resp) = reply.get("response").and_then(Value::as_str) {
-            resp.to_string()
-        } else if let Some(e) = reply.get("error").and_then(Value::as_str) {
-            // A configured-but-unreachable model → the DRY stand-in's "set another"
-            // guidance instead of a raw error.
-            if ai::is_unreachable(e) {
+        // SUCCESS streamed live + sealed by the watched `done`; nothing to do here.
+        // Only an error needs reporting (it produces no `done`): surface the dry
+        // "unreachable" guidance for a reachability failure, else the raw error.
+        if let Some(e) = reply.get("error").and_then(Value::as_str) {
+            let out = if ai::is_unreachable(e) {
                 ai::dry_reply(&ai::config_status(), Some(e)).unwrap_or_else(|| format!("✗ {e}"))
             } else {
                 format!("✗ {e}")
-            }
-        } else {
-            serde_json::to_string(&reply).unwrap_or_default()
-        };
-        let _ = ai_tx.send(out);
+            };
+            let _ = ai_tx.send(out);
+        }
     });
 }
 

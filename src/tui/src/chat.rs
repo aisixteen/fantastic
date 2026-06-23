@@ -153,15 +153,12 @@ impl Transcript {
     }
 
     /// Route a backend event (`token`/`say`/`status`/`done`) into the
-    /// transcript. The event's `source` (falling back to `from`) names the
-    /// agent; events with no live message for that source are tolerated
-    /// (a `token` lazily opens one).
-    ///
-    /// The live-token renderer. Currently UNUSED by the product (answers are
-    /// sealed atomically from the send-completion to keep ordering correct with
-    /// the AI queue); retained + tested for when per-turn stream ids let token
-    /// streaming render without splitting answers.
-    #[allow(dead_code)]
+    /// transcript — the **live-token renderer**. `token` appends to the source's
+    /// live message, `say`/`status` push notes/tool lines, `done` seals it. The
+    /// event's `source` (falling back to `from`) names the agent; events with no
+    /// live message for that source are tolerated (a `token` lazily opens one).
+    /// ai-core emits a turn's events IN ORDER (`queued → token… → done`), so the
+    /// `done` seal always follows that turn's last token — no split.
     pub fn on_event(&mut self, ev: &Value) {
         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
         let source = ev
