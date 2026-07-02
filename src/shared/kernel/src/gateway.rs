@@ -40,6 +40,25 @@ impl Runtime {
             Runtime::Rust | Runtime::Python | Runtime::Swift => "fantastic_kernel",
         }
     }
+
+    /// The lowercase name (for the registry file + status lines).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Runtime::Rust => "rust",
+            Runtime::Python => "python",
+            Runtime::Swift => "swift",
+        }
+    }
+
+    /// Parse a runtime name (`rust`/`python`/`swift`), `None` if unknown.
+    pub fn parse(s: &str) -> Option<Runtime> {
+        match s {
+            "rust" => Some(Runtime::Rust),
+            "python" => Some(Runtime::Python),
+            "swift" => Some(Runtime::Swift),
+            _ => None,
+        }
+    }
 }
 
 /// Resolve the `fantastic_kernel` binary for a runtime:

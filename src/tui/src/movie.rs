@@ -5,10 +5,11 @@
 //! MODULAR / ARBITRARY: the movie is a `Vec<Box<dyn Scene>>`; add or reorder a
 //! scene by editing `Movie::storyboard()`. Each scene draws into the body `area`
 //! given its local progress `t ∈ [0,1]` plus the global `clock` (seconds) for
-//! continuous effects (blink, color-cycle, starfield drift). Rendering is plain
+//! continuous effects (blink, 4-color CGA cycle, eased motion). Rendering is plain
 //! buffer-cell writes (top-down coords), so it's resolution-tolerant and the
-//! whole `area` is cleared each frame (no ghosts). Deterministic: any "noise"
-//! comes from a seeded xorshift, so the cutscene looks identical every run.
+//! whole `area` is cleared each frame (no ghosts). Deterministic by construction:
+//! every effect is a pure function of `t`/`clock` (no RNG), so the cutscene looks
+//! identical every run.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -137,14 +138,6 @@ fn draw_box(buf: &mut Buffer, area: Rect, x: i32, y: i32, w: i32, h: i32, label:
     text(buf, area, lx, y + h / 2, label, st);
 }
 
-/// Deterministic xorshift — our only "randomness" (no `rand` dep).
-fn lcg(mut x: u32) -> u32 {
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    x
-}
-
 /// On/off square wave at `hz` from the clock (for blinking prompts).
 fn blink(clock: f32, hz: f32) -> bool {
     ((clock * hz) as i64) % 2 == 0
@@ -171,43 +164,6 @@ fn ease(t: f32) -> f32 {
         4.0 * t * t * t
     } else {
         1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-    }
-}
-
-/// Twinkling, drifting starfield (deterministic). `pub(crate)` so the arcade
-/// background (`bg::render_stars`) reuses the exact same field — the attract
-/// screen, the chat screen, and the intro cutscene all share one starfield.
-pub(crate) fn starfield(buf: &mut Buffer, area: Rect, clock: f32) {
-    let w = area.width.max(1) as u32;
-    let h = area.height.max(1) as u32;
-    let n = ((w * h) / 35).clamp(20, 220);
-    for i in 0..n {
-        let s = lcg(i.wrapping_mul(2_654_435_761));
-        let layer = 1 + (s % 3); // parallax speed
-        let by = (s >> 9) % h;
-        let drift = (clock * layer as f32 * 4.0) as u32;
-        let x = (((s >> 3) % w + drift) % w) as i32;
-        let ch = match (s >> 17) % 3 {
-            0 => '.',
-            1 => '·',
-            _ => '*',
-        };
-        let tw = (clock * (2.0 + (s % 5) as f32) + (s % 7) as f32).sin();
-        let col = if tw > 0.5 {
-            Color::White
-        } else if tw > -0.2 {
-            Color::Gray
-        } else {
-            Color::DarkGray
-        };
-        plot(
-            buf,
-            area,
-            x,
-            by as i32,
-            ch,
-            Style::default().fg(col).bg(Color::Black),
-        );
     }
 }
 

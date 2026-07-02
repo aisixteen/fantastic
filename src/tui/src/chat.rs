@@ -257,7 +257,7 @@ impl Transcript {
 
 /// One chat **per character**: each addressee (`@ai`, `@sh`, `@ws`, or any agent
 /// you address) owns its own [`Transcript`], and you tab between them. Addressing
-/// someone *enters* their room (focus); Shift-Tab turns to face the next one. A
+/// someone *enters* their agent (focus); Shift-Tab turns to face the next one. A
 /// tab that receives a message while you're elsewhere is marked **unread**.
 pub struct Tabs {
     order: Vec<String>,
@@ -292,10 +292,6 @@ impl Tabs {
         &self.order[self.active]
     }
 
-    pub fn active_index(&self) -> usize {
-        self.active
-    }
-
     /// True if `id` got a message while it wasn't the active tab.
     pub fn is_unread(&self, id: &str) -> bool {
         self.unread.contains(id)
@@ -324,7 +320,7 @@ impl Tabs {
         }
     }
 
-    /// **Enter** `id`'s room: create its tab if new, make it active, clear its
+    /// **Enter** `id`'s agent: create its tab if new, make it active, clear its
     /// unread mark. This is what addressing a character does.
     pub fn focus(&mut self, id: &str) {
         self.ensure(id);
@@ -600,16 +596,16 @@ impl Composer {
 #[derive(Clone, PartialEq, Debug)]
 pub struct PaletteItem {
     pub id: String,
-    /// True when this character's room is already open (a tab exists).
+    /// True when this character's agent is already open (a tab exists).
     pub open: bool,
-    /// True when the open room holds unread messages.
+    /// True when the open agent holds unread messages.
     pub unread: bool,
 }
 
 /// Build the `@`-palette for the current sender `fragment`: **`ai` pinned
-/// first**, then the OPEN rooms in tab order, then known-but-unopened agents —
+/// first**, then the OPEN agents in tab order, then known-but-unopened agents —
 /// all prefix-filtered by the fragment. Navigation and discovery are one list:
-/// picking an open room enters it; picking an unopened agent opens its room
+/// picking an open agent enters it; picking an unopened agent opens its chat
 /// (a bare `@id` submit reflects it — the introduction).
 pub fn palette_items(tabs: &Tabs, known: &[String], fragment: &str) -> Vec<PaletteItem> {
     let mut out: Vec<PaletteItem> = Vec::new();
@@ -1077,7 +1073,6 @@ mod tests {
         let t = Tabs::new(&["ai", "sh", "ws"]);
         assert_eq!(t.ids(), ["ai", "sh", "ws"]);
         assert_eq!(t.active_id(), "ai");
-        assert_eq!(t.active_index(), 0);
     }
 
     #[test]
@@ -1315,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_pins_ai_first_then_rooms_then_discoverables() {
+    fn palette_pins_ai_first_then_agents_then_discoverables() {
         let mut tabs = Tabs::new(&["ai", "sh", "ws"]);
         tabs.deliver("sh")
             .push("sh", "you", Body::Note("x".into()), State::Done); // sh unread
@@ -1323,7 +1318,7 @@ mod tests {
         let items = palette_items(&tabs, &known, "");
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["ai", "sh", "ws", "core", "web"]);
-        assert!(items[0].open, "ai is an open room");
+        assert!(items[0].open, "ai is an open agent");
         assert!(items[1].unread, "sh got a message while ai was active");
         assert!(!items[3].open, "core is discoverable, not open");
     }
@@ -1331,7 +1326,7 @@ mod tests {
     #[test]
     fn palette_prefix_filters_and_dedupes() {
         let mut tabs = Tabs::new(&["ai", "sh", "ws"]);
-        tabs.focus("core"); // core is now an OPEN room…
+        tabs.focus("core"); // core is now an OPEN agent…
         let known = vec!["core".to_string(), "kernel".to_string()];
         let items = palette_items(&tabs, &known, "c");
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();

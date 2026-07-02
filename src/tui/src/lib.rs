@@ -1,11 +1,11 @@
 //! `fantastic-tui` — the ratatui terminal UI for the product.
 //!
-//! A chat **per character**, and you tab between them ([`chat::Tabs`]). Each
-//! addressee owns its own room: `@ai`/`@brain` streams an AI turn; `@<agent>`
+//! A chat **per agent**, and you tab between them ([`chat::Tabs`]). Each
+//! addressee owns its own chat: `@ai`/`@brain` streams an AI turn; `@<agent>`
 //! reflects it; `@<agent> <verb> [k=v…]` sends a sugar command and opens that
-//! agent's room; `@sh`/`@ws` are the shell + workspace rooms. The input is a smart
+//! agent's chat; `@sh`/`@ws` are the shell + workspace agents. The input is a smart
 //! `@sender` field ([`chat::Composer`]): Tab-complete, Shift-Tab to turn between
-//! rooms, Backspace into the sender, **nogo** on an unknown character. Per-source
+//! agents, Backspace into the sender, **nogo** on an unknown agent. Per-source
 //! colored rails keep agents distinct; AI turns stream live, queue, and Ctrl+C
 //! interrupts.
 //!
@@ -18,6 +18,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,8 +27,8 @@ use fantastic_kernel::{AgentId, Kernel};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -38,12 +39,16 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 mod bg;
+mod browser;
 mod chat;
+mod hub;
 mod input;
+mod kernels;
 mod movie;
 use chat::{Body, Composer, Route, State, Tabs, WsCmd};
 use fantastic_brain as ai;
 use fantastic_host::gateway::{self, KernelHandle};
+use fantastic_host::registry;
 use fantastic_term::{used_rows, TerminalSession};
 
 /// The client_id the brain emits its streaming events to (our inbox key).
@@ -51,7 +56,7 @@ const CLIENT_ID: &str = "fantastic";
 /// The brain agent id (kept in sync with `fantastic-brain`).
 const BRAIN_ID: &str = "brain";
 /// The base "characters" present at boot, in tab order: the brain, the shell, the
-/// workspace kernel. Any agent you address opens its own room after these.
+/// workspace kernel. Any agent you address opens its own agent after these.
 const BASE_TABS: [&str; 3] = ["ai", "sh", "ws"];
 
 /// Collect agent ids from a reflect tree (handles `id` + `children`/`agents`).
@@ -71,20 +76,6 @@ fn collect_ids(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// Reflect the manager kernel's id-tree into a flat list of addressable agents
-/// (the extra "characters" for Tab-complete / Shift-Tab / nogo validation).
-async fn agent_ids(kernel: &Arc<Kernel>) -> Vec<String> {
-    let tree = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"reflect","tree":"ids"}),
-        )
-        .await;
-    let mut ids = vec!["kernel".to_string()];
-    collect_ids(&tree, &mut ids);
-    ids
-}
-
 /// Async results from the workspace-gateway tasks, delivered back into the
 /// `select!` loop. Spawned tasks own a cloned `KernelHandle` and report here.
 enum WsEvent {
@@ -98,11 +89,55 @@ enum WsEvent {
     Down,
 }
 
+/// The runtimes the `+ new` picker offers, in order (cursor indexes this).
+const RUNTIMES: [gateway::Runtime; 3] = [
+    gateway::Runtime::Rust,
+    gateway::Runtime::Python,
+    gateway::Runtime::Swift,
+];
+
+/// Result of attaching/spawning a folder kernel (from `+ new`, or selecting an
+/// existing folder square). Delivered into the `select!` loop.
+enum KernelTaskResult {
+    /// The folder kernel is live — switch the active kernel to it.
+    Attached {
+        dir: PathBuf,
+        runtime: gateway::Runtime,
+        handle: KernelHandle,
+        /// True for `+ new` (record it in the registry); false when re-selecting one.
+        remember: bool,
+    },
+    /// Attach/spawn failed — surfaced on the Kernels screen, never a silent failure.
+    Failed(String),
+}
+
+/// The top-level launch phase (a little game state machine).
+///
+/// Attract (big title + "press any key") → Minimizing (the title shrinks and docks
+/// to the top over ~1s) → Hub (the active kernel's agent-tree lobby) → Chat (a
+/// maximized agent chat). Enter descends the ladder; Esc climbs it:
+/// Chat →Esc→ Hub →Esc→ Kernels (the list of all kernels, the top rung).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Attract,
+    Minimizing,
+    Kernels,
+    Hub,
+    Chat,
+}
+
+/// How long the attract→hub minimize animation runs.
+const MINIMIZE_SECS: f32 = 1.0;
+
 struct App {
+    /// The in-proc `★ RAM` manager kernel — always present (also the `app_home`
+    /// source). Chat/hub drive [`App::active`], which defaults to this one.
     kernel: Arc<Kernel>,
-    agent_count: usize,
-    /// One chat **per character**: `@ai`/`@sh`/`@ws` + any agent you address, each
-    /// its own room; Shift-Tab turns between them.
+    /// Which kernel the chat + hub currently drive (the RAM kernel, or a folder
+    /// kernel selected from the Kernels screen). Defaults to `InProc(kernel)`.
+    active: kernels::ActiveKernel,
+    /// One chat **per agent**: `@ai`/`@sh`/`@ws` + any agent you address, each
+    /// its own chat; Shift-Tab turns between them.
     tabs: Tabs,
     /// The smart input line — an editable `@sender` field + the message.
     composer: Composer,
@@ -116,15 +151,15 @@ struct App {
     help_open: bool,
     /// Transcript scrollback: VISUAL rows scrolled up from the bottom (0 = follow
     /// the newest). PageUp/PageDown page it, the mouse wheel nudges it; any
-    /// submit / room switch snaps back to the bottom.
+    /// submit / agent switch snaps back to the bottom.
     scroll: usize,
-    /// The max meaningful `scroll` for the active room, computed at render (the
+    /// The max meaningful `scroll` for the active agent, computed at render (the
     /// handler clamps against it — a `Cell` because render sees `&App`).
     scroll_max: std::cell::Cell<usize>,
     /// The running connector-setup wizard, if any.
     flow: Option<input::SetupFlow>,
     /// Kernel agent ids (cached at boot) — the extra "characters" you can address
-    /// + Tab-complete beyond the base rooms.
+    /// + Tab-complete beyond the base agents.
     known_agents: Vec<String>,
     /// AI turns typed while a turn is in flight queue here and fire in order.
     /// Each entry carries the transcript seq of its rendered line (shown dim
@@ -166,12 +201,37 @@ struct App {
     /// manual `/intro`); any key stops it. `intro_since` is its frame clock.
     intro_playing: bool,
     intro_since: Option<Instant>,
-    /// Arcade-cabinet attract state machine. `started` is false at boot → the
-    /// attract screen ("press any key to continue"); the first key flips it true
-    /// and enters chat. `last_activity` is reset on any key (the idle clock that
-    /// drives the 10s-idle → auto-demo). `boot` is the global animation clock for
-    /// the always-on starfield + title + blink phases.
-    started: bool,
+    /// The launch phase (see [`Phase`]). `Attract` at boot; the first key starts
+    /// the minimize animation → the `Hub` lobby. `last_activity` is reset on any
+    /// key (the idle clock that drives the 10s-idle → auto-demo); `boot` is the
+    /// global animation clock for the grid + title + blink phases.
+    phase: Phase,
+    /// When the attract→hub minimize animation started (its tween clock), or
+    /// `None` when not minimizing.
+    minimize_since: Option<Instant>,
+    /// The lobby's agent tree (agents = the kernel reflect tree, 1:1). Rebuilt
+    /// when `hub_dirty` is set (on entering the hub).
+    hub: hub::Hub,
+    /// Set when the hub should re-reflect the kernel (agents may have changed);
+    /// the tick loop does the async refresh and clears it.
+    hub_dirty: bool,
+    /// The Kernels screen (the top nav rung): the row of kernel squares + selection.
+    kernels_view: kernels::KernelsView,
+    /// The persisted list of folder kernels (`<app_home>/kernels.json`).
+    registry: registry::Registry,
+    /// Set when the Kernels screen should re-reflect-ping its folder kernels (on
+    /// entering it, or after creating one); the tick loop does the async refresh.
+    kernels_dirty: bool,
+    /// The folder browser overlay while creating a new kernel (`+ new`).
+    browser: Option<browser::Browser>,
+    /// After a folder is chosen, the runtime pick: `(dir, cursor into RUNTIMES)`.
+    new_runtime: Option<(PathBuf, usize)>,
+    /// True while a kernel attach/spawn task is in flight (blocks re-entry).
+    kernels_busy: bool,
+    /// A transient status/error line for the Kernels screen (attach failures, etc).
+    kernels_msg: Option<String>,
+    /// Attach/spawn task results (create-new or selecting a folder kernel).
+    kernel_task_tx: mpsc::UnboundedSender<KernelTaskResult>,
     last_activity: Instant,
     boot: Instant,
     /// When the attract screen last (re)appeared — set at boot and reset every
@@ -192,7 +252,7 @@ struct App {
 }
 
 impl App {
-    /// Every addressable character: the open rooms (base + spawned tabs) plus the
+    /// Every addressable character: the open agents (base + spawned tabs) plus the
     /// known kernel agents. Drives Tab-complete, Shift-Tab roll, and the nogo
     /// check on send.
     fn known_senders(&self) -> Vec<String> {
@@ -206,20 +266,22 @@ impl App {
     }
 }
 
-pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
+pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
     // One-shot kernel command replies flow back here as (source_id, text).
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
     // The final result of an AI turn (the blocking `response`, or `✗ error`) — the
-    // authoritative turn boundary. Renders into the `@ai` room + drives the queue.
+    // authoritative turn boundary. Renders into the `@ai` chat + drives the queue.
     let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<String>();
     // Workspace gateway task results (attach/spawn/send/down) flow back here.
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<WsEvent>();
+    // Kernel attach/spawn task results (the Kernels screen: `+ new` / select folder).
+    let (kernel_task_tx, mut kernel_task_rx) = mpsc::unbounded_channel::<KernelTaskResult>();
     // PTY output → repaint pings.
     let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
 
     // The brain streams its per-turn events (token/say/status/done) to the
     // `CLIENT_ID` inbox. Register a bounded channel matching `kernel.inboxes`'
-    // Sender type and drain it into the transcript. A roomy bound so a fast
+    // Sender type and drain it into the transcript. A generous bound so a fast
     // token BURST isn't dropped on `try_send` before the ~16fps loop drains it
     // (a dropped `done` would hang the turn).
     let (brain_tx, mut brain_rx) = tokio::sync::mpsc::channel::<Value>(8192);
@@ -236,24 +298,39 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(
-        out,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
+    // NOTE: mouse capture is deliberately LEFT OFF so the terminal keeps its native
+    // selection — you can drag-select the chat and copy (Cmd/Ctrl+C in the terminal),
+    // and paste (Cmd/Ctrl+V) arrives as a bracketed-paste event. Scroll history with
+    // PageUp/PageDown; fly the hub with the arrows.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // Spawn the shared PTY sized to the chat breathing-viewport grid.
     let (trows, tcols) = chat_term_grid(&term);
     let session = TerminalSession::spawn(trows, tcols, redraw_tx.clone()).ok();
 
-    // Cache the manager kernel's agent ids as addressable "characters".
-    let known_agents = agent_ids(&kernel).await;
+    // The active kernel — starts as the in-proc RAM kernel, so everything below is
+    // byte-identical to before until you switch to a folder kernel.
+    let active = kernels::ActiveKernel::InProc(Arc::clone(&kernel));
+    // Cache the active kernel's agent ids as addressable "characters".
+    let known_agents = active.agent_ids().await;
+    // The lobby tree — the active kernel's live agent hierarchy.
+    let hub = hub::Hub::from_reflect(&active.reflect_tree().await);
+    // The persisted folder-kernel list → seed the Kernels screen (offline until the
+    // first reflect-ping when you enter it).
+    let registry = registry::Registry::load();
+    let mut kernels_view = kernels::KernelsView::default();
+    kernels_view.rebuild(
+        registry
+            .entries
+            .iter()
+            .map(|e| (e.dir.clone(), e.runtime, false))
+            .collect(),
+    );
 
     let mut app = App {
         kernel,
-        agent_count,
+        active,
         tabs: Tabs::new(&BASE_TABS),
         composer: Composer::new("ai"),
         control: input::Control::Chat,
@@ -280,7 +357,18 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         movie: movie::Movie::storyboard(),
         intro_playing: false,
         intro_since: None,
-        started: false,
+        phase: Phase::Attract,
+        minimize_since: None,
+        hub,
+        hub_dirty: false,
+        kernels_view,
+        registry,
+        kernels_dirty: false,
+        browser: None,
+        new_runtime: None,
+        kernels_busy: false,
+        kernels_msg: None,
+        kernel_task_tx,
         last_activity: Instant::now(),
         boot: Instant::now(),
         attract_since: Instant::now(),
@@ -290,20 +378,13 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         last_q: None,
         q_armed: false,
     };
-    app.tabs.deliver("ai").push(
-        "system",
-        "you",
-        Body::Note(
-            "Rooms — one chat per character. `@ai` is the brain (streams live, Ctrl+C interrupts), `@sh` a shell (Ctrl+F focuses it), `@ws` the workspace kernel; `@<agent> <verb> [k=v…]` opens any agent's room. Type `@` for the palette; Shift-Tab turns between rooms; Esc comes home to @ai. `/help` shows everything · `/setup` connects a model · `/intro` plays the movie.".into(),
-        ),
-        State::Done,
-    );
     term.draw(|f| ui(f, &app))?;
 
-    // ~16fps heartbeat — the arcade background (starfield + title) is always
-    // animating, so this fires CONTINUOUSLY and every tick falls through to a
-    // redraw. It's a cabinet: accept the steady repaint. The tick also drives
-    // the attract state machine (10s-idle → auto-demo, demo end → attract).
+    // ~16fps heartbeat — the title reveal/minimize tween, live token streaming,
+    // and the blinking attract prompt all animate, so this fires CONTINUOUSLY and
+    // every tick falls through to a redraw. It's a cabinet: accept the steady
+    // repaint. The tick also drives the attract state machine (10s-idle →
+    // auto-demo, demo end → attract).
     let mut ticker = tokio::time::interval(Duration::from_millis(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -311,14 +392,14 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         tokio::select! {
             Some(ev) = in_rx.recv() => handle_input(&mut app, ev),
             Some((from, text)) = cmd_rx.recv() => {
-                // A kernel reply lands in that agent's room (unread if you're away).
+                // A kernel reply lands in that agent's chat (unread if you're away).
                 app.tabs.deliver(&from).push(&from, "you", Body::Text(text), State::Done);
             }
             Some(ev) = brain_rx.recv() => {
                 // LIVE EVENT STREAM, shared by `@ai` AND `@<id>` commands. Any agent
                 // we `watch` mirrors its self-emitted events here; each carries a
                 // `source` naming the emitter. We render it live into THAT source's
-                // room via the same `on_event` (token append · say/activity note ·
+                // agent via the same `on_event` (token append · say/activity note ·
                 // done seal). The brain (`source == BRAIN_ID`) additionally drives the
                 // AI turn lifecycle (phase indicator + queue drain on the ordered
                 // `done`); command targets just render — their final reply arrives via
@@ -330,15 +411,15 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                     .unwrap_or(BRAIN_ID)
                     .to_string();
                 let is_ai = source == BRAIN_ID;
-                // Room: the brain renders in the `ai` room; every other agent renders
-                // in the room named by its id (the `@<id>` room).
-                let room = if is_ai { "ai" } else { source.as_str() };
+                // Routing: the brain renders in the `ai` chat; every other agent
+                // renders in the chat named by its id (the `@<id>` chat).
+                let agent = if is_ai { "ai" } else { source.as_str() };
                 if is_ai && ty == "status" {
                     if let Some(p) = ev.get("phase").and_then(Value::as_str) {
                         app.ai_phase = Some(p.to_string());
                     }
                 }
-                app.tabs.deliver(room).on_event(&ev);
+                app.tabs.deliver(agent).on_event(&ev);
                 if is_ai && ty == "done" {
                     finish_ai_turn(&mut app);
                 }
@@ -353,6 +434,33 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                 finish_ai_turn(&mut app);
             }
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
+            Some(res) = kernel_task_rx.recv() => {
+                app.kernels_busy = false;
+                match res {
+                    KernelTaskResult::Attached { dir, runtime, handle, remember } => {
+                        if remember {
+                            app.registry.add(dir.clone(), runtime);
+                            let _ = app.registry.save();
+                        }
+                        let label = dir
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| dir.to_string_lossy().into_owned());
+                        app.active = kernels::ActiveKernel::Remote(kernels::RemoteKernel {
+                            handle,
+                            label,
+                        });
+                        app.known_agents = app.active.agent_ids().await;
+                        app.kernels_msg = None;
+                        app.brain_ready = false; // a fresh kernel — re-provision on first @ai
+                        app.hub_dirty = true;
+                        enter_hub(&mut app);
+                    }
+                    KernelTaskResult::Failed(e) => {
+                        app.kernels_msg = Some(format!("✗ {e}"));
+                    }
+                }
+            }
             Some(()) = redraw_rx.recv() => {}
             _ = ticker.tick() => {
                 // The animated bg needs a continuous repaint; we always fall
@@ -364,7 +472,7 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                     .map(|t| t.elapsed().as_secs_f32())
                     .unwrap_or(0.0);
                 match attract_tick(
-                    app.started,
+                    app.phase != Phase::Attract,
                     app.intro_playing,
                     idle,
                     intro_elapsed,
@@ -384,6 +492,43 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
                     }
                     AttractTick::Nothing => {}
                 }
+                // The minimize animation completes → the hub lobby opens.
+                if app.phase == Phase::Minimizing {
+                    let t = app
+                        .minimize_since
+                        .map(|s| s.elapsed().as_secs_f32())
+                        .unwrap_or(1.0);
+                    if t >= MINIMIZE_SECS {
+                        app.phase = Phase::Hub;
+                        app.minimize_since = None;
+                        app.hub_dirty = true;
+                    }
+                }
+                // Refresh the lobby's agent tree (async reflect) when it's dirty —
+                // entering the hub, or after opening an agent that may have spawned
+                // more. Keep the selection index in range across the rebuild.
+                if app.hub_dirty && app.phase == Phase::Hub {
+                    app.hub_dirty = false;
+                    let sel = app.hub.sel;
+                    app.hub = hub::Hub::from_reflect(&app.active.reflect_tree().await);
+                    app.hub.sel = sel.min(app.hub.nodes().len().saturating_sub(1));
+                }
+                // Reflect-ping each registry folder kernel (live/offline) when the
+                // Kernels screen is up and dirty — entering it, or after creating one.
+                if app.kernels_dirty && app.phase == Phase::Kernels {
+                    app.kernels_dirty = false;
+                    let mut folders = Vec::new();
+                    for e in &app.registry.entries {
+                        let live = gateway::Workspace::new(e.dir.clone())
+                            .attach()
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        folders.push((e.dir.clone(), e.runtime, live));
+                    }
+                    app.kernels_view.rebuild(folders);
+                }
             }
             else => break,
         }
@@ -391,7 +536,7 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             break;
         }
         // Keep the PTY grid matched to the breathing chat viewport: it gets the
-        // full chat-body height (so htop/vim get real room) while only
+        // full chat-body height (so htop/vim get real agent) while only
         // `used_rows` of it are displayed below the transcript.
         app.chat_term_grid = chat_term_grid(&term);
         if app.term_active {
@@ -407,7 +552,6 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     execute!(
         term.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         DisableBracketedPaste
     )?;
     term.show_cursor()?;
@@ -493,9 +637,9 @@ fn term_live(app: &App) -> bool {
     app.term_active && app.term.is_some()
 }
 
-/// True when the terminal viewport is BOTH live and on-screen — i.e. you're in
-/// the `@sh` room. The PTY is shared, but it must only render + capture keys in
-/// its own room, never bleed into `@ai`/`@ws`/agent rooms.
+/// True when the terminal viewport is BOTH live and on-screen — i.e. `@sh` is the
+/// active agent. The PTY is shared, but it must only render + capture keys in its
+/// own chat, never bleed into the `@ai`/`@ws`/other agent chats.
 fn term_visible(app: &App) -> bool {
     term_live(app) && app.tabs.active_id() == "sh"
 }
@@ -506,8 +650,8 @@ fn handle_input(app: &mut App, ev: Event) {
     // keystrokes, where each newline would fire Enter and submit fragments.
     if let Event::Paste(text) = &ev {
         app.last_activity = Instant::now();
-        if app.intro_playing || !app.started {
-            return; // not meaningful on the attract/intro screens
+        if app.phase != Phase::Chat {
+            return; // only the composer/agent takes paste
         }
         if app.term_focused {
             if let Some(ts) = app.term.as_mut() {
@@ -536,19 +680,8 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         return;
     }
-    // The mouse wheel scrolls the transcript (clamped to the room's history);
-    // clicks stay no-ops (no hit-testing yet).
-    if let Event::Mouse(m) = &ev {
-        use ratatui::crossterm::event::MouseEventKind as MK;
-        if app.started && !app.intro_playing && !app.help_open {
-            match m.kind {
-                MK::ScrollUp => app.scroll = (app.scroll + 3).min(app.scroll_max.get()),
-                MK::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
-                _ => {}
-            }
-        }
-        return;
-    }
+    // Mouse events are NOT captured (native terminal selection/copy is preserved),
+    // so none arrive here — history scrolls with PageUp/PageDown, the hub with arrows.
     let Event::Key(KeyEvent {
         code,
         kind,
@@ -563,15 +696,27 @@ fn handle_input(app: &mut App, ev: Event) {
     }
     // Any key press is activity — reset the idle clock that drives attract mode.
     app.last_activity = Instant::now();
-    // Arcade "press any key to continue / press to start": while the attract
-    // demo plays OR before the game has started, the FIRST key enters chat. It
-    // is fully consumed — it must NOT leak into the input line or be processed
-    // as a chat key.
-    if app.intro_playing || !app.started {
-        app.started = true;
+    // Arcade "press any key": on the attract screen (or during the auto-demo)
+    // the FIRST key starts the minimize animation → the hub lobby. During the
+    // minimize, a key skips straight to the hub. Fully consumed — never leaks.
+    if app.intro_playing {
         app.intro_playing = false;
         app.intro_since = None;
+        if app.phase == Phase::Attract {
+            start_minimize(app);
+        }
         return;
+    }
+    match app.phase {
+        Phase::Attract => {
+            start_minimize(app);
+            return;
+        }
+        Phase::Minimizing => {
+            enter_hub(app); // skip the animation
+            return;
+        }
+        Phase::Kernels | Phase::Hub | Phase::Chat => {}
     }
     // The /help overlay: any key dismisses it (fully consumed).
     if app.help_open {
@@ -585,7 +730,7 @@ fn handle_input(app: &mut App, ev: Event) {
         return;
     }
     // Ctrl+F toggles PTY focus (only when the terminal viewport is on-screen — in
-    // the `@sh` room). Elsewhere it says why nothing happened.
+    // the `@sh` agent). Elsewhere it says why nothing happened.
     if ctrl && code == KeyCode::Char('f') {
         if term_visible(app) {
             app.term_focused = !app.term_focused;
@@ -613,7 +758,7 @@ fn handle_input(app: &mut App, ev: Event) {
         app.last_ctrl_c = Some(now);
         let ai_live = app.tabs.chat("ai").is_some_and(|c| c.has_live());
         // SIGINT goes to the shell only when its viewport is the one in front
-        // (the `@sh` room / focused); elsewhere Ctrl+C interrupts the AI stream.
+        // (the `@sh` agent / focused); elsewhere Ctrl+C interrupts the AI stream.
         // The note says what THIS press did, so the action is never a mystery.
         let note = if app.term_focused || term_visible(app) {
             if let Some(ts) = app.term.as_mut() {
@@ -640,6 +785,81 @@ fn handle_input(app: &mut App, ev: Event) {
         app.tabs
             .active_mut()
             .push("system", "you", Body::Note(note), State::Done);
+        return;
+    }
+    // The HUB lobby owns the keys while it's up: arrows fly the agent tree
+    // (↑ parent · ↓ child · ←/→ siblings), Enter opens the selected agent's chat,
+    // Esc/`/` no-op. (Ctrl+Q / double-Ctrl+C above still exit from here.)
+    if app.phase == Phase::Hub {
+        match code {
+            KeyCode::Up => app.hub.move_up(),
+            KeyCode::Down => app.hub.move_down(),
+            KeyCode::Left => app.hub.move_left(),
+            KeyCode::Right => app.hub.move_right(),
+            KeyCode::Enter => {
+                let agent = app.hub.selected_agent();
+                open_agent(app, &agent);
+            }
+            // Esc climbs one more rung: Hub → Kernels (the list of all kernels).
+            KeyCode::Esc => {
+                app.phase = Phase::Kernels;
+                app.kernels_dirty = true; // re-reflect-ping the folder kernels
+            }
+            _ => {}
+        }
+        return;
+    }
+    // The "+ new kernel" overlay owns keys while it's up: first the folder browser,
+    // then the runtime pick. (Global exits Ctrl+Q / double-Ctrl+C above still work.)
+    if app.browser.is_some() {
+        match code {
+            KeyCode::Up => app.browser.as_mut().unwrap().up(),
+            KeyCode::Down => app.browser.as_mut().unwrap().down(),
+            KeyCode::Enter => app.browser.as_mut().unwrap().enter(),
+            // Space = "use THIS folder" → advance to the runtime pick.
+            KeyCode::Char(' ') => {
+                let dir = app.browser.as_ref().unwrap().choose();
+                app.browser = None;
+                app.new_runtime = Some((dir, 0));
+            }
+            KeyCode::Esc => app.browser = None,
+            _ => {}
+        }
+        return;
+    }
+    if app.new_runtime.is_some() {
+        match code {
+            KeyCode::Up => {
+                if let Some((_, c)) = app.new_runtime.as_mut() {
+                    *c = c.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some((_, c)) = app.new_runtime.as_mut() {
+                    if *c + 1 < RUNTIMES.len() {
+                        *c += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((dir, c)) = app.new_runtime.take() {
+                    spawn_attach(app, dir, RUNTIMES[c], true);
+                }
+            }
+            KeyCode::Esc => app.new_runtime = None,
+            _ => {}
+        }
+        return;
+    }
+    // The KERNELS lobby (top rung): ←/→ pick a kernel square, Enter opens it (its
+    // Hub) or the `+ new` browser, Esc stays (already home; Ctrl+Q quits).
+    if app.phase == Phase::Kernels {
+        match code {
+            KeyCode::Left => app.kernels_view.move_left(),
+            KeyCode::Right => app.kernels_view.move_right(),
+            KeyCode::Enter => select_square(app),
+            _ => {}
+        }
         return;
     }
     // Hold `q` to exit: physically holding the key fires rapid auto-repeats; a
@@ -702,7 +922,7 @@ fn handle_input(app: &mut App, ev: Event) {
     }
     // While the `@sender` is being edited, the palette owns the navigation keys:
     // ↑/↓ move the selection, Enter picks + submits the bare line (enter the
-    // room; a fresh agent room opens on its reflect — the introduction), Tab
+    // agent; a fresh agent opens on its reflect — the introduction), Tab
     // completes to the selection, Esc cancels back to the previous sender.
     if app.composer.editing_sender {
         match code {
@@ -751,12 +971,11 @@ fn handle_input(app: &mut App, ev: Event) {
             _ => {}
         }
     } else if code == KeyCode::Esc {
-        // Esc = home: back to the brain. (The other Esc meanings — cancel a
+        // Esc = minimize back to the lobby. (The other Esc meanings — cancel a
         // flow, release the PTY, cancel a sender edit — were all handled above,
-        // so the ladder stays consistent: Esc always steps "back".)
-        app.tabs.focus("ai");
-        app.composer.set_sender("ai");
-        app.scroll = 0;
+        // so the ladder stays consistent: Esc always steps "back", ending at the
+        // hub.)
+        enter_hub(app);
         return;
     }
     // Otherwise the keys edit the smart composer (`@sender` field + message):
@@ -788,14 +1007,14 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         KeyCode::Tab => {
             // Complete the `@sender` against every known character; if it lands on
-            // an open room, turn to face it.
+            // an open agent, turn to face it.
             app.composer.complete(&app.known_senders());
             if app.tabs.ids().contains(&app.composer.sender) {
                 app.tabs.focus(&app.composer.sender);
             }
         }
         KeyCode::BackTab => {
-            // Shift-Tab: turn to the next OPEN room (rolls over the characters you
+            // Shift-Tab: turn to the next OPEN agent (rolls over the characters you
             // know); the composer follows. New agents are reached by name + Tab.
             app.tabs.cycle(true);
             let id = app.tabs.active_id().to_string();
@@ -804,6 +1023,96 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         KeyCode::Enter => submit_chat(app),
         _ => {}
+    }
+}
+
+/// Kick off the attract→hub minimize animation (title shrinks + docks over ~1s).
+fn start_minimize(app: &mut App) {
+    app.phase = Phase::Minimizing;
+    app.minimize_since = Some(Instant::now());
+}
+
+/// Open the hub lobby (from a chat via Esc, or skipping the minimize). Marks the
+/// agent tree dirty so the tick loop refreshes it.
+fn enter_hub(app: &mut App) {
+    app.phase = Phase::Hub;
+    app.minimize_since = None;
+    app.hub_dirty = true;
+}
+
+/// Act on the selected Kernels square: `★ RAM` → make the in-proc kernel active and
+/// drop into its Hub; a folder kernel → attach it and switch; `+ new` → open the
+/// folder browser.
+fn select_square(app: &mut App) {
+    if app.kernels_busy {
+        return; // an attach is already in flight
+    }
+    // Read what we need first (releases the `kernels_view` borrow before mutating).
+    enum Pick {
+        Ram,
+        Folder(PathBuf, gateway::Runtime),
+        New,
+    }
+    let pick = match app.kernels_view.selected() {
+        kernels::Square::Ram => Pick::Ram,
+        kernels::Square::Folder { dir, runtime, .. } => Pick::Folder(dir.clone(), *runtime),
+        kernels::Square::New => Pick::New,
+    };
+    match pick {
+        Pick::Ram => {
+            app.active = kernels::ActiveKernel::InProc(Arc::clone(&app.kernel));
+            app.hub_dirty = true;
+            enter_hub(app);
+        }
+        Pick::Folder(dir, rt) => spawn_attach(app, dir, rt, false),
+        Pick::New => {
+            let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+            app.browser = Some(browser::Browser::open(start));
+            app.kernels_msg = None;
+        }
+    }
+}
+
+/// Attach (or spawn) the folder kernel at `dir` with `runtime`, in a background
+/// task; the result comes back via `kernel_task_tx` → the `select!` loop, which
+/// switches the active kernel to it. `remember` records it in the registry.
+fn spawn_attach(app: &mut App, dir: PathBuf, runtime: gateway::Runtime, remember: bool) {
+    app.kernels_busy = true;
+    app.kernels_msg = Some(format!(
+        "attaching {} ({})…",
+        dir.display(),
+        runtime.as_str()
+    ));
+    let tx = app.kernel_task_tx.clone();
+    tokio::spawn(async move {
+        let res = match gateway::Workspace::new(dir.clone())
+            .attach_or_spawn(runtime)
+            .await
+        {
+            Ok(handle) => KernelTaskResult::Attached {
+                dir,
+                runtime,
+                handle,
+                remember,
+            },
+            Err(e) => KernelTaskResult::Failed(e.to_string()),
+        };
+        let _ = tx.send(res);
+    });
+}
+
+/// Open an agent's chat from a hub selection: focus it (creating its tab), point
+/// the composer there, and for a not-yet-open agent fire its reflect (the bare-`@`
+/// intro) so it isn't empty. Then switch to the Chat phase.
+fn open_agent(app: &mut App, agent: &str) {
+    app.phase = Phase::Chat;
+    app.scroll = 0;
+    let base = matches!(agent, "ai" | "sh" | "ws");
+    let already_open = app.tabs.ids().iter().any(|t| t == agent);
+    app.tabs.focus(agent);
+    app.composer.set_sender(agent);
+    if !base && !already_open {
+        dispatch_kernel(app, AgentId::from(agent), json!({"type":"reflect"}));
     }
 }
 
@@ -819,8 +1128,8 @@ fn palette_pick(app: &App) -> Option<String> {
 }
 
 /// Submit the composed line: validate the `@sender` (a **nogo** if it names no
-/// known character), enter that room, then dispatch — an AI turn streams into the
-/// `@ai` room; a kernel command sends and routes its reply back via `cmd_tx`.
+/// known character), enter that agent, then dispatch — an AI turn streams into the
+/// `@ai` agent; a kernel command sends and routes its reply back via `cmd_tx`.
 fn submit_chat(app: &mut App) {
     // Submitting re-joins the conversation: snap the view back to the newest.
     app.scroll = 0;
@@ -894,7 +1203,7 @@ fn submit_chat(app: &mut App) {
     // Reconstruct the routable line `@sender body` and resolve it.
     let line = format!("@{sender} {message}");
     let (target, route) = chat::route(&line, &sender);
-    // Entering the addressed room (creates its tab if new) + keep the composer
+    // Entering the addressed agent (creates its tab if new) + keep the composer
     // pointed there.
     app.tabs.focus(&target);
     app.composer.set_sender(&target);
@@ -964,7 +1273,7 @@ fn handle_flow_key(app: &mut App, code: KeyCode) {
 }
 
 /// Persist a completed connector draft (settings + OS keychain), update the live
-/// env, re-provision the brain (drop the old one), and confirm in the `@ai` room.
+/// env, re-provision the brain (drop the old one), and confirm in the `@ai` agent.
 fn finish_setup(app: &mut App, draft: input::Draft) {
     app.control = input::Control::Chat;
     app.flow = None;
@@ -1032,16 +1341,31 @@ fn finish_ai_turn(app: &mut App) {
     }
 }
 
-/// Start one AI turn: open a live streaming message in the `@ai` room, ensure the
+/// Start one AI turn: open a live streaming message in the `@ai` agent, ensure the
 /// brain once (mirroring its inbox to ours so we receive the live token stream),
 /// then send. SUCCESS is rendered LIVE off the watched stream and sealed by the
 /// ordered `done` event (handled in the `brain_rx` arm); only an ERROR (no `done`)
 /// is reported back via `ai_tx`.
 fn fire_ai_turn(app: &mut App, text: String) {
+    // Phase 1: the brain is provisioned in-proc. A folder kernel doesn't get a
+    // local brain yet (Phase 2), so `@ai` on a remote kernel degrades to a clear
+    // note rather than a hang. (`active` is always InProc until the Kernels screen
+    // lands, so this branch is dormant for now.)
+    let kernel = match app.active.in_proc() {
+        Some(k) => k,
+        None => {
+            app.tabs.deliver("ai").push(
+                "system",
+                "ai",
+                Body::Note("this kernel has no brain yet — reflect / verbs / @sh only".into()),
+                State::Done,
+            );
+            return;
+        }
+    };
     app.chat_busy = true;
     app.ai_phase = Some("sending".to_string());
     app.tabs.deliver("ai").start_stream(BRAIN_ID, "you");
-    let kernel = Arc::clone(&app.kernel);
     let ai_tx = app.ai_tx.clone();
     let ensure = !app.brain_ready;
     app.brain_ready = true;
@@ -1270,17 +1594,16 @@ fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
         },
         State::Done,
     );
-    let kernel = Arc::clone(&app.kernel);
+    let active = app.active.clone();
     let tx = app.cmd_tx.clone();
     let from = target.as_str().to_string();
     tokio::spawn(async move {
-        // Mirror the target's own inbox into our client inbox FIRST, so any
-        // events it emits while handling the verb (token/say/status/done, or a
-        // generic activity event) render LIVE in its room via `brain_rx` —
-        // exactly the path `@ai` uses. Idempotent. Targets that just return a
-        // reply emit nothing; their reply still renders below.
-        kernel.watch(&target, AgentId::from(CLIENT_ID)).await;
-        let reply = kernel.send(&target, payload).await;
+        // `dispatch` mirrors the target's own inbox into our client inbox FIRST (for
+        // the in-proc kernel), so any events it emits while handling the verb
+        // (token/say/status/done, or a generic activity event) render LIVE in its
+        // agent via `brain_rx` — exactly the path `@ai` uses. A remote kernel is
+        // request→response here; its live emits arrive over the Phase-2 WS mirror.
+        let reply = active.dispatch(&target, payload).await;
         let rendered = serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
         let _ = tx.send((from, rendered));
     });
@@ -1321,7 +1644,7 @@ fn encode_key(code: KeyCode, mods: KeyModifiers) -> Option<Vec<u8>> {
 }
 
 /// The chat breathing-viewport grid `(rows, cols)`: the PTY is sized to the
-/// FULL chat-body interior so full-screen TUIs get real room, even though only
+/// FULL chat-body interior so full-screen TUIs get real agent, even though only
 /// `used_rows` of it are displayed below the transcript. Subtracts the header
 /// (3) + body border (2) chrome, the viewport's `│ sh` header row, and the
 /// input line (3) below the transcript.
@@ -1330,43 +1653,6 @@ fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16
     let rows = size.height.saturating_sub(3 + 2 + 1 + 3).max(1);
     let cols = size.width.saturating_sub(2).max(1);
     (rows, cols)
-}
-
-/// The tab bar above the chat: one chip per open room (`@ai`, `@sh`, `@ws`, and
-/// any agent you've addressed). The active room is bold + underlined; a room that
-/// got a message while you were away carries a `•` unread dot. Shift-Tab turns
-/// between them. (The big FANTASTIC lives in the animated background.)
-fn status_line(app: &App) -> Line<'static> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let mut spans = vec![Span::styled(" ", dim)];
-    for (i, id) in app.tabs.ids().iter().enumerate() {
-        let active = i == app.tabs.active_index();
-        let col = chat::color_for(id);
-        if app.tabs.is_unread(id) {
-            spans.push(Span::styled("•", Style::default().fg(Color::Yellow)));
-        }
-        let st = if active {
-            Style::default()
-                .fg(col)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            Style::default().fg(col).add_modifier(Modifier::DIM)
-        };
-        spans.push(Span::styled(format!("@{id}"), st));
-        spans.push(Span::styled("  ", dim));
-    }
-    let ws = match &app.workspace {
-        Some(h) => format!("ws:{}", h.base_url.trim_start_matches("http://")),
-        None => "ws:none".to_string(),
-    };
-    spans.push(Span::styled(
-        format!(
-            " ·  {ws}  ·  {} agents  ·  ⇧⇥ rooms · Ctrl+F",
-            app.agent_count
-        ),
-        dim,
-    ));
-    Line::from(spans)
 }
 
 /// Black out every cell of `area` (so a floated, opaque widget hides the stars
@@ -1417,7 +1703,7 @@ fn ui(f: &mut Frame, app: &App) {
     // light or dark terminal — dark sky everywhere, content opaque on top.
     fill_black(f.buffer_mut(), full);
 
-    // STATE 1 — the intro movie plays full-screen (its own starfield + scenes).
+    // The intro movie plays full-screen over everything (its own scenes).
     if app.intro_playing {
         let elapsed = app
             .intro_since
@@ -1427,63 +1713,487 @@ fn ui(f: &mut Frame, app: &App) {
         return;
     }
 
-    // STATE 2 — ATTRACT: stars + the big title appearing top→bottom over ~1.5s
-    // + a blinking "press any key".
-    if !app.started {
-        let buf = f.buffer_mut();
-        bg::render_stars(buf, full, clock);
-        let reveal = (app.attract_since.elapsed().as_secs_f32() / 1.5).clamp(0.0, 1.0);
-        let title_bottom = bg::render_title(buf, full, reveal);
-        if blink(clock, 1.2) {
-            buf_text_center(
-                buf,
-                full,
-                title_bottom + 2,
-                "PRESS ANY KEY TO CONTINUE",
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
-        return;
-    }
+    // The moving sky (drifting starfield) sits behind every phase.
+    bg::render_sky(f.buffer_mut(), full, clock);
 
-    // STATE 3 — CHAT floated over the same animated background (starfield only,
-    // no title band).
-    {
-        let buf = f.buffer_mut();
-        bg::render_stars(buf, full, clock);
+    match app.phase {
+        // ATTRACT — the big title revealing top→bottom + a blinking prompt over the
+        // moving sky.
+        Phase::Attract => {
+            let buf = f.buffer_mut();
+            let reveal = (app.attract_since.elapsed().as_secs_f32() / 1.5).clamp(0.0, 1.0);
+            let title_bottom = bg::render_title(buf, full, reveal);
+            if blink(clock, 1.2) {
+                buf_text_center(
+                    buf,
+                    full,
+                    title_bottom + 2,
+                    "PRESS ANY KEY TO CONTINUE",
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+        // MINIMIZING — the title tweens from big-centered to small-docked over
+        // ~1s (eased), sliding + shrinking to the top-left header slot.
+        Phase::Minimizing => {
+            let buf = f.buffer_mut();
+            let raw = app
+                .minimize_since
+                .map(|s| s.elapsed().as_secs_f32() / MINIMIZE_SECS)
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let t = 1.0 - (1.0 - raw) * (1.0 - raw); // ease-out
+            let geo = bg::tween_geo(bg::title_geometry(full), bg::docked_geometry(full), t);
+            bg::draw_title(buf, full, geo, 1.0);
+        }
+        // KERNELS — the top rung: the row of kernel squares, plus the `+ new`
+        // overlay (folder browser, then runtime pick) when creating one.
+        Phase::Kernels => {
+            render_kernels(f, full, app);
+            if app.browser.is_some() {
+                render_browser(f, full, app);
+            } else if app.new_runtime.is_some() {
+                render_runtime(f, full, app);
+            }
+        }
+        // HUB — the lobby: the small docked title + the navigable agent tree.
+        Phase::Hub => render_hub(f, full, app),
+        // CHAT — the maximized agent chat.
+        Phase::Chat => render_chat(f, full, app),
     }
-    render_chat(f, full, app);
 }
 
-/// The unified chat, FLOATED over the arcade background. The whole chat block is
-/// inset 2 cells from every screen edge (so the starfield shows in that border
-/// margin); inside, a slim status line, the transcript, a 1-row gap (stars peek
-/// through), then the input box at the bottom. Transcript + input are opaque.
-/// The 3-row chat header banner (mirrors the headless `ansi_banner`): a neon
-/// magenta vertical bar down the left, `FANTASTIC` on the middle row, and the live
-/// tab bar on the bottom row. Opaque (the stars don't show through it).
-fn render_chat_header(f: &mut Frame, area: Rect, app: &App) {
+/// Write a cell at absolute `(x, y)`, clipped to `clip`; out-of-bounds is a no-op.
+fn cell_at(buf: &mut Buffer, clip: Rect, x: i32, y: i32, ch: char, style: Style) {
+    if x < clip.x as i32
+        || y < clip.y as i32
+        || x >= (clip.x + clip.width) as i32
+        || y >= (clip.y + clip.height) as i32
+    {
+        return;
+    }
+    if let Some(c) = buf.cell_mut((x as u16, y as u16)) {
+        c.set_char(ch);
+        c.set_style(style);
+    }
+}
+
+/// Write a string starting at absolute `(x, y)` (clipped). Returns nothing.
+fn str_at(buf: &mut Buffer, clip: Rect, x: i32, y: i32, s: &str, style: Style) {
+    for (i, ch) in s.chars().enumerate() {
+        cell_at(buf, clip, x + i as i32, y, ch, style);
+    }
+}
+
+/// The rendered label for a tree node (`★@ai`, `@fs`, …).
+fn hub_label(n: &hub::HubNode) -> String {
+    format!("{}@{}", if n.is_home { "★" } else { "" }, n.label)
+}
+
+/// Truncate `s` to `w` display cells, appending `…` when it overflows.
+fn clip_str(s: &str, w: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= w {
+        return s.to_string();
+    }
+    let mut out: String = chars[..w.saturating_sub(1)].iter().collect();
+    out.push('…');
+    out
+}
+
+/// Draw a 1-cell box border `[bx, by] .. [bx+w-1, by+h-1]` (clipped to `clip`).
+fn draw_box(buf: &mut Buffer, clip: Rect, bx: i32, by: i32, w: i32, h: i32, st: Style) {
+    let (r, b) = (bx + w - 1, by + h - 1);
+    cell_at(buf, clip, bx, by, '┌', st);
+    cell_at(buf, clip, r, by, '┐', st);
+    cell_at(buf, clip, bx, b, '└', st);
+    cell_at(buf, clip, r, b, '┘', st);
+    for x in (bx + 1)..r {
+        cell_at(buf, clip, x, by, '─', st);
+        cell_at(buf, clip, x, b, '─', st);
+    }
+    for y in (by + 1)..b {
+        cell_at(buf, clip, bx, y, '│', st);
+        cell_at(buf, clip, r, y, '│', st);
+    }
+}
+
+/// The KERNELS screen (top nav rung): the docked title, then a horizontal row of
+/// fixed-size boxes — `★ RAM` (the in-proc kernel, always first), any folder kernels
+/// (Slice 3), and a trailing `+ new`. Each box carries 3 status lines
+/// (name · kind · status); the selected one is drawn white. `←/→` pick, `⏎` opens.
+fn render_kernels(f: &mut Frame, full: Rect, app: &App) {
+    bg::draw_title(f.buffer_mut(), full, bg::docked_geometry(full), 1.0);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let mag = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    let squares = &app.kernels_view.squares;
+    if squares.is_empty() {
+        return;
+    }
+    let sel = app.kernels_view.sel.min(squares.len() - 1);
+    let box_w = 16_i32;
+    let box_h = 5_i32;
+    let col_step = box_w + 2;
+    let n = squares.len() as i32;
+    let total_w = n * col_step - 2;
+    let base_x = full.x as i32 + 4 + ((full.width as i32 - 8 - total_w).max(0)) / 2;
+    let top = full.y as i32 + 6;
+    let active_inproc = matches!(app.active, kernels::ActiveKernel::InProc(_));
+
+    let buf = f.buffer_mut();
+    str_at(
+        buf,
+        full,
+        full.x as i32 + 4,
+        full.y as i32 + 4,
+        "kernels — pick one",
+        mag,
+    );
+    for (i, sq) in squares.iter().enumerate() {
+        let selected = i == sel;
+        let label = sq.label();
+        let (l2, l3): (String, String) = match sq {
+            kernels::Square::Ram => (
+                "in-proc".into(),
+                if active_inproc { "active" } else { "live" }.into(),
+            ),
+            kernels::Square::Folder { runtime, live, .. } => (
+                runtime.as_str().into(),
+                if *live { "live" } else { "offline" }.into(),
+            ),
+            kernels::Square::New => ("kernel".into(), String::new()),
+        };
+        let white = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let border = if selected { white } else { dim };
+        let name_st = if selected { white } else { mag };
+        let body_st = if selected { white } else { dim };
+        let x0 = base_x + i as i32 * col_step;
+        draw_box(buf, full, x0, top, box_w, box_h, border);
+        let cxi = x0 + 2;
+        str_at(buf, full, cxi, top + 1, &clip_str(&label, 12), name_st);
+        str_at(buf, full, cxi, top + 2, &clip_str(&l2, 12), body_st);
+        str_at(buf, full, cxi, top + 3, &clip_str(&l3, 12), body_st);
+    }
+    // A transient status/error line (attaching…, ✗ failed), above the hint.
+    if let Some(msg) = &app.kernels_msg {
+        str_at(
+            buf,
+            full,
+            full.x as i32 + 4,
+            full.y as i32 + full.height as i32 - 3,
+            &clip_str(msg, full.width.saturating_sub(8) as usize),
+            if msg.starts_with('✗') {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Yellow)
+            },
+        );
+    }
+    str_at(
+        buf,
+        full,
+        full.x as i32 + 4,
+        full.y as i32 + full.height as i32 - 2,
+        "←→ pick · ⏎ open · Ctrl+Q quit",
+        dim,
+    );
+}
+
+/// A centered opaque panel (fills black, draws a magenta border) at `(w×h)`; returns
+/// the interior top-left `(x, y)`. Used by the `+ new` overlays.
+fn draw_panel(buf: &mut Buffer, full: Rect, w: i32, h: i32) -> (i32, i32) {
+    let x0 = full.x as i32 + (full.width as i32 - w).max(0) / 2;
+    let y0 = full.y as i32 + (full.height as i32 - h).max(0) / 2;
+    let panel = Rect {
+        x: x0.max(0) as u16,
+        y: y0.max(0) as u16,
+        width: (w.max(0) as u16).min(full.width),
+        height: (h.max(0) as u16).min(full.height),
+    };
+    fill_black(buf, panel);
+    draw_box(
+        buf,
+        full,
+        x0,
+        y0,
+        w,
+        h,
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    );
+    (x0 + 2, y0 + 1)
+}
+
+/// The `+ new` folder browser overlay: a centered list of the current dir's subdirs
+/// (`..` first), selection highlighted; ⏎ descends, Space uses the current folder.
+fn render_browser(f: &mut Frame, full: Rect, app: &App) {
+    let Some(b) = &app.browser else {
+        return;
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let mag = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    let white = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let w = (full.width as i32 - 8).clamp(24, 60);
+    let rows = (full.height as i32 - 10).clamp(3, 14);
+    let h = rows + 4;
+    let inner_w = (w - 4) as usize;
+    let buf = f.buffer_mut();
+    let (ix, iy) = draw_panel(buf, full, w, h);
+    str_at(
+        buf,
+        full,
+        ix,
+        iy,
+        &clip_str(
+            &format!("pick a folder — {}", b.cwd.to_string_lossy()),
+            inner_w,
+        ),
+        mag,
+    );
+    // Scroll the entry window so the selection stays visible.
+    let n = b.entries.len() as i32;
+    let start = (b.sel as i32 - rows / 2).clamp(0, (n - rows).max(0)) as usize;
+    for (row, i) in (start..b.entries.len()).take(rows as usize).enumerate() {
+        let selected = i == b.sel;
+        let name = &b.entries[i];
+        let slash = if name == ".." { "" } else { "/" };
+        let cursor = if selected { "▸ " } else { "  " };
+        str_at(
+            buf,
+            full,
+            ix,
+            iy + 2 + row as i32,
+            &clip_str(&format!("{cursor}{name}{slash}"), inner_w),
+            if selected { white } else { dim },
+        );
+    }
+    str_at(
+        buf,
+        full,
+        ix,
+        iy + h - 2,
+        &clip_str("↑↓ move · ⏎ open · space: use this folder · esc", inner_w),
+        dim,
+    );
+}
+
+/// The `+ new` runtime picker (after a folder is chosen): rust / python / swift.
+fn render_runtime(f: &mut Frame, full: Rect, app: &App) {
+    let Some((dir, cursor)) = &app.new_runtime else {
+        return;
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let mag = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    let white = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let w = 44_i32;
+    let h = RUNTIMES.len() as i32 + 4;
+    let inner_w = (w - 4) as usize;
+    let buf = f.buffer_mut();
+    let (ix, iy) = draw_panel(buf, full, w, h);
+    str_at(
+        buf,
+        full,
+        ix,
+        iy,
+        &clip_str(
+            &format!(
+                "runtime for {}",
+                dir.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.to_string_lossy().into_owned())
+            ),
+            inner_w,
+        ),
+        mag,
+    );
+    for (i, rt) in RUNTIMES.iter().enumerate() {
+        let selected = i == *cursor;
+        let cur = if selected { "▸ " } else { "  " };
+        str_at(
+            buf,
+            full,
+            ix,
+            iy + 2 + i as i32,
+            &format!("{cur}{}", rt.as_str()),
+            if selected { white } else { dim },
+        );
+    }
+    str_at(buf, full, ix, iy + h - 2, "↑↓ · ⏎ create · esc", dim);
+}
+
+/// The HUB lobby: the small docked FANTASTIC title, then the kernel agents as a
+/// **hierarchical top-down tree** of fixed-size boxes (1-cell border, up to 3
+/// status lines each — the selected one drawn white), fanning out from the root
+/// and joined by connector lines, then a nav hint. Arrows fly the tree; Enter opens
+/// an agent. (Overflow past the viewport is left for a future pan/scroll.)
+fn render_hub(f: &mut Frame, full: Rect, app: &App) {
+    bg::draw_title(f.buffer_mut(), full, bg::docked_geometry(full), 1.0);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let nodes = app.hub.nodes();
+    if nodes.is_empty() {
+        return;
+    }
+    let sel = app.hub.sel.min(nodes.len() - 1);
+
+    // Fixed-size boxes: a 1-cell border wrapping `CONTENT_W`-wide content, 3 status
+    // lines tall. `col` (leaf units) → box columns; `depth` → box rows.
+    const CONTENT_W: usize = 12;
+    let box_w = CONTENT_W as i32 + 4; // 1 border + 1 pad on each side
+    let box_h = 5_i32; // border + 3 content lines + border
+    let col_step = box_w + 2;
+    let row_step = box_h + 1; // a box + one connector row per depth
+    let min_col = nodes.iter().map(|n| n.col).fold(f32::MAX, f32::min);
+    let max_col = nodes.iter().map(|n| n.col).fold(f32::MIN, f32::max);
+    let total_w = ((max_col - min_col) * col_step as f32) as i32 + box_w;
+    let pad = ((full.width as i32 - 8 - total_w).max(0)) / 2;
+    let base_x = full.x as i32 + 4 + pad;
+    let top = full.y as i32 + 6; // below the docked title (3 rows) + a heading row
+    let bx = |n: &hub::HubNode| base_x + ((n.col - min_col) * col_step as f32) as i32;
+    let by = |n: &hub::HubNode| top + (n.depth as i32) * row_step;
+    let ccol = |n: &hub::HubNode| bx(n) + box_w / 2;
+
+    let buf = f.buffer_mut();
+    str_at(
+        buf,
+        full,
+        full.x as i32 + 4,
+        full.y as i32 + 4,
+        "the agents — pick one",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    // Boxes with their status lines.
+    for (i, n) in nodes.iter().enumerate() {
+        let selected = i == sel;
+        // White on select; otherwise a dim border + the agent's own tint on line 1.
+        let (border, name_st) = if selected {
+            let white = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            (white, white)
+        } else if n.is_home {
+            (
+                dim,
+                Style::default()
+                    .fg(chat::color_for("ai"))
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (dim, Style::default().fg(chat::color_for(&n.agent)))
+        };
+        let body_st = if selected { border } else { dim };
+        let (x0, y0) = (bx(n), by(n));
+        draw_box(buf, full, x0, y0, box_w, box_h, border);
+        // 3 status lines: name · type · children/leaf.
+        let name = clip_str(&hub_label(n), CONTENT_W);
+        let ty = clip_str(n.ty.as_deref().unwrap_or("agent"), CONTENT_W);
+        let sub = if n.children.is_empty() {
+            "leaf".to_string()
+        } else {
+            format!("{} agents", n.children.len())
+        };
+        let cxi = x0 + 2;
+        str_at(buf, full, cxi, y0 + 1, &name, name_st);
+        str_at(buf, full, cxi, y0 + 2, &ty, body_st);
+        str_at(buf, full, cxi, y0 + 3, &clip_str(&sub, CONTENT_W), body_st);
+    }
+
+    // Connectors (drawn over the box borders): a `┬` stem out of each parent's
+    // bottom, a merged horizontal bus, and a `┴` into each child's top.
+    for p in nodes.iter().filter(|n| !n.children.is_empty()) {
+        let pcx = ccol(p);
+        let bus_y = by(p) + box_h; // the row just below the parent box
+        let child_cx: Vec<i32> = p.children.iter().map(|&i| ccol(&nodes[i])).collect();
+        let lo = *child_cx.iter().min().unwrap().min(&pcx);
+        let hi = *child_cx.iter().max().unwrap().max(&pcx);
+        cell_at(buf, full, pcx, bus_y - 1, '┬', dim); // parent bottom border
+        for x in lo..=hi {
+            let up = x == pcx;
+            let down = child_cx.contains(&x);
+            let ch = box_char(up, down, x > lo, x < hi);
+            if ch != ' ' {
+                cell_at(buf, full, x, bus_y, ch, dim);
+            }
+        }
+        for &cxx in &child_cx {
+            cell_at(buf, full, cxx, bus_y + 1, '┴', dim); // child top border
+        }
+    }
+
+    str_at(
+        buf,
+        full,
+        full.x as i32 + 4,
+        full.y as i32 + full.height as i32 - 2,
+        "↑ parent · ↓ child · ←→ siblings · ⏎ open · Ctrl+Q quit",
+        dim,
+    );
+}
+
+/// Pick a box-drawing glyph from the four connection directions.
+fn box_char(up: bool, down: bool, left: bool, right: bool) -> char {
+    match (up, down, left, right) {
+        (true, true, true, true) => '┼',
+        (true, true, true, false) => '┤',
+        (true, true, false, true) => '├',
+        (true, true, false, false) => '│',
+        (true, false, true, true) => '┴',
+        (true, false, true, false) => '┘',
+        (true, false, false, true) => '└',
+        (true, false, false, false) => '│',
+        (false, true, true, true) => '┬',
+        (false, true, true, false) => '┐',
+        (false, true, false, true) => '┌',
+        (false, true, false, false) => '│',
+        (false, false, true, _) | (false, false, false, true) => '─',
+        _ => ' ',
+    }
+}
+
+/// The unified chat over the moving sky. The whole chat block is inset 2 cells from
+/// every screen edge (so the sky shows in that border margin); inside, a slim
+/// header, the transcript, a 1-row gap, then the input box at the bottom. Transcript
+/// and input are opaque. The header is deliberately minimal: a neon-magenta bar,
+/// `FANTASTIC` on the left, and a right-aligned `esc to switch` hint. Esc drops back
+/// to the hub, which is the agent switcher, so no tab bar or ws or agent-count
+/// clutter is drawn here.
+fn render_chat_header(f: &mut Frame, area: Rect) {
     fill_black(f.buffer_mut(), area);
     let bar = Color::Indexed(165); // neon magenta — matches ansi_banner's 38;5;165
     let buf = f.buffer_mut();
-    // The vertical bar, full height of the header (3 rows).
+    // The vertical bar, full height of the header.
     for dy in 0..area.height {
         if let Some(c) = buf.cell_mut((area.x, area.y + dy)) {
             c.set_char('█');
             c.set_style(Style::default().fg(bar));
         }
     }
-    // `FANTASTIC` on the middle row, bright magenta + bold, two cells past the bar.
-    let title = "FANTASTIC";
-    let tx = area.x + 3;
-    let ty = area.y + 1;
+    let ty = area.y + area.height / 2; // the middle row
+                                       // `FANTASTIC` on the left, bright magenta + bold, two cells past the bar.
     let title_st = Style::default()
         .fg(Color::LightMagenta)
         .add_modifier(Modifier::BOLD);
-    for (i, ch) in title.chars().enumerate() {
-        let x = tx + i as u16;
+    for (i, ch) in "FANTASTIC".chars().enumerate() {
+        let x = area.x + 3 + i as u16;
         if x < area.x + area.width {
             if let Some(c) = buf.cell_mut((x, ty)) {
                 c.set_char(ch);
@@ -1491,14 +2201,19 @@ fn render_chat_header(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-    // The live tab bar on the bottom row, past the bar.
-    let bar_row = Rect {
-        x: area.x + 3,
-        y: area.y + area.height.saturating_sub(1),
-        width: area.width.saturating_sub(3),
-        height: 1,
-    };
-    f.render_widget(Paragraph::new(status_line(app)), bar_row);
+    // `/help · esc → switch` right-aligned on the same row.
+    let hint = "/help · esc → switch";
+    let hint_st = Style::default().fg(Color::DarkGray);
+    let hx = area.x + area.width.saturating_sub(hint.chars().count() as u16 + 1);
+    for (i, ch) in hint.chars().enumerate() {
+        let x = hx + i as u16;
+        if x < area.x + area.width {
+            if let Some(c) = buf.cell_mut((x, ty)) {
+                c.set_char(ch);
+                c.set_style(hint_st);
+            }
+        }
+    }
 }
 
 fn render_chat(f: &mut Frame, area: Rect, app: &App) {
@@ -1511,7 +2226,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     };
     // header (3) · transcript (min) · bottom region (dynamic). The bottom is the
     // chat input normally; it grows into a setup-flow panel when a `/setup` or
-    // `/model` flow is active (a select list needs room for its options).
+    // `/model` flow is active (a select list needs agent for its options).
     let bottom_h: u16 = match &app.control {
         input::Control::Select { options, .. } => {
             (options.len() as u16 + 4).clamp(5, inset.height.saturating_sub(6).max(5))
@@ -1530,16 +2245,15 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     let chat_area = parts[1];
     let bottom = parts[2];
 
-    render_chat_header(f, header_area, app);
+    render_chat_header(f, header_area);
 
-    // The transcript is OPAQUE: black it out first so the starfield only shows in
-    // the 2-cell border margin and (in Chat mode) the 1-row gap.
+    // The transcript is OPAQUE: black it out first.
     fill_black(f.buffer_mut(), chat_area);
 
-    // When a `@sh` command is live AND you're in the `@sh` room, the bottom of the
+    // When a `@sh` command is live AND `@sh` is the active agent, the bottom of the
     // chat body breathes the PTY screen. The viewport height = `used_rows` of the
     // PTY (clamped to the body) + 1 for its `│ sh` header; the transcript scrolls
-    // in what remains. In every OTHER room the PTY is hidden (it never bleeds).
+    // in what remains. For every OTHER agent the PTY is hidden (it never bleeds).
     let transcript_area = if term_visible(app) {
         if let Some(ts) = &app.term {
             if let Ok(p) = ts.parser.lock() {
@@ -1567,7 +2281,7 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     let lines = transcript_lines(app);
     // Show the tail that fits the pane height, BOTTOM-anchored like a chat app:
     // the newest message sits just above the input, and a short conversation
-    // leaves the empty space (starfield) at the TOP rather than a gap in the
+    // leaves the empty space at the TOP rather than a gap in the
     // middle. Count VISUAL rows (a long line wraps to several), accumulating from
     // the bottom up, so the newest entries are never clipped off the bottom edge.
     // `app.scroll` pages BACK through history (PageUp / mouse wheel): it skips
@@ -1663,15 +2377,15 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The `/help` overlay: the whole interactive surface on one card — routing,
-/// the palette, room turns, editing, scrollback, commands, exits.
+/// the palette, agent turns, editing, scrollback, commands, exits.
 fn render_help(f: &mut Frame, within: Rect) {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default()
         .fg(Color::LightMagenta)
         .add_modifier(Modifier::BOLD);
     let body = Style::default().fg(Color::White);
-    let rows: [(&str, &str); 11] = [
-        ("@", "palette: ↑↓ pick · ⏎ enter room · ⇥ complete · esc"),
+    let rows: [(&str, &str); 12] = [
+        ("@", "palette: ↑↓ pick · ⏎ open · ⇥ complete · esc"),
         (
             "@ai …",
             "talk to the brain (streams live · Ctrl+C interrupts)",
@@ -1682,10 +2396,14 @@ fn render_help(f: &mut Frame, within: Rect) {
         ),
         ("@ws …", "workspace kernel: up · down · <verb> [k=v…]"),
         ("@<id> [verb]", "drive any agent; bare @<id> reflects it"),
-        ("⇧⇥ / Esc", "next room / home to @ai"),
+        ("⇧⇥ / Esc", "next agent · Esc minimizes to the lobby"),
         ("↑ ↓", "recall sent lines"),
-        ("PgUp PgDn", "scroll history (wheel too · End snaps down)"),
+        ("PgUp PgDn", "scroll history (End snaps down)"),
         ("←→ Home End", "move the caret in the input"),
+        (
+            "copy / paste",
+            "select + copy in your terminal · Cmd/Ctrl+V pastes",
+        ),
         ("/commands", "/help · /intro · /setup · /model"),
         ("exit", "Ctrl+Q · Ctrl+C twice · hold q"),
     ];
@@ -1719,9 +2437,9 @@ fn render_help(f: &mut Frame, within: Rect) {
 }
 
 /// The `@`-palette: a small panel anchored just above the input while the
-/// `@sender` is being edited. **`ai` pinned first**, then open rooms (unread
-/// `•`), then known-but-unopened agents (dim — picking one opens its room and
-/// a bare submit reflects it). ↑↓ move · ⏎ enter the room · ⇥ complete · esc.
+/// `@sender` is being edited. **`ai` pinned first**, then open agents (unread
+/// `•`), then known-but-unopened agents (dim — picking one opens its chat and
+/// a bare submit reflects it). ↑↓ move · ⏎ open · ⇥ complete · esc.
 fn render_palette(f: &mut Frame, transcript_area: Rect, app: &App) {
     let items = chat::palette_items(&app.tabs, &app.known_agents, &app.composer.sender);
     let mag = Color::Indexed(165);
@@ -1730,7 +2448,7 @@ fn render_palette(f: &mut Frame, transcript_area: Rect, app: &App) {
     let rows = items.len().clamp(1, 8) as u16;
     let h = (rows + 2).min(transcript_area.height); // title + rows + hint
     if h < 3 {
-        return; // no room — the inline sender edit still works
+        return; // no space — the inline sender edit still works
     }
     let area = Rect {
         x: transcript_area.x,
@@ -1740,7 +2458,7 @@ fn render_palette(f: &mut Frame, transcript_area: Rect, app: &App) {
     };
     fill_black(f.buffer_mut(), area);
     let mut lines = vec![Line::from(Span::styled(
-        "@ rooms & agents",
+        "@ agents",
         Style::default()
             .fg(Color::LightMagenta)
             .add_modifier(Modifier::BOLD),
@@ -1770,13 +2488,13 @@ fn render_palette(f: &mut Frame, transcript_area: Rect, app: &App) {
                 spans.push(Span::styled(" •", Style::default().fg(Color::Yellow)));
             }
             if !it.open {
-                spans.push(Span::styled("  opens room", dim));
+                spans.push(Span::styled("  opens it", dim));
             }
             lines.push(Line::from(spans));
         }
     }
     lines.push(Line::from(Span::styled(
-        "↑↓ · ⏎ enter room · ⇥ complete · esc",
+        "↑↓ · ⏎ open · ⇥ complete · esc",
         dim,
     )));
     f.render_widget(Paragraph::new(lines), area);
@@ -2033,10 +2751,10 @@ mod e2e {
     /// is synchronous (the e2e tests need no async surface).
     fn test_app() -> App {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let (kernel, loaded) = rt
+        let (kernel, _loaded) = rt
             .block_on(fantastic_host::compose_manager_in_memory())
             .expect("compose host kernel");
-        let agent_count = loaded.len();
+        let active = kernels::ActiveKernel::InProc(Arc::clone(&kernel));
 
         // Dummy channels: hold the receivers so the senders stay live (a dropped
         // receiver would make `send` error, but the e2e paths never rely on it).
@@ -2047,7 +2765,7 @@ mod e2e {
 
         App {
             kernel,
-            agent_count,
+            active,
             tabs: Tabs::new(&BASE_TABS),
             composer: Composer::new("ai"),
             control: input::Control::Chat,
@@ -2074,9 +2792,20 @@ mod e2e {
             movie: movie::Movie::storyboard(),
             intro_playing: false,
             intro_since: None,
-            // The chat e2e tests drive the chat path → start past the attract
-            // screen. The attract/first-key behavior is tested separately.
-            started: true,
+            // The chat e2e tests drive the chat path → start in a maximized Chat.
+            // The attract/minimize/hub behavior is tested separately.
+            phase: Phase::Chat,
+            minimize_since: None,
+            hub: hub::Hub::from_reflect(&json!({})),
+            hub_dirty: false,
+            kernels_view: kernels::KernelsView::default(),
+            registry: registry::Registry::default(),
+            kernels_dirty: false,
+            browser: None,
+            new_runtime: None,
+            kernels_busy: false,
+            kernels_msg: None,
+            kernel_task_tx: mpsc::unbounded_channel::<KernelTaskResult>().0,
             last_activity: Instant::now(),
             boot: Instant::now(),
             attract_since: Instant::now(),
@@ -2190,14 +2919,14 @@ mod e2e {
     }
 
     #[test]
-    fn shift_tab_turns_between_rooms() {
+    fn shift_tab_turns_between_agents() {
         let mut app = test_app();
         assert_eq!(app.tabs.active_id(), "ai");
         handle_input(&mut app, key(KeyCode::BackTab));
         assert_eq!(
             app.tabs.active_id(),
             "sh",
-            "Shift-Tab turns to the next room"
+            "Shift-Tab turns to the next agent"
         );
         assert_eq!(app.composer.sender, "sh", "and the composer follows");
     }
@@ -2244,42 +2973,44 @@ mod e2e {
     }
 
     #[test]
-    fn first_key_on_attract_enters_chat_without_leaking() {
-        // A fresh cabinet boots on the attract screen (`started:false`). The
-        // very first key "presses to start" → enters chat and is consumed: it
-        // must NOT leak into the input line nor be processed as a chat key.
+    fn first_key_on_attract_starts_minimize_then_hub_without_leaking() {
+        // A fresh cabinet boots on the attract screen. The very first key starts
+        // the minimize animation (consumed — must NOT leak into the input line);
+        // a key during the minimize skips straight to the hub lobby.
         let mut app = test_app();
-        app.started = false;
+        app.phase = Phase::Attract;
         assert!(app.composer.message.is_empty());
         handle_input(&mut app, key(KeyCode::Char('x')));
-        assert!(app.started, "the first key starts the game / enters chat");
-        assert!(!app.intro_playing, "and is not playing the intro");
+        assert_eq!(
+            app.phase,
+            Phase::Minimizing,
+            "the first key starts the minimize animation"
+        );
+        assert!(!app.intro_playing);
         assert!(
             app.composer.message.is_empty(),
-            "the first key is consumed, not typed into the input line"
+            "the first key is consumed, not typed"
         );
-        // The NEXT key now edits the chat input normally.
         handle_input(&mut app, key(KeyCode::Char('y')));
-        assert_eq!(
-            app.composer.message, "y",
-            "subsequent keys edit the chat input"
+        assert_eq!(app.phase, Phase::Hub, "a key during minimize opens the hub");
+        assert!(
+            app.composer.message.is_empty(),
+            "hub keys never leak into the input"
         );
     }
 
     #[test]
     fn attract_render_then_chat_renders_over_bg() {
-        // Attract screen: stars + big title + the blinking prompt.
+        // Attract screen: grid + big title + the blinking prompt.
         let mut app = test_app();
-        app.started = false;
+        app.phase = Phase::Attract;
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).expect("test terminal");
         term.draw(|f| ui(f, &app)).expect("draw attract");
-        // The big FANTASTIC bg + the blink prompt are present (blink phase is
-        // clock-driven; force a known-on phase is hard, so just assert the bg).
         let _ = buffer_text(term.backend().buffer());
 
-        // Started: the transcript renders opaquely over the same bg.
-        app.started = true;
+        // A maximized Chat: the transcript renders opaquely over the same bg.
+        app.phase = Phase::Chat;
         app.tabs.deliver("ai").push(
             "you",
             "ai",

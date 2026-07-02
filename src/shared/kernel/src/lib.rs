@@ -13,6 +13,7 @@ use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
 use serde_json::{json, Map, Value};
 
 pub mod gateway;
+pub mod registry;
 pub mod secret;
 pub use gateway::{KernelHandle, Runtime, Workspace};
 

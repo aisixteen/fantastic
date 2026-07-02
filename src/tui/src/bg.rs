@@ -1,19 +1,16 @@
-//! Arcade-cabinet **background**: an animated starfield + a crisp block-font
-//! FANTASTIC title.
+//! The arcade **background**: a twinkling, drifting starfield (the "moving sky",
+//! [`render_sky`]) + a crisp block-font **FANTASTIC title**.
 //!
-//! The title is a hand block font drawn at NATIVE cell resolution and
-//! **integer-scaled** to the terminal — NO FIGlet downscaling (a 118-col FIGlet
-//! shrunk to fit turned to mush). The scale is recomputed each frame: as large
-//! as the width allows, but capped at ~half the smaller screen dimension. Bright
-//! magenta gradient, bold, revealed top→bottom by `reveal`. The starfield reuses
-//! the movie's deterministic seeded starfield so the bg and the cutscene match.
+//! The sky is a deterministic parallax starfield drawn behind every phase. The
+//! title is a hand block font drawn at NATIVE cell resolution and
+//! **integer-scaled** (no FIGlet mush). Its geometry (scale + position) is factored
+//! out ([`title_geometry`] / [`draw_title`]) so the launch can TWEEN it from
+//! big-centered to small-docked over ~1s.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
-
-use crate::movie;
 
 /// The word, in block-font order.
 const LETTERS: [char; 9] = ['F', 'A', 'N', 'T', 'A', 'S', 'T', 'I', 'C'];
@@ -67,10 +64,50 @@ fn plot(buf: &mut Buffer, area: Rect, x: i32, y: i32, ch: char, style: Style) {
     }
 }
 
-/// The looped, drifting, twinkling starfield — REUSES the movie's seeded
-/// starfield so the bg and the intro cutscene are visually identical.
-pub(crate) fn render_stars(buf: &mut Buffer, area: Rect, clock: f32) {
-    movie::starfield(buf, area, clock);
+/// Deterministic xorshift — the starfield's only "randomness" (no `rand` dep).
+fn lcg(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    x
+}
+
+/// The **moving sky**: a twinkling, slowly-drifting starfield on the black canvas.
+/// Deterministic (seeded xorshift) so it's identical every run; three parallax
+/// layers drift at different speeds, and each star twinkles on a `clock`-driven
+/// sine. Drawn behind every phase (attract · minimize · hub · chat).
+pub(crate) fn render_sky(buf: &mut Buffer, area: Rect, clock: f32) {
+    let w = area.width.max(1) as u32;
+    let h = area.height.max(1) as u32;
+    let n = ((w * h) / 35).clamp(20, 220);
+    for i in 0..n {
+        let s = lcg(i.wrapping_mul(2_654_435_761));
+        let layer = 1 + (s % 3); // parallax speed
+        let by = (s >> 9) % h;
+        let drift = (clock * layer as f32 * 4.0) as u32;
+        let x = (((s >> 3) % w + drift) % w) as i32;
+        let ch = match (s >> 17) % 3 {
+            0 => '.',
+            1 => '·',
+            _ => '*',
+        };
+        let tw = (clock * (2.0 + (s % 5) as f32) + (s % 7) as f32).sin();
+        let col = if tw > 0.5 {
+            Color::White
+        } else if tw > -0.2 {
+            Color::Gray
+        } else {
+            Color::DarkGray
+        };
+        plot(
+            buf,
+            area,
+            x,
+            by as i32,
+            ch,
+            Style::default().fg(col).bg(Color::Black),
+        );
+    }
 }
 
 /// Bright magenta gradient (pink → magenta → violet) across `t ∈ [0,1]` — high
@@ -93,32 +130,77 @@ fn gradient(t: f32) -> (u8, u8, u8) {
     }
 }
 
-/// Draw the crisp block-font FANTASTIC, centered, scaled to the terminal. Width is
-/// integer-scaled to fit; height is packed with **half-block** glyphs (`▀▄█`, two
-/// glyph rows per terminal row) so the title isn't vertically stretched — terminal
-/// cells are ~2:1, so packing two rows per cell ≈ corrects the aspect (~1.5–2×
-/// shorter than full-block). `reveal ∈ [0,1]` wipes it on top→bottom (powers on).
-/// Returns the bottom row (area-relative) the title occupies.
-pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
+/// The title's placement: integer `scale` (cells per glyph pixel) + area-relative
+/// top-left `(ox, oy)`. Factored out so the launch can TWEEN between two of these.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TitleGeo {
+    pub scale: usize,
+    pub ox: i32,
+    pub oy: i32,
+}
+
+/// The big, centered ATTRACT geometry — as large as the width allows (≤92%),
+/// capped at ~30% of the smaller screen dim; centered.
+pub(crate) fn title_geometry(area: Rect) -> TitleGeo {
     let rows = word_rows();
-    let w = rows.first().map(|r| r.len()).unwrap_or(0);
-    let h = rows.len();
+    let (w, h) = (rows.first().map(|r| r.len()).unwrap_or(0), rows.len());
     if w == 0 || area.width < 4 || area.height < 3 {
-        return 0;
+        return TitleGeo {
+            scale: 1,
+            ox: 0,
+            oy: 0,
+        };
     }
-    // Integer scale fits ≤92% width, capped at ~30% of the smaller screen dim.
-    // Half-block packing then halves the rendered HEIGHT (the stretch fix) without
-    // changing the width — same footprint, ~1.5–2× shorter.
     let avail_w = (area.width as usize * 92) / 100;
     let cap = (area.width.min(area.height) as usize) * 3 / 10;
     let scale = (avail_w / w).min((cap / h).max(1)).max(1);
-    let tw = w * scale; // terminal cols
+    let trows = (h * scale).div_ceil(2);
+    TitleGeo {
+        scale,
+        ox: (area.width as i32 - (w * scale) as i32) / 2,
+        oy: ((area.height as i32 - trows as i32) / 2 - 1).max(0),
+    }
+}
+
+/// The small, top-left DOCKED geometry — the minimized "chrome" title
+/// (scale 1 ≈ 45×3 cells), padded a couple cells from the top-left.
+pub(crate) fn docked_geometry(_area: Rect) -> TitleGeo {
+    TitleGeo {
+        scale: 1,
+        ox: 3,
+        oy: 1,
+    }
+}
+
+/// Interpolate two geometries at `t ∈ [0,1]` (integer scale rounds; position
+/// glides). Eased by the caller.
+pub(crate) fn tween_geo(from: TitleGeo, to: TitleGeo, t: f32) -> TitleGeo {
+    let t = t.clamp(0.0, 1.0);
+    let li = |a: i32, b: i32| a + ((b - a) as f32 * t).round() as i32;
+    let ls = |a: usize, b: usize| (a as f32 + (b as f32 - a as f32) * t).round().max(1.0) as usize;
+    TitleGeo {
+        scale: ls(from.scale, to.scale),
+        ox: li(from.ox, to.ox),
+        oy: li(from.oy, to.oy),
+    }
+}
+
+/// Draw the crisp block-font FANTASTIC at an explicit `geo`. Width is
+/// integer-scaled; height is packed with **half-block** glyphs (`▀▄█`, two glyph
+/// rows per terminal row) so the title isn't vertically stretched. `reveal ∈
+/// [0,1]` wipes it on top→bottom (powers on). Returns the bottom row occupied.
+pub(crate) fn draw_title(buf: &mut Buffer, area: Rect, geo: TitleGeo, reveal: f32) -> i32 {
+    let rows = word_rows();
+    let (w, h) = (rows.first().map(|r| r.len()).unwrap_or(0), rows.len());
+    if w == 0 || area.width < 4 || area.height < 3 {
+        return 0;
+    }
+    let scale = geo.scale.max(1);
+    let (ox, oy) = (geo.ox, geo.oy);
+    let tw = w * scale;
     let sh = h * scale; // scaled glyph sub-rows (2 per terminal row)
-    let trows = sh.div_ceil(2); // terminal rows after half-block packing
-    let ox = (area.width as i32 - tw as i32) / 2;
-    let oy = ((area.height as i32 - trows as i32) / 2 - 1).max(0);
+    let trows = sh.div_ceil(2);
     let revealed = (reveal.clamp(0.0, 1.0) * trows as f32).ceil() as usize;
-    // Is scaled sub-row `sub`, terminal col `tx`, a lit block cell?
     let lit = |sub: usize, tx: usize| -> bool {
         let by = sub / scale;
         by < h && rows[by][tx / scale]
@@ -141,6 +223,11 @@ pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
         }
     }
     oy + trows as i32
+}
+
+/// The big, centered ATTRACT title with a top→bottom `reveal` wipe.
+pub(crate) fn render_title(buf: &mut Buffer, area: Rect, reveal: f32) -> i32 {
+    draw_title(buf, area, title_geometry(area), reveal)
 }
 
 #[cfg(test)]
