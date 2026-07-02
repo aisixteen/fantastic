@@ -3,19 +3,15 @@
 //! *host*: it composes an in-proc "brain" kernel and drives everything through
 //! the one primitive — `kernel.send(target, payload)`.
 //!
-//! Modes — Shift+Tab cycles, or click a header tab: AI / Terminal /
-//! Kernel-manager / Intro.
-//! - **AI**: chat a brain agent that drives the kernel via `send`.
-//! - **Terminal**: a real PTY (`$SHELL`).
-//! - **Kernel manager**: a command line whose sugar verbs drive the host
-//!   (`tree`, `reflect [id]`, `create <handler> [k=v…]`, `update <id> k=v…`,
-//!   `delete <id>`, `send <id> <verb> [k=v…]`).
-//! - **Intro**: a scripted retro "movie" of how Fantastic works (see `movie.rs`).
+//! The TUI is ONE chat with a room per character (see `fantastic-tui`):
+//! `@ai` streams the brain, `@sh` breathes a real PTY, `@ws` drives the
+//! out-of-process workspace kernel, `@<agent> <verb> [k=v…]` opens any agent's
+//! room; Shift-Tab turns between rooms; `/intro` plays the scripted movie.
 //!
 //! Headless: `fantastic --smoke` (or non-tty stdout) composes the host, reflects
 //! the root, and exits — for CI/build verification without a terminal. One-shot
 //! `fantastic ai "<prompt>"` runs a single AI turn; `fantastic demo` plays the
-//! A→Z flow.
+//! A→Z flow. `fantastic --help` lists the full surface.
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::sync::Arc;
@@ -52,6 +48,18 @@ async fn main() -> Result<()> {
         Some("up") => return cmd_up(&args[1..]).await,
         Some("k") => return cmd_k(&args[1..]).await,
         Some("down") => return cmd_down().await,
+        Some("--help") | Some("-h") | Some("help") => {
+            print!("{}", usage());
+            return Ok(());
+        }
+        // Unknown subcommand: refuse loudly (exit 2) instead of silently
+        // launching the TUI with the arg ignored. Bare `fantastic` (no args)
+        // still opens the TUI / headless reflect below.
+        Some(other) if !KNOWN_SUBCOMMANDS.contains(&other) => {
+            eprintln!("fantastic: unknown subcommand `{other}`\n");
+            eprint!("{}", usage());
+            std::process::exit(2);
+        }
         _ => {}
     }
 
@@ -81,7 +89,7 @@ async fn main() -> Result<()> {
             let prompt = args[1..].join(" ");
             if prompt.trim().is_empty() {
                 eprintln!("usage: fantastic ai \"<prompt>\"");
-                return Ok(());
+                std::process::exit(2);
             }
             eprint!("{}", ansi_banner(loaded.len()));
             let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -107,6 +115,35 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     fantastic_tui::run(kernel, loaded.len()).await
+}
+
+/// Every recognized top-level subcommand / flag. Anything else is refused with
+/// the usage text (exit 2) instead of silently launching the TUI.
+const KNOWN_SUBCOMMANDS: [&str; 8] = ["config", "up", "k", "down", "demo", "--smoke", "ai", "ask"];
+
+/// The `--help` / unknown-subcommand usage text — the headless surface in one
+/// screen (the interactive surface is documented in-app via `/help`).
+fn usage() -> String {
+    "\
+fantastic — AI coder + kernel manager for emerging software
+
+usage: fantastic [subcommand]
+
+  (no args)             open the TUI (a chat with a room per agent); non-tty
+                        stdout prints the reflected agent tree instead
+  ai|ask \"<prompt>\"     one-shot AI turn (requires an explicit connector:
+                        `config set ai.backend …` + `config set ai.model …`)
+  config show|set|clear persisted settings (keys: ai.backend, ai.model,
+                        ai.num_ctx; ai.key goes to the OS keychain)
+  up [--container] [--image X] [--runtime rust|python|swift]
+                        attach to (or spawn) the workspace kernel in cwd
+  k <id> <verb> [k=v …] send a verb to a workspace agent (over the gateway)
+  down                  shut the workspace kernel down
+  demo                  play the headless A→Z composition demo
+  --smoke               compose the host, print the reflect tree, exit
+  --help | -h | help    this text
+"
+    .to_string()
 }
 
 /// Parse `--runtime <name>` out of the subcommand args (default Rust). Only the
@@ -174,7 +211,7 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 async fn cmd_k(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         eprintln!("usage: fantastic k <id> <verb> [k=v ...]");
-        return Ok(());
+        std::process::exit(2);
     }
     let id = &args[0];
     let verb = &args[1];

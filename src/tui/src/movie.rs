@@ -227,7 +227,7 @@ fn chrome(buf: &mut Buffer, area: Rect, idx: usize, total: usize, clock: f32) {
             buf,
             area,
             area.height as i32 - 1,
-            "▶ SHIFT-TAB ▶",
+            "▶ PRESS ANY KEY ▶",
             bold(Color::Yellow),
         );
     }
@@ -484,7 +484,7 @@ impl Scene for Credits {
         6.0
     }
     fn render(&self, buf: &mut Buffer, area: Rect, _t: f32, clock: f32) {
-        const MSG: &str = "FANTASTIC  ·  everything is an agent  ·  one verb: send  ·  reflect to discover  ·  compose a living system  ·  scaffolding for emerging software  ·  press SHIFT-TAB  ·   ";
+        const MSG: &str = "FANTASTIC  ·  everything is an agent  ·  one verb: send  ·  reflect to discover  ·  compose a living system  ·  scaffolding for emerging software  ·  press any key  ·   ";
         let chars: Vec<char> = MSG.chars().collect();
         let w = area.width as i32;
         let y = area.height as i32 / 2;

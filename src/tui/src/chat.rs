@@ -44,7 +44,10 @@ pub enum State {
     Streaming,
     Done,
     Interrupted,
+    /// A failed line (rendered red-tinted).
     Error,
+    /// An `@ai` line typed mid-turn, waiting its turn (rendered dim + `⏳`).
+    Queued,
 }
 
 #[derive(Default)]
@@ -133,10 +136,11 @@ impl Transcript {
 
     /// Close a live streaming message for `source` at turn's end: if it never
     /// received any streamed text (a backend that doesn't route tokens to us, e.g.
-    /// ollama), fill it with `fallback` (the final response); then seal it Done. A
-    /// no-op when there's no live stream (a streamed `done` already sealed it) — so
-    /// streaming backends don't double-render.
-    pub fn close_stream(&mut self, source: &str, fallback: &str) {
+    /// ollama), fill it with `fallback` (the final response); then seal it with
+    /// `state` (`Done` for a normal end, `Error` for a failed turn — rendered red).
+    /// A no-op when there's no live stream (a streamed `done` already sealed it) —
+    /// so streaming backends don't double-render.
+    pub fn close_stream_with(&mut self, source: &str, fallback: &str, state: State) {
         if let Some(&seq) = self.live.get(source) {
             let empty = self
                 .msgs
@@ -147,7 +151,7 @@ impl Transcript {
             if empty {
                 self.append_text(seq, fallback);
             }
-            self.set_state(seq, State::Done);
+            self.set_state(seq, state);
             self.live.remove(source);
         }
     }
@@ -365,30 +369,83 @@ pub struct Composer {
     pub sender: String,
     /// The message body being typed.
     pub message: String,
+    /// The caret as a CHAR index into `message` (0..=chars). Editing happens at
+    /// the caret, not just the tail — Left/Right/Home/End/Delete work.
+    pub cursor: usize,
     /// True while the cursor is in the `@sender` field (vs the message body).
     pub editing_sender: bool,
+    /// The sender as it was when the current sender-edit began — Esc restores it.
+    sender_prev: String,
     /// Set when a send was rejected because the sender is unknown (for a flash).
     pub nogo: bool,
+    /// Sent lines, oldest→newest (cap [`HIST_CAP`]); Up/Down recall them.
+    history: VecDeque<String>,
+    /// The in-flight recall position into `history` (`None` = not recalling).
+    hist_pos: Option<usize>,
+    /// The message that was being typed when recall started (restored by
+    /// stepping Down past the newest entry).
+    hist_stash: String,
 }
+
+/// Cap on recalled sent lines.
+const HIST_CAP: usize = 100;
 
 impl Composer {
     pub fn new(sender: &str) -> Self {
         Composer {
             sender: sender.to_string(),
             message: String::new(),
+            cursor: 0,
             editing_sender: false,
+            sender_prev: sender.to_string(),
             nogo: false,
+            history: VecDeque::new(),
+            hist_pos: None,
+            hist_stash: String::new(),
         }
+    }
+
+    /// Cancel an in-flight sender edit: restore the sender as it was when the
+    /// edit began. No-op when not editing.
+    pub fn cancel_sender_edit(&mut self) {
+        if self.editing_sender {
+            self.sender = self.sender_prev.clone();
+            self.editing_sender = false;
+            self.nogo = false;
+        }
+    }
+
+    /// Byte offset of char index `i` in `message`.
+    fn byte_at(&self, i: usize) -> usize {
+        self.message
+            .char_indices()
+            .nth(i)
+            .map(|(b, _)| b)
+            .unwrap_or(self.message.len())
+    }
+
+    fn char_count(&self) -> usize {
+        self.message.chars().count()
+    }
+
+    /// Insert a char into the message AT the caret (no `@`/sender semantics —
+    /// used by paste and the newline path).
+    pub fn insert_char(&mut self, c: char) {
+        let b = self.byte_at(self.cursor);
+        self.message.insert(b, c);
+        self.cursor += 1;
     }
 
     /// Type a printable char into the focused field. `@` at the start of an empty
     /// message jumps to (re)editing the sender; a space commits the sender back to
-    /// the message body.
+    /// the message body. Message chars insert at the caret.
     pub fn type_char(&mut self, c: char) {
         self.nogo = false;
         if !self.editing_sender && self.message.is_empty() && c == '@' {
-            // Retarget from scratch: jump into the sender field and clear it.
+            // Retarget from scratch: jump into the sender field and clear it
+            // (Esc restores what it was).
             self.editing_sender = true;
+            self.sender_prev = self.sender.clone();
             self.sender.clear();
             return;
         }
@@ -399,20 +456,101 @@ impl Composer {
                 self.sender.push(c);
             }
         } else {
-            self.message.push(c);
+            self.insert_char(c);
         }
     }
 
-    /// Backspace: delete from the message; once it's empty, step into and trim the
-    /// `@sender` field — so you can edit the addressee, not just the text.
+    /// Backspace: delete the char BEFORE the caret; at the start of an empty
+    /// message, step into and trim the `@sender` field — so you can edit the
+    /// addressee, not just the text.
     pub fn backspace(&mut self) {
         self.nogo = false;
         if self.editing_sender {
             self.sender.pop();
-        } else if self.message.pop().is_none() {
+        } else if self.cursor > 0 {
+            let b = self.byte_at(self.cursor - 1);
+            self.message.remove(b);
+            self.cursor -= 1;
+        } else if self.message.is_empty() {
             self.editing_sender = true;
+            self.sender_prev = self.sender.clone();
             self.sender.pop();
         }
+    }
+
+    /// Delete the char AT the caret (the `Delete` key).
+    pub fn delete(&mut self) {
+        if !self.editing_sender && self.cursor < self.char_count() {
+            let b = self.byte_at(self.cursor);
+            self.message.remove(b);
+        }
+    }
+
+    /// Move the caret one char left/right (message field only).
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.char_count());
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.char_count();
+    }
+
+    /// Record a sent line for Up/Down recall (consecutive duplicates collapse).
+    pub fn record_history(&mut self, line: &str) {
+        if line.is_empty() || self.history.back().is_some_and(|l| l == line) {
+            self.hist_pos = None;
+            return;
+        }
+        self.history.push_back(line.to_string());
+        while self.history.len() > HIST_CAP {
+            self.history.pop_front();
+        }
+        self.hist_pos = None;
+    }
+
+    /// Up: step to the previous sent line (stashing the in-progress message on
+    /// the first step). Returns true if the message changed.
+    pub fn recall_up(&mut self) -> bool {
+        if self.history.is_empty() || self.editing_sender {
+            return false;
+        }
+        let next = match self.hist_pos {
+            None => {
+                self.hist_stash = std::mem::take(&mut self.message);
+                self.history.len() - 1
+            }
+            Some(0) => return false,
+            Some(p) => p - 1,
+        };
+        self.hist_pos = Some(next);
+        self.message = self.history[next].clone();
+        self.cursor = self.char_count();
+        true
+    }
+
+    /// Down: step toward the newest sent line; past it, restore the stashed
+    /// in-progress message. Returns true if the message changed.
+    pub fn recall_down(&mut self) -> bool {
+        let Some(p) = self.hist_pos else {
+            return false;
+        };
+        if p + 1 < self.history.len() {
+            self.hist_pos = Some(p + 1);
+            self.message = self.history[p + 1].clone();
+        } else {
+            self.hist_pos = None;
+            self.message = std::mem::take(&mut self.hist_stash);
+        }
+        self.cursor = self.char_count();
+        true
     }
 
     /// Tab-complete the `@sender` against `known` (only while editing it).
@@ -451,8 +589,47 @@ impl Composer {
 
     /// Take the message (clearing it). The sender stays (sticky addressee).
     pub fn take_message(&mut self) -> String {
+        self.cursor = 0;
+        self.hist_pos = None;
         std::mem::take(&mut self.message)
     }
+}
+
+/// One row of the `@`-palette: an addressable character. AI is pinned first —
+/// the brain is home; everything else orbits it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PaletteItem {
+    pub id: String,
+    /// True when this character's room is already open (a tab exists).
+    pub open: bool,
+    /// True when the open room holds unread messages.
+    pub unread: bool,
+}
+
+/// Build the `@`-palette for the current sender `fragment`: **`ai` pinned
+/// first**, then the OPEN rooms in tab order, then known-but-unopened agents —
+/// all prefix-filtered by the fragment. Navigation and discovery are one list:
+/// picking an open room enters it; picking an unopened agent opens its room
+/// (a bare `@id` submit reflects it — the introduction).
+pub fn palette_items(tabs: &Tabs, known: &[String], fragment: &str) -> Vec<PaletteItem> {
+    let mut out: Vec<PaletteItem> = Vec::new();
+    let add = |id: &str, open: bool, unread: bool, out: &mut Vec<PaletteItem>| {
+        if id.starts_with(fragment) && !out.iter().any(|i| i.id == id) {
+            out.push(PaletteItem {
+                id: id.to_string(),
+                open,
+                unread,
+            });
+        }
+    };
+    add("ai", true, tabs.is_unread("ai"), &mut out);
+    for id in tabs.ids() {
+        add(id, true, tabs.is_unread(id), &mut out);
+    }
+    for id in known {
+        add(id, false, false, &mut out);
+    }
+    out
 }
 
 /// A stable color for an agent's rail. `"you"` is forced White; everything else
@@ -1042,5 +1219,124 @@ mod tests {
         assert_eq!(c.take_message(), "list_agents");
         assert_eq!(c.message, "");
         assert_eq!(c.sender, "kernel"); // sticky addressee
+    }
+
+    #[test]
+    fn composer_cursor_insert_move_and_delete() {
+        let mut c = Composer::new("ai");
+        for ch in "helo".chars() {
+            c.type_char(ch);
+        }
+        // Fix the typo mid-word: ← ← insert 'l' at the caret.
+        c.move_left();
+        c.move_left();
+        c.type_char('l');
+        assert_eq!(c.message, "hello");
+        assert_eq!(c.cursor, 3);
+        // Home/End clamp to the ends; Delete removes AT the caret.
+        c.move_home();
+        c.delete();
+        assert_eq!(c.message, "ello");
+        c.move_end();
+        assert_eq!(c.cursor, 4);
+        c.delete(); // at the end — no-op
+        assert_eq!(c.message, "ello");
+        // Backspace mid-message removes BEFORE the caret, not the tail.
+        c.move_home();
+        c.move_right();
+        c.backspace();
+        assert_eq!(c.message, "llo");
+        assert_eq!(c.cursor, 0);
+        // Backspace at cursor 0 with text present does NOT eat the sender.
+        c.backspace();
+        assert_eq!(c.message, "llo");
+        assert!(!c.editing_sender);
+    }
+
+    #[test]
+    fn composer_cursor_is_char_indexed_not_bytes() {
+        let mut c = Composer::new("ai");
+        for ch in "héllo".chars() {
+            c.type_char(ch);
+        }
+        c.move_left();
+        c.move_left();
+        c.move_left();
+        c.move_left(); // caret after 'h', before 'é'
+        c.delete();
+        assert_eq!(c.message, "hllo");
+    }
+
+    #[test]
+    fn composer_history_recall_cycles_and_restores_stash() {
+        let mut c = Composer::new("ai");
+        c.record_history("first");
+        c.record_history("second");
+        c.record_history("second"); // consecutive dup collapses
+        for ch in "draft".chars() {
+            c.type_char(ch);
+        }
+        assert!(c.recall_up());
+        assert_eq!(c.message, "second");
+        assert!(c.recall_up());
+        assert_eq!(c.message, "first");
+        assert!(!c.recall_up()); // at the oldest — stays
+        assert!(c.recall_down());
+        assert_eq!(c.message, "second");
+        assert!(c.recall_down()); // past the newest — the draft comes back
+        assert_eq!(c.message, "draft");
+        assert!(!c.recall_down());
+    }
+
+    #[test]
+    fn composer_insert_char_keeps_newlines_for_paste() {
+        let mut c = Composer::new("ai");
+        for ch in "ab".chars() {
+            c.type_char(ch);
+        }
+        c.insert_char('\n');
+        c.type_char('c');
+        assert_eq!(c.message, "ab\nc");
+        assert_eq!(c.cursor, 4);
+    }
+
+    #[test]
+    fn composer_esc_cancels_sender_edit_restoring_previous() {
+        let mut c = Composer::new("kernel");
+        c.type_char('@'); // enter sender edit (clears the sender)
+        for ch in "co".chars() {
+            c.type_char(ch);
+        }
+        assert!(c.editing_sender);
+        assert_eq!(c.sender, "co");
+        c.cancel_sender_edit();
+        assert!(!c.editing_sender);
+        assert_eq!(c.sender, "kernel"); // back to what it was
+    }
+
+    #[test]
+    fn palette_pins_ai_first_then_rooms_then_discoverables() {
+        let mut tabs = Tabs::new(&["ai", "sh", "ws"]);
+        tabs.deliver("sh")
+            .push("sh", "you", Body::Note("x".into()), State::Done); // sh unread
+        let known = vec!["core".to_string(), "web".to_string()];
+        let items = palette_items(&tabs, &known, "");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["ai", "sh", "ws", "core", "web"]);
+        assert!(items[0].open, "ai is an open room");
+        assert!(items[1].unread, "sh got a message while ai was active");
+        assert!(!items[3].open, "core is discoverable, not open");
+    }
+
+    #[test]
+    fn palette_prefix_filters_and_dedupes() {
+        let mut tabs = Tabs::new(&["ai", "sh", "ws"]);
+        tabs.focus("core"); // core is now an OPEN room…
+        let known = vec!["core".to_string(), "kernel".to_string()];
+        let items = palette_items(&tabs, &known, "c");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["core"]); // …listed once, as open
+        assert!(items[0].open);
+        assert!(palette_items(&tabs, &known, "zzz").is_empty());
     }
 }
