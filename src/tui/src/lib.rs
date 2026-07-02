@@ -232,6 +232,12 @@ struct App {
     kernels_msg: Option<String>,
     /// Attach/spawn task results (create-new or selecting a folder kernel).
     kernel_task_tx: mpsc::UnboundedSender<KernelTaskResult>,
+    /// A clone of the brain inbox sender — handed to the remote WS mirror so a
+    /// folder kernel's emits land in the same inbox the in-proc brain feeds.
+    brain_relay: tokio::sync::mpsc::Sender<Value>,
+    /// The live emit-stream subscription to the active REMOTE kernel (`None` for the
+    /// in-proc RAM kernel). Dropping it unsubscribes.
+    ws_stream: Option<kernels::WsStream>,
     last_activity: Instant,
     boot: Instant,
     /// When the attract screen last (re)appeared — set at boot and reset every
@@ -285,6 +291,9 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
     // token BURST isn't dropped on `try_send` before the ~16fps loop drains it
     // (a dropped `done` would hang the turn).
     let (brain_tx, mut brain_rx) = tokio::sync::mpsc::channel::<Value>(8192);
+    // A clone of the brain inbox sender for the remote-kernel WS mirror to forward
+    // into (so remote agent/@ai streams render through the same `brain_rx` path).
+    let brain_relay = brain_tx.clone();
     kernel.inboxes.insert(AgentId::from(CLIENT_ID), brain_tx);
 
     let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
@@ -369,6 +378,8 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
         kernels_busy: false,
         kernels_msg: None,
         kernel_task_tx,
+        brain_relay,
+        ws_stream: None,
         last_activity: Instant::now(),
         boot: Instant::now(),
         attract_since: Instant::now(),
@@ -446,6 +457,16 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
                             .file_name()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_else(|| dir.to_string_lossy().into_owned());
+                        // Open the live emit-stream mirror to this kernel + watch its
+                        // brain, so remote @ai / agent events render like the in-proc
+                        // ones. (`None` if the socket won't open — reflect+verbs still
+                        // work; only live streaming is lost.)
+                        app.ws_stream =
+                            kernels::WsStream::connect(&handle.base_url, app.brain_relay.clone())
+                                .await;
+                        if let Some(ws) = &app.ws_stream {
+                            ws.watch(BRAIN_ID);
+                        }
                         app.active = kernels::ActiveKernel::Remote(kernels::RemoteKernel {
                             handle,
                             label,
@@ -1061,6 +1082,7 @@ fn select_square(app: &mut App) {
     match pick {
         Pick::Ram => {
             app.active = kernels::ActiveKernel::InProc(Arc::clone(&app.kernel));
+            app.ws_stream = None; // back to in-proc streaming — drop the remote mirror
             app.hub_dirty = true;
             enter_hub(app);
         }
@@ -1347,59 +1369,78 @@ fn finish_ai_turn(app: &mut App) {
 /// ordered `done` event (handled in the `brain_rx` arm); only an ERROR (no `done`)
 /// is reported back via `ai_tx`.
 fn fire_ai_turn(app: &mut App, text: String) {
-    // Phase 1: the brain is provisioned in-proc. A folder kernel doesn't get a
-    // local brain yet (Phase 2), so `@ai` on a remote kernel degrades to a clear
-    // note rather than a hang. (`active` is always InProc until the Kernels screen
-    // lands, so this branch is dormant for now.)
-    let kernel = match app.active.in_proc() {
-        Some(k) => k,
-        None => {
-            app.tabs.deliver("ai").push(
-                "system",
-                "ai",
-                Body::Note("this kernel has no brain yet — reflect / verbs / @sh only".into()),
-                State::Done,
-            );
-            return;
-        }
-    };
     app.chat_busy = true;
     app.ai_phase = Some("sending".to_string());
     app.tabs.deliver("ai").start_stream(BRAIN_ID, "you");
     let ai_tx = app.ai_tx.clone();
-    let ensure = !app.brain_ready;
-    app.brain_ready = true;
-    tokio::spawn(async move {
-        if ensure {
-            if let Err(e) = ai::ensure_brain(&kernel).await {
-                let _ = ai_tx.send(format!("✗ {e}"));
-                return;
+    match app.active.clone() {
+        // In-proc RAM kernel: ensure the brain once (mirroring its inbox to ours),
+        // then send. SUCCESS streams live + is sealed by the watched `done`; only an
+        // ERROR (no `done`) is reported via `ai_tx`.
+        kernels::ActiveKernel::InProc(kernel) => {
+            let ensure = !app.brain_ready;
+            app.brain_ready = true;
+            tokio::spawn(async move {
+                if ensure {
+                    if let Err(e) = ai::ensure_brain(&kernel).await {
+                        let _ = ai_tx.send(format!("✗ {e}"));
+                        return;
+                    }
+                    // The backend emits its stream to the brain's OWN inbox, not
+                    // ours — mirror the brain's inbox into our `CLIENT_ID` inbox to
+                    // receive the live token stream + status. Once.
+                    kernel
+                        .watch(&AgentId::from(BRAIN_ID), AgentId::from(CLIENT_ID))
+                        .await;
+                }
+                let reply = kernel
+                    .send(
+                        &AgentId::from(BRAIN_ID),
+                        json!({"type":"send","text":text,"client_id":CLIENT_ID}),
+                    )
+                    .await;
+                if let Some(e) = reply.get("error").and_then(Value::as_str) {
+                    let out = if ai::is_unreachable(e) {
+                        ai::dry_reply(&ai::config_status(), Some(e))
+                            .unwrap_or_else(|| format!("✗ {e}"))
+                    } else {
+                        format!("✗ {e}")
+                    };
+                    let _ = ai_tx.send(out);
+                }
+            });
+        }
+        // Remote folder kernel: send to ITS brain over HTTP; the reply blocks while
+        // the brain streams token/say/status/done to its inbox, which the WS mirror
+        // (watching `brain`) forwards into our `brain_rx` — same render path. If the
+        // kernel has no brain (not provisioned), the reply carries an error and we
+        // seal the stream with it rather than hanging.
+        kernels::ActiveKernel::Remote(remote) => {
+            if let Some(ws) = &app.ws_stream {
+                ws.watch(BRAIN_ID);
             }
-            // The ollama backend emits its stream to the brain's OWN inbox
-            // (cli-round-trip route), not ours — so mirror the brain's inbox into
-            // our `CLIENT_ID` inbox to receive the live token stream + status. Once.
-            kernel
-                .watch(&AgentId::from(BRAIN_ID), AgentId::from(CLIENT_ID))
-                .await;
+            let handle = remote.handle;
+            tokio::spawn(async move {
+                match handle
+                    .send(
+                        BRAIN_ID,
+                        json!({"type":"send","text":text,"client_id":CLIENT_ID}),
+                    )
+                    .await
+                {
+                    Ok(reply) => {
+                        if let Some(e) = reply.get("error").and_then(Value::as_str) {
+                            let _ = ai_tx
+                                .send(format!("✗ this kernel has no brain (or it errored): {e}"));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = ai_tx.send(format!("✗ {e}"));
+                    }
+                }
+            });
         }
-        let reply = kernel
-            .send(
-                &AgentId::from(BRAIN_ID),
-                json!({"type":"send","text":text,"client_id":CLIENT_ID}),
-            )
-            .await;
-        // SUCCESS streamed live + sealed by the watched `done`; nothing to do here.
-        // Only an error needs reporting (it produces no `done`): surface the dry
-        // "unreachable" guidance for a reachability failure, else the raw error.
-        if let Some(e) = reply.get("error").and_then(Value::as_str) {
-            let out = if ai::is_unreachable(e) {
-                ai::dry_reply(&ai::config_status(), Some(e)).unwrap_or_else(|| format!("✗ {e}"))
-            } else {
-                format!("✗ {e}")
-            };
-            let _ = ai_tx.send(out);
-        }
-    });
+    }
 }
 
 /// Drive the out-of-process workspace kernel over the gateway. Lifecycle
@@ -1594,6 +1635,12 @@ fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
         },
         State::Done,
     );
+    // For a remote kernel, subscribe to the target's emits over the WS mirror BEFORE
+    // sending, so any events it emits while handling the verb stream live into its
+    // agent (parity with the in-proc `watch` the `dispatch` InProc arm does).
+    if let Some(ws) = &app.ws_stream {
+        ws.watch(target.as_str());
+    }
     let active = app.active.clone();
     let tx = app.cmd_tx.clone();
     let from = target.as_str().to_string();
@@ -1601,8 +1648,9 @@ fn dispatch_kernel(app: &mut App, target: AgentId, payload: Value) {
         // `dispatch` mirrors the target's own inbox into our client inbox FIRST (for
         // the in-proc kernel), so any events it emits while handling the verb
         // (token/say/status/done, or a generic activity event) render LIVE in its
-        // agent via `brain_rx` — exactly the path `@ai` uses. A remote kernel is
-        // request→response here; its live emits arrive over the Phase-2 WS mirror.
+        // agent via `brain_rx` — exactly the path `@ai` uses. A remote kernel's live
+        // emits arrive over the WS mirror (subscribed just above); its verb REPLY
+        // comes back request→response here.
         let reply = active.dispatch(&target, payload).await;
         let rendered = serde_json::to_string_pretty(&reply).unwrap_or_else(|_| reply.to_string());
         let _ = tx.send((from, rendered));
@@ -2069,13 +2117,18 @@ fn render_hub(f: &mut Frame, full: Rect, app: &App) {
     let by = |n: &hub::HubNode| top + (n.depth as i32) * row_step;
     let ccol = |n: &hub::HubNode| bx(n) + box_w / 2;
 
+    // Heading names the active kernel (the RAM kernel, or a folder kernel's label).
+    let heading = match &app.active {
+        kernels::ActiveKernel::Remote(r) => format!("{} — pick an agent", r.label),
+        kernels::ActiveKernel::InProc(_) => "the agents — pick one".to_string(),
+    };
     let buf = f.buffer_mut();
     str_at(
         buf,
         full,
         full.x as i32 + 4,
         full.y as i32 + 4,
-        "the agents — pick one",
+        &heading,
         Style::default()
             .fg(Color::LightMagenta)
             .add_modifier(Modifier::BOLD),
@@ -2806,6 +2859,8 @@ mod e2e {
             kernels_busy: false,
             kernels_msg: None,
             kernel_task_tx: mpsc::unbounded_channel::<KernelTaskResult>().0,
+            brain_relay: tokio::sync::mpsc::channel::<Value>(1).0,
+            ws_stream: None,
             last_activity: Instant::now(),
             boot: Instant::now(),
             attract_since: Instant::now(),

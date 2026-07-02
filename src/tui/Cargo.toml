@@ -13,6 +13,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1.40", features = ["full"] }
 anyhow = "1"
 ratatui = "0.29"
+# Live emit-stream mirror from a remote folder kernel's web_ws surface (loopback
+# ws://, no TLS). Kept minimal — default features only, no TLS connector.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 # Terminal-proxy mode render + startup billboard.
 tui-term = "0.2"
 vt100 = "0.15"

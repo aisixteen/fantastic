@@ -682,10 +682,12 @@ dependencies = [
  "fantastic-host",
  "fantastic-kernel",
  "fantastic-term",
+ "futures-util",
  "ratatui",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tui-term",
  "vt100",
 ]
