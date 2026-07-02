@@ -3,10 +3,10 @@
 //! *host*: it composes an in-proc "brain" kernel and drives everything through
 //! the one primitive — `kernel.send(target, payload)`.
 //!
-//! The TUI is ONE chat with a room per character (see `fantastic-tui`):
-//! `@ai` streams the brain, `@sh` breathes a real PTY, `@ws` drives the
-//! out-of-process workspace kernel, `@<agent> <verb> [k=v…]` opens any agent's
-//! room; Shift-Tab turns between rooms; `/intro` plays the scripted movie.
+//! The TUI is ONE chat per agent (see `fantastic-tui`): `@ai` streams the brain,
+//! `@sh` breathes a real PTY, `@ws` drives the out-of-process workspace kernel,
+//! `@<agent> <verb> [k=v…]` drives any agent; Shift-Tab turns between agents;
+//! `/intro` plays the scripted movie.
 //!
 //! Headless: `fantastic --smoke` (or non-tty stdout) composes the host, reflects
 //! the root, and exits — for CI/build verification without a terminal. One-shot
@@ -129,7 +129,7 @@ fantastic — AI coder + kernel manager for emerging software
 
 usage: fantastic [subcommand]
 
-  (no args)             open the TUI (a chat with a room per agent); non-tty
+  (no args)             open the TUI (a chat, one agent per tab); non-tty
                         stdout prints the reflected agent tree instead
   ai|ask \"<prompt>\"     one-shot AI turn (requires an explicit connector:
                         `config set ai.backend …` + `config set ai.model …`)
