@@ -26,8 +26,8 @@ use fantastic_kernel::{AgentId, Kernel};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -109,13 +109,27 @@ struct App {
     /// The active input control — `Chat` normally, or a setup-flow Select/Field
     /// while `/setup` · `/model` is running.
     control: input::Control,
+    /// The `@`-palette selection index (meaningful while the composer is editing
+    /// the sender; reset to 0 as the fragment changes).
+    palette_idx: usize,
+    /// True while the `/help` overlay is up (any key closes it).
+    help_open: bool,
+    /// Transcript scrollback: VISUAL rows scrolled up from the bottom (0 = follow
+    /// the newest). PageUp/PageDown page it, the mouse wheel nudges it; any
+    /// submit / room switch snaps back to the bottom.
+    scroll: usize,
+    /// The max meaningful `scroll` for the active room, computed at render (the
+    /// handler clamps against it — a `Cell` because render sees `&App`).
+    scroll_max: std::cell::Cell<usize>,
     /// The running connector-setup wizard, if any.
     flow: Option<input::SetupFlow>,
     /// Kernel agent ids (cached at boot) — the extra "characters" you can address
     /// + Tab-complete beyond the base rooms.
     known_agents: Vec<String>,
     /// AI turns typed while a turn is in flight queue here and fire in order.
-    pending: VecDeque<String>,
+    /// Each entry carries the transcript seq of its rendered line (shown dim
+    /// + `⏳` while queued) so the drain can flip it to `Done`.
+    pending: VecDeque<(u64, String)>,
     /// The final AI-turn result is sent here from the spawned send task.
     ai_tx: mpsc::UnboundedSender<String>,
     /// The live phase of the in-flight AI turn (sending → thinking → generating),
@@ -171,6 +185,10 @@ struct App {
     last_ctrl_c: Option<Instant>,
     q_streak: u8,
     last_q: Option<Instant>,
+    /// True once a `q`-hold has been recognized as an exit gesture (started from
+    /// an empty line) — held `q`s are then consumed, not typed. Typing normal
+    /// text with q's never arms it.
+    q_armed: bool,
 }
 
 impl App {
@@ -218,7 +236,12 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
 
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // Spawn the shared PTY sized to the chat breathing-viewport grid.
@@ -234,6 +257,10 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         tabs: Tabs::new(&BASE_TABS),
         composer: Composer::new("ai"),
         control: input::Control::Chat,
+        palette_idx: 0,
+        help_open: false,
+        scroll: 0,
+        scroll_max: std::cell::Cell::new(0),
         flow: None,
         known_agents,
         pending: VecDeque::new(),
@@ -261,12 +288,13 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
         last_ctrl_c: None,
         q_streak: 0,
         last_q: None,
+        q_armed: false,
     };
     app.tabs.deliver("ai").push(
         "system",
         "you",
         Body::Note(
-            "Rooms — one chat per character. `@ai` is the brain (streams live, Ctrl+C interrupts), `@sh` a shell (Ctrl+F focuses it), `@ws` the workspace kernel; `@<agent> <verb> [k=v…]` opens any agent's room. Shift-Tab turns between rooms; Tab completes a name; `/intro` plays the movie.".into(),
+            "Rooms — one chat per character. `@ai` is the brain (streams live, Ctrl+C interrupts), `@sh` a shell (Ctrl+F focuses it), `@ws` the workspace kernel; `@<agent> <verb> [k=v…]` opens any agent's room. Type `@` for the palette; Shift-Tab turns between rooms; Esc comes home to @ai. `/help` shows everything · `/setup` connects a model · `/intro` plays the movie.".into(),
         ),
         State::Done,
     );
@@ -318,8 +346,10 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
             Some(out) = ai_rx.recv() => {
                 // ERROR path only: a turn that failed produced no `done` event (the
                 // send returned an error), so the spawned task sends the error/dry
-                // text here. Seal the live line with it and end the turn.
-                app.tabs.deliver("ai").close_stream(BRAIN_ID, &out);
+                // text here. Seal the live line with it and end the turn — a raw
+                // `✗ …` seals red (Error); dry guidance seals as a normal line.
+                let state = if out.starts_with('✗') { State::Error } else { State::Done };
+                app.tabs.deliver("ai").close_stream_with(BRAIN_ID, &out, state);
                 finish_ai_turn(&mut app);
             }
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
@@ -377,7 +407,8 @@ pub async fn run(kernel: Arc<Kernel>, agent_count: usize) -> Result<()> {
     execute!(
         term.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     term.show_cursor()?;
     Ok(())
@@ -470,8 +501,54 @@ fn term_visible(app: &App) -> bool {
 }
 
 fn handle_input(app: &mut App, ev: Event) {
-    // Mouse capture stays on so the alt-screen behaves, but there are no header
-    // tabs to hit-test anymore — mouse events are a no-op.
+    // Bracketed paste arrives as ONE event — insert it whole (embedded newlines
+    // preserved as literal breaks in the message) instead of replaying it as
+    // keystrokes, where each newline would fire Enter and submit fragments.
+    if let Event::Paste(text) = &ev {
+        app.last_activity = Instant::now();
+        if app.intro_playing || !app.started {
+            return; // not meaningful on the attract/intro screens
+        }
+        if app.term_focused {
+            if let Some(ts) = app.term.as_mut() {
+                ts.write(text.as_bytes());
+            }
+            return;
+        }
+        if !matches!(app.control, input::Control::Chat) {
+            // A setup-flow field: paste the text flat (no newlines in a model
+            // name / API key).
+            for c in text.chars().filter(|c| !c.is_control()) {
+                app.control.type_char(c);
+            }
+            return;
+        }
+        for c in text.chars() {
+            if c == '\n' {
+                if app.composer.editing_sender {
+                    app.composer.type_char(' '); // commit the sender, like a space
+                } else {
+                    app.composer.insert_char('\n');
+                }
+            } else if c != '\r' {
+                app.composer.type_char(c);
+            }
+        }
+        return;
+    }
+    // The mouse wheel scrolls the transcript (clamped to the room's history);
+    // clicks stay no-ops (no hit-testing yet).
+    if let Event::Mouse(m) = &ev {
+        use ratatui::crossterm::event::MouseEventKind as MK;
+        if app.started && !app.intro_playing && !app.help_open {
+            match m.kind {
+                MK::ScrollUp => app.scroll = (app.scroll + 3).min(app.scroll_max.get()),
+                MK::ScrollDown => app.scroll = app.scroll.saturating_sub(3),
+                _ => {}
+            }
+        }
+        return;
+    }
     let Event::Key(KeyEvent {
         code,
         kind,
@@ -496,6 +573,11 @@ fn handle_input(app: &mut App, ev: Event) {
         app.intro_since = None;
         return;
     }
+    // The /help overlay: any key dismisses it (fully consumed).
+    if app.help_open {
+        app.help_open = false;
+        return;
+    }
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     // Ctrl-Q is the always-reliable quit (works even while the PTY is focused).
     if ctrl && code == KeyCode::Char('q') {
@@ -503,10 +585,19 @@ fn handle_input(app: &mut App, ev: Event) {
         return;
     }
     // Ctrl+F toggles PTY focus (only when the terminal viewport is on-screen — in
-    // the `@sh` room).
+    // the `@sh` room). Elsewhere it says why nothing happened.
     if ctrl && code == KeyCode::Char('f') {
         if term_visible(app) {
             app.term_focused = !app.term_focused;
+        } else {
+            app.tabs.active_mut().push(
+                "system",
+                "you",
+                Body::Note(
+                    "no shell here — `@sh <cmd>` opens one (Ctrl+F focuses it in @sh)".into(),
+                ),
+                State::Done,
+            );
         }
         return;
     }
@@ -520,22 +611,21 @@ fn handle_input(app: &mut App, ev: Event) {
             return;
         }
         app.last_ctrl_c = Some(now);
-        app.tabs.active_mut().push(
-            "system",
-            "you",
-            Body::Note("press Ctrl+C again to exit".into()),
-            State::Done,
-        );
         let ai_live = app.tabs.chat("ai").is_some_and(|c| c.has_live());
         // SIGINT goes to the shell only when its viewport is the one in front
         // (the `@sh` room / focused); elsewhere Ctrl+C interrupts the AI stream.
-        if app.term_focused || term_visible(app) {
+        // The note says what THIS press did, so the action is never a mystery.
+        let note = if app.term_focused || term_visible(app) {
             if let Some(ts) = app.term.as_mut() {
                 ts.write(&[0x03]);
             }
+            "^C sent to shell · Ctrl+C again to exit".to_string()
         } else if ai_live {
             app.tabs.deliver("ai").interrupt_live();
-            app.pending.clear();
+            // Queued lines will never fire now — mark them interrupted too.
+            for (seq, _) in app.pending.drain(..) {
+                app.tabs.deliver("ai").set_state(seq, State::Interrupted);
+            }
             app.chat_busy = false;
             let kernel = Arc::clone(&app.kernel);
             tokio::spawn(async move {
@@ -543,24 +633,52 @@ fn handle_input(app: &mut App, ev: Event) {
                     .send(&AgentId::from(BRAIN_ID), json!({"type":"interrupt"}))
                     .await;
             });
-        }
+            "⊘ interrupted @ai · Ctrl+C again to exit".to_string()
+        } else {
+            "press Ctrl+C again to exit".to_string()
+        };
+        app.tabs
+            .active_mut()
+            .push("system", "you", Body::Note(note), State::Done);
         return;
     }
     // Hold `q` to exit: physically holding the key fires rapid auto-repeats; a
-    // run of them in a short window quits. SUPPRESSED while the PTY is focused,
-    // where a typed `q` must reach the shell (only Ctrl+Q / double-Ctrl+C exit).
+    // run of them STARTED FROM AN EMPTY LINE quits. The gesture ARMS on the 2nd
+    // fast repeat (the first typed `q` is reclaimed, a hint shows); once armed,
+    // held q's are consumed, not typed. Typing normal text with q's never arms —
+    // no more quitting mid-word. SUPPRESSED while the PTY is focused, where a
+    // typed `q` must reach the shell (only Ctrl+Q / double-Ctrl+C exit).
     if let KeyCode::Char('q') = code {
-        if !ctrl && !app.term_focused {
+        let in_chat = matches!(app.control, input::Control::Chat);
+        if !ctrl && !app.term_focused && in_chat && !app.composer.editing_sender {
             let now = Instant::now();
             app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
             app.last_q = Some(now);
-            if app.q_streak >= Q_HOLD_STREAK {
-                app.quit = true;
-                return;
+            if app.q_streak == 1 {
+                app.q_armed = false; // fresh press — arms only if a hold follows
+            }
+            if app.q_streak >= 2 && !app.q_armed && app.composer.message == "q" {
+                // A hold beginning on an empty line: reclaim the first typed q,
+                // consume the run, and hint at what's happening.
+                app.q_armed = true;
+                app.composer.backspace();
+                app.tabs.active_mut().push(
+                    "system",
+                    "you",
+                    Body::Note("hold q to exit…".into()),
+                    State::Done,
+                );
+            }
+            if app.q_armed {
+                if app.q_streak >= Q_HOLD_STREAK {
+                    app.quit = true;
+                }
+                return; // consume the held q — it is a gesture, not text
             }
         }
     } else {
         app.q_streak = 0;
+        app.q_armed = false;
     }
     if app.term_focused {
         // Full interactivity: encode the key straight to the PTY. Esc or Ctrl+F
@@ -582,10 +700,92 @@ fn handle_input(app: &mut App, ev: Event) {
         handle_flow_key(app, code);
         return;
     }
-    // Otherwise the keys edit the smart composer (`@sender` field + message).
+    // While the `@sender` is being edited, the palette owns the navigation keys:
+    // ↑/↓ move the selection, Enter picks + submits the bare line (enter the
+    // room; a fresh agent room opens on its reflect — the introduction), Tab
+    // completes to the selection, Esc cancels back to the previous sender.
+    if app.composer.editing_sender {
+        match code {
+            KeyCode::Up => {
+                app.palette_idx = app.palette_idx.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                app.palette_idx = app.palette_idx.saturating_add(1); // clamped at pick/render
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(pick) = palette_pick(app) {
+                    app.composer.set_sender(&pick);
+                } else {
+                    // No candidate — keep the typed fragment; submit nogo-flashes.
+                    app.composer.editing_sender = false;
+                }
+                app.palette_idx = 0;
+                submit_chat(app);
+                return;
+            }
+            KeyCode::Tab => {
+                if let Some(pick) = palette_pick(app) {
+                    app.composer.set_sender(&pick);
+                    if app.tabs.ids().contains(&pick) {
+                        app.tabs.focus(&pick);
+                        app.scroll = 0;
+                    }
+                } else {
+                    app.composer.complete(&app.known_senders());
+                }
+                app.palette_idx = 0;
+                return;
+            }
+            KeyCode::Esc => {
+                app.composer.cancel_sender_edit();
+                app.palette_idx = 0;
+                return;
+            }
+            KeyCode::Char(_) | KeyCode::Backspace => {
+                // Fragment is changing — reset the selection, then fall through
+                // to the composer edit below.
+                app.palette_idx = 0;
+            }
+            _ => {}
+        }
+    } else if code == KeyCode::Esc {
+        // Esc = home: back to the brain. (The other Esc meanings — cancel a
+        // flow, release the PTY, cancel a sender edit — were all handled above,
+        // so the ladder stays consistent: Esc always steps "back".)
+        app.tabs.focus("ai");
+        app.composer.set_sender("ai");
+        app.scroll = 0;
+        return;
+    }
+    // Otherwise the keys edit the smart composer (`@sender` field + message):
+    // chars insert at the caret, Left/Right/Home/End move it, Up/Down recall
+    // sent lines, Delete removes at the caret.
     match code {
         KeyCode::Char(c) => app.composer.type_char(c),
         KeyCode::Backspace => app.composer.backspace(),
+        KeyCode::Delete => app.composer.delete(),
+        KeyCode::Left => app.composer.move_left(),
+        KeyCode::Right => app.composer.move_right(),
+        KeyCode::Home => app.composer.move_home(),
+        KeyCode::End => {
+            // End: caret to the end of the line AND snap the view to the newest.
+            app.composer.move_end();
+            app.scroll = 0;
+        }
+        KeyCode::Up => {
+            app.composer.recall_up();
+        }
+        KeyCode::Down => {
+            app.composer.recall_down();
+        }
+        KeyCode::PageUp => {
+            app.scroll = (app.scroll + 8).min(app.scroll_max.get());
+        }
+        KeyCode::PageDown => {
+            app.scroll = app.scroll.saturating_sub(8);
+        }
         KeyCode::Tab => {
             // Complete the `@sender` against every known character; if it lands on
             // an open room, turn to face it.
@@ -600,16 +800,36 @@ fn handle_input(app: &mut App, ev: Event) {
             app.tabs.cycle(true);
             let id = app.tabs.active_id().to_string();
             app.composer.set_sender(&id);
+            app.scroll = 0;
         }
         KeyCode::Enter => submit_chat(app),
         _ => {}
     }
 }
 
+/// The currently-selected `@`-palette candidate for the composer's fragment
+/// (selection clamped into the filtered list). `None` when nothing matches.
+fn palette_pick(app: &App) -> Option<String> {
+    let items = chat::palette_items(&app.tabs, &app.known_agents, &app.composer.sender);
+    if items.is_empty() {
+        return None;
+    }
+    let idx = app.palette_idx.min(items.len() - 1);
+    Some(items[idx].id.clone())
+}
+
 /// Submit the composed line: validate the `@sender` (a **nogo** if it names no
 /// known character), enter that room, then dispatch — an AI turn streams into the
 /// `@ai` room; a kernel command sends and routes its reply back via `cmd_tx`.
 fn submit_chat(app: &mut App) {
+    // Submitting re-joins the conversation: snap the view back to the newest.
+    app.scroll = 0;
+    // Every submitted line is recallable with Up/Down (consecutive dups collapse;
+    // a nogo'd line re-recorded on the fixed resubmit collapses too).
+    let typed = app.composer.message.trim().to_string();
+    if !typed.is_empty() {
+        app.composer.record_history(&typed);
+    }
     // Local slash commands on the message body (never reach the `@`-router).
     match app.composer.message.trim() {
         "/intro" => {
@@ -641,6 +861,26 @@ fn submit_chat(app: &mut App) {
             app.control = ctrl;
             return;
         }
+        "/help" => {
+            app.composer.take_message();
+            app.help_open = true;
+            return;
+        }
+        // Any other `/command` is a command TYPO, not a message — never route it
+        // to an agent as text; print the command list instead.
+        other if other.starts_with('/') => {
+            let cmd = other.to_string();
+            app.composer.take_message();
+            app.tabs.active_mut().push(
+                "system",
+                "you",
+                Body::Note(format!(
+                    "unknown command {cmd} — /help · /intro · /setup · /model"
+                )),
+                State::Done,
+            );
+            return;
+        }
         _ => {}
     }
     // Nogo: you can't talk to a character who isn't there.
@@ -661,20 +901,30 @@ fn submit_chat(app: &mut App) {
     match route {
         Route::Empty => {}
         Route::Ai(text) => {
-            app.tabs
-                .deliver("ai")
-                .push("you", "ai", Body::Text(text.clone()), State::Done);
             // The DRY stand-in brain: if no connector is configured, answer with
             // setup guidance instead of provisioning a real brain (which would
             // error). The real brain runs only once a connector is Ready.
             if let Some(guide) = ai::dry_reply(&ai::config_status(), None) {
                 app.tabs
                     .deliver("ai")
+                    .push("you", "ai", Body::Text(text), State::Done);
+                app.tabs
+                    .deliver("ai")
                     .push("brain", "you", Body::Text(guide), State::Done);
             } else if app.chat_busy {
-                // A turn is in flight — queue this one; it fires on `done`.
-                app.pending.push_back(text);
+                // A turn is in flight — queue this one (rendered dim + ⏳ until
+                // the drain fires it on `done`).
+                let seq = app.tabs.deliver("ai").push(
+                    "you",
+                    "ai",
+                    Body::Text(text.clone()),
+                    State::Queued,
+                );
+                app.pending.push_back((seq, text));
             } else {
+                app.tabs
+                    .deliver("ai")
+                    .push("you", "ai", Body::Text(text.clone()), State::Done);
                 fire_ai_turn(app, text);
             }
         }
@@ -719,6 +969,7 @@ fn finish_setup(app: &mut App, draft: input::Draft) {
     app.control = input::Control::Chat;
     app.flow = None;
     let key = (!draft.key.trim().is_empty()).then_some(draft.key.as_str());
+    let mut seal = State::Done;
     let note = match fantastic_host::set_ai_connector(&draft.backend, &draft.model, key) {
         Ok(()) => {
             // Update the live env so the re-provisioned brain reads the new config.
@@ -746,11 +997,14 @@ fn finish_setup(app: &mut App, draft: input::Draft) {
                 draft.backend, draft.model
             )
         }
-        Err(e) => format!("✗ {e}"),
+        Err(e) => {
+            seal = State::Error;
+            format!("✗ {e}")
+        }
     };
     app.tabs
         .deliver("ai")
-        .push("brain", "you", Body::Text(note), State::Done);
+        .push("brain", "you", Body::Text(note), seal);
     app.tabs.focus("ai");
     app.composer.set_sender("ai");
 }
@@ -764,7 +1018,16 @@ fn finish_ai_turn(app: &mut App) {
     if app.pending.is_empty() {
         app.chat_busy = false;
     } else {
-        let joined = app.pending.drain(..).collect::<Vec<_>>().join("\n");
+        let entries: Vec<(u64, String)> = app.pending.drain(..).collect();
+        // The queued lines fire now — flip their ⏳ markers to sent.
+        for (seq, _) in &entries {
+            app.tabs.deliver("ai").set_state(*seq, State::Done);
+        }
+        let joined = entries
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join("\n");
         fire_ai_turn(app, joined);
     }
 }
@@ -823,11 +1086,17 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
     match cmd {
         WsCmd::Up(rt) => {
             if app.ws_busy {
+                app.tabs.deliver("ws").push(
+                    "ws",
+                    "you",
+                    Body::Note("ws: still working…".into()),
+                    State::Done,
+                );
                 return;
             }
             app.tabs.deliver("ws").push(
-                "ws",
                 "you",
+                "ws",
                 Body::Tool {
                     verb: "up".into(),
                     target: "ws".into(),
@@ -865,8 +1134,8 @@ fn dispatch_workspace(app: &mut App, cmd: WsCmd) {
                 return;
             };
             app.tabs.deliver("ws").push(
-                "ws",
                 "you",
+                "ws",
                 Body::Tool {
                     verb: "down".into(),
                     target: "ws".into(),
@@ -938,9 +1207,12 @@ fn handle_ws_event(app: &mut App, ev: WsEvent) {
         }
         WsEvent::Error(e) => {
             app.ws_busy = false;
-            app.tabs
-                .deliver("ws")
-                .push("ws", "you", Body::Note(format!("✗ ws: {e}")), State::Done);
+            app.tabs.deliver("ws").push(
+                "ws",
+                "you",
+                Body::Note(format!("✗ ws: {e}")),
+                State::Error,
+            );
         }
         WsEvent::Down => {
             app.workspace = None;
@@ -963,8 +1235,8 @@ fn run_shell(app: &mut App, cmd: String) {
         app.term = TerminalSession::spawn(rows, cols, app.redraw_tx.clone()).ok();
     }
     app.tabs.deliver("sh").push(
-        "sh",
         "you",
+        "sh",
         Body::Tool {
             verb: "sh".to_string(),
             target: "sh".to_string(),
@@ -1298,26 +1570,68 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     // leaves the empty space (starfield) at the TOP rather than a gap in the
     // middle. Count VISUAL rows (a long line wraps to several), accumulating from
     // the bottom up, so the newest entries are never clipped off the bottom edge.
+    // `app.scroll` pages BACK through history (PageUp / mouse wheel): it skips
+    // that many visual rows off the bottom before anchoring, line-granular.
     let h = transcript_area.height as usize;
     let aw = transcript_area.width.max(1) as usize;
-    let rows_of = |l: &Line| -> usize { l.width().div_ceil(aw).max(1) };
+    let rows: Vec<usize> = lines
+        .iter()
+        .map(|l| l.width().div_ceil(aw).max(1))
+        .collect();
+    let total: usize = rows.iter().sum();
+    // Publish the max meaningful scroll so the key/wheel handlers clamp to it.
+    let max_scroll = total.saturating_sub(h);
+    app.scroll_max.set(max_scroll);
+    let scroll = app.scroll.min(max_scroll);
+    let mut skipped = 0usize;
+    let mut end = lines.len();
+    while end > 0 && skipped < scroll {
+        skipped += rows[end - 1];
+        end -= 1;
+    }
     let mut used = 0usize;
-    let mut start = lines.len();
-    for (i, l) in lines.iter().enumerate().rev() {
-        let r = rows_of(l);
+    let mut start = end;
+    for i in (0..end).rev() {
+        let r = rows[i];
         if used + r > h && i + 1 < start {
-            break; // keep at least the newest line even if it alone overflows
+            break; // keep at least the newest visible line even if it overflows
         }
         used += r;
         start = i;
     }
     let pad = h.saturating_sub(used);
     let mut view: Vec<Line> = vec![Line::from(""); pad];
-    view.extend(lines.into_iter().skip(start));
+    view.extend(lines.into_iter().take(end).skip(start));
     f.render_widget(
         Paragraph::new(view).wrap(Wrap { trim: false }),
         transcript_area,
     );
+    // Scrolled away from the live edge: a dim marker points back down.
+    if scroll > 0 {
+        let marker = " ↓ newer (End) ";
+        let w = marker.chars().count() as u16;
+        let mx = transcript_area
+            .x
+            .saturating_add(transcript_area.width.saturating_sub(w));
+        let my = transcript_area
+            .y
+            .saturating_add(transcript_area.height.saturating_sub(1));
+        let area = Rect {
+            x: mx,
+            y: my,
+            width: w.min(transcript_area.width),
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                marker,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::DIM),
+            )),
+            area,
+        );
+    }
 
     // Bottom region: the chat composer, or the active setup-flow control.
     match &app.control {
@@ -1330,12 +1644,142 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
             let input_area = b[1];
             fill_black(f.buffer_mut(), input_area);
             render_composer(f, input_area, app);
+            // The `@`-palette floats over the transcript bottom while the
+            // sender is being edited — navigate + discover in one gesture.
+            if app.composer.editing_sender {
+                render_palette(f, transcript_area, app);
+            }
         }
         ctrl => {
             fill_black(f.buffer_mut(), bottom);
             render_flow(f, bottom, ctrl);
         }
     }
+
+    // The /help overlay floats over everything; any key closes it.
+    if app.help_open {
+        render_help(f, inset);
+    }
+}
+
+/// The `/help` overlay: the whole interactive surface on one card — routing,
+/// the palette, room turns, editing, scrollback, commands, exits.
+fn render_help(f: &mut Frame, within: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+    let body = Style::default().fg(Color::White);
+    let rows: [(&str, &str); 11] = [
+        ("@", "palette: ↑↓ pick · ⏎ enter room · ⇥ complete · esc"),
+        (
+            "@ai …",
+            "talk to the brain (streams live · Ctrl+C interrupts)",
+        ),
+        (
+            "@sh <cmd>",
+            "run in the live shell (Ctrl+F focus · Esc release)",
+        ),
+        ("@ws …", "workspace kernel: up · down · <verb> [k=v…]"),
+        ("@<id> [verb]", "drive any agent; bare @<id> reflects it"),
+        ("⇧⇥ / Esc", "next room / home to @ai"),
+        ("↑ ↓", "recall sent lines"),
+        ("PgUp PgDn", "scroll history (wheel too · End snaps down)"),
+        ("←→ Home End", "move the caret in the input"),
+        ("/commands", "/help · /intro · /setup · /model"),
+        ("exit", "Ctrl+Q · Ctrl+C twice · hold q"),
+    ];
+    let w = (within.width.saturating_sub(4)).clamp(20, 60);
+    let h = (rows.len() as u16 + 4).min(within.height);
+    let area = Rect {
+        x: within.x + (within.width.saturating_sub(w)) / 2,
+        y: within.y + (within.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    fill_black(f.buffer_mut(), area);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "FANTASTIC — how to play",
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for (k, v) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {k:<13}"), key),
+            Span::styled(v.to_string(), body),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  any key closes", dim)));
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The `@`-palette: a small panel anchored just above the input while the
+/// `@sender` is being edited. **`ai` pinned first**, then open rooms (unread
+/// `•`), then known-but-unopened agents (dim — picking one opens its room and
+/// a bare submit reflects it). ↑↓ move · ⏎ enter the room · ⇥ complete · esc.
+fn render_palette(f: &mut Frame, transcript_area: Rect, app: &App) {
+    let items = chat::palette_items(&app.tabs, &app.known_agents, &app.composer.sender);
+    let mag = Color::Indexed(165);
+    let dim = Style::default().fg(Color::DarkGray);
+    // Panel geometry: bottom-anchored inside the transcript, modest width.
+    let rows = items.len().clamp(1, 8) as u16;
+    let h = (rows + 2).min(transcript_area.height); // title + rows + hint
+    if h < 3 {
+        return; // no room — the inline sender edit still works
+    }
+    let area = Rect {
+        x: transcript_area.x,
+        y: transcript_area.y + transcript_area.height - h,
+        width: transcript_area.width.min(44),
+        height: h,
+    };
+    fill_black(f.buffer_mut(), area);
+    let mut lines = vec![Line::from(Span::styled(
+        "@ rooms & agents",
+        Style::default()
+            .fg(Color::LightMagenta)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled("no match", dim)));
+    } else {
+        // Keep the selection visible: slide the window once it scrolls past.
+        let sel = app.palette_idx.min(items.len() - 1);
+        let win = rows as usize;
+        let start = (sel + 1).saturating_sub(win);
+        for (i, it) in items.iter().enumerate().skip(start).take(win) {
+            let selected = i == sel;
+            let mark = if selected { "▸ " } else { "  " };
+            let id_style = if selected {
+                Style::default().fg(mag).add_modifier(Modifier::BOLD)
+            } else if it.open {
+                Style::default().fg(chat::color_for(&it.id))
+            } else {
+                dim
+            };
+            let mut spans = vec![
+                Span::styled(mark.to_string(), id_style),
+                Span::styled(format!("@{}", it.id), id_style),
+            ];
+            if it.unread {
+                spans.push(Span::styled(" •", Style::default().fg(Color::Yellow)));
+            }
+            if !it.open {
+                spans.push(Span::styled("  opens room", dim));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        "↑↓ · ⏎ enter room · ⇥ complete · esc",
+        dim,
+    )));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// The smart composer: an editable `@<sender>` field + ` ▸ ` + the message. The
@@ -1357,16 +1801,24 @@ fn render_composer(f: &mut Frame, input_area: Rect, app: &App) {
     } else {
         Style::default().fg(sender_col).add_modifier(Modifier::BOLD)
     };
+    // Pasted newlines render as a visible `⏎` on the one-line prompt (the sent
+    // message keeps the real breaks).
+    let shown: String = c
+        .message
+        .chars()
+        .map(|ch| if ch == '\n' { '⏎' } else { ch })
+        .collect();
     let prompt = Line::from(vec![
         Span::styled(format!("@{}", c.sender), sender_st),
         Span::styled(" ▸ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(c.message.clone(), Style::default().fg(Color::White)),
+        Span::styled(shown, Style::default().fg(Color::White)),
     ]);
     f.render_widget(Paragraph::new(prompt), input_area);
+    // The terminal caret tracks the composer's char cursor (not just the tail).
     let cx = if c.editing_sender {
         input_area.x + 1 + c.sender.chars().count() as u16
     } else {
-        input_area.x + (1 + c.sender.chars().count() + 3 + c.message.chars().count()) as u16
+        input_area.x + (1 + c.sender.chars().count() + 3 + c.cursor) as u16
     };
     f.set_cursor_position((
         cx.min(input_area.x + input_area.width.saturating_sub(1)),
@@ -1494,10 +1946,12 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                         Span::styled(format!("⟳ {phase}…"), dim.add_modifier(Modifier::ITALIC)),
                     ]));
                 } else {
-                    let body_style = if m.from == "you" {
-                        Style::default().fg(Color::White)
-                    } else {
-                        Style::default()
+                    let body_style = match m.state {
+                        // Failed lines read red; queued lines read dim until fired.
+                        State::Error => Style::default().fg(Color::Red),
+                        State::Queued => dim,
+                        _ if m.from == "you" => Style::default().fg(Color::White),
+                        _ => Style::default(),
                     };
                     // Preserve embedded newlines: one rendered line per text line
                     // (so poems / lists / code keep their breaks). The first line
@@ -1513,6 +1967,9 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                             }
                             if matches!(m.state, State::Interrupted) {
                                 seg.push_str(" ⊘");
+                            }
+                            if matches!(m.state, State::Queued) {
+                                seg.push_str(" ⏳");
                             }
                         }
                         if i == 0 {
@@ -1535,14 +1992,26 @@ fn transcript_lines(app: &App) -> Vec<Line<'static>> {
                 target,
                 summary,
             } => {
-                let mut text = format!("→ {verb} {target}");
-                if !summary.is_empty() {
-                    text.push_str(&format!("  {summary}"));
-                }
-                out.push(Line::from(vec![gutter, Span::styled(text, dim)]));
+                // Activity line: `{from} → {target}: {verb} {summary}` — actor,
+                // addressee, action. A shell command (verb == target) collapses
+                // to `you → sh: ls -la` (no doubled name).
+                let head = Span::styled(format!("{} → {}: ", m.from, target), label_style);
+                let mut text = if verb == target {
+                    String::new()
+                } else {
+                    format!("{verb} ")
+                };
+                text.push_str(summary);
+                let text = text.trim_end().to_string();
+                out.push(Line::from(vec![gutter, head, Span::styled(text, dim)]));
             }
             Body::Note(n) => {
-                out.push(Line::from(vec![gutter, Span::styled(n.clone(), dim)]));
+                let st = if matches!(m.state, State::Error) {
+                    Style::default().fg(Color::Red)
+                } else {
+                    dim
+                };
+                out.push(Line::from(vec![gutter, Span::styled(n.clone(), st)]));
             }
         }
     }
@@ -1582,6 +2051,10 @@ mod e2e {
             tabs: Tabs::new(&BASE_TABS),
             composer: Composer::new("ai"),
             control: input::Control::Chat,
+            palette_idx: 0,
+            help_open: false,
+            scroll: 0,
+            scroll_max: std::cell::Cell::new(0),
             flow: None,
             known_agents: vec!["kernel".into(), "core".into()],
             pending: VecDeque::new(),
@@ -1611,6 +2084,7 @@ mod e2e {
             last_ctrl_c: None,
             q_streak: 0,
             last_q: None,
+            q_armed: false,
         }
     }
 
