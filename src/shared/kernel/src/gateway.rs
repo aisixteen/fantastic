@@ -157,6 +157,12 @@ pub struct KernelHandle {
     /// The daemon pid from `lock.json`, if known (best-effort, never used for
     /// liveness — HTTP is the source of truth).
     pub pid: Option<u32>,
+    /// The STABLE per-folder kernel identity from `.fantastic/identity.json` (minted
+    /// once, reused across restarts — the folder IS the kernel's identity). Empty if
+    /// unknown (e.g. a handle built before `ensure_guid`). Lets a client recognize
+    /// "the same kernel" across restarts and (later) dedup a kernel reached both
+    /// directly and via the relay by comparing this against the relay `owner_guid`.
+    pub guid: String,
     client: reqwest::Client,
 }
 
@@ -170,6 +176,7 @@ impl KernelHandle {
             base_url,
             rest_id,
             pid,
+            guid: String::new(),
             client,
         }
     }
@@ -225,6 +232,29 @@ impl Workspace {
         self.dir.join(".fantastic")
     }
 
+    /// Ensure a STABLE per-folder kernel guid at `.fantastic/identity.json` — minted
+    /// once, then reused across kernel restarts (the folder IS the kernel's
+    /// identity). Best-effort: a read/write failure just yields a fresh (unpersisted)
+    /// guid rather than erroring. Decentralized by design — no central registry; the
+    /// per-folder `.fantastic` is the source of truth.
+    pub fn ensure_guid(&self) -> String {
+        let path = self.fantastic_dir().join("identity.json");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(g) = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("guid").and_then(Value::as_str).map(String::from))
+            {
+                if !g.is_empty() {
+                    return g;
+                }
+            }
+        }
+        let guid = mint_guid();
+        let _ = std::fs::create_dir_all(self.fantastic_dir());
+        let _ = std::fs::write(&path, serde_json::json!({ "guid": guid }).to_string());
+        guid
+    }
+
     /// Pure-filesystem discovery — NO network. Reads `lock.json` (pid,
     /// best-effort) and scans the (nested) `agents/**/agent.json` tree for the
     /// `web.tools` agent (→ its `port`) and the `web_rest.tools` agent (→ its
@@ -240,8 +270,10 @@ impl Workspace {
         let Some(d) = self.discover() else {
             return Ok(None);
         };
-        let handle = KernelHandle::new(format!("http://127.0.0.1:{}", d.port), d.rest_id, d.pid);
+        let mut handle =
+            KernelHandle::new(format!("http://127.0.0.1:{}", d.port), d.rest_id, d.pid);
         if reflect_ping(&handle).await {
+            handle.guid = self.ensure_guid();
             Ok(Some(handle))
         } else {
             Ok(None)
@@ -254,9 +286,10 @@ impl Workspace {
         // A discoverable-but-dead workspace is a stale lock. Don't auto-kill;
         // surface a clear message so the user clears it deliberately.
         if let Some(d) = self.discover() {
-            let handle =
+            let mut handle =
                 KernelHandle::new(format!("http://127.0.0.1:{}", d.port), d.rest_id, d.pid);
             if reflect_ping(&handle).await {
+                handle.guid = self.ensure_guid();
                 return Ok(handle);
             }
             return Err(anyhow!(
@@ -737,6 +770,19 @@ fn free_loopback_port() -> Result<u16> {
     Ok(l.local_addr().context("local_addr")?.port())
 }
 
+/// Mint a 32-hex-char id — unique enough for a folder-kernel identity (it's minted
+/// ONCE and persisted). Not cryptographic; mirrors the relay-bridge `mint_guid`
+/// scheme (wall-clock nanos + pid + a stack address) with no extra deps.
+fn mint_guid() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
+    let pid = std::process::id() as u64;
+    let stack = &nanos as *const _ as u64;
+    format!("{:016x}{:016x}", nanos, pid ^ stack)
+}
+
 /// Filesystem discovery factored out of `Workspace` so it's unit-testable
 /// against a fixture `.fantastic/` dir. `fdir` is the `.fantastic` directory.
 fn discover_in(fdir: &Path) -> Option<Discovered> {
@@ -874,6 +920,20 @@ mod tests {
         assert_eq!(d.port, 8771);
         assert_eq!(d.rest_id, "web_rest_95803a");
         assert_eq!(d.pid, Some(89090));
+    }
+
+    #[test]
+    fn ensure_guid_mints_once_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(tmp.path());
+        let g1 = ws.ensure_guid();
+        assert_eq!(g1.len(), 32, "32 hex chars");
+        // Stable across calls — the folder identity, not per-run.
+        assert_eq!(ws.ensure_guid(), g1);
+        // Persisted to .fantastic/identity.json, and a fresh Workspace reads it back.
+        let id_path = tmp.path().join(".fantastic").join("identity.json");
+        assert!(id_path.exists());
+        assert_eq!(Workspace::new(tmp.path()).ensure_guid(), g1);
     }
 
     #[test]
