@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import importlib.resources
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -410,8 +411,16 @@ def reflect_root_extra(agent) -> dict:
     provider, or `null` when none is wired (state stays in RAM). The provider's own
     posture (open / sealed) is visible inline in the tree node, so a client reads, in
     ONE reflect, whether persistence is wired AND whether the wired leg is actually
-    open — no silent RAM/sealed surprise, no kernel guessing."""
-    return {"persistence": {"provider": _find_store(agent)}}
+    open — no silent RAM/sealed surprise, no kernel guessing.
+
+    Also surfaces the kernel's stable instance `guid` — the persistence-scoped
+    identity minted ONCE at boot and persisted into the root record's meta (unlike
+    run-scoped runtime/env/version, which are read inline from the environment each
+    reflect). Sourced from the persisted meta so it round-trips a reboot verbatim."""
+    return {
+        "persistence": {"provider": _find_store(agent)},
+        "guid": agent.record.get("guid"),
+    }
 
 
 async def _boot(id, payload, agent):
@@ -435,6 +444,16 @@ async def _boot(id, payload, agent):
     loop = _FlushLoop(agent)
     agent._fs_flush_loop = loop
     loop.start()
+    # Mint the kernel's stable instance guid ONCE (root only), AFTER the flush loop
+    # subscribes so `kernel.update`'s "updated" event is caught → write_stream →
+    # .fantastic/agent.json (no new persistence code). The seal, exactly as
+    # relay_connector mints its WS-path guid: auto-gen only FILLS an absent field
+    # (an explicit/existing guid always wins), and once written back it is never
+    # regenerated — the next hydration reads it verbatim, so the identity is stable
+    # across reboots. An in-memory (no store wired) boot still mints it into the
+    # record (just not persisted), so root reflect always carries a guid.
+    if agent.parent is None and not agent.record.get("guid"):
+        agent.ctx.update(agent.id, guid=uuid.uuid4().hex)
     return None
 
 

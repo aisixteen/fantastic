@@ -151,6 +151,23 @@ fn boot_disk(
         }
     };
 
+    // Stable instance guid (persistence-scoped). Mint ONCE — an
+    // explicit/existing guid in the persisted meta always wins and is read
+    // back verbatim on every subsequent boot. Persist through the COLD
+    // primitive (`write_record_at`), same as the virgin-record seed above: no
+    // store provider is wired this early. The `meta.clone()` below then carries
+    // the guid into the live root, and root reflect surfaces it.
+    let mut root_rec = root_rec;
+    if !root_rec.meta.contains_key("guid") {
+        root_rec.meta.insert(
+            "guid".to_string(),
+            serde_json::Value::String(crate::lifecycle::mint_guid()),
+        );
+        if opts.storage.is_disk() {
+            persistence::write_record_at(&root_record_path, &root_rec)?;
+        }
+    }
+
     // Construct the root agent — its on-disk dir is `.fantastic/`
     // (children live under `.fantastic/agents/<id>/`).
     let root = Agent::new(
@@ -177,11 +194,18 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     // write sidecars in InMemory mode will get an fs error from
     // their own code, which is correct (they shouldn't be writing
     // sidecars in a brain-kernel context).
+    // Ephemeral guid so root reflect always carries one, even with no disk.
+    // Minted, never persisted (InMemory never touches the filesystem).
+    let mut meta = Map::new();
+    meta.insert(
+        "guid".to_string(),
+        serde_json::Value::String(crate::lifecycle::mint_guid()),
+    );
     let root = Agent::new(
         AgentId(root_id.to_string()),
         None,
         None,
-        Map::new(),
+        meta,
         PathBuf::new(),
         false,
     );

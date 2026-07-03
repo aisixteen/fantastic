@@ -83,6 +83,14 @@ that agent's own `agent.json` (store-relative — no `.fantastic/.fantastic/…`
 nesting). `reflect readme=true` on the agent for its verb guide (read /
 keys / set / delete / replace / state_yaml).
 
+The root's `reflect` ALSO carries a stable **`guid`** — the kernel's own instance
+identity, minted ONCE at boot and persisted into the root record
+(`.fantastic/agent.json`). It is PERSISTENCE-scoped: it round-trips a reboot
+verbatim (an explicit `guid` always wins, a minted one is never regenerated) —
+unlike the run-scoped `env`/`version`, which are read inline each reflect. A relay
+peer advertises this value as its `owner_guid` (distinct from a relay LEG's own
+`guid` on a `relay_connector` record).
+
 ## Transports — every way to talk to this kernel
 
 The envelope is always `{"type":"<verb>", ...fields}`. `reflect` is

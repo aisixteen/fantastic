@@ -302,6 +302,15 @@ the next process start.
   duck-typed `reflect_root_extra(agent)` hook (no substrate↔bundle coupling),
   so a client sees in one reflect whether persistence is wired — and, with the
   provider's posture inline in the tree, whether the wired leg is actually open.
+  The root reflect ALSO carries `guid` — the kernel's stable INSTANCE identity,
+  minted ONCE at boot (the loader's `_boot`, root only; auto-fills an absent field
+  so an explicit `guid` wins and a minted one is never regenerated) and persisted
+  into the root record `.fantastic/agent.json`. Contributed by the same
+  `reflect_root_extra(agent)` hook, alongside `persistence`. Unlike the run-scoped
+  `env`/`version` (read inline each reflect), the guid is PERSISTENCE-scoped — it
+  round-trips a reboot verbatim, sourced from the persisted meta. A relay peer
+  advertises this value as its `owner_guid` (the kernel-INSTANCE guid — distinct
+  from a relay LEG's own `guid` on a `relay_connector` record).
 - **`render_html`** — duck-typed presentation. Any agent returning
   `{html:str}` from `render_html` can be rendered by a view. This is now
   a FRONTEND pattern (a `*.ts` content agent holds the body in its

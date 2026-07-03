@@ -34,6 +34,23 @@ struct ReflectUniformTests {
         }
     }
 
+    @Test func rootReflectSurfacesGuidFromMeta() async {
+        let kernel = makeKernel()
+        // Bare root has no guid in meta → reflect surfaces an explicit null
+        // (persistence-scoped field, always present on the root reflect).
+        let bare = await kernel.send("core", ["type": "reflect"])
+        #expect(bare["guid"].isNull)
+        // Seed a 32-hex guid into root meta → reflect surfaces it verbatim.
+        kernel.root?.updateMeta(["guid": .string("0123456789abcdef0123456789abcdef")])
+        let r = await kernel.send("core", ["type": "reflect"])
+        #expect(r["guid"].asString == "0123456789abcdef0123456789abcdef")
+        // Non-root reflects never carry guid.
+        _ = await kernel.send(
+            "core", ["type": "create_agent", "handler_module": "echo.tools", "id": "kid"])
+        let kid = await kernel.send("kid", ["type": "reflect"])
+        #expect(kid["guid"] == nil || kid["guid"].isNull)
+    }
+
     @Test func treeTiers() async {
         let kernel = makeKernel()
         _ = await kernel.send(

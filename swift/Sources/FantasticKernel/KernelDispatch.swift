@@ -172,6 +172,10 @@ extension Kernel {
             obj["persistence"] = .object([
                 "provider": findStore().map { JSON.string($0.value) } ?? .null
             ])
+            // The kernel's stable instance `guid`. PERSISTENCE-scoped (unlike the
+            // run-scoped runtime/env/version above): sourced from the persisted
+            // root meta, minted once at boot + read back verbatim thereafter.
+            obj["guid"] = target.metaValue(forKey: "guid") ?? .null
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)
