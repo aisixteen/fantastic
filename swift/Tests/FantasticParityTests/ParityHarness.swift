@@ -227,6 +227,78 @@
             }
         }
 
+        /// Both runtimes' ROOT reflect carries a stable instance `guid`:
+        /// 32 lowercase-hex chars, minted ONCE at boot and persisted, so it
+        /// is STABLE across a reboot of the same workdir — and PER-RUNTIME
+        /// (each independently minted in its OWN workdir, so not a shared
+        /// constant; same convention as `runtime`/root-id, which differ by
+        /// design). No value is hardcoded; the assertion is on shape +
+        /// invariants only.
+        @Test func rootGuidPerRuntimeAndStableParity() async throws {
+            guard let binary = pythonBinaryURL() else { return }
+            // Separate workdirs — a SHARED `.fantastic/agent.json` would make
+            // both runtimes rehydrate the SAME persisted guid (defeating the
+            // per-runtime check); distinct dirs each mint their own.
+            let pyDir = makeTempDir()
+            let swDir = makeTempDir()
+            defer {
+                try? FileManager.default.removeItem(at: pyDir)
+                try? FileManager.default.removeItem(at: swDir)
+            }
+
+            // Python: wire a `file_bridge` persistence provider (child of root,
+            // rooted at `.fantastic`, opened) FIRST. Python persists ONLY through
+            // a discovered provider (NO FALLBACK) — with none wired the flush is a
+            // no-op and the minted guid stays in RAM, re-minted every boot. This is
+            // the apples-to-apples "persistence-on" config matching Swift's disk
+            // mode (which persists the root record at cold-seed). The create routes
+            // through the `call` path, so the root BOOTS (the mint fires) and the
+            // flush persists the guid into `.fantastic/agent.json`.
+            _ = try pythonOneShot(
+                binary: binary, workdir: pyDir, agentId: "kernel_state", verb: "create_agent",
+                args: [
+                    "handler_module": "file_bridge.tools", "root": ".fantastic",
+                    "ingress_rule": "allow_all",
+                ])
+            // Two reflect calls in the SAME workdir must read the guid back
+            // verbatim from disk (reboot stability — never regenerated).
+            let pyR1 = try pythonOneShot(
+                binary: binary, workdir: pyDir, agentId: "kernel", verb: "reflect")
+            let pyGuid1 = pyR1["guid"].asString
+            let pyR2 = try pythonOneShot(
+                binary: binary, workdir: pyDir, agentId: "kernel", verb: "reflect")
+            let pyGuid2 = pyR2["guid"].asString
+
+            // Swift: `startKernel(workdir:)` mints+persists on first boot; a
+            // second boot of the same dir rehydrates the same guid from disk.
+            let sw1 = try await startKernel(workdir: swDir.path)
+            let swGuid1 = await sw1.send(
+                AgentId("core"), .object(["type": .string("reflect")]))["guid"].asString
+            let sw2 = try await startKernel(workdir: swDir.path)
+            let swGuid2 = await sw2.send(
+                AgentId("core"), .object(["type": .string("reflect")]))["guid"].asString
+
+            // Shape: 32 lowercase-hex on every runtime.
+            for (label, g) in [("python", pyGuid1), ("swift", swGuid1)] {
+                #expect(
+                    isThirtyTwoLowerHex(g),
+                    "\(label) root reflect guid not 32 lowercase-hex: \(g ?? "nil")")
+            }
+            // Stable across a reboot of the SAME workdir (never regenerated).
+            #expect(
+                pyGuid1 == pyGuid2,
+                "python guid regenerated across reboot: \(pyGuid1 ?? "nil") != \(pyGuid2 ?? "nil")")
+            #expect(
+                swGuid1 == swGuid2,
+                "swift guid regenerated across reboot: \(swGuid1 ?? "nil") != \(swGuid2 ?? "nil")")
+            // PER-RUNTIME: independently minted, not a shared constant (like
+            // `runtime`/root-id differ by design). Distinct workdirs ⇒ distinct
+            // random guids.
+            #expect(
+                pyGuid1 != swGuid1,
+                "guid identical across runtimes — not per-runtime (py=\(pyGuid1 ?? "nil"))")
+        }
+
         /// `reflect tree=ids` → a flat string-id list (root first) on
         /// both runtimes; `reflect bundles=all` → a `{name, handler_module}`
         /// array on both (don't pin the set — bundle lists differ).
@@ -314,6 +386,12 @@
                 swReply["error"].asString != nil,
                 "swift missing error on missing agent: \(swReply.serialize())")
         }
+    }
+
+    /// True iff `s` is exactly 32 lowercase-hex chars (the guid contract).
+    private func isThirtyTwoLowerHex(_ s: String?) -> Bool {
+        guard let s = s, s.count == 32 else { return false }
+        return s.allSatisfy { $0.isHexDigit && ($0.isNumber || $0.isLowercase) }
     }
 
     private func makeTempDir() -> URL {

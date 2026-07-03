@@ -38,7 +38,10 @@ to the relay (the relay STORES + reflects it into `list_peers` entries + a
 `peer_updated` event, and never interprets it). Well-known keys:
 - `role` — `"manager" | "kernel"` (default `kernel`). A **manager** owns kernels and
   exposes control; a **kernel** is driven (standalone, or owned by a manager).
-- `owner_guid` — the managing peer's guid (`null` = standalone).
+- `owner_guid` — the managing peer's **kernel-instance guid** (that peer's
+  ROOT-record `guid`, surfaced as the top-level `guid` in its root `reflect` — the
+  kernel's own persisted identity, NOT a relay LEG's `guid`; this connector's own
+  `guid` below is the WS-path leg id, a separate identity). `null` = standalone.
 - `exposes` — an opaque control-surface list the peer advertises (e.g.
   `["stop","restart"]`).
 

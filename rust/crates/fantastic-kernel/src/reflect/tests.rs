@@ -83,6 +83,40 @@ async fn root_reflect_is_uniform_no_primer_keys() {
 }
 
 #[tokio::test]
+async fn root_reflect_carries_a_32hex_guid() {
+    let kernel = Arc::new(Kernel::new());
+    let mut meta = Map::new();
+    meta.insert(
+        "guid".to_string(),
+        json!("0123456789abcdef0123456789abcdef"),
+    );
+    let root = mk_agent_meta("core", None, meta);
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let v = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
+    let guid = v["guid"].as_str().expect("root reflect has a guid");
+    assert_eq!(guid.len(), 32);
+    assert!(guid
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+}
+
+#[tokio::test]
+async fn child_reflect_has_no_guid() {
+    // guid is persistence-scoped + root-only. A child record never carries a
+    // `guid` in its meta (only the root record does), so a child reflect must
+    // not surface one — `apply_reflect_flags` only injects it on the root.
+    let kernel = Arc::new(Kernel::new());
+    let root = mk_agent("core", None);
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let child = mk_agent("kid_1", Some(AgentId::from("core")));
+    let _rx2 = kernel.register(Arc::clone(&child));
+    let v = bare_reflect(&kernel, &child, &json!({"type": "reflect"}));
+    assert!(v.get("guid").is_none(), "guid must be root-only");
+}
+
+#[tokio::test]
 async fn child_reflect_is_uniform() {
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);

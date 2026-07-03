@@ -105,6 +105,15 @@ pub fn apply_reflect_flags(
     // .fantastic workdir). Same field names + key order (runtime → env →
     // version) across all four runtimes.
     if target.parent_id.is_none() {
+        // Stable kernel instance guid — PERSISTENCE-scoped (sourced from the
+        // persisted root meta, minted once at boot), unlike runtime/env/version
+        // which are run-scoped. Always present: disk boot reads it back, an
+        // in-memory boot mints an ephemeral one.
+        if let Ok(meta) = target.meta.read() {
+            if let Some(guid) = meta.get("guid").and_then(Value::as_str) {
+                obj.insert("guid".to_string(), json!(guid));
+            }
+        }
         obj.insert("runtime".to_string(), json!("rust"));
         obj.insert(
             "env".to_string(),

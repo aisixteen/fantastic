@@ -82,10 +82,16 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
         storage: .inMemory,
         bundles: defaultBundleRegistry()
     )
+    // Mint an ephemeral guid into the root meta so reflect always carries one.
+    // No-disk boot → not persisted, just present in RAM (persistence-scoped
+    // field, but the in-memory kernel still needs a value to reflect). Mirrors
+    // the disk path's mint; explicit is impossible here (virgin RAM root).
+    let ephemeralGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     let root = Agent(
         id: AgentId("core"),
         handlerModule: nil,
-        parentId: nil
+        parentId: nil,
+        meta: ["guid": .string(ephemeralGuid)]
     )
     kernel.register(root)
     kernel.setRoot(root)
@@ -149,20 +155,44 @@ public func startKernel(
     // provider (see PersistenceProvider). Mirrors py write_record / rust
     // write_record_at, so a swift workdir handed to py/rust carries the root.
     let rootRecordFile = dotFantastic.appendingPathComponent("agent.json")
-    if !fm.fileExists(atPath: rootRecordFile.path) {
+    // Determine the kernel's stable instance `guid`. Persistence-scoped (unlike
+    // run-scoped runtime/env/version): read it back verbatim from the persisted
+    // root record if present; otherwise MINT a 32-hex guid ONCE and persist it
+    // through the SAME cold serializePretty primitive. Explicit/existing always
+    // wins — a minted guid is never regenerated (next boot reads it back). Covers
+    // BOTH the virgin-dir and already-exists-but-guidless cases. Mirrors the relay
+    // guid idiom in KernelBridge.bootRelay + py write_record / rust.
+    let rootGuid: String
+    if fm.fileExists(atPath: rootRecordFile.path),
+        let data = try? Data(contentsOf: rootRecordFile),
+        let parsed = try? JSON.parse(data),
+        case .object(var obj) = parsed
+    {
+        if let existing = obj["guid"]?.asString, !existing.isEmpty {
+            rootGuid = existing
+        } else {
+            rootGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            obj["guid"] = .string(rootGuid)
+            try? JSON.object(obj).serializePretty(indent: 2).data(using: .utf8)?
+                .write(to: rootRecordFile)
+        }
+    } else {
+        rootGuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let rec: JSON = .object([
             "id": .string("core"), "handler_module": .null, "parent_id": .null,
+            "guid": .string(rootGuid),
         ])
         try? rec.serializePretty(indent: 2).data(using: .utf8)?.write(to: rootRecordFile)
     }
 
-    // Register a bare `core` root agent. If the workdir has a
-    // persisted `core` record, `kernel.load()` below will replace
-    // this one with the disk-backed shape (carrying meta etc.).
+    // Register a bare `core` root agent carrying the persisted guid. If the
+    // workdir has a persisted `core` record under agents/, `kernel.load()` below
+    // will replace this one with the disk-backed shape (carrying meta etc.).
     let root = Agent(
         id: AgentId("core"),
         handlerModule: nil,
         parentId: nil,
+        meta: ["guid": .string(rootGuid)],
         rootPath: dotFantastic
     )
     kernel.register(root)
@@ -200,6 +230,13 @@ public func startKernel(
                     .data(using: .utf8) ?? Data())
             throw error
         }
+    }
+
+    // Ensure the in-memory root always carries the guid — hydration/load may
+    // have swapped in a synthesized root with empty meta (rare agents/-has-root
+    // path). Sourced from the persisted root record, never regenerated.
+    if let r = kernel.root, r.metaValue(forKey: "guid")?.asString == nil {
+        _ = r.updateMeta(["guid": .string(rootGuid)])
     }
 
     _ = portHint  // unused now; CLI / daemon mode passes port via
