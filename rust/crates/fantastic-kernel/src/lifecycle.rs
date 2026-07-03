@@ -40,6 +40,27 @@ pub fn mint_id(handler_module: &str) -> String {
     format!("{bundle}_{hex6}")
 }
 
+/// Mint a stable 32-hex-char (lowercase) kernel instance guid.
+///
+/// Entropy = wall-clock nanos + pid + a stack address — NOT cryptographic,
+/// only needs per-boot uniqueness. This is the kernel-side twin of
+/// `fantastic-bridge`'s `mint_guid`; we can't import that here because the
+/// bridge depends on the kernel, not the reverse. Called once at boot when the
+/// root record carries no `guid`; an explicit/existing guid always wins.
+pub fn mint_guid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut stack: u64 = 0;
+    let stack_ptr = &mut stack as *mut u64 as u64;
+    let pid = std::process::id() as u64;
+    let hi = (nanos as u64) ^ stack_ptr;
+    let lo = ((nanos >> 64) as u64) ^ pid ^ stack_ptr.rotate_left(17);
+    format!("{hi:016x}{lo:016x}")
+}
+
 /// Implementation of the `create_agent` system verb.
 ///
 /// `payload` shape (matches the workdir wire format):

@@ -105,3 +105,57 @@ fn bootstrap_weak_loads_unknown_handler_modules() {
     assert!(ghost.join("agent.json").exists());
     shutdown(tmp.path()).unwrap();
 }
+
+/// Helper: pull the root instance guid out of a booted kernel's live root meta.
+fn root_guid(booted: &BootedKernel) -> String {
+    booted
+        .kernel
+        .root()
+        .expect("root")
+        .meta
+        .read()
+        .unwrap()
+        .get("guid")
+        .and_then(Value::as_str)
+        .expect("root carries a guid")
+        .to_string()
+}
+
+#[test]
+fn boot_mints_a_32hex_guid_and_persists_it_stably() {
+    let tmp = TempDir::new().unwrap();
+    // First boot mints + persists the guid.
+    let g1 = {
+        let booted =
+            bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let g = root_guid(&booted);
+        shutdown(tmp.path()).unwrap();
+        g
+    };
+    assert_eq!(g1.len(), 32);
+    assert!(g1
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    // Guid is persisted on the root record.
+    let raw = std::fs::read_to_string(tmp.path().join(".fantastic/agent.json")).unwrap();
+    assert!(raw.contains(&g1), "guid must be persisted to agent.json");
+    // Second boot of the SAME dir reads it back verbatim — minted ONCE.
+    let g2 = {
+        let booted =
+            bootstrap(BundleRegistry::new(), BootstrapOptions::daemon(tmp.path())).expect("boot2");
+        let g = root_guid(&booted);
+        shutdown(tmp.path()).unwrap();
+        g
+    };
+    assert_eq!(g1, g2, "guid must be identical across boots");
+}
+
+#[test]
+fn in_memory_boot_mints_an_ephemeral_guid() {
+    let booted = bootstrap(BundleRegistry::new(), BootstrapOptions::in_memory()).expect("boot");
+    let g = root_guid(&booted);
+    assert_eq!(g.len(), 32);
+    assert!(g
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+}

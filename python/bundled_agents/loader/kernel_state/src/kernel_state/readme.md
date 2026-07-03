@@ -185,6 +185,14 @@ lock + the live provider. And **one store serves both**: bundles that need a sid
 `.fantastic` store and write store-relative `agents/<id>/<file>`, so their state lands
 next to their own `agent.json` — one bridge, records + sidecars together.
 
+The root's `reflect` ALSO carries a stable **`guid`** — the kernel's own instance
+identity, minted ONCE at boot and persisted into the root record
+(`.fantastic/agent.json`). It is PERSISTENCE-scoped: it round-trips a reboot
+verbatim (an explicit `guid` always wins, a minted one is never regenerated) —
+unlike the run-scoped `env`/`version`, which are read inline each reflect. A relay
+peer advertises this value as its `owner_guid` (distinct from a relay LEG's own
+`guid` on a `relay_connector` record).
+
 ## Two kernels — host + browser frontend
 
 This is the HOST kernel (Python, `*.tools` bundles). A second kernel — a
