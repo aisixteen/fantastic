@@ -117,6 +117,18 @@ Nothing above is TS-specific. To serve view package *X*:
 The host stays a dumb static server; each view package is self-contained and
 swappable. Weak binding is the beauty.
 
+## The native sibling — `cli_loader`
+
+`web_loader` is one **sub-kernel** anchor. The `fantastic` CLI writes another of the
+*same shape* — `cli_loader = kernel_state @ .fantastic/cli` (a literal sibling of
+`.fantastic/web`) — but realizes it differently: the CLI is in-proc with disk, so it
+**native-writes** the anchor + namespace directly (no `proxy_loader` over WS, no
+served bytes), because the WS RPC surface exists only for a sandboxed *browser*. Same
+config shape, different realization: `web` is the **passive/served** sub-kernel,
+`cli` the **initiator** one. Sub-kernels are a generic construct (web is not a special
+case) — the full model + roles live in the CLI contract
+[`src/cli/design/25_subkernels.md`](../../cli/design/25_subkernels.md).
+
 ---
 
 *Part of **Aisixteen Fantastic** — licensed **AGPL-3.0-or-later** ([`../LICENSE`](../LICENSE)). "Aisixteen Fantastic" and "AISIXTEEN" (USPTO reg. 7,238,635) are trademarks of AISixteen; the license covers the code only, not the marks — forks must rename. See the [root README](../README.md#license--brand).*
