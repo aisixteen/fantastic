@@ -18,7 +18,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,11 +45,12 @@ mod hub;
 mod input;
 mod kernels;
 mod movie;
+mod subkernel;
 use chat::{Body, Composer, Route, State, Tabs, WsCmd};
 use fantastic_brain as ai;
 use fantastic_host::gateway::{self, KernelHandle};
-use fantastic_host::registry;
 use fantastic_term::{used_rows, TerminalSession};
+use subkernel::{Role, SubKernel};
 
 /// The client_id the brain emits its streaming events to (our inbox key).
 const CLIENT_ID: &str = "fantastic";
@@ -99,13 +100,14 @@ const RUNTIMES: [gateway::Runtime; 3] = [
 /// Result of attaching/spawning a folder kernel (from `+ new`, or selecting an
 /// existing folder square). Delivered into the `select!` loop.
 enum KernelTaskResult {
-    /// The folder kernel is live — switch the active kernel to it.
+    /// The sub-kernel is live — switch the active kernel to it.
     Attached {
         dir: PathBuf,
         runtime: gateway::Runtime,
         handle: KernelHandle,
-        /// True for `+ new` (record it in the registry); false when re-selecting one.
-        remember: bool,
+        /// Its role on the vis plane: `FolderHost` when `dir` is the launch folder,
+        /// else `Foreign` (a kernel someone else spawned that we attached to).
+        role: Role,
     },
     /// Attach/spawn failed — surfaced on the Kernels screen, never a silent failure.
     Failed(String),
@@ -215,12 +217,17 @@ struct App {
     /// Set when the hub should re-reflect the kernel (agents may have changed);
     /// the tick loop does the async refresh and clears it.
     hub_dirty: bool,
-    /// The Kernels screen (the top nav rung): the row of kernel squares + selection.
+    /// The Kernels screen (the top nav rung): the row of sub-kernel nodes + selection.
     kernels_view: kernels::KernelsView,
-    /// The persisted list of folder kernels (`<app_home>/kernels.json`).
-    registry: registry::Registry,
-    /// Set when the Kernels screen should re-reflect-ping its folder kernels (on
-    /// entering it, or after creating one); the tick loop does the async refresh.
+    /// The launch folder the CLI is anchored to — `cwd`. Its `.fantastic/cli` is the
+    /// initiator sub-kernel's namespace; its `.fantastic` is the folder-host's home.
+    cwd: PathBuf,
+    /// Session-attached sub-kernels beyond `self` + `cli` (the discovered cwd
+    /// folder-host, plus any foreigners attached via `+ attach`). Re-pinged for
+    /// liveness on each Kernels refresh. Clean break: nothing persisted (no registry).
+    attached: Vec<SubKernel>,
+    /// Set when the Kernels screen should re-reflect-ping its sub-kernels (on
+    /// entering it, or after attaching one); the tick loop does the async refresh.
     kernels_dirty: bool,
     /// The folder browser overlay while creating a new kernel (`+ new`).
     browser: Option<browser::Browser>,
@@ -272,7 +279,63 @@ impl App {
     }
 }
 
-pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
+/// The optional per-folder **host** sub-kernel for `cwd`, discovered from
+/// `<cwd>/.fantastic` — a singleton, differentiated from foreigners (I own this
+/// folder). `None` if the folder has no discoverable kernel. `live` reflect-pings it
+/// (pass `false` at boot to seed dormant without a network round-trip). The runtime
+/// defaults to Rust for a later spawn (the only end-to-end-wired runtime; matches
+/// the CLI's `--runtime` default).
+async fn discover_folder_host(cwd: &Path, live: bool) -> Option<SubKernel> {
+    let ws = gateway::Workspace::new(cwd.to_path_buf());
+    ws.discover()?; // no `.fantastic` kernel here → no folder-host node
+    let alive = live && ws.attach().await.ok().flatten().is_some();
+    Some(SubKernel::folder(
+        cwd.to_path_buf(),
+        gateway::Runtime::Rust,
+        Role::FolderHost,
+        alive,
+    ))
+}
+
+/// The optional `web` **passive** sub-kernel for `cwd` — a config-only *dormant* node
+/// when `<cwd>/.fantastic/web` exists. `web` only hydrates when a browser loads it
+/// (out of CLI scope — weak binding), so it's never `live` here; it exists on the
+/// plane to show `web` is just another sub-kernel, not a special case.
+fn discover_web(cwd: &Path) -> Option<SubKernel> {
+    let web_dir = cwd.join(".fantastic").join("web");
+    web_dir.is_dir().then(|| SubKernel::web(web_dir))
+}
+
+/// Rebuild the Kernels-screen sub-kernel list: `self` · `cli` · the session-attached
+/// nodes (folder-host + foreigners), each re-pinged for liveness. This is the
+/// `.fantastic`-driven discovery result — no registry.
+async fn refresh_subkernels(app: &mut App) {
+    let mut subs = vec![
+        SubKernel::self_manager(),
+        SubKernel::cli(app.cwd.join(".fantastic").join("cli")),
+    ];
+    for node in &app.attached {
+        let alive = match &node.dir {
+            Some(dir) => gateway::Workspace::new(dir.clone())
+                .attach()
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            None => matches!(node.status, subkernel::Status::Live),
+        };
+        let mut n = node.clone();
+        n.status = if alive {
+            subkernel::Status::Live
+        } else {
+            subkernel::Status::Dormant
+        };
+        subs.push(n);
+    }
+    app.kernels_view.rebuild(subs);
+}
+
+pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Result<()> {
     // One-shot kernel command replies flow back here as (source_id, text).
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
     // The final result of an AI turn (the blocking `response`, or `✗ error`) — the
@@ -325,17 +388,22 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
     let known_agents = active.agent_ids().await;
     // The lobby tree — the active kernel's live agent hierarchy.
     let hub = hub::Hub::from_reflect(&active.reflect_tree().await);
-    // The persisted folder-kernel list → seed the Kernels screen (offline until the
-    // first reflect-ping when you enter it).
-    let registry = registry::Registry::load();
+    // `.fantastic`-driven discovery: the optional `web` (passive, dormant) + cwd
+    // folder-host (seeded dormant — reflect-pinged on entering the Kernels screen).
+    // `self` + `cli` are synthetic and always present; foreigners are added at
+    // runtime via `+ attach`.
+    let mut attached: Vec<SubKernel> = Vec::new();
+    attached.extend(discover_web(&cwd));
+    attached.extend(discover_folder_host(&cwd, false).await);
     let mut kernels_view = kernels::KernelsView::default();
-    kernels_view.rebuild(
-        registry
-            .entries
-            .iter()
-            .map(|e| (e.dir.clone(), e.runtime, false))
-            .collect(),
-    );
+    {
+        let mut subs = vec![
+            SubKernel::self_manager(),
+            SubKernel::cli(cwd.join(".fantastic").join("cli")),
+        ];
+        subs.extend(attached.iter().cloned());
+        kernels_view.rebuild(subs);
+    }
 
     let mut app = App {
         kernel,
@@ -371,7 +439,8 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
         hub,
         hub_dirty: false,
         kernels_view,
-        registry,
+        cwd,
+        attached,
         kernels_dirty: false,
         browser: None,
         new_runtime: None,
@@ -448,15 +517,22 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
             Some(res) = kernel_task_rx.recv() => {
                 app.kernels_busy = false;
                 match res {
-                    KernelTaskResult::Attached { dir, runtime, handle, remember } => {
-                        if remember {
-                            app.registry.add(dir.clone(), runtime);
-                            let _ = app.registry.save();
+                    KernelTaskResult::Attached { dir, runtime, handle, role } => {
+                        // The sub-kernel descriptor for this attach (Live; carries the
+                        // kernel-instance guid for dedup + reconnect).
+                        let mut sub = SubKernel::folder(dir.clone(), runtime, role, true);
+                        sub.guid = (!handle.guid.is_empty()).then(|| handle.guid.clone());
+                        // Remember it on the vis plane for this session (clean break:
+                        // nothing persisted). Dedupe by dir — re-attaching updates it.
+                        if let Some(existing) = app
+                            .attached
+                            .iter_mut()
+                            .find(|n| n.dir.as_deref() == Some(dir.as_path()))
+                        {
+                            *existing = sub.clone();
+                        } else {
+                            app.attached.push(sub.clone());
                         }
-                        let label = dir
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| dir.to_string_lossy().into_owned());
                         // Open the live emit-stream mirror to this kernel + watch its
                         // brain, so remote @ai / agent events render like the in-proc
                         // ones. (`None` if the socket won't open — reflect+verbs still
@@ -467,10 +543,8 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
                         if let Some(ws) = &app.ws_stream {
                             ws.watch(BRAIN_ID);
                         }
-                        app.active = kernels::ActiveKernel::Remote(kernels::RemoteKernel {
-                            handle,
-                            label,
-                        });
+                        app.active =
+                            kernels::ActiveKernel::Remote(kernels::RemoteKernel { handle, sub });
                         app.known_agents = app.active.agent_ids().await;
                         app.kernels_msg = None;
                         app.brain_ready = false; // a fresh kernel — re-provision on first @ai
@@ -534,21 +608,30 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize) -> Result<()> {
                     app.hub = hub::Hub::from_reflect(&app.active.reflect_tree().await);
                     app.hub.sel = sel.min(app.hub.nodes().len().saturating_sub(1));
                 }
-                // Reflect-ping each registry folder kernel (live/offline) when the
-                // Kernels screen is up and dirty — entering it, or after creating one.
+                // Rebuild the sub-kernel plane (self · cli · attached) with fresh
+                // liveness when the Kernels screen is up and dirty — entering it, or
+                // after attaching one. Also re-discovers the cwd folder-host if it
+                // came up since boot.
                 if app.kernels_dirty && app.phase == Phase::Kernels {
                     app.kernels_dirty = false;
-                    let mut folders = Vec::new();
-                    for e in &app.registry.entries {
-                        let live = gateway::Workspace::new(e.dir.clone())
-                            .attach()
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some();
-                        folders.push((e.dir.clone(), e.runtime, live));
+                    // Pick up a `web` sub-kernel that appeared since boot (dormant node
+                    // — kept first so the plane reads self · cli · web · folder · …).
+                    if !app.attached.iter().any(|n| n.name == "web") {
+                        if let Some(web) = discover_web(&app.cwd) {
+                            app.attached.insert(0, web);
+                        }
                     }
-                    app.kernels_view.rebuild(folders);
+                    // Pick up a folder-host that appeared since boot (not yet tracked).
+                    if !app
+                        .attached
+                        .iter()
+                        .any(|n| n.dir.as_deref() == Some(app.cwd.as_path()))
+                    {
+                        if let Some(host) = discover_folder_host(&app.cwd, false).await {
+                            app.attached.push(host);
+                        }
+                    }
+                    refresh_subkernels(&mut app).await;
                 }
             }
             else => break,
@@ -864,7 +947,14 @@ fn handle_input(app: &mut App, ev: Event) {
             }
             KeyCode::Enter => {
                 if let Some((dir, c)) = app.new_runtime.take() {
-                    spawn_attach(app, dir, RUNTIMES[c], true);
+                    // The launch folder is the singleton folder-host; any other is a
+                    // foreigner (a kernel we attach to, not our own folder).
+                    let role = if dir == app.cwd {
+                        Role::FolderHost
+                    } else {
+                        Role::Foreign
+                    };
+                    spawn_attach(app, dir, RUNTIMES[c], role);
                 }
             }
             KeyCode::Esc => app.new_runtime = None,
@@ -1061,44 +1151,56 @@ fn enter_hub(app: &mut App) {
     app.hub_dirty = true;
 }
 
-/// Act on the selected Kernels square: `★ RAM` → make the in-proc kernel active and
-/// drop into its Hub; a folder kernel → attach it and switch; `+ new` → open the
-/// folder browser.
+/// Act on the selected Kernels node: a **native** sub-kernel (`★ self` / `cli`) →
+/// drive the in-proc manager and drop into its Hub; a **folder-host / foreigner** →
+/// attach it and switch; a **passive** node (`web`/relay) → a note (it hydrates in a
+/// browser, not the CLI — weak binding); `+ attach` → open the folder browser.
 fn select_square(app: &mut App) {
     if app.kernels_busy {
         return; // an attach is already in flight
     }
     // Read what we need first (releases the `kernels_view` borrow before mutating).
     enum Pick {
-        Ram,
-        Folder(PathBuf, gateway::Runtime),
-        New,
+        Native,
+        Folder(PathBuf, gateway::Runtime, Role),
+        Passive(String),
+        Attach,
     }
     let pick = match app.kernels_view.selected() {
-        kernels::Square::Ram => Pick::Ram,
-        kernels::Square::Folder { dir, runtime, .. } => Pick::Folder(dir.clone(), *runtime),
-        kernels::Square::New => Pick::New,
+        kernels::Node::Kernel(s) if s.role.is_native() => Pick::Native,
+        kernels::Node::Kernel(s) => match (s.dir.clone(), s.runtime) {
+            (Some(dir), Some(rt)) => Pick::Folder(dir, rt, s.role),
+            // A served sub-kernel (web) or relay peer: config-only — not hydratable
+            // from the CLI (it opens in a browser / over a transport).
+            _ => Pick::Passive(s.name.clone()),
+        },
+        kernels::Node::Attach => Pick::Attach,
     };
     match pick {
-        Pick::Ram => {
+        Pick::Native => {
             app.active = kernels::ActiveKernel::InProc(Arc::clone(&app.kernel));
             app.ws_stream = None; // back to in-proc streaming — drop the remote mirror
             app.hub_dirty = true;
             enter_hub(app);
         }
-        Pick::Folder(dir, rt) => spawn_attach(app, dir, rt, false),
-        Pick::New => {
-            let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            app.browser = Some(browser::Browser::open(start));
+        Pick::Folder(dir, rt, role) => spawn_attach(app, dir, rt, role),
+        Pick::Passive(name) => {
+            app.kernels_msg = Some(format!(
+                "{name}: served sub-kernel — opens in a browser, not the CLI"
+            ));
+        }
+        Pick::Attach => {
+            app.browser = Some(browser::Browser::open(app.cwd.clone()));
             app.kernels_msg = None;
         }
     }
 }
 
-/// Attach (or spawn) the folder kernel at `dir` with `runtime`, in a background
-/// task; the result comes back via `kernel_task_tx` → the `select!` loop, which
-/// switches the active kernel to it. `remember` records it in the registry.
-fn spawn_attach(app: &mut App, dir: PathBuf, runtime: gateway::Runtime, remember: bool) {
+/// Attach (or spawn) the sub-kernel at `dir` with `runtime`, in a background task;
+/// the result comes back via `kernel_task_tx` → the `select!` loop, which switches
+/// the active kernel to it. `role` is `FolderHost` for the launch folder, else
+/// `Foreign`.
+fn spawn_attach(app: &mut App, dir: PathBuf, runtime: gateway::Runtime, role: Role) {
     app.kernels_busy = true;
     app.kernels_msg = Some(format!(
         "attaching {} ({})…",
@@ -1115,7 +1217,7 @@ fn spawn_attach(app: &mut App, dir: PathBuf, runtime: gateway::Runtime, remember
                 dir,
                 runtime,
                 handle,
-                remember,
+                role,
             },
             Err(e) => KernelTaskResult::Failed(e.to_string()),
         };
@@ -1879,19 +1981,18 @@ fn render_kernels(f: &mut Frame, full: Rect, app: &App) {
     let mag = Style::default()
         .fg(Color::LightMagenta)
         .add_modifier(Modifier::BOLD);
-    let squares = &app.kernels_view.squares;
-    if squares.is_empty() {
+    let nodes = &app.kernels_view.nodes;
+    if nodes.is_empty() {
         return;
     }
-    let sel = app.kernels_view.sel.min(squares.len() - 1);
+    let sel = app.kernels_view.sel.min(nodes.len() - 1);
     let box_w = 16_i32;
     let box_h = 5_i32;
     let col_step = box_w + 2;
-    let n = squares.len() as i32;
+    let n = nodes.len() as i32;
     let total_w = n * col_step - 2;
     let base_x = full.x as i32 + 4 + ((full.width as i32 - 8 - total_w).max(0)) / 2;
     let top = full.y as i32 + 6;
-    let active_inproc = matches!(app.active, kernels::ActiveKernel::InProc(_));
 
     let buf = f.buffer_mut();
     str_at(
@@ -1899,22 +2000,24 @@ fn render_kernels(f: &mut Frame, full: Rect, app: &App) {
         full,
         full.x as i32 + 4,
         full.y as i32 + 4,
-        "kernels — pick one",
+        "sub-kernels — pick one",
         mag,
     );
-    for (i, sq) in squares.iter().enumerate() {
+    for (i, node) in nodes.iter().enumerate() {
         let selected = i == sel;
-        let label = sq.label();
-        let (l2, l3): (String, String) = match sq {
-            kernels::Square::Ram => (
-                "in-proc".into(),
-                if active_inproc { "active" } else { "live" }.into(),
-            ),
-            kernels::Square::Folder { runtime, live, .. } => (
-                runtime.as_str().into(),
-                if *live { "live" } else { "offline" }.into(),
-            ),
-            kernels::Square::New => ("kernel".into(), String::new()),
+        let label = node.label();
+        let (l2, l3): (String, String) = match node {
+            kernels::Node::Kernel(s) => {
+                // This node is the currently-driven kernel? `self` when in-proc; the
+                // matching folder when a Remote sub-kernel is active. (`cli` shares the
+                // in-proc kernel but reads `● live`, so only one box says `active`.)
+                let is_active = match &app.active {
+                    kernels::ActiveKernel::InProc(_) => s.role == Role::SelfManager,
+                    kernels::ActiveKernel::Remote(r) => s.dir.is_some() && r.sub.dir == s.dir,
+                };
+                s.vis_lines(is_active)
+            }
+            kernels::Node::Attach => ("folder".into(), String::new()),
         };
         let white = Style::default()
             .fg(Color::White)
@@ -2117,9 +2220,9 @@ fn render_hub(f: &mut Frame, full: Rect, app: &App) {
     let by = |n: &hub::HubNode| top + (n.depth as i32) * row_step;
     let ccol = |n: &hub::HubNode| bx(n) + box_w / 2;
 
-    // Heading names the active kernel (the RAM kernel, or a folder kernel's label).
+    // Heading names the active kernel (the in-proc manager, or a sub-kernel's name).
     let heading = match &app.active {
-        kernels::ActiveKernel::Remote(r) => format!("{} — pick an agent", r.label),
+        kernels::ActiveKernel::Remote(r) => format!("{} — pick an agent", r.sub.name),
         kernels::ActiveKernel::InProc(_) => "the agents — pick one".to_string(),
     };
     let buf = f.buffer_mut();
@@ -2852,7 +2955,8 @@ mod e2e {
             hub: hub::Hub::from_reflect(&json!({})),
             hub_dirty: false,
             kernels_view: kernels::KernelsView::default(),
-            registry: registry::Registry::default(),
+            cwd: PathBuf::from("/tmp/fantastic-test"),
+            attached: Vec::new(),
             kernels_dirty: false,
             browser: None,
             new_runtime: None,

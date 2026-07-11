@@ -4,7 +4,7 @@
 //! into its in-proc kernel and drives everything through the one primitive —
 //! `kernel.send(target, payload)`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,7 +13,6 @@ use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
 use serde_json::{json, Map, Value};
 
 pub mod gateway;
-pub mod registry;
 pub mod secret;
 pub use gateway::{KernelHandle, Runtime, Workspace};
 
@@ -87,6 +86,52 @@ pub fn app_home() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Ensure the **`cli` sub-kernel** anchor + namespace at `<cwd>/.fantastic/cli` —
+/// the CLI as a generic sub-kernel *peer*, folder-anchored (a literal sibling of
+/// `<cwd>/.fantastic/web`). The `cli` is the **initiator** sub-kernel: it has disk,
+/// so it hydrates its own namespace natively — a direct on-disk write (like
+/// [`Workspace::ensure_guid`]'s `identity.json`), NOT through the app-home manager
+/// store and NOT a `kernel_state` loader agent (that RPC surface exists only for a
+/// sandboxed browser — see `ts/SERVE.md`). Host-independent: this runs whether or
+/// not a folder host kernel is spawned.
+///
+/// Writes two things, mirroring the `web_loader` shape (`kernel_state @ .fantastic/web
+/// watch=false alias=web_loader`):
+/// - the namespace dir `<cwd>/.fantastic/cli/` (folder-scoped session state lives here);
+/// - a **marker anchor record** `<cwd>/.fantastic/agents/cli_loader/agent.json` — the
+///   same shape as `web_loader`, tagged `role=initiator kind=subkernel`. It is a
+///   descriptor (not executed here); mint-once (an existing anchor is never clobbered).
+///
+/// **One path, fail loud** (no fallback): an unwritable `.fantastic` errors out
+/// naming the path, rather than silently running without the anchor. Returns the
+/// namespace path (`<cwd>/.fantastic/cli`) for the vis.
+pub fn ensure_cli_subkernel(cwd: &Path) -> std::io::Result<PathBuf> {
+    let fantastic = cwd.join(".fantastic");
+    let namespace = fantastic.join("cli");
+    std::fs::create_dir_all(&namespace)?;
+    let anchor_dir = fantastic.join("agents").join("cli_loader");
+    std::fs::create_dir_all(&anchor_dir)?;
+    let anchor = anchor_dir.join("agent.json");
+    // Mint-once · explicit-wins: never clobber an existing anchor (hand-edits / a
+    // future guid on it survive).
+    if !anchor.exists() {
+        let record = json!({
+            "id": "cli_loader",
+            "handler_module": "kernel_state.tools",
+            "alias": "cli_loader",
+            "root": ".fantastic/cli",
+            "role": "initiator",
+            "kind": "subkernel",
+            "watch": false,
+        });
+        std::fs::write(
+            &anchor,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        )?;
+    }
+    Ok(namespace)
 }
 
 /// Persisted product settings file: `<app_home>/settings.json`. Hydrated config
@@ -382,5 +427,49 @@ mod tests {
         assert!(parse_command("").is_err());
         assert!(parse_command("   ").is_err());
         assert!(parse_command("frobnicate x").is_err());
+    }
+
+    #[test]
+    fn ensure_cli_subkernel_writes_anchor_and_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ns = ensure_cli_subkernel(tmp.path()).unwrap();
+        // The namespace dir is `<cwd>/.fantastic/cli` (sibling of `.fantastic/web`).
+        assert_eq!(ns, tmp.path().join(".fantastic").join("cli"));
+        assert!(ns.is_dir());
+        // The anchor record mirrors the `web_loader` shape, tagged as a sub-kernel.
+        let anchor = tmp
+            .path()
+            .join(".fantastic")
+            .join("agents")
+            .join("cli_loader")
+            .join("agent.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(v["alias"], json!("cli_loader"));
+        assert_eq!(v["root"], json!(".fantastic/cli"));
+        assert_eq!(v["role"], json!("initiator"));
+        assert_eq!(v["kind"], json!("subkernel"));
+        assert_eq!(v["handler_module"], json!("kernel_state.tools"));
+        assert_eq!(v["watch"], json!(false));
+    }
+
+    #[test]
+    fn ensure_cli_subkernel_is_mint_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_cli_subkernel(tmp.path()).unwrap();
+        let anchor = tmp
+            .path()
+            .join(".fantastic")
+            .join("agents")
+            .join("cli_loader")
+            .join("agent.json");
+        // A hand-edit survives a second call (explicit-wins · never regenerated).
+        std::fs::write(
+            &anchor,
+            json!({"id":"cli_loader","hand":"edited"}).to_string(),
+        )
+        .unwrap();
+        ensure_cli_subkernel(tmp.path()).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(v["hand"], json!("edited"));
     }
 }

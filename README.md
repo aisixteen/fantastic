@@ -139,6 +139,12 @@ recipe serves any view package. The sovereign distribution artifact is
 `file_bridge` agent — no import map, no CSS link (vendors + CSS are inlined).
 See [`ts/readme.md`](ts/readme.md) and [`ts/SERVE.md`](ts/SERVE.md).
 
+The frontend is one **sub-kernel** (`web_loader = kernel_state @ .fantastic/web`).
+The `fantastic` CLI is another of the same shape — `cli_loader @ .fantastic/cli`, a
+native, folder-anchored *initiator* sibling (no browser proxy). Sub-kernels are a
+generic construct (web is not special-cased); the model lives in
+[`src/cli/design/25_subkernels.md`](src/cli/design/25_subkernels.md).
+
 ## One runtime active per workdir
 
 **One host runtime is active per workdir at a time.** The

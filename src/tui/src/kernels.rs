@@ -1,44 +1,47 @@
-//! The **active kernel** — which kernel the chat + hub currently drive.
+//! The **active kernel** — which sub-kernel the chat + hub currently drive.
 //!
-//! The TUI is a kernel MANAGER. It always holds the in-proc `★ RAM` manager kernel
-//! (full local streaming), and can switch to a **folder kernel** reached over the
-//! loopback gateway. Both are normalized behind [`ActiveKernel`] so the hub
+//! The TUI is a kernel MANAGER over a uniform plane of **sub-kernels** (see
+//! `subkernel.rs` + design `25_subkernels.md`): `★ self` / `cli` (the in-proc
+//! manager, native, full local streaming) and folder-host / foreigner nodes reached
+//! over the loopback gateway. Both are normalized behind [`ActiveKernel`] so the hub
 //! (`reflect_tree`) and the chat (`dispatch`) don't care which one is live.
 //!
-//! Phase 1: the in-proc arm is the current behavior verbatim; the remote arm does
-//! reflect + verbs (request→response over HTTP). Live token-streaming for a remote
-//! kernel is Phase 2 (a WS mirror that feeds the same `brain_rx` inbox).
+//! Iter-1: the in-proc arm is the current behavior verbatim; the remote arm does
+//! reflect + verbs (request→response over HTTP) with live token-streaming via a WS
+//! mirror that feeds the same `brain_rx` inbox. The roadmap (`26_federation.md`) swaps
+//! the remote transport for the `ws_bridge` connector.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use fantastic_host::gateway::{KernelHandle, Runtime};
+use fantastic_host::gateway::KernelHandle;
 use fantastic_kernel::{AgentId, Kernel};
+
+use crate::subkernel::{Role, SubKernel};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Which kernel the chat + hub drive right now.
+/// Which sub-kernel the chat + hub drive right now.
 #[derive(Clone)]
 pub enum ActiveKernel {
-    /// The in-proc manager kernel (`★ RAM`) — full local streaming.
+    /// The in-proc manager kernel — the native roles `★ self` / `cli`, full local
+    /// streaming.
     InProc(Arc<Kernel>),
-    // NOTE(kernel-switcher): the Kernels screen constructs this when you select a
-    // folder kernel (Slice 4); the arms below are already implemented so the switch
-    // is a one-line change there. `allow` drops when that lands.
-    /// A folder kernel over the loopback gateway (reflect + verbs; Phase 2 streams).
-    #[allow(dead_code)]
+    /// A folder-host / foreigner over the loopback gateway (reflect + verbs, with live
+    /// emits mirrored via `WsStream`). Constructed when you open such a node.
     Remote(RemoteKernel),
 }
 
-/// A folder kernel reached over the gateway — an HTTP handle + a display label.
+/// A sub-kernel reached over the gateway — an HTTP handle + its [`SubKernel`]
+/// descriptor (name/role/guid) for the header + dedup. Iter-1 realization is the
+/// loopback HTTP handle (`Conn::Http`); the roadmap swaps it for a bridge connector.
 #[derive(Clone)]
 pub struct RemoteKernel {
     pub handle: KernelHandle,
-    /// Short label for the header/squares (the folder basename).
-    pub label: String,
+    /// The sub-kernel descriptor (its `name` is the header label; `role`/`guid` too).
+    pub sub: SubKernel,
 }
 
 /// A **live emit-stream subscription** to a remote folder kernel's `web_ws` surface.
@@ -130,78 +133,71 @@ impl Drop for WsStream {
     }
 }
 
-/// One square on the **Kernels** screen (the top nav level).
-pub enum Square {
-    /// The in-proc `★ RAM` manager kernel — always first, always live.
-    Ram,
-    /// A folder kernel from the persisted registry (live = a reflect-ping answered).
-    Folder {
-        dir: PathBuf,
-        runtime: Runtime,
-        live: bool,
-    },
-    /// The trailing `+ new` action (opens the folder browser).
-    New,
+/// One node on the **Kernels** screen — a [`SubKernel`] on the uniform vis plane,
+/// or the trailing `+ attach` action. `self`/`cli`/folder-host/foreigners all render
+/// through the SAME `Node::Kernel` arm (web is not special-cased).
+pub enum Node {
+    /// A sub-kernel node (role + live/dormant status shown uniformly).
+    Kernel(SubKernel),
+    /// The trailing `+ attach` action (opens the folder browser).
+    Attach,
 }
 
-impl Square {
-    /// The folder basename shown on the square (`~` collapsed), or the fixed labels.
+impl Node {
+    /// The first line shown on the node: `★ self` for the manager, the sub-kernel
+    /// name otherwise, or the `+ attach` action.
     pub fn label(&self) -> String {
         match self {
-            Square::Ram => "★ RAM".to_string(),
-            Square::New => "+ new".to_string(),
-            Square::Folder { dir, .. } => dir
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| dir.to_string_lossy().into_owned()),
+            Node::Kernel(s) if s.role == Role::SelfManager => "★ self".to_string(),
+            Node::Kernel(s) => s.name.clone(),
+            Node::Attach => "+ attach".to_string(),
         }
     }
 }
 
-/// The Kernels-screen model: the row of squares + the selection. `★ RAM` is
-/// synthetic (always index 0); `+ new` is always last; folder kernels sit between.
+/// The Kernels-screen model: the row of sub-kernel nodes + the selection. `★ self`
+/// is always first; `+ attach` is always last; `cli`, the folder-host, and any
+/// foreigners sit between — all on one uniform plane.
 pub struct KernelsView {
-    pub squares: Vec<Square>,
+    pub nodes: Vec<Node>,
     pub sel: usize,
 }
 
 impl Default for KernelsView {
     fn default() -> Self {
         Self {
-            squares: vec![Square::Ram, Square::New],
+            nodes: vec![Node::Kernel(SubKernel::self_manager()), Node::Attach],
             sel: 0,
         }
     }
 }
 
 impl KernelsView {
-    /// Rebuild the squares from the registry folders + their live flags — `★ RAM`
-    /// first, `+ new` last — keeping the selection index in range.
-    pub fn rebuild(&mut self, folders: Vec<(PathBuf, Runtime, bool)>) {
-        let mut squares = vec![Square::Ram];
-        for (dir, runtime, live) in folders {
-            squares.push(Square::Folder { dir, runtime, live });
-        }
-        squares.push(Square::New);
-        self.sel = self.sel.min(squares.len() - 1);
-        self.squares = squares;
+    /// Rebuild the nodes from the discovered sub-kernels (self · cli · folder-host ·
+    /// foreigners, in order) — `+ attach` always last — keeping the selection index
+    /// in range. This is the `.fantastic`-driven discovery result (no registry).
+    pub fn rebuild(&mut self, subs: Vec<SubKernel>) {
+        let mut nodes: Vec<Node> = subs.into_iter().map(Node::Kernel).collect();
+        nodes.push(Node::Attach);
+        self.sel = self.sel.min(nodes.len().saturating_sub(1));
+        self.nodes = nodes;
     }
 
-    /// ← : the previous square (clamped).
+    /// ← : the previous node (clamped).
     pub fn move_left(&mut self) {
         self.sel = self.sel.saturating_sub(1);
     }
 
-    /// → : the next square (clamped).
+    /// → : the next node (clamped).
     pub fn move_right(&mut self) {
-        if self.sel + 1 < self.squares.len() {
+        if self.sel + 1 < self.nodes.len() {
             self.sel += 1;
         }
     }
 
-    /// The selected square (clamped into range).
-    pub fn selected(&self) -> &Square {
-        &self.squares[self.sel.min(self.squares.len().saturating_sub(1))]
+    /// The selected node (clamped into range).
+    pub fn selected(&self) -> &Node {
+        &self.nodes[self.sel.min(self.nodes.len().saturating_sub(1))]
     }
 }
 
@@ -338,6 +334,73 @@ mod tests {
             ev.get("type").and_then(Value::as_str),
             Some("reflect"),
             "the mirror forwarded the fanned-out send payload: {ev}"
+        );
+    }
+
+    /// Live end-to-end for the CLI-as-sub-kernel: the CLI native-anchors its own
+    /// `.fantastic/cli` (the `cli` node is `● live`); then spawning a real folder
+    /// kernel makes the folder-host node flip `○ dormant → ● live`. Proves the
+    /// initiator anchor + `.fantastic`-driven folder-host discovery over a real kernel.
+    ///
+    ///   cargo test -p fantastic-tui cli_anchor_and_folder_host_liveness -- --ignored
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "spawns a real fantastic_kernel daemon; needs a built binary"]
+    async fn cli_anchor_and_folder_host_liveness() {
+        use crate::subkernel::{Role, Status};
+        use fantastic_host::gateway::{resolve_kernel_bin, Runtime, Workspace};
+
+        if resolve_kernel_bin(Runtime::Rust).is_none() {
+            eprintln!(
+                "SKIP: no fantastic_kernel binary (set FANTASTIC_KERNEL_BIN or build lib/rust)"
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ft-cli-anchor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The CLI anchors its own sub-kernel namespace natively — folder-anchored, and
+        // host-independent (no folder kernel spawned yet).
+        let ns = fantastic_host::ensure_cli_subkernel(&dir).expect("cli anchor");
+        assert!(ns.is_dir(), "cli namespace <cwd>/.fantastic/cli exists");
+        let anchor = dir
+            .join(".fantastic")
+            .join("agents")
+            .join("cli_loader")
+            .join("agent.json");
+        assert!(anchor.is_file(), "cli_loader anchor written natively");
+        // The `cli` node is `● live` (initiator — the in-proc manager is its kernel).
+        assert_eq!(SubKernel::cli(ns.clone()).status, Status::Live);
+
+        // No folder-host yet → no node.
+        assert!(
+            crate::discover_folder_host(&dir, true).await.is_none(),
+            "no folder-host before spawn"
+        );
+
+        // Spawn a real folder kernel → the folder-host node reflect-pings `● live`.
+        let handle = Workspace::new(dir.clone())
+            .spawn(Runtime::Rust)
+            .await
+            .expect("spawn folder kernel");
+        let host = crate::discover_folder_host(&dir, true)
+            .await
+            .expect("folder-host discovered after spawn");
+        let live = host.status == Status::Live;
+        let role = host.role;
+
+        // Clean up the daemon + temp dir regardless of the assertions.
+        let _ = handle.send("core", json!({"type":"shutdown_kernel"})).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            role,
+            Role::FolderHost,
+            "the cwd kernel is the folder-host role"
+        );
+        assert!(
+            live,
+            "folder-host flips ○→● (reflect-pinged live) after spawn"
         );
     }
 }

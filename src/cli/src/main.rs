@@ -114,7 +114,13 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
     }
-    fantastic_tui::run(kernel, loaded.len()).await
+    // The CLI is folder-anchored: ensure its sub-kernel anchor + namespace at
+    // `<cwd>/.fantastic/cli` (the initiator sub-kernel — native, host-independent,
+    // sibling to `.fantastic/web`) before the TUI opens. Fail loud if the folder is
+    // unwritable (no fallback — the CLI never runs un-anchored).
+    let cwd = std::env::current_dir()?;
+    fantastic_host::ensure_cli_subkernel(&cwd)?;
+    fantastic_tui::run(kernel, loaded.len(), cwd).await
 }
 
 /// Every recognized top-level subcommand / flag. Anything else is refused with

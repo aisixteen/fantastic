@@ -41,7 +41,7 @@ impl Runtime {
         }
     }
 
-    /// The lowercase name (for the registry file + status lines).
+    /// The lowercase name (for the sub-kernel vis + status lines).
     pub fn as_str(self) -> &'static str {
         match self {
             Runtime::Rust => "rust",
