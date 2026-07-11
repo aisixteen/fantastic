@@ -63,6 +63,16 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_tools::HANDLER_MODULE,
         fantastic_tools::ToolsBundle::new(),
     );
+    // Baked script executors — IN-PROCESS engines (no subprocess, no system
+    // deps), the bodies authored control harnesses run on. Always-on.
+    reg.register(
+        fantastic_lua_runtime::HANDLER_MODULE,
+        fantastic_lua_runtime::LuaRuntimeBundle,
+    );
+    reg.register(
+        fantastic_js_runtime::HANDLER_MODULE,
+        fantastic_js_runtime::JsRuntimeBundle,
+    );
 
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //

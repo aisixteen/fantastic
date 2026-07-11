@@ -32,13 +32,6 @@ pub fn interrupt(agent_id: &AgentId) -> Value {
     }
 }
 
-/// `refresh_menu` verb.
-pub fn refresh_menu(agent_id: &AgentId) -> Value {
-    let state = state_for(agent_id);
-    *state.menu.lock().expect("menu poisoned") = None;
-    json!({"refreshed": true})
-}
-
 /// `history` verb. `name` is the backend's error-message prefix.
 pub async fn history(
     agent_id: &AgentId,
@@ -172,6 +165,11 @@ pub async fn send(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // Optional caller-supplied system block (a caller teaches its own tool convention).
+    let system_prompt = payload
+        .get("system_prompt")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let client_id = safe_client(
         payload
             .get("client_id")
@@ -254,6 +252,7 @@ pub async fn send(
     let agent_id_owned = agent_id.clone();
     let client_id_owned = client_id.clone();
     let text_owned = text.clone();
+    let system_prompt_owned = system_prompt.clone();
     let kernel_owned = Arc::clone(kernel);
     let state_owned = Arc::clone(&state);
     let provider_owned = Arc::clone(&provider);
@@ -270,6 +269,7 @@ pub async fn send(
             &kernel_owned,
             &client_id_owned,
             cfg,
+            system_prompt_owned,
         )
         .await;
         *task_result_inner.lock().await = Some(outcome);

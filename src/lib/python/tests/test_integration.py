@@ -38,59 +38,10 @@ async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
     assert data[-1]["content"] == "hello"
 
 
-async def test_inter_llm_tool_call(seeded_kernel, store_agent):
-    """ollama_A's tool_call to ollama_B routes through kernel.send and returns to A."""
-    a = (
-        await seeded_kernel.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "ollama_backend.tools",
-                "file_bridge_id": store_agent,
-            },
-        )
-    )["id"]
-    b = (
-        await seeded_kernel.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "ollama_backend.tools",
-                "file_bridge_id": store_agent,
-            },
-        )
-    )["id"]
-
-    # A scripts: emit tool_call to B; then summary text.
-    ot._providers[a] = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "c1",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": b,
-                            "payload": {
-                                "type": "send",
-                                "text": "what color is the sky?",
-                            },
-                        },
-                    }
-                }
-            ],
-            ["The other agent says: blue."],
-        ]
-    )
-    # B answers with text directly.
-    ot._providers[b] = _FakeProvider([["The sky is blue."]])
-
-    try:
-        r = await seeded_kernel.send(a, {"type": "send", "text": "ask B"})
-        assert "blue" in r["final"].lower()
-    finally:
-        ot._providers.pop(a, None)
-        ot._providers.pop(b, None)
+# NOTE: inter-LLM tool-calling (A calls B) is no longer a BACKEND concern — the
+# backend does one bare pass, and orchestrating one AI to call another is the
+# emergent MIND's job (a script driving the tool loop). Proven by the mind tests
+# (rust lua/js, python_runtime, swift JS), not here.
 
 
 async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):

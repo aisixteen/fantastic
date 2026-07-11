@@ -31,11 +31,6 @@ struct MockProvider {
 #[derive(Clone)]
 enum ScriptEvent {
     Token(String),
-    Tool {
-        id: String,
-        name: String,
-        args: Value,
-    },
 }
 
 impl MockProvider {
@@ -59,9 +54,6 @@ impl Provider for MockProvider {
             .map(|e| {
                 Ok(match e {
                     ScriptEvent::Token(t) => ProviderEvent::Token(t),
-                    ScriptEvent::Tool { id, name, args } => {
-                        ProviderEvent::ToolCall { id, name, args }
-                    }
                 })
             })
             .collect();
@@ -91,7 +83,6 @@ fn scripts() -> std::sync::MutexGuard<'static, ScriptMap> {
 
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
-    parallel_tools: true,
     name: "mock_backend",
 };
 
@@ -136,7 +127,6 @@ impl Bundle for MockBundle {
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
-            "refresh_menu" => verbs::refresh_menu(agent_id),
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("mock_backend: unknown type {other:?}")}),
         };
@@ -497,70 +487,6 @@ async fn recall_pages_durable_store_and_context_status_shape() {
 }
 
 #[tokio::test]
-async fn tool_call_dispatches_and_persists_full_history() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "tool").await;
-    // Pass 1: a tool_call to `core` list_agents. Pass 2: final text.
-    scripts().insert(
-        backend.as_str().to_string(),
-        (
-            vec![
-                vec![ScriptEvent::Tool {
-                    id: "call_1".into(),
-                    name: "send".into(),
-                    args: json!({"target_id": "core", "payload": {"type": "list_agents"}}),
-                }],
-                vec![ScriptEvent::Token("done".into())],
-            ],
-            Duration::ZERO,
-        ),
-    );
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
-    let client_id = "browser_tool";
-    let reply = kernel
-        .send(
-            &backend,
-            json!({"type": "send", "text": "go", "client_id": client_id}),
-        )
-        .await;
-    assert_eq!(reply["response"], "done");
-
-    let events = drain(&mut rx).await;
-    assert!(
-        events.iter().any(|e| {
-            e.get("type").and_then(Value::as_str) == Some("say")
-                && e.get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .contains("[tool core ->")
-        }),
-        "expected a say(tool core) event: {events:#?}"
-    );
-
-    // Persisted history must include the tool turns (full messages[1:]) — RAW
-    // text shape: a role:tool turn carrying the `<tool_response>` text, and an
-    // assistant turn carrying the `<tool_call>` inline (no structured field).
-    let h = kernel
-        .send(&backend, json!({"type": "history", "client_id": client_id}))
-        .await;
-    let msgs = h["messages"].as_array().unwrap();
-    assert!(
-        msgs.iter().any(|m| m["role"] == "tool"
-            && m["content"]
-                .as_str()
-                .unwrap_or("")
-                .contains("<tool_response")),
-        "expected a role:tool <tool_response> message: {msgs:#?}"
-    );
-    assert!(
-        msgs.iter().any(|m| m["role"] == "assistant"
-            && m["content"].as_str().unwrap_or("").contains("<tool_call>")
-            && m["content"].as_str().unwrap_or("").contains("list_agents")),
-        "expected an assistant turn carrying a <tool_call>: {msgs:#?}"
-    );
-}
-
-#[tokio::test]
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hist").await;
@@ -632,18 +558,6 @@ async fn interrupt_cancels_in_flight() {
             .any(|e| e.get("type").and_then(Value::as_str) == Some("done")),
         "expected a done event after interrupt: {events:#?}",
     );
-}
-
-#[tokio::test]
-async fn refresh_menu_drops_cache() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, backend) = mk_kernel(&tmp, "rmen").await;
-    let state = crate::state::state_for(&backend);
-    *state.menu.lock().unwrap() = Some(vec![json!({"id": "sentinel"})]);
-    assert!(state.menu.lock().unwrap().is_some());
-    let r = kernel.send(&backend, json!({"type": "refresh_menu"})).await;
-    assert_eq!(r["refreshed"], true);
-    assert!(state.menu.lock().unwrap().is_none());
 }
 
 #[tokio::test]

@@ -115,7 +115,6 @@ pub async fn safe_summary(provider: &Arc<dyn Provider>, overflow: &[Value]) -> S
     while let Some(ev) = stream.next().await {
         match ev {
             Ok(ProviderEvent::Token(t)) => parts.push(t),
-            Ok(ProviderEvent::ToolCall { .. }) => {}
             Err(_) => return STUB_SUMMARY.to_string(),
         }
     }

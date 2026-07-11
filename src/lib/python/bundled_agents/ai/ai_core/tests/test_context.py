@@ -284,13 +284,17 @@ async def test_seam_unknown_strategy_errors_without_event():
 
 
 def _send_turn(target, payload):
-    """An assistant tool-call turn in RAW text shape (as the store records it now):
-    the `<tool_call>` envelope inline in the assistant content."""
-    from ai_core.tool_parse import render_tool_call
+    """An assistant turn carrying a `<tool_call>` envelope inline — the shape a
+    mind (or an old transcript) leaves in the durable store for `_derive_reaction`
+    to detect. Built inline (the backend no longer renders tool calls)."""
+    import json
 
+    envelope = json.dumps(
+        {"name": "send", "arguments": {"target_id": target, "payload": payload}}
+    )
     return {
         "role": "assistant",
-        "content": render_tool_call("send", {"target_id": target, "payload": payload}),
+        "content": f"<tool_call>{envelope}</tool_call>",
     }
 
 

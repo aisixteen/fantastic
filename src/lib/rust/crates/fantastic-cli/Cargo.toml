@@ -25,6 +25,8 @@ fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend
 fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
 fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../bundles/fantastic-tools" }
+fantastic-lua-runtime = { path = "../bundles/fantastic-lua-runtime" }
+fantastic-js-runtime = { path = "../bundles/fantastic-js-runtime" }
 # Full-tier-only bundles — subprocess-using; only compiled into the
 # `full` feature build. iOS embedded slice MUST NOT pull them in.
 fantastic-terminal-backend = { path = "../bundles/fantastic-terminal-backend", optional = true }

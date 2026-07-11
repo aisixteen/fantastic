@@ -52,13 +52,8 @@ public struct AIBackendConfig: Sendable {
     /// with whatever it accumulated, persisting that partial turn.
     public var emitInterruptedError: Bool
 
-    /// Dispatch a batch of tool-calls concurrently (ollama / FM) vs
-    /// serially (NIM). Either way the appended `role:tool` messages keep
-    /// the model-emitted order. Mirrors Rust's `parallel_tools`.
-    public var parallelTools: Bool
-
     /// Extra system-prompt text appended AFTER the shared assembly
-    /// (primer + self-reflect + agent menu + send how-to). The Apple-FM
+    /// (primer + self-reflect + context how-to). The Apple-FM
     /// backend uses this for its always-inject durable memory (each
     /// mounted yaml_state agent's `state_yaml` + any custom
     /// `instructions` meta). Receives the agent + kernel so it can read
@@ -90,7 +85,6 @@ public struct AIBackendConfig: Sendable {
         stateless: Bool = false,
         includeAccumulatedOnError: Bool = false,
         emitInterruptedError: Bool = false,
-        parallelTools: Bool = true,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         systemPromptExtra: @escaping @Sendable (Agent, Kernel) async -> String = { _, _ in "" },
@@ -104,7 +98,6 @@ public struct AIBackendConfig: Sendable {
         self.stateless = stateless
         self.includeAccumulatedOnError = includeAccumulatedOnError
         self.emitInterruptedError = emitInterruptedError
-        self.parallelTools = parallelTools
         self.reflectExtra = reflectExtra
         self.backendStateExtra = backendStateExtra
         self.systemPromptExtra = systemPromptExtra

@@ -1,18 +1,19 @@
-"""ollama bundle — reflect-driven LLM agent with native tool-calling.
+"""ollama bundle — a bare, context-managed LLM completion agent.
 
 A THIN binding over `ai_core`: this module supplies the OllamaProvider
 builder + the backend's identity, and `ai_core.build()` returns the
 `(VERBS, handler)` bound to it. ALL the shared machinery (queue / FIFO
-lock / menu cache, prompt assembly, the agentic `_run` loop, the verb
-bodies) lives in `ai_core.core`.
+lock, prompt assembly, the ONE-PASS `_run`, context management, the verb
+bodies) lives in `ai_core.core`. There is NO agentic loop — tool dispatch
+is the caller's job (an authored agent); this backend does one provider pass per send.
 
-The state dicts (`_providers`, `_queue`, `_current`, `_menu_cache`,
-`_tasks`, `_locks`) and the patchable `SEND_TIMEOUT` / `MAX_CALL_DEPTH`
-constants are RE-EXPORTED from `ai_core.core` here so the existing tests'
-monkeypatch seams (`ollama_backend.tools._providers[id] = fake`,
-`monkeypatch.setattr(..., "SEND_TIMEOUT", 0.05)`, calls to `_assemble` /
-`_invalidate_menu`) keep working unchanged on the shared core path. The
-re-exported dicts are the SAME objects `ai_core.core` mutates.
+The state dicts (`_providers`, `_queue`, `_current`, `_tasks`, `_locks`)
+and the patchable `SEND_TIMEOUT` / `MAX_CALL_DEPTH` constants are
+RE-EXPORTED from `ai_core.core` here so the existing tests' monkeypatch
+seams (`ollama_backend.tools._providers[id] = fake`,
+`monkeypatch.setattr(..., "SEND_TIMEOUT", 0.05)`, calls to `_assemble`)
+keep working unchanged on the shared core path. The re-exported dicts are
+the SAME objects `ai_core.core` mutates.
 """
 
 from __future__ import annotations
@@ -23,11 +24,8 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
     _assemble,
-    _build_menu,
     _current,
-    _invalidate_menu,
     _locks,
-    _menu_cache,
     _providers,
     _queue,
     _tasks,

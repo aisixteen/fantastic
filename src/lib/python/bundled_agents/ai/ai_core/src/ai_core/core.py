@@ -67,24 +67,19 @@ from ai_core.context import (
 )
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
-from ai_core.tool_parse import (
-    extract_tool_calls,
-    render_tool_call,
-    stream_tool_calls,
-)
+
+# `extract_tool_calls` is kept ONLY for the context-reaction read-model
+# (`_derive_reaction` scans the durable transcript for the model's recall/persist
+# reaction). The backend itself no longer parses tool calls — the agentic LOOP is
+# emergent (an authored agent drives tool dispatch); the backend is a
+# context-managed conversational completion that does ONE provider pass per send.
+from ai_core.tool_parse import extract_tool_calls
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
 _providers: dict = {}
 _tasks: dict[str, asyncio.Task] = {}
 _locks: dict[str, asyncio.Lock] = {}
-
-# Per-backend cache of "what other agents exist + what they answer".
-# Built lazily at assemble time; invalidated automatically after every
-# tool_call (which may have mutated the population) and on the
-# `refresh_menu` verb (so the LLM can self-invalidate). Never persisted
-# to chat.json — it's prepended to the system block on each turn.
-_menu_cache: dict[str, list[dict]] = {}
 
 # Structural state for the `status` verb + status events. One channel,
 # one source of truth — UI subscribes to `status` events for live phase
@@ -265,11 +260,6 @@ def _status_snapshot(self_id: str, requesting_client_id: str | None) -> dict:
     }
 
 
-def _invalidate_menu(self_id: str) -> None:
-    """Drop the agent menu so the next assemble rebuilds it from live reflect."""
-    _menu_cache.pop(self_id, None)
-
-
 def _lock_for(self_id: str) -> asyncio.Lock:
     """Per-backend FIFO serializer: only one `_send` runs at a time per
     agent. Concurrent callers (cli, browser tabs) wait their turn."""
@@ -278,18 +268,17 @@ def _lock_for(self_id: str) -> asyncio.Lock:
     return _locks[self_id]
 
 
-# NOTE: there is NO native tool schema. Tool-calling is RAW prompt-and-parse,
-# owned by this base class: the `send` tool + its text envelope are taught in
-# `_SEND_HOWTO`, the model emits the call as text, and `ai_core.tool_parse`
-# parses it back out of the stream. Providers NEVER receive a tools array.
+# NOTE: providers NEVER receive a tools array. This backend is a bare, ONE-PASS
+# completion: it does not parse tool calls and does not loop. Any tool convention
+# is the CALLER's — an authored agent teaches it in the prompt (system_prompt),
+# reads the completion, dispatches, and feeds the result back as the next turn.
 
 
 def _render_for_model(messages: list[dict]) -> list[dict]:
-    """Project the internal message list to what the model actually reads — pure
-    text, every role a chat template renders. We store tool replies as `role:tool`
-    (so the projection/recall machinery's tool-pairing stays intact), but map them
-    to `role:user` here because many templates (incl. tiny local models) don't render
-    a `tool` role at all. Strips any non-text keys (e.g. legacy `tool_calls`)."""
+    """Project the message list to what the model actually reads — pure text, every
+    role a chat template renders. Maps any `role:tool` (e.g. legacy turns in an old
+    chat.json, or a caller-supplied convo) to `role:user` because many templates
+    (incl. tiny local models) don't render a `tool` role. Strips non-text keys."""
     out: list[dict] = []
     for m in messages:
         role = m.get("role")
@@ -398,79 +387,6 @@ def _render_reflect(d: dict) -> str:
     return f"{sentence}  {fields}".strip()
 
 
-async def _build_menu(self_id: str, kernel) -> list[dict]:
-    """Reflect on every running agent (skip self) and collect their
-    one-line sentence + verb names. Used to grow the system prompt
-    into a real "menu of capabilities" the model can see at a glance.
-    """
-    online = await kernel.send("kernel_state", {"type": "list_agents"})
-    items: list[dict] = []
-    for a in online.get("agents", []):
-        if a["id"] == self_id:
-            continue  # self is described separately in the prompt
-        try:
-            r = await kernel.send(a["id"], {"type": "reflect"})
-        except Exception:
-            r = {}
-        verbs = r.get("verbs", {}) if isinstance(r, dict) else {}
-        verb_names = list(verbs.keys()) if isinstance(verbs, dict) else list(verbs)
-        items.append(
-            {
-                "id": a["id"],
-                "sentence": (r or {}).get("sentence", "")
-                if isinstance(r, dict)
-                else "",
-                "verbs": verb_names,
-            }
-        )
-    return items
-
-
-def _render_menu(menu: list[dict]) -> str:
-    """Format the menu as bullet lines for the system prompt."""
-    if not menu:
-        return "## Available agents\n(none — only `kernel_state` and `self`)"
-    lines = [
-        "## Available agents (reflect any for verb signatures; reflect the root"
-        " agent with readme:true for the full system guide)"
-    ]
-    for m in menu:
-        verbs = m.get("verbs") or []
-        head = ", ".join(verbs[:10]) + (" …" if len(verbs) > 10 else "")
-        lines.append(f"- `{m['id']}` — {m['sentence']} — verbs: {head or '(none)'}")
-    return "\n".join(lines)
-
-
-_SEND_HOWTO = """## How to use the `send` tool
-You have ONE tool: `send(target_id, payload)`. EVERY action goes through it.
-
-To CALL it, emit EXACTLY this on its own — a `<tool_call>` tag wrapping one JSON object:
-<tool_call>{"name": "send", "arguments": {"target_id": "<id>", "payload": {"type": "<verb>", ...fields}}}</tool_call>
-Rules:
-- Emit the tag verbatim; put NOTHING else on that line. You may emit several tags to
-  batch calls. Any text OUTSIDE the tags is shown to the user as your message.
-- After a call, you receive a `<tool_response>...</tool_response>` with the reply. READ it,
-  then either call again or write your final answer (no tag) to finish.
-- Example — list the agents:
-  <tool_call>{"name": "send", "arguments": {"target_id": "kernel_state", "payload": {"type": "list_agents"}}}</tool_call>
-
-- ORIENT FIRST. For anything beyond the menu's verb names — especially the
-  browser frontend (panels/views), persistence, or how agents are wired — read
-  the full system guide in ONE call BEFORE acting:
-  `send('kernel_state', {type:'reflect', readme:true})`. It explains the transports,
-  how compute/memory/views are addressed, and how the browser frontend and
-  persistence work. Don't guess the wiring — read it first.
-- To do something concrete (read a file, run python, list agents, etc.), pick
-  an agent from the menu above whose verbs cover what you need, then build
-  `{type:'<verb>', ...args}` and pass it as `payload`.
-- To learn an agent's full verb signatures (arg names, types):
-  `send('<id>', {type:'reflect'})` returns `{verbs: {name: 'doc'}, ...}`.
-- To rebuild your menu of agents (useful right after you create one):
-  `send('<your_own_id>', {type:'refresh_menu'})` — next turn shows the fresh menu.
-- NEVER claim "I don't have access" without trying the menu first. The
-  send tool reaches every agent in the system.
-"""
-
 _CONTEXT_HOWTO = """## Context window & compaction
 Your live context is finite. When the conversation outgrows it, the system COMPACTS your
 view: older turns are summarized or elided and a `[context-notice]` turn is inserted. The
@@ -480,8 +396,8 @@ nothing is ever truly lost.
   `query` substring-filters your full history; `limit` caps the page. Use it whenever you
   need a detail from earlier that isn't in your current view.
 - When a compaction notice lands and the dropped span held durable facts (names, decisions,
-  preferences), persist them to your memory agent (in the menu above) via the send tool —
-  that is how they survive beyond this window.
+  preferences), persist them to a memory agent (reflect the tree to find one) via the send
+  tool — that is how they survive beyond this window.
 - To inspect your budget + the last compaction + your own last reaction:
   `send('<your_own_id>', {type:'context_status'})`.
 """
@@ -504,28 +420,25 @@ async def _assemble(
     if isinstance(system_prompt, str) and system_prompt.strip():
         sys_content = system_prompt
     else:
-        # Lean substrate context for the system prompt: an id-index of the
-        # tree + the bundle catalog by name (not the full nested tree).
+        # The DEFAULT system block is deliberately lean: a tree id-index + bundle
+        # catalog primer, self-identity, and the context-window howto (context IS
+        # the backend's — see `_CONTEXT_HOWTO`). NO agent menu, NO tool howto — this
+        # backend does not run a tool loop; a caller that wants tool-calling supplies
+        # its own `system_prompt` teaching its convention + whatever menu it built.
         primer = await kernel.send(
             "kernel", {"type": "reflect", "tree": "ids", "bundles": "ids"}
         )
         me = await kernel.send(self_id, {"type": "reflect", "tree": "none"})
-        # Lazy menu: rebuild only when invalidated (None / missing).
-        if self_id not in _menu_cache:
-            _menu_cache[self_id] = await _build_menu(self_id, kernel)
-        menu = _menu_cache[self_id]
         sys_content = "\n\n".join(
             [
                 _render_reflect(primer),
                 f"You are `{self_id}`. " + _render_reflect(me),
-                _render_menu(menu),
-                _SEND_HOWTO,
                 _CONTEXT_HOWTO,
             ]
         )
     # System block is rebuilt on EVERY user turn; chat.json holds only
-    # the user/assistant turns. Menu + howto are not persisted — they
-    # always reflect the latest state at send-time.
+    # the user/assistant turns. The howto is not persisted — it always
+    # reflects the latest state at send-time.
     messages: list[dict] = [{"role": "system", "content": sys_content}]
     if isinstance(messages_override, list) and messages_override:
         messages.extend(messages_override)  # stateless: caller supplies the convo
@@ -771,9 +684,7 @@ async def _run(
     cfg: Backend,
     system_prompt: str | None = None,
     messages_override: list[dict] | None = None,
-    call_stack: list | None = None,
 ) -> dict:
-    call_stack = call_stack or []
     stateless = isinstance(messages_override, list) and bool(messages_override)
     provider = await _get_provider(self_id, kernel, cfg)
     # Caller (`_send`) pre-checks when require_provider; this is defensive.
@@ -801,155 +712,50 @@ async def _run(
         if isinstance(projected, dict):  # too_small failsafe / config error
             return projected
         messages = projected
-    last_text = ""
-    # The NEW turns this send produces — appended to the durable chat store at the end
-    # (NOT `messages[1:]`, which is the projected/trimmed view, not the full record).
-    new_turns: list[dict] = [{"role": "user", "content": user_text}]
-
-    # Loop until the model stops emitting tool_calls. Bounded only by
-    # SEND_TIMEOUT (asyncio.wait_for around the whole _run task) and
-    # the user-callable `interrupt` verb. No fixed step cap — Claude
-    # Code-style runs as long as the model keeps proposing tools.
-    iteration = 0
-    while True:
-        iteration += 1
-        if iteration > 1:
-            # Re-entering the loop after tool_calls — phase transitions
-            # streaming/tool_calling back to `thinking` while the model
-            # decides its next move. UI uses this to keep the pulse
-            # animation alive between tool blocks.
-            await _emit_status(kernel, self_id, client_id, "thinking")
-        content_parts: list[str] = []
-        tool_calls: list[dict] = []
-        first_chunk = True
-        # RAW tool-calling: the provider streams pure text; the SHARED parser
-        # (`stream_tool_calls`) splits content tokens from `<tool_call>` envelopes —
-        # NO native tools array is ever sent. `_render_for_model` projects our stored
-        # turns to plain text every chat template renders. An optional per-backend
-        # stream wrapper (nvidia's 429 retry) wraps the raw provider stream.
-        model_messages = _render_for_model(messages)
-        if cfg.stream_wrapper is not None:
-            raw = cfg.stream_wrapper(
-                provider, model_messages, kernel, self_id, client_id
+    # ONE provider pass — no tool loop. The provider streams pure text; every chunk
+    # is a content token routed to the caller. Any tool convention is the caller's
+    # (an authored agent reads this completion + drives its own loop). The optional
+    # per-backend stream wrapper (nvidia's 429 retry) wraps the raw provider stream.
+    content_parts: list[str] = []
+    first_chunk = True
+    model_messages = _render_for_model(messages)
+    if cfg.stream_wrapper is not None:
+        raw = cfg.stream_wrapper(provider, model_messages, kernel, self_id, client_id)
+    else:
+        raw = provider.chat(model_messages)
+    async for chunk in raw:
+        if first_chunk:
+            # First text chunk — phase transitions thinking → streaming.
+            await _emit_status(kernel, self_id, client_id, "streaming")
+            first_chunk = False
+        content_parts.append(chunk)
+        # Accumulate so the `status` verb's snapshot includes everything streamed
+        # so far, letting the UI rebuild a mid-stream view on page reload.
+        if self_id in _current:
+            _current[self_id]["text_so_far"] = (
+                _current[self_id].get("text_so_far", "") + chunk
             )
-        else:
-            raw = provider.chat(model_messages)
-        stream = stream_tool_calls(raw)
-        async for chunk in stream:
-            if isinstance(chunk, str):
-                if first_chunk:
-                    # First text chunk for this iteration — phase
-                    # transitions thinking → streaming.
-                    await _emit_status(kernel, self_id, client_id, "streaming")
-                    first_chunk = False
-                content_parts.append(chunk)
-                # Accumulate so the `status` verb's snapshot includes
-                # everything streamed so far, letting the UI rebuild a
-                # mid-stream view on page reload.
-                if self_id in _current:
-                    _current[self_id]["text_so_far"] = (
-                        _current[self_id].get("text_so_far", "") + chunk
-                    )
-                await _to_caller(
-                    kernel,
-                    self_id,
-                    client_id,
-                    {"type": "token", "text": chunk, "source": self_id},
-                )
-            else:
-                tool_calls.append(chunk["tool_call"])
-        last_text = "".join(content_parts)
-
-        if not tool_calls:
-            break
-
-        # Record the assistant turn as TEXT — its prose plus the `<tool_call>`
-        # envelope(s) it emitted, exactly as a raw text turn. No structured
-        # `tool_calls` field anywhere (raw, single-truth): next turn the model
-        # re-reads its own call as text.
-        call_tags = "\n".join(
-            render_tool_call(c["name"], c["arguments"]) for c in tool_calls
+        await _to_caller(
+            kernel,
+            self_id,
+            client_id,
+            {"type": "token", "text": chunk, "source": self_id},
         )
-        assistant_text = (
-            last_text + ("\n" if last_text and call_tags else "") + call_tags
-        )
-        assistant_turn = {"role": "assistant", "content": assistant_text}
-        messages.append(assistant_turn)
-        new_turns.append(assistant_turn)
-
-        # Execute tool_calls IN PARALLEL via asyncio.gather. Each runs
-        # its own status entry → kernel.send → status exit → say emit;
-        # gather preserves result order so role:tool messages append in
-        # the order the model emitted them. Menu invalidation runs once
-        # per batch (the population may have changed via any of the
-        # parallel create/delete/update calls).
-        async def _exec_one(c):
-            args = c["arguments"]
-            target = args.get("target_id", "")
-            payload = args.get("payload", {})
-            verb = (payload or {}).get("type", "") if isinstance(payload, dict) else ""
-            tool_entry = {
-                "call_id": c["id"],
-                "target": target,
-                "verb": verb,
-                "args": args,
-            }
-            # ENTRY: emit before invocation so the UI can render an
-            # in-progress tool block (header pulses, body empty).
-            if self_id in _current:
-                _current[self_id]["last_tool"] = tool_entry
-            await _emit_status(
-                kernel, self_id, client_id, "tool_calling", tool=tool_entry
-            )
-            try:
-                send_payload = payload
-                if isinstance(payload, dict):
-                    # Propagate the call chain so a downstream AI agent can refuse
-                    # cycles / over-depth (recursion guard). Non-AI targets ignore
-                    # the extra key; it is NOT recorded in the persisted args.
-                    send_payload = {**payload, "_call_stack": call_stack + [self_id]}
-                reply = await kernel.send(target, send_payload)
-            except Exception as e:
-                reply = {"error": str(e)}
-            reply_str = json.dumps(reply, default=str)
-            tool_entry_done = {**tool_entry, "reply_preview": reply_str[:120]}
-            # EXIT: same call_id, with reply_preview now filled.
-            if self_id in _current:
-                _current[self_id]["last_tool"] = tool_entry_done
-            await _emit_status(
-                kernel, self_id, client_id, "tool_calling", tool=tool_entry_done
-            )
-            return {"name": c["name"], "reply": reply_str}
-
-        results = await asyncio.gather(*[_exec_one(c) for c in tool_calls])
-        _invalidate_menu(self_id)
-        # ONE `role:tool` turn carrying every reply as `<tool_response>` text — fed
-        # back to the model (mapped to role:user by `_render_for_model`). Kept as a
-        # single turn so role alternation stays clean for every chat template.
-        tool_msg = {
-            "role": "tool",
-            "content": "\n".join(
-                f'<tool_response name="{r["name"]}">{r["reply"]}</tool_response>'
-                for r in results
-            ),
-        }
-        messages.append(tool_msg)
-        new_turns.append(tool_msg)
+    last_text = "".join(content_parts)
 
     # Status before the back-compat `done` event so subscribers can
     # observe the final phase transition first.
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
     await _to_caller(kernel, self_id, client_id, {"type": "done", "source": self_id})
 
-    # Final assistant turn (the no-tool_calls completion that broke the loop).
-    final_turn = {"role": "assistant", "content": last_text}
-    messages.append(final_turn)
-    new_turns.append(final_turn)
-    # APPEND this send's new turns (user + assistant(+tool_calls) + role:tool replies +
-    # final assistant) to the durable `chat` yaml_state. NOT `messages[1:]` — that's the
-    # projected/trimmed view; the store keeps the FULL conversation. Keeping tool_calls +
-    # role:tool replies means faulty calls are auditable and the next turn has full memory.
+    # APPEND this send's user + assistant turns to the durable `chat` yaml_state.
+    # NOT `messages[1:]` — that's the projected/trimmed view; the store keeps the
+    # FULL conversation so context management (compaction/recall) works next turn.
     if not stateless:
+        new_turns = [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": last_text},
+        ]
         await _save_history(self_id, kernel, client_id, new_turns)
     return {"response": last_text, "final": last_text, "client_id": client_id}
 
@@ -1072,7 +878,6 @@ def _make_send(cfg: Backend):
                     cfg,
                     system_prompt,
                     messages_override,
-                    call_stack,
                 )
             )
             _tasks[id] = task
@@ -1136,12 +941,6 @@ async def _interrupt(id, payload, kernel):
         task.cancel()
         return {"interrupted": True}
     return {"interrupted": False}
-
-
-async def _refresh_menu(id, payload, kernel):
-    """No args. Drops the cached agent menu so the next user turn rebuilds it from live reflect. Useful right after the LLM creates/deletes/updates an agent. Returns {refreshed:true}."""
-    _invalidate_menu(id)
-    return {"refreshed": True}
 
 
 async def _status(id, payload, kernel):
@@ -1270,10 +1069,10 @@ def build(
     """Bind one backend's config into a fresh `(VERBS, handler)` pair.
 
     The verb closures capture the returned `Backend`, so the per-backend
-    config (sentence, provider builder, tool-args shape, stream wrapper,
-    error prefix) is isolated; the module-global STATE (`_providers`,
-    `_queue`, `_current`, `_menu_cache`, `_tasks`, `_locks`) is shared and
-    keyed by agent id, so multiple backends coexist in one kernel.
+    config (sentence, provider builder, stream wrapper, error prefix) is
+    isolated; the module-global STATE (`_providers`, `_queue`, `_current`,
+    `_tasks`, `_locks`) is shared and keyed by agent id, so multiple backends
+    coexist in one kernel.
 
     Args:
       sentence: the agent's one-line self-description (reflect `sentence`).
@@ -1319,7 +1118,6 @@ def build(
         "send": _make_send(cfg),
         "history": _make_history(cfg),
         "interrupt": _interrupt,
-        "refresh_menu": _refresh_menu,
         **(extra_verbs or {}),
         "status": _status,
         "context_status": _context_status,

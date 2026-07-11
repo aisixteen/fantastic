@@ -40,10 +40,8 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                         "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
                 ] as JSON,
-                // NIM's `done` error path keeps `accumulated`; dispatch the
-                // batch serially (matches the Rust NIM port).
+                // NIM's `done` error path keeps `accumulated`.
                 includeAccumulatedOnError: true,
-                parallelTools: false,
                 reflectExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),

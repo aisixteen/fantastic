@@ -1,48 +1,51 @@
-# ollama_backend — local LLM agent
-Talks to a local ollama. Per-client chat threads, FIFO lock, raw prompt-and-parse tool-calling, menu cache. Persistence via `file_bridge_id`.
+# ollama_backend â local LLM, a context-managed completion agent
+Talks to a local ollama. Per-client chat threads, FIFO lock, and automatic
+context management (compaction / recall / context_status). Persistence via
+`file_bridge_id`. **No agentic loop** â one provider pass per `send`.
 
 ## Implementation
-This bundle is a thin binding over the shared `ai_core` lib. The queue/FIFO lock/menu cache, prompt assembly, the agentic `_run` loop, and all verb bodies live in `ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint/model from the agent record) and `ai_core.build()` wires the rest into `(VERBS, handler)`.
+A thin binding over the shared `ai_core` lib. The queue / FIFO lock, prompt
+assembly, the ONE-PASS `_run`, and all the context machinery live in
+`ai_core.core`; this module supplies the `OllamaProvider` builder (endpoint /
+model from the agent record) and `ai_core.build()` wires the rest into
+`(VERBS, handler)`.
 
-## Tool-calling is RAW (no native ollama tools)
-This backend NEVER sends ollama's `tools` array nor reads `message.tool_calls`. The
-`OllamaProvider` streams pure `content` text; the shared `ai_core` layer teaches the
-`send` tool's text envelope in the system prompt and parses the call back out of the
-stream (`ai_core.tool_parse`): the model emits
-`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
-results come back as `<tool_response>…</tool_response>` text. Model-agnostic — works even
-with models ollama marks `completion`-only. Identical across the ollama / nvidia /
-anthropic backends.
+## Bare completion â the tool loop is the CALLER's
+This backend does NOT parse tool calls and does NOT loop. `send` performs exactly
+ONE provider pass: it streams the model's pure text and returns it. Any tool
+convention is the caller's: an authored agent teaches its convention in the
+prompt (via `system_prompt`), reads the completion, dispatches, and feeds the
+result back as the next `{send, text}` turn. The `OllamaProvider` never receives a
+`tools` array and no `message.tool_calls` are read â model-agnostic.
 
-## Calling this agent as a workflow unit
-`send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO
-lock) and returns `{response, final}`. It is a first-class peer of
-`python_runtime`: a scheduler, a host job, a peer kernel, or another AI can
-call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
-(caller-supplied role/context — read it from a state agent yourself; the AI has NO
-yaml coupling). Optional `messages:list` REPLACES persisted history (fully
-stateless — no `file_bridge_id` needed).
+## Context management â owned HERE (the conversation's owner owns its context)
+Because this backend owns the per-client conversation, it owns the context:
+- **history** â every `send` loads + appends the per-client `chat.json` thread;
+- **auto-compaction** â when the assembled prompt overflows the model's window,
+  the configured `context_strategy` (default `compact`) summarizes / elides older
+  turns ONCE at turn entry and inserts a `[context-notice]`; the durable
+  transcript is never trimmed;
+- **`recall {query?, limit?}`** â page dropped turns back from the durable store;
+- **`context_status`** â inspect budget + last compaction + the model's reaction.
 
-## Wiring your completion — routing is YOUR decision, not plumbed
-You are a workflow unit: you receive a call, think (calling other agents as tools
-via `send`), and stream `token`/`status`/`done` on your OWN id. HOW your result
-reaches its addressee is your decision:
-- the per-call PROMPT names WHO listens for your completion — the addressee id(s),
-  and there may be MANY;
-- your SYSTEM PROMPT always carries the `send` call() signature.
-Given those, route your own output: `send()` to a named listener, or simply answer
-— any caller that `watch`es your id consumes the same stream. There is no
-`reply_to`; a capable model routes itself, to one addressee or several.
+## Calling this agent
+`send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
+and returns `{response, final}`. A first-class peer of `python_runtime`: a
+scheduler, a host job, a peer kernel, or a routine can call it by id. Optional
+`system_prompt:str` REPLACES the default system block (the caller supplies its own
+role / tool convention / whatever menu it built). Optional `messages:list`
+REPLACES persisted history (fully stateless â no `file_bridge_id` needed, and no
+compaction â the caller owns the context in that mode).
 
 ## Recursion guard
-Tool-calls propagate a reserved `_call_stack`. A call that re-enters an agent
-already in the chain (a cycle) or exceeds depth 8 is refused BEFORE the FIFO lock
-— so AI→AI chains can neither deadlock nor run away. Don't set `_call_stack`
-yourself.
+A `send` carrying a reserved `_call_stack` that already contains this agent (a
+cycle) or exceeds depth 8 is refused BEFORE the FIFO lock â so an authored agent's AI→AI
+chain can neither deadlock nor run away. Don't set `_call_stack` yourself.
 
-## Meta-possibility — any routine orchestrates the whole substrate
-Every routine (this AI, a host job, a peer kernel, or any out-of-process caller)
-reaches every agent by id. From any of them you can read memory anywhere (`send(<state>,
-{read})`), run an inference turn (`send(<ai>, {send, ...})`), and/or spawn compute
-(`send(<py>, {start, code})`) — regardless of which kernel owns the target. Code
-steps and LLM-call steps are interchangeable, both directions.
+## Meta-possibility â any routine orchestrates the whole substrate
+Every routine (an authored agent, a host job, a peer kernel, any out-of-process caller)
+reaches every agent by id. From any of them you can read memory anywhere
+(`send(<state>, {read})`), run an inference turn (`send(<ai>, {send, ...})`),
+and/or spawn compute (`send(<py>, {start, code})`) â regardless of which kernel
+owns the target. Code steps and LLM-call steps are interchangeable, both
+directions.

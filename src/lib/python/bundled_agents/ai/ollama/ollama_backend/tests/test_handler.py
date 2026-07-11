@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 
 import ollama_backend.tools as ot
@@ -192,74 +191,6 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
     assert "error" in r and "depth" in r["error"]
 
 
-async def test_tool_call_to_self_does_not_deadlock(seeded_kernel, store_agent):
-    """The keystone: a tool-call back to the SAME backend must NOT deadlock on its
-    held FIFO lock. _exec_one injects _call_stack=[self] into the outgoing send, so
-    the re-entry is refused as a cycle BEFORE the lock — the run completes fast."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider(
-        [
-            # iter 1: model tool-calls ITSELF
-            [
-                {
-                    "tool_call": {
-                        "id": "c1",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": oid,
-                            "payload": {"type": "send", "text": "again"},
-                        },
-                    }
-                }
-            ],
-            # iter 2: finishes (after seeing the cycle error as the tool reply)
-            ["done"],
-        ]
-    )
-    ot._providers[oid] = fp
-    try:
-        # If the guard were missing, the inner send would block on the held lock
-        # and the outer send would hang to SEND_TIMEOUT (180s); wait_for(15) proves
-        # it returns fast.
-        r = await asyncio.wait_for(
-            seeded_kernel.send(oid, {"type": "send", "text": "go"}), timeout=15
-        )
-        assert r["final"] == "done" and fp.calls == 2
-    finally:
-        ot._providers.pop(oid, None)
-
-
-async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
-    """Model emits a tool_call to kernel_state, gets reply, second iteration finishes."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider(
-        [
-            # iter 1: emit tool_call
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            # iter 2: text only, loop ends
-            ["Final answer based on tool reply."],
-        ]
-    )
-    ot._providers[oid] = fp
-    try:
-        r = await seeded_kernel.send(oid, {"type": "send", "text": "list"})
-        assert r["final"] == "Final answer based on tool reply."
-        assert fp.calls == 2
-    finally:
-        ot._providers.pop(oid, None)
-
-
 async def test_run_persists_history(seeded_kernel, store_agent):
     """Default caller (no client_id) persists user+assistant to the chat yaml_state."""
     oid = await _make_ollama(seeded_kernel)
@@ -274,53 +205,6 @@ async def test_run_persists_history(seeded_kernel, store_agent):
     assert data[-1] == {"role": "assistant", "content": "reply"}
     # System prompt is NEVER persisted — rebuilt fresh each turn from the live menu.
     assert all(m.get("role") != "system" for m in data)
-
-
-async def test_run_persists_full_tool_call_round_trip(seeded_kernel, store_agent):
-    """Lossless persistence of tool turns to the chat yaml_state — RAW text shape:
-      1. the assistant turn carrying its `<tool_call>` envelope inline (text),
-      2. the role:tool reply carrying the `<tool_response>` text,
-      3. the final assistant turn that closed the loop.
-    The audit trail for tool-calls."""
-    from ai_core.tool_parse import extract_tool_calls
-
-    oid = await _make_ollama(seeded_kernel)
-    fp = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "call_X",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            ["Done."],
-        ]
-    )
-    ot._providers[oid] = fp
-    try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "list em"})
-    finally:
-        ot._providers.pop(oid, None)
-    data = (await seeded_kernel.send(oid, {"type": "history"}))["messages"]
-    roles = [m["role"] for m in data]
-    assert roles == ["user", "assistant", "tool", "assistant"], (
-        f"roles malformed: {roles}\nfull: {data}"
-    )
-    # assistant turn carries the call as <tool_call> text — parse it back out
-    calls = extract_tool_calls(data[1]["content"])
-    assert calls and calls[0]["name"] == "send"
-    assert calls[0]["arguments"]["target_id"] == "kernel_state"
-    # tool reply is <tool_response> text content
-    assert (
-        "<tool_response" in data[2]["content"] and "kernel_state" in data[2]["content"]
-    )
-    assert data[3] == {"role": "assistant", "content": "Done."}
 
 
 async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
@@ -345,37 +229,6 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
     ]
     assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
     assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
-
-
-async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):
-    """Loop continues as long as the model emits tool_calls; safety
-    bounds are SEND_TIMEOUT (180s wall) and the user-callable
-    `interrupt` verb. Verify a 7-step chain completes cleanly."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    scripts = [
-        [
-            {
-                "tool_call": {
-                    "id": f"call_{i}",
-                    "name": "send",
-                    "arguments": {
-                        "target_id": "kernel_state",
-                        "payload": {"type": "list_agents"},
-                    },
-                }
-            }
-        ]
-        for i in range(6)
-    ]
-    scripts.append(["finally done."])
-    fp = _FakeProvider(scripts)
-    ot._providers[oid] = fp
-    try:
-        r = await seeded_kernel.send(oid, {"type": "send", "text": "loop"})
-        assert r["final"] == "finally done."
-        assert fp.calls == 7  # old MAX_STEPS=5 would have truncated here
-    finally:
-        ot._providers.pop(oid, None)
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):
@@ -458,94 +311,6 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
     finally:
         unsub()
         ot._providers.pop(oid, None)
-
-
-async def test_assemble_includes_agent_menu(seeded_kernel, store_agent):
-    """System prompt carries a 'Available agents' menu built by reflecting
-    on every running agent, plus a `send`-tool how-to. Each turn rebuilds
-    the menu lazily; chat.json holds only user/assistant turns.
-    """
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    # Force a fresh menu build.
-    ot._invalidate_menu(oid)
-    msgs = await ot._assemble(oid, "hello", seeded_kernel, "alice")
-    sys_block = msgs[0]["content"]
-    assert "Available agents" in sys_block
-    # File agent is in the menu (created by the store_agent fixture).
-    assert store_agent in sys_block
-    # Verbs are listed alongside ids.
-    assert "read" in sys_block
-    # Send-tool guidance present.
-    assert "send tool" in sys_block.lower()
-    assert "refresh_menu" in sys_block
-    # Menu is now cached.
-    assert oid in ot._menu_cache
-
-
-async def test_menu_invalidates_after_tool_call(seeded_kernel, store_agent):
-    """Successful tool_call clears the menu so the next assemble rebuilds it."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider(
-        [
-            # iter 1: emit a tool_call to kernel_state
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            # iter 2: text only, loop ends
-            ["done."],
-        ]
-    )
-    ot._providers[oid] = fp
-    try:
-        # Prime the cache.
-        ot._menu_cache[oid] = [{"id": "stale", "sentence": "", "verbs": []}]
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "list", "client_id": "alice"}
-        )
-        # After the run, cache must be invalidated (popped).
-        assert oid not in ot._menu_cache
-    finally:
-        ot._providers.pop(oid, None)
-
-
-async def test_refresh_menu_verb_invalidates(seeded_kernel, store_agent):
-    """LLM can self-clear the menu via send(<self>, {type:'refresh_menu'})."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    ot._menu_cache[oid] = [{"id": "stale", "sentence": "", "verbs": []}]
-    r = await seeded_kernel.send(oid, {"type": "refresh_menu"})
-    assert r == {"refreshed": True}
-    assert oid not in ot._menu_cache
-
-
-async def test_menu_not_persisted_to_history(seeded_kernel, store_agent):
-    """Menu lives in the system block ONLY — never in the persisted history."""
-    oid = await _make_ollama(seeded_kernel)
-    fp = _FakeProvider([["reply"]])
-    ot._providers[oid] = fp
-    try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi", "client_id": "alice"}
-        )
-    finally:
-        ot._providers.pop(oid, None)
-    data = (await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"}))[
-        "messages"
-    ]
-    blob = json.dumps(data)
-    # Persisted history is just user/assistant turns — none of the
-    # menu prose, send-tool how-to, or substrate primer should leak in.
-    assert "Available agents" not in blob
-    assert "send tool" not in blob.lower()
-    assert "Fantastic kernel" not in blob
 
 
 async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
@@ -727,62 +492,6 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
         phases = [s["phase"] for s in statuses]
         assert phases == ["thinking", "streaming", "done"], phases
         assert statuses[-1]["detail"]["reason"] == "ok"
-        send_ids = {s["detail"].get("send_id") for s in statuses}
-        assert len(send_ids) == 1 and None not in send_ids
-    finally:
-        ot._providers.pop(oid, None)
-
-
-async def test_status_event_sequence_with_tool_call(seeded_kernel, store_agent):
-    """thinking → streaming → tool_calling(entry) → tool_calling(exit) →
-    thinking → streaming → done. Same call_id between tool entry/exit;
-    same send_id across all phases."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            ["wrapping up."],
-        ]
-    )
-    ot._providers[oid] = fp
-    sends, emits, ctx = _capture(seeded_kernel)
-    try:
-        with ctx:
-            await seeded_kernel.send(
-                oid, {"type": "send", "text": "list", "client_id": "alice"}
-            )
-        statuses = [p for _, p in emits if p.get("type") == "status"]
-        phases = [s["phase"] for s in statuses]
-        # iter 1: thinking, tool_calling entry, tool_calling exit
-        # (no streaming because the iter only produced a tool_call)
-        # iter 2: thinking (between iterations), streaming, done
-        assert phases == [
-            "thinking",
-            "tool_calling",
-            "tool_calling",
-            "thinking",
-            "streaming",
-            "done",
-        ], phases
-        tool_entries = [s for s in statuses if s["phase"] == "tool_calling"]
-        assert "reply_preview" not in tool_entries[0]["detail"]["tool"]
-        assert "reply_preview" in tool_entries[1]["detail"]["tool"]
-        assert (
-            tool_entries[0]["detail"]["tool"]["call_id"]
-            == tool_entries[1]["detail"]["tool"]["call_id"]
-            == "call_a"
-        )
         send_ids = {s["detail"].get("send_id") for s in statuses}
         assert len(send_ids) == 1 and None not in send_ids
     finally:

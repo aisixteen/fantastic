@@ -23,6 +23,10 @@ import FantasticOllamaBackend
 import FantasticProxyAgent
 import FantasticScheduler
 import FantasticTools
+
+#if canImport(JavaScriptCore)
+    import FantasticJSRuntime
+#endif
 import FantasticWeb
 import FantasticWebRest
 import FantasticWebWS
@@ -46,6 +50,11 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
     r.register("scheduler.tools", SchedulerBundle())
+    #if canImport(JavaScriptCore)
+        // In-process JS executor (durable authored agents). Apple platforms
+        // ship JavaScriptCore; mirrors the Rust js_runtime bundle.
+        r.register("js_runtime.tools", JsRuntimeBundle())
+    #endif
     // TWO io_bridge derivations sharing one engine (mirrors py's separate
     // ws_bridge + relay_connector bundles): ws/memory transports vs the relay-kernel router.
     r.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))

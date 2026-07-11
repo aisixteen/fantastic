@@ -48,7 +48,6 @@ pub const DEFAULT_MODEL: &str = "gemma4:e2b";
 /// Per-backend config: cli round-trip routing, parallel tool dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
-    parallel_tools: true,
     name: "ollama_backend",
 };
 
@@ -167,7 +166,6 @@ impl Bundle for OllamaBackendBundle {
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
-            "refresh_menu" => verbs::refresh_menu(agent_id),
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("ollama: unknown type {other:?}")}),
         };
@@ -225,7 +223,6 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "interrupt": "No args. Cancels any in-flight send. Returns {interrupted:bool}.",
-            "refresh_menu": "No args. Drops the cached agent menu. Returns {refreshed:true}.",
             "status": "args: client_id:str?. Returns the in-flight/queue snapshot (text redacted for other clients).",
         },
         "emits": {

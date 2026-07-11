@@ -281,7 +281,9 @@ async fn send_streams_tokens_via_event_typed_sse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn raw_tool_call_in_text_split_across_deltas() {
+async fn envelope_text_streams_verbatim_no_dispatch() {
+    // BARE: a `<tool_call>` envelope split across two text_deltas is just TEXT —
+    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
@@ -290,9 +292,7 @@ async fn raw_tool_call_in_text_split_across_deltas() {
         .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
         .await;
 
-    // RAW: the `<tool_call>` envelope arrives as plain `text_delta` fragments
-    // split across two deltas — ai-core's shared parser buffers + extracts it.
-    let tool_body = sse(&[
+    let body = sse(&[
         json!({"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co"}}),
@@ -301,83 +301,27 @@ async fn raw_tool_call_in_text_split_across_deltas() {
         json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
         json!({"type":"message_stop"}),
     ]);
-    // Second call: the final assistant answer after the tool ran.
-    let final_body = sse(&[
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),
-        json!({"type":"content_block_stop","index":0}),
-        json!({"type":"message_stop"}),
-    ]);
-
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string(tool_body),
+                .set_body_string(body),
         )
-        .up_to_n_times(1)
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(final_body),
-        )
-        .expect(1)
+        .expect(1) // exactly one pass — no loop
         .mount(&server)
         .await;
 
     let client_id = "test_tool";
-    let mut rx = open_client_inbox(&kernel, client_id);
-    let send_kernel = Arc::clone(&kernel);
-    let ant_for_task = ant.clone();
-    let join = tokio::spawn(async move {
-        send_kernel
-            .send(
-                &ant_for_task,
-                json!({"type": "send", "text": "do it", "client_id": client_id}),
-            )
-            .await
-    });
-
-    let mut tool_invoked = false;
-    let mut saw_done = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    while tokio::time::Instant::now() < deadline && !saw_done {
-        match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(ev)) => {
-                let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                if ty == "status" {
-                    if let Some(tool) = ev.get("detail").and_then(|d| d.get("tool")) {
-                        if let Some(args) = tool.get("args") {
-                            if args.get("target_id").and_then(Value::as_str) == Some("core")
-                                && args
-                                    .get("payload")
-                                    .and_then(|p| p.get("type"))
-                                    .and_then(Value::as_str)
-                                    == Some("list_agents")
-                            {
-                                tool_invoked = true;
-                            }
-                        }
-                    }
-                } else if ty == "done" {
-                    saw_done = true;
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {}
-        }
-    }
-    let _ = join.await.unwrap();
-    assert!(
-        tool_invoked,
-        "expected the text-streamed <tool_call> to parse + dispatch against 'core'",
-    );
+    let _rx = open_client_inbox(&kernel, client_id);
+    let reply = kernel
+        .send(
+            &ant,
+            json!({"type": "send", "text": "do it", "client_id": client_id}),
+        )
+        .await;
+    let expected = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
+    assert_eq!(reply["response"], expected, "verbatim text: {reply:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
