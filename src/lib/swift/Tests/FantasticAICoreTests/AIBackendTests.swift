@@ -1,10 +1,10 @@
 // Shared AI-backend machinery tests — driven through a MOCK
-// `AIProvider` so the verb surface, the spawned streaming loop,
-// history persistence, tool-call persistence, cancellation, and the
-// stateless/error-shape config flags are all exercised WITHOUT any
-// live LLM. These cover the behaviour the three real backends used to
-// each test separately; provider-specific wire tests stay with each
-// backend target.
+// `AIProvider` so the verb surface, the single-pass streaming, history
+// persistence, cancellation, context management, and the
+// stateless/error-shape config flags are all exercised WITHOUT any live
+// LLM. This backend runs ONE provider pass per `send` (the tool loop is
+// the caller's, tested in the plumbed-mind suites); provider-specific
+// wire tests stay with each backend target.
 
 import FantasticAICore
 import FantasticJSON
@@ -14,74 +14,45 @@ import Testing
 
 // MARK: - Mock provider + bundle
 
-/// Deterministic provider replaying a SCRIPT of passes — one per
-/// `chat()` call (the agentic loop calls `chat` once per turn). Each
-/// pass is a sequence of chunks (tokens + finalized tool-calls). Once
-/// the script is exhausted, `chat` yields an empty pass, which the loop
-/// reads as "no more tools" and terminates. `chat` can also be told to
-/// throw. Mirrors the Rust `MockProvider` (scripted passes).
+/// Deterministic provider: streams a fixed token sequence per `chat()`
+/// call (one call per `send` — this backend runs a single pass). `chat`
+/// can also be told to throw. Providers are pure raw-text streamers
+/// (`.token` only). Mirrors the Rust `MockProvider`.
 private final class MockProvider: AIProvider, @unchecked Sendable {
     let model: String
-    private let lock = NSLock()
-    private var passes: [[AIChunk]]
+    private let tokens: [String]
     let throwsError: Bool
     /// Per-chunk delay (ns) so a generation can be observed in-flight.
     let chunkDelayNanos: UInt64
 
-    /// Single-pass convenience: tokens only, no tool-calls.
     init(
         model: String = "mock-1", tokens: [String] = ["Hel", "lo"],
         throwsError: Bool = false, chunkDelayNanos: UInt64 = 0
     ) {
         self.model = model
-        self.passes = [tokens.map { .token($0) }]
+        self.tokens = tokens
         self.throwsError = throwsError
-        self.chunkDelayNanos = chunkDelayNanos
-    }
-
-    /// Multi-pass: drive the agentic loop with scripted tool-calls.
-    init(model: String = "mock-1", passes: [[AIChunk]], chunkDelayNanos: UInt64 = 0) {
-        self.model = model
-        self.passes = passes
-        self.throwsError = false
         self.chunkDelayNanos = chunkDelayNanos
     }
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let throwsError = throwsError
         let chunkDelayNanos = chunkDelayNanos
-        lock.lock()
-        let pass = passes.isEmpty ? [] : passes.removeFirst()
-        lock.unlock()
+        let tokens = tokens
         return AsyncThrowingStream { continuation in
             Task {
                 if throwsError {
                     continuation.finish(throwing: MockError.boom)
                     return
                 }
-                for c in pass {
+                for t in tokens {
                     if chunkDelayNanos > 0 { try? await Task.sleep(nanoseconds: chunkDelayNanos) }
-                    continuation.yield(c)
+                    continuation.yield(.token(t))
                 }
                 continuation.finish()
             }
         }
     }
-}
-
-/// Build a finalized `send` tool-call chunk in the OpenAI shape the
-/// shared loop dispatches.
-private func sendCall(id: String, target: String, verb: String) -> AIChunk {
-    .toolCall(
-        .object([
-            "id": .string(id),
-            "type": .string("function"),
-            "function": .object([
-                "name": .string("send"),
-                "arguments": .string(
-                    "{\"target_id\":\"\(target)\",\"payload\":{\"type\":\"\(verb)\"}}"),
-            ]),
-        ]))
 }
 
 private enum MockError: Error, CustomStringConvertible {
@@ -299,80 +270,36 @@ struct AIBackendTests {
         #expect(msgs[1]["id"].asString != nil)
     }
 
-    @Test func agenticLoopExecutesToolCallThenFinishes() async throws {
-        // Pass 1: a `send` tool-call (reflect `core`). Pass 2: the final
-        // answer. The loop must dispatch the call through the kernel,
-        // feed the reply back, and stop when no more tools come.
+    @Test func callerDrivenToolLoopViaSystemPromptOverride() async throws {
+        // The tool LOOP is the caller's, not the backend's: a caller supplies a
+        // `system_prompt` teaching its convention and reads the completion. This
+        // backend runs exactly ONE provider pass per `send` — the streamed text
+        // (which may itself be a `<tool_call>` envelope) is persisted verbatim as
+        // the assistant turn; no dispatch happens here.
+        let envelope =
+            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect"}}}</tool_call>"#
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig {
-                .provider(
-                    MockProvider(passes: [
-                        [.token("checking…"), sendCall(id: "a", target: "core", verb: "reflect")],
-                        [.token("all set")],
-                    ]))
-            })
+            config: baseConfig { .provider(MockProvider(tokens: [envelope])) })
         _ = await kernel.send(
             id,
             .object([
                 "type": .string("send"), "text": .string("go"),
+                "system_prompt": .string("You drive tools via <tool_call> envelopes."),
                 "client_id": .string("c"),
             ]))
-        // user, assistant(tool_calls), tool result, final assistant.
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        // Exactly two rows: user + the single assistant pass. NO tool turn.
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         let msgs =
             (await kernel.send(
                 id, .object(["type": .string("history"), "client_id": .string("c")])))[
                 "messages"
             ].asArray ?? []
-        #expect(msgs.count == 4)
+        #expect(msgs.count == 2)
         #expect(msgs[0]["role"].asString == "user")
-        // RAW: the assistant turn carries its call as `<tool_call>` text inline
-        // (no structured tool_calls field).
         #expect(msgs[1]["role"].asString == "assistant")
+        // The envelope streamed straight through — persisted verbatim, undispatched.
+        #expect(msgs[1]["content"].asString == envelope)
         #expect(msgs[1]["tool_calls"].asArray == nil)
-        #expect(msgs[1]["content"].asString?.contains("<tool_call>") == true)
-        #expect(msgs[1]["content"].asString?.contains("reflect") == true)
-        // The kernel reply rides back as a role:tool `<tool_response>` text turn.
-        #expect(msgs[2]["role"].asString == "tool")
-        #expect(msgs[2]["content"].asString?.contains("<tool_response") == true)
-        #expect(msgs[2]["content"].asString?.contains("core") == true)
-        // The final no-tool pass is the answer.
-        #expect(msgs[3]["role"].asString == "assistant")
-        #expect(msgs[3]["content"].asString == "all set")
-        #expect(msgs[3]["tool_calls"].asArray == nil)
-    }
-
-    @Test func toolCallWithEmptyTargetErrorsButLoopContinues() async throws {
-        // A malformed call (no target_id) must not wedge the loop: the
-        // dispatch returns an error reply, the loop feeds it back and the
-        // next pass concludes.
-        let badCall: AIChunk = .toolCall(
-            .object([
-                "id": .string("z"),
-                "function": .object([
-                    "name": .string("send"),
-                    "arguments": .string("{\"payload\":{\"type\":\"reflect\"}}"),
-                ]),
-            ]))
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig {
-                .provider(MockProvider(passes: [[badCall], [.token("ok")]]))
-            })
-        _ = await kernel.send(
-            id,
-            .object([
-                "type": .string("send"), "text": .string("go"),
-                "client_id": .string("c"),
-            ]))
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
-        let msgs =
-            (await kernel.send(
-                id, .object(["type": .string("history"), "client_id": .string("c")])))[
-                "messages"
-            ].asArray ?? []
-        #expect(msgs[2]["role"].asString == "tool")
-        #expect(msgs[2]["content"].asString?.contains("empty target_id") == true)
-        #expect(msgs[3]["content"].asString == "ok")
     }
 
     @Test func errorStreamDoesNotPersistAssistantTurn() async throws {

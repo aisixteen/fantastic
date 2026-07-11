@@ -38,6 +38,8 @@ fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-
 fantastic-bridge = { path = "../../lib/rust/crates/bundles/fantastic-bridge" }
 fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
+fantastic-lua-runtime = { path = "../../lib/rust/crates/bundles/fantastic-lua-runtime" }
+fantastic-js-runtime = { path = "../../lib/rust/crates/bundles/fantastic-js-runtime" }
 fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-terminal-backend" }
 fantastic-python-runtime = { path = "../../lib/rust/crates/bundles/fantastic-python-runtime" }
 fantastic-local-runner = { path = "../../lib/rust/crates/bundles/fantastic-local-runner" }
@@ -46,3 +48,5 @@ fantastic-ssh-runner = { path = "../../lib/rust/crates/bundles/fantastic-ssh-run
 [dev-dependencies]
 # Gateway discover() unit tests build fixture `.fantastic/` trees in temp dirs.
 tempfile = "3"
+# The plumbed-mind test mocks the NIM SSE endpoint.
+wiremock = "0.6"

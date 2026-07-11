@@ -241,7 +241,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 await writer.drain()
             elif op == "emit":
                 try:
-                    await kernel.emit(m.get("target"), m.get("payload") or {})
+                    # No `target` → emit on the OWNER agent (one-arg `emit(payload)`).
+                    tgt = m.get("target") or owner_id
+                    await kernel.emit(tgt, m.get("payload") or {})
                 except Exception:
                     pass
             elif op == "watch":
@@ -292,16 +294,28 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
 # ─── verbs ──────────────────────────────────────────────────────
 
 
+def _has_running_job(owner_id: str) -> bool:
+    """True iff this agent owns a job whose subprocess hasn't exited."""
+    return any(
+        v.get("owner") == owner_id and v["proc"].returncode is None
+        for v in _jobs.values()
+    )
+
+
 async def _start(id, payload, kernel):
-    """args: code:str (req), cwd:str?, python:str?, venv:str?. Spawns `python -u -c code`
-    in the BACKGROUND (non-blocking) and returns {job_id, status:'running'} at once;
-    streams stdout/stderr as `progress` events + a final `job_done`. Many run in parallel.
-    The job gets a `kernel` connector (send/emit/reflect/watch/on_message) over a private
-    control fd relayed by this agent — read memory, call agents, spawn jobs by id."""
-    code = payload.get("code", "")
-    if not isinstance(code, str) or not code:
-        return {"error": "python_runtime: code (str) required"}
+    """args: code:str? (falls back to the record's `code` meta), cwd:str?, python:str?,
+    venv:str?. Spawns `python -u -c code` in the BACKGROUND (non-blocking) and returns
+    {job_id, status:'running'} at once; streams stdout/stderr as `progress` events + a
+    final `job_done`. Many run in parallel. The job gets a `kernel` connector
+    (send/emit/reflect/watch/on_message) over a private control fd relayed by this agent.
+    The `code` is PERSISTED on the agent record so `boot` re-starts it after a reboot (a
+    durable authored agent — parity with the lua/js runtimes)."""
     rec = kernel.get(id) or {}
+    code = payload.get("code") or rec.get("code") or ""
+    if not isinstance(code, str) or not code:
+        return {
+            "error": "python_runtime: code (str) required (pass it or set it on the record)"
+        }
     cwd = payload.get("cwd") or rec.get("cwd") or None
     interp = _resolve_python(rec, payload)
     job_id = secrets.token_hex(4)
@@ -347,6 +361,8 @@ async def _start(id, payload, kernel):
         _serve_ctrl(parent_sock, id, job_id, kernel)
     )
     _jobs[job_id]["task"] = asyncio.create_task(_pump(id, job_id, proc, kernel))
+    # Durable authored agent: persist the code on the record so `boot` rehydrates it.
+    kernel.update(id, code=code)
     await kernel.emit(id, {"type": "job_started", "job_id": job_id})
     return {"job_id": job_id, "status": "running"}
 
@@ -463,10 +479,14 @@ async def _reflect(id, payload, kernel):
 
 async def _boot(id, payload, kernel):
     """Idempotent. Persists sys.executable into record.python when neither python
-    nor venv is set, so cross-runtime opens read a deterministic interpreter."""
+    nor venv is set. If the record carries `code` (a durable authored agent) and no
+    job is running, RE-STARTS it — the script survives reboot (parity with lua/js)."""
     rec = kernel.get(id) or {}
     if not rec.get("python") and not rec.get("venv"):
         kernel.update(id, python=sys.executable)
+    code = rec.get("code")
+    if isinstance(code, str) and code and not _has_running_job(id):
+        await _start(id, {"code": code}, kernel)
     return None
 
 
@@ -505,5 +525,15 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"python_runtime: unknown type {t!r}"}
+        # Addressable inbox: any verb this bundle doesn't own is delivered to the
+        # running job's `on_message` (mirrors the lua/js runtimes' `{queued:true}`),
+        # so an authored agent receives turns like any agent. The delivery is the
+        # substrate's own dispatch fanout (`_dispatch` mirrors every payload to the
+        # agent's watchers — the on_message proxy is one), so we do NOT re-emit here
+        # (that would double-deliver); we only ACK. No running job → loud error.
+        if _has_running_job(id):
+            return {"queued": True}
+        return {
+            "error": f"python_runtime: unknown type {t!r} (no running job to receive it)"
+        }
     return await fn(id, payload, kernel)

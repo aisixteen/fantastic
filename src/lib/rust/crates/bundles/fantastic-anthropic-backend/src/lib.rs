@@ -71,7 +71,6 @@ pub const RATE_LIMIT_MAX_RETRIES: u32 = 1;
 /// Per-backend config: per-client-inbox routing; serial dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::PerClientInbox,
-    parallel_tools: false,
     name: "anthropic_backend",
 };
 
@@ -413,7 +412,6 @@ impl Bundle for AnthropicBundle {
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "interrupt" => verbs::interrupt(agent_id),
-            "refresh_menu" => verbs::refresh_menu(agent_id),
             "set_api_key" => set_api_key_reply(agent_id, payload, kernel).await,
             "clear_api_key" => clear_api_key_reply(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
@@ -497,7 +495,6 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
             "interrupt": "No args. Cancels any in-flight `send`. Returns {interrupted:bool}.",
-            "refresh_menu": "No args. Drops the cached agent menu.",
             "set_api_key": "args: api_key:str (req). Persists to .fantastic/agents/<id>/api_key via file agent. Drops cached client.",
             "clear_api_key": "No args. Deletes the api_key sidecar. Returns {ok:true, deleted:bool}.",
             "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",

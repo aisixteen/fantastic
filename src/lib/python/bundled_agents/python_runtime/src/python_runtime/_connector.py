@@ -81,8 +81,16 @@ try:
             _frame({"op": "send", "rid": r, "target": target, "payload": payload or {}})
             return q.get()
 
-        def emit(self, target, payload=None):
-            _frame({"op": "emit", "target": target, "payload": payload or {}})
+        def emit(self, payload_or_target, payload=None):
+            # One-arg `emit(payload)` emits on the OWNER agent (the common form,
+            # parity with the lua/js runtimes + the genesis contract). Two-arg
+            # `emit(target, payload)` emits on a named target (back-compat).
+            if payload is None:
+                _frame({"op": "emit", "payload": payload_or_target or {}})
+            else:
+                _frame(
+                    {"op": "emit", "target": payload_or_target, "payload": payload or {}}
+                )
 
         def reflect(self, target="kernel"):
             return self.send(target, {"type": "reflect"})

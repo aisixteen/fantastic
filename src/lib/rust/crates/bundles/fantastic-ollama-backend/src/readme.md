@@ -1,45 +1,30 @@
-# ollama_backend — local LLM agent
-Thin Provider + Bundle over `fantastic-ai-core`: this crate supplies
-only the `OllamaProvider` (NDJSON transport to a local ollama process)
-and a thin `Bundle`. The per-client chat threads, FIFO lock, menu
-cache, history, prompt assembly, and agentic loop all live in
-`fantastic-ai-core`.
+# ollama_backend — local LLM, a context-managed completion agent
+Thin Provider + Bundle over `fantastic-ai-core`: this crate supplies only the
+`OllamaProvider` (NDJSON transport to a local ollama process) and a thin
+`Bundle`. The per-client chat threads, FIFO lock, prompt assembly, ONE-PASS
+generation, and context management all live in `fantastic-ai-core`.
 
-Reference implementation for the **LLM backend contract** defined in
-`fantastic-ai-core`'s module header. Every backend (nvidia_nim,
-apple_fm, …) speaks the same contract, so any caller retargets by
-changing one record field — no caller-side change.
+Reference implementation for the **LLM backend contract** in `fantastic-ai-core`'s
+module header. Every backend speaks it, so any caller retargets by changing one id.
 
-## Tool-calling is RAW (no native ollama tools)
-This backend NEVER sends ollama's `tools` array nor reads `message.tool_calls`.
-`OllamaProvider` streams pure `content` text; the shared `fantastic-ai-core` layer
-teaches the `send` tool's text envelope in the system prompt and parses the call back
-out of the stream (`tool_parse`): the model emits
-`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
-results return as `<tool_response>…</tool_response>` text. Model-agnostic — works even
-with models ollama marks `completion`-only. Identical across the ollama / nvidia /
-anthropic backends.
+## Bare completion — the tool loop is the CALLER's
+`send` does exactly ONE provider pass: it streams the model's pure text and
+returns it. **No agentic loop, no tool parsing.** `OllamaProvider` never sends
+ollama's `tools` array nor reads `message.tool_calls`. Any tool convention is the
+caller's — an authored agent teaches it in the prompt (via `system_prompt`),
+reads the completion, dispatches, and feeds the result back as the next
+`{send, text}` turn.
 
-## Calling this agent as a workflow unit
-`send {type:"send", text, client_id?}` runs ONE inference turn (per-backend FIFO
-lock). It is SHARED COMPUTE reached by id: a scheduler, a host job, a
-peer kernel, or another AI all `send` to it by id — threads are kept
-per-`client_id`. Optional `system_prompt`/`messages` override the
-auto-built prompt/history (stateless mode).
+## Context management — owned HERE
+Because this backend owns the per-client conversation, it owns the context:
+per-client `chat.json` history, auto-compaction on overflow (`context_strategy`,
+default `compact`, + `[context-notice]`), and the `recall` / `context_status` verbs.
+The durable transcript is never trimmed. Requires `file_bridge_id` for the store.
 
-Verbs: `send` · `history` · `interrupt` · `status` ·
-`refresh_menu` · `reflect` · `boot` · `shutdown`.
+Verbs: `send` (args `text`, `client_id?`, `system_prompt?`) · `history` · `recall` ·
+`context_status` · `interrupt` · `status` · `reflect` · `boot` · `shutdown`.
 
 ## Streaming routing
-This backend uses `CallerRoute::CliRoundTrip`: when `client_id` is
-`"cli"`, stream events are sent to the `cli` agent directly
-(`kernel.send("cli", ev)`). For all other `client_id` values, events
-are emitted on the backend agent's own inbox (`kernel.emit(self_id,
-ev)`) tagged with `client_id` — only a watcher of the backend id who
-supplies that `client_id` sees them.
-
-## Routing is the model's decision
-HOW a completion reaches its addressee is the model's: the per-call prompt names
-who listens (possibly many); the system prompt carries the `send` signature; the
-model `send()`s a named listener or just answers — no `reply_to`. A reserved
-`_call_stack` guard refuses cycles / depth>8 before the lock (AI→AI can't deadlock).
+`CallerRoute::CliRoundTrip`: `client_id == "cli"` → the `cli` agent; else emitted on
+the backend's own inbox tagged with `client_id`. Events: `status`
+(queued|thinking|streaming|done) · `token` · `done` · `context` (compaction).

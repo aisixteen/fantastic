@@ -51,6 +51,16 @@ pub fn register_host_bundles() -> BundleRegistry {
         fantastic_tools::HANDLER_MODULE,
         fantastic_tools::ToolsBundle::new(),
     );
+    // Baked script executors — IN-PROCESS engines (no subprocess, no system
+    // deps), the bodies authored control harnesses run on.
+    reg.register(
+        fantastic_lua_runtime::HANDLER_MODULE,
+        fantastic_lua_runtime::LuaRuntimeBundle,
+    );
+    reg.register(
+        fantastic_js_runtime::HANDLER_MODULE,
+        fantastic_js_runtime::JsRuntimeBundle,
+    );
     reg.register(
         "terminal_backend.tools",
         fantastic_terminal_backend::TerminalBackendBundle,

@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "fantastic-js-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "General-purpose IN-PROCESS JavaScript executor bundle (rquickjs, bundled QuickJS). NOT agentic: runs caller-authored scripts as long-lived agents with a kernel connector (send/emit/on_message) as their ONLY capability. The body an authored control harness runs on."
+
+[dependencies]
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+rquickjs = { workspace = true }
+
+[dev-dependencies]
+fantastic-file = { path = "../fantastic-file" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

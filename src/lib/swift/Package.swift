@@ -145,6 +145,13 @@ let package = Package(
             name: "FantasticScheduler",
             dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
+        // In-process JavaScript executor (JavaScriptCore, Apple system
+        // framework). Mirrors the Rust `fantastic-js-runtime` contract.
+        .target(
+            name: "FantasticJSRuntime",
+            dependencies: ["FantasticKernel", "FantasticJSON"],
+            linkerSettings: [.linkedFramework("JavaScriptCore")]
+        ),
         .target(
             name: "FantasticCliBundle",
             dependencies: ["FantasticKernel", "FantasticJSON"]
@@ -271,7 +278,7 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticScheduler", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticJSRuntime", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
@@ -286,6 +293,10 @@ let package = Package(
                 "FantasticKernelStartup", "FantasticKernel", "FantasticJSON",
                 "FantasticProxyAgent",
             ]
+        ),
+        .testTarget(
+            name: "FantasticJSRuntimeTests",
+            dependencies: ["FantasticJSRuntime", "FantasticKernel", "FantasticJSON"]
         ),
         // ── Cross-runtime parity (Phase 8J) ──────────────────────
         // Spawns the Python kernel binary as a subprocess +

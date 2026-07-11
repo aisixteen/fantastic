@@ -1,44 +1,48 @@
-//! fantastic-ai-core — shared reflect-driven LLM-agent machinery behind
-//! a [`Provider`] seam. The ollama / NIM (and future) backends supply
-//! only their `Provider` impl + a thin `Bundle` that dispatches verbs
+//! fantastic-ai-core — shared machinery for **context-managed completion**
+//! backends behind a [`Provider`] seam. The ollama / NIM / anthropic backends
+//! supply only their `Provider` impl + a thin `Bundle` that dispatches verbs
 //! through this crate.
 //!
-//! Two layers (mirroring the Python `ai_core` dedup):
+//! A backend does ONE provider pass per `send` — **no agentic loop, no tool
+//! parsing, no agent menu**. The loop is emergent (an authored agent reads the
+//! completion + drives tool dispatch). What the backend DOES own, because it
+//! owns the per-client conversation, is **context management**: per-client
+//! history, auto-compaction on overflow, and the `recall` / `context_status`
+//! verbs (see [`projection`], [`strategies`], [`context`]).
 //!
-//!  1. PROCESS-GLOBAL STATE keyed by agent id ([`state`]): the FIFO
-//!     lock, in-flight task, current/queue status entries, menu cache.
-//!     Keyed by id so multiple backends coexist in one kernel.
+//! Two layers (mirroring the Python `ai_core`):
 //!
-//!  2. PER-BACKEND CONFIG ([`agent_loop::BackendConfig`]): the caller
-//!     route (cli round-trip vs per-client inbox), tool-args-as-json
-//!     (OpenAI vs ollama shape), and parallel-vs-serial tool dispatch.
-//!     The [`Provider`] (built per agent by the backend) is the streaming
-//!     seam. NIM-only bits (api_key verbs, Bearer client cache, 429
-//!     retry, SSE parse) stay IN the nvidia crate.
+//!  1. PROCESS-GLOBAL STATE keyed by agent id ([`state`]): the FIFO lock,
+//!     in-flight task, current/queue status entries, projection/compaction
+//!     bookkeeping. Keyed by id so multiple backends coexist in one kernel.
+//!
+//!  2. PER-BACKEND CONFIG ([`agent_loop::BackendConfig`]): the caller route
+//!     (cli round-trip vs per-client inbox) + error-name prefix. The
+//!     [`Provider`] (built per agent by the backend) is the streaming seam.
+//!     NIM-only bits (api_key verbs, Bearer client cache, 429 retry, SSE
+//!     parse) stay IN the nvidia crate.
 //!
 //! ## LLM backend contract (canonical reference)
 //!
-//! Every LLM backend bundle MUST implement the same verb + event shape
-//! so any chat UI can retarget via a single `update_agent
-//! upstream_id=<other>` with no frontend changes.
-//!
 //! ### Verbs (caller → backend, via `kernel.send`)
 //!
-//! - `send` args `{text:str, client_id:str?}` →
+//! - `send` args `{text:str, client_id:str?, system_prompt:str?}` →
 //!   `{response:str, final:str, client_id:str}` on success,
-//!   `{error:str, client_id:str}` on failure.
-//! - `history` args `{client_id:str?}` →
-//!   `{messages:[{role,content,…}], client_id:str}`.
+//!   `{error:str, client_id:str}` on failure. ONE bare pass; a
+//!   `system_prompt` override lets a caller teach its own tool convention.
+//! - `history` args `{client_id:str?}` → `{messages, client_id}`.
+//! - `recall` args `{client_id:str?, query:str?, limit:int?, before:int?}`.
+//! - `context_status` → the budget posture + last compaction + reaction.
 //! - `interrupt` → `{interrupted:bool}`. Cancels in-flight `send`.
-//! - `reflect`, `boot`, `shutdown`, `status`, `refresh_menu`.
+//! - `reflect`, `boot`, `shutdown`, `status`.
 //!
 //! ### Events (backend → caller's inbox, via the route)
 //!
 //! - `{type:"status", source, client_id, ts, phase, detail}` where
-//!   `phase` ∈ `queued|thinking|streaming|tool_calling|done`.
+//!   `phase` ∈ `queued|thinking|streaming|done`.
 //! - `{type:"token", text, source, client_id}` — one per chunk.
-//! - `{type:"say", text:"[tool target -> reply]", source, client_id}`.
 //! - `{type:"done", source, client_id}` — final event.
+//! - `{type:"context", ...}` — the compaction push half (see [`projection`]).
 
 #![deny(missing_docs)]
 

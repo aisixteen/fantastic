@@ -224,34 +224,6 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
         nt._providers.pop(nid, None)
 
 
-async def test_run_with_tool_call_iterates(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    fp = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            ["Final answer based on tool reply."],
-        ]
-    )
-    nt._providers[nid] = fp
-    try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "list"})
-        assert r["final"] == "Final answer based on tool reply."
-        assert fp.calls == 2
-    finally:
-        nt._providers.pop(nid, None)
-
-
 async def test_run_persists_history(seeded_kernel, store_agent):
     # History lands in the mounted chat yaml_state (persisted THROUGH the loader),
     # NOT a chat_<client>.json the AI writes itself — read it back via `history`.
@@ -288,38 +260,6 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
     ]
     assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
     assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
-
-
-async def test_run_unbounded_steps_until_no_tool_calls(seeded_kernel, store_agent):
-    """No fixed step cap. Same Claude-Code-style loop as ollama_backend."""
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    scripts = [
-        [
-            {
-                "tool_call": {
-                    "id": f"call_{i}",
-                    "name": "send",
-                    "arguments": {
-                        "target_id": "kernel_state",
-                        "payload": {"type": "list_agents"},
-                    },
-                }
-            }
-        ]
-        for i in range(6)
-    ]
-    scripts.append(["finally done."])
-    fp = _FakeProvider(scripts)
-    nt._providers[nid] = fp
-    try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "loop"})
-        assert r["final"] == "finally done."
-        assert fp.calls == 7
-    finally:
-        nt._providers.pop(nid, None)
-
-
-# ─── routing ───────────────────────────────────────────────────
 
 
 async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
@@ -373,60 +313,6 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
 
 
 # ─── menu ───────────────────────────────────────────────────────
-
-
-async def test_assemble_includes_agent_menu(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    nt._invalidate_menu(nid)
-    msgs = await nt._assemble(nid, "hello", seeded_kernel, "alice")
-    sys_block = msgs[0]["content"]
-    assert "Available agents" in sys_block
-    assert store_agent in sys_block
-    assert "read" in sys_block
-    assert "send tool" in sys_block.lower()
-    assert "refresh_menu" in sys_block
-    assert nid in nt._menu_cache
-
-
-async def test_menu_invalidates_after_tool_call(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    fp = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            ["done."],
-        ]
-    )
-    nt._providers[nid] = fp
-    try:
-        nt._menu_cache[nid] = [{"id": "stale", "sentence": "", "verbs": []}]
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "list", "client_id": "alice"}
-        )
-        assert nid not in nt._menu_cache
-    finally:
-        nt._providers.pop(nid, None)
-
-
-async def test_refresh_menu_verb_invalidates(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    nt._menu_cache[nid] = [{"id": "stale", "sentence": "", "verbs": []}]
-    r = await seeded_kernel.send(nid, {"type": "refresh_menu"})
-    assert r == {"refreshed": True}
-    assert nid not in nt._menu_cache
-
-
-# ─── concurrency ────────────────────────────────────────────────
 
 
 async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
@@ -518,61 +404,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
         nt._providers.pop(nid, None)
 
 
-# ─── tool_call round-trip (RAW text shape) ─────────────────────
-
-
-async def test_prior_tool_call_replayed_as_text_to_model(seeded_kernel, store_agent):
-    """RAW: the second iteration must SEE the prior call + reply as plain TEXT —
-    the assistant's `<tool_call>` inline, and the reply as a user-role
-    `<tool_response>` (no native `tool_calls`/`role:tool` structured fields, since
-    many models — incl. tiny local ones — don't render a `tool` role)."""
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    seen_messages: list[list[dict]] = []
-
-    class _CapturingProvider:
-        def __init__(self):
-            self.calls = 0
-
-        async def chat(self, messages, tools=None):
-            self.calls += 1
-            seen_messages.append([dict(m) for m in messages])
-            if self.calls == 1:
-                yield {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            else:
-                yield "done"
-
-    nt._providers[nid] = _CapturingProvider()
-    try:
-        await seeded_kernel.send(nid, {"type": "send", "text": "go"})
-    finally:
-        nt._providers.pop(nid, None)
-
-    # The model-facing messages on the 2nd pass are pure text turns.
-    second = seen_messages[1]
-    assert all(m.get("role") in ("system", "user", "assistant") for m in second), (
-        f"raw mode renders no role:tool / no structured tool_calls: {second}"
-    )
-    assert all("tool_calls" not in m for m in second)
-    assistant = [m for m in second if m.get("role") == "assistant"][-1]
-    assert (
-        "<tool_call>" in assistant["content"] and "list_agents" in assistant["content"]
-    )
-    # the reply came back as a user-role <tool_response>
-    assert any(
-        m["role"] == "user" and "<tool_response" in m.get("content", "") for m in second
-    )
-
-
-# ─── rate-limit retry ──────────────────────────────────────────
+# ─── rate-limit retry (429) ────────────────────────────────────
 
 
 def _http_status_error(code: int, retry_after: str | None = None):
@@ -772,54 +604,6 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
         assert statuses[-1]["detail"]["reason"] == "ok"
         send_ids = {s["detail"].get("send_id") for s in statuses}
         assert len(send_ids) == 1 and None not in send_ids
-    finally:
-        nt._providers.pop(nid, None)
-
-
-async def test_status_event_sequence_with_tool_call(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    fp = _FakeProvider(
-        [
-            [
-                {
-                    "tool_call": {
-                        "id": "call_a",
-                        "name": "send",
-                        "arguments": {
-                            "target_id": "kernel_state",
-                            "payload": {"type": "list_agents"},
-                        },
-                    }
-                }
-            ],
-            ["wrap up."],
-        ]
-    )
-    nt._providers[nid] = fp
-    sends, emits, ctx = _capture(seeded_kernel)
-    try:
-        with ctx:
-            await seeded_kernel.send(
-                nid, {"type": "send", "text": "list", "client_id": "alice"}
-            )
-        statuses = [p for _, p in emits if p.get("type") == "status"]
-        phases = [s["phase"] for s in statuses]
-        assert phases == [
-            "thinking",
-            "tool_calling",
-            "tool_calling",
-            "thinking",
-            "streaming",
-            "done",
-        ], phases
-        tcs = [s for s in statuses if s["phase"] == "tool_calling"]
-        assert "reply_preview" not in tcs[0]["detail"]["tool"]
-        assert "reply_preview" in tcs[1]["detail"]["tool"]
-        assert (
-            tcs[0]["detail"]["tool"]["call_id"]
-            == tcs[1]["detail"]["tool"]["call_id"]
-            == "call_a"
-        )
     finally:
         nt._providers.pop(nid, None)
 

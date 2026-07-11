@@ -70,13 +70,6 @@ public final class AIBackend: @unchecked Sendable {
     private let stateLock = NSLock()
     private var inFlight: Int = 0
 
-    /// Lazy per-agent "menu of capabilities" cache (id → reflected
-    /// peers). `nil`/absent means "rebuild on the next assemble". The
-    /// `refresh_menu` verb + each tool batch invalidate it. Mirrors the
-    /// Rust `BackendState.menu` / Python `_menu_cache`.
-    private let menuLock = NSLock()
-    private var menuCache: [String: [JSON]] = [:]
-
     /// Per-agent send coordination (FIFO lock + queue + in-flight entry)
     /// behind the `status` verb + phase events. Lazily created per id.
     private let runStatesLock = NSLock()
@@ -141,9 +134,6 @@ public final class AIBackend: @unchecked Sendable {
             return statusVerb(agentId: agentId, payload: payload)
         case "interrupt":
             return interruptVerb(payload: payload)
-        case "refresh_menu":
-            invalidateMenu(agentId)
-            return .object(["refreshed": .bool(true)])
         case "backend_state":
             return backendStateReply(agent: agent)
         default:
@@ -170,9 +160,11 @@ public final class AIBackend: @unchecked Sendable {
         // per-backend `verbs` map so the capability is discoverable.
         var verbs = config.verbs.asObject ?? [:]
         verbs["recall"] = .string(
-            "args: client_id?, query? (substring), limit? (max 100), before?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.")
+            "args: client_id?, query? (substring), limit? (max 100), before?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}."
+        )
         verbs["context_status"] = .string(
-            "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.")
+            "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}."
+        )
         fields["verbs"] = .object(verbs)
         return .object(fields)
     }
@@ -193,6 +185,9 @@ public final class AIBackend: @unchecked Sendable {
             return .object(["error": .string("send requires text")])
         }
         let clientId = payload["client_id"].asString ?? "cli"
+        // A caller-supplied `system_prompt` REPLACES the default system block
+        // (the caller teaches its own tool convention there). Mirrors py/rust.
+        let systemPrompt = payload["system_prompt"].asString
 
         // Build the provider FIRST — backends that must refuse before
         // touching history (NIM no-api_key, FM unavailable) return their
@@ -254,6 +249,7 @@ public final class AIBackend: @unchecked Sendable {
                 clientId: clientId,
                 st: st,
                 userText: text,
+                systemPrompt: systemPrompt,
                 kernel: kernel
             )
             st.clearCurrent()
@@ -277,6 +273,7 @@ public final class AIBackend: @unchecked Sendable {
         clientId: String,
         st: AIAgentRunState,
         userText: String,
+        systemPrompt: String?,
         kernel: Kernel
     ) async {
         let agentId = agent.id
@@ -299,10 +296,12 @@ public final class AIBackend: @unchecked Sendable {
         await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: persistBase)
         let modelHistory = config.stateless ? [] : prior
 
-        // Rebuild the system block every turn from the live substrate
-        // (primer + self-reflect + agent menu + send how-to + per-backend
-        // extra). The system block is NOT persisted.
-        let systemContent = await assembleSystemPrompt(agent: agent, kernel: kernel)
+        // Rebuild the system block every turn from the live substrate (a lean
+        // primer + self-reflect + the context how-to), OR use the caller's
+        // `system_prompt` override verbatim. NO agent menu, NO tool how-to —
+        // this backend runs ONE pass, no tool loop. Not persisted.
+        let systemContent = await assembleSystemPrompt(
+            agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         var messages: [JSON] = [
             .object(["role": .string("system"), "content": .string(systemContent)])
         ]
@@ -311,11 +310,11 @@ public final class AIBackend: @unchecked Sendable {
             .object(["role": .string("user"), "content": .string(userText)]))
 
         // Context-Protocol seam: shape what the MODEL sees this turn to fit the
-        // window (prepending the canonical [context-notice]), ONCE at entry —
-        // never mid-tool-loop. `messages` is the model view; persistence uses
-        // `persistBase`/`newTurns` (the full conversation), so the durable store
-        // is never trimmed and the notice is never persisted. Skipped for
-        // stateless backends (FM owns its context; modelHistory is empty).
+        // window (prepending the canonical [context-notice]), ONCE at entry.
+        // `messages` is the model view; persistence uses `persistBase` (the full
+        // conversation), so the durable store is never trimmed and the notice is
+        // never persisted. Skipped for stateless backends (FM owns its context;
+        // modelHistory is empty).
         if !config.stateless {
             switch await projectContext(
                 provider: provider, agent: agent, clientId: clientId, messages: messages,
@@ -338,154 +337,86 @@ public final class AIBackend: @unchecked Sendable {
             }
         }
 
-        // The agentic loop: stream a pass, dispatch any tool-calls back
-        // through the kernel, feed the results in, repeat until the model
-        // stops emitting tools. FM yields no tool-calls (Apple runs them
-        // inside the session), so it runs exactly one pass. Mirrors Rust
-        // `run_generation` / Python `_run`.
-        var accumulated = ""  // generation-wide, for the UI token stream
-        var lastText = ""  // current pass text → the final assistant turn
-        var newTurns: [JSON] = []  // assistant/tool turns to persist at the end
-        var cancelled = false
-        var iteration = 0
-
-        loop: while true {
-            iteration += 1
-            if iteration > 1 {
-                // Re-entering after a tool batch — back to `thinking`.
-                await emitStatus(
-                    agentId: agentId, clientId: clientId, phase: "thinking", st: st,
-                    kernel: kernel)
-            }
-            var passText = ""
-            var passToolCalls: [JSON] = []
-            var firstToken = true
-            do {
-                // RAW tool-calling: the provider streams pure text; the SHARED
-                // parser splits content tokens from `<tool_call>` envelopes (no
-                // native tools). `renderForModel` projects stored turns to plain
-                // text every chat template renders.
-                let stream = parseToolCalls(provider.chat(messages: renderForModel(messages)))
-                for try await chunk in stream {
-                    if Date() > deadline {
-                        await provider.stop()
+        // ONE provider pass — stream tokens straight to the caller. The tool
+        // LOOP is emergent (a caller drives it by reading the completion and
+        // sending the next turn); this backend is a context-managed
+        // conversational completion. `renderForModel` projects stored turns to
+        // plain text every chat template renders. Mirrors Rust `run_generation`
+        // / Python `_run`.
+        var accumulated = ""
+        var firstToken = true
+        do {
+            let stream = provider.chat(messages: renderForModel(messages))
+            for try await chunk in stream {
+                if Date() > deadline {
+                    await provider.stop()
+                    await emitStatus(
+                        agentId: agentId, clientId: clientId, phase: "done", st: st,
+                        extraDetail: ["reason": .string("timeout")], kernel: kernel)
+                    await emitDone(
+                        kernel: kernel, agentId: agentId,
+                        streamId: streamId, messageId: messageId,
+                        clientId: clientId, accumulated: accumulated,
+                        error: "send: timeout after \(Int(sendTimeoutSeconds))s")
+                    return
+                }
+                if isStreamCancelled(streamId: streamId, startedAt: startedAtEpoch) {
+                    await provider.stop()
+                    if config.emitInterruptedError {
+                        // FM shape: terminal `done{error:"interrupted"}`,
+                        // partial turn NOT persisted.
                         await emitStatus(
                             agentId: agentId, clientId: clientId, phase: "done", st: st,
-                            extraDetail: ["reason": .string("timeout")], kernel: kernel)
+                            extraDetail: ["reason": .string("interrupted")], kernel: kernel)
                         await emitDone(
                             kernel: kernel, agentId: agentId,
                             streamId: streamId, messageId: messageId,
                             clientId: clientId, accumulated: accumulated,
-                            error: "send: timeout after \(Int(sendTimeoutSeconds))s")
+                            error: "interrupted")
                         return
                     }
-                    if isStreamCancelled(streamId: streamId, startedAt: startedAtEpoch) {
-                        await provider.stop()
-                        if config.emitInterruptedError {
-                            // FM shape: terminal `done{error:"interrupted"}`,
-                            // partial turn NOT persisted.
-                            await emitStatus(
-                                agentId: agentId, clientId: clientId, phase: "done", st: st,
-                                extraDetail: ["reason": .string("interrupted")], kernel: kernel)
-                            await emitDone(
-                                kernel: kernel, agentId: agentId,
-                                streamId: streamId, messageId: messageId,
-                                clientId: clientId, accumulated: accumulated,
-                                error: "interrupted")
-                            return
-                        }
-                        cancelled = true
-                        break
-                    }
-                    switch chunk {
-                    case .token(let delta):
-                        if firstToken {
-                            firstToken = false
-                            await emitStatus(
-                                agentId: agentId, clientId: clientId, phase: "streaming",
-                                st: st, kernel: kernel)
-                        }
-                        accumulated += delta
-                        passText += delta
-                        st.updateCurrent { $0.textSoFar += delta }
-                        await kernel.emit(
-                            agentId,
-                            .object([
-                                "type": .string("token"),
-                                "stream_id": .string(streamId),
-                                "message_id": .string(messageId),
-                                "delta": .string(delta),
-                                "accumulated": .string(accumulated),
-                                "client_id": .string(clientId),
-                            ]))
-                    case .toolCall(let call):
-                        passToolCalls.append(call)
-                    }
+                    // ollama / NIM shape: stop reading, persist what streamed.
+                    break
                 }
-            } catch {
-                await emitStatus(
-                    agentId: agentId, clientId: clientId, phase: "done", st: st,
-                    extraDetail: ["reason": .string("error")], kernel: kernel)
-                await emitDone(
-                    kernel: kernel, agentId: agentId,
-                    streamId: streamId, messageId: messageId,
-                    clientId: clientId, accumulated: accumulated,
-                    error: "\(error)")
-                return
+                switch chunk {
+                case .token(let delta):
+                    if firstToken {
+                        firstToken = false
+                        await emitStatus(
+                            agentId: agentId, clientId: clientId, phase: "streaming",
+                            st: st, kernel: kernel)
+                    }
+                    accumulated += delta
+                    st.updateCurrent { $0.textSoFar += delta }
+                    await kernel.emit(
+                        agentId,
+                        .object([
+                            "type": .string("token"),
+                            "stream_id": .string(streamId),
+                            "message_id": .string(messageId),
+                            "delta": .string(delta),
+                            "accumulated": .string(accumulated),
+                            "client_id": .string(clientId),
+                        ]))
+                }
             }
-            lastText = passText
-
-            // No tools (or interrupted) → this pass is the final answer.
-            if passToolCalls.isEmpty || cancelled { break loop }
-
-            // Record the assistant turn as TEXT — its prose plus the
-            // `<tool_call>` envelope(s) it emitted (no structured `tool_calls`
-            // field; raw, single-truth). Next pass the model re-reads its own
-            // call as text.
-            let callTags = passToolCalls.map { renderToolCallChunk($0) }.joined(separator: "\n")
-            let assistantText =
-                passText.isEmpty
-                ? callTags : (callTags.isEmpty ? passText : passText + "\n" + callTags)
-            let assistantTurnWithTools: JSON = .object([
-                "role": .string("assistant"),
-                "content": .string(assistantText),
-            ])
-            messages.append(assistantTurnWithTools)
-            newTurns.append(assistantTurnWithTools)
-
-            // Phase → tool_calling, noting the first call for `status`.
-            let toolDetail = toolEntry(passToolCalls.first)
-            st.updateCurrent { $0.lastTool = toolDetail }
+        } catch {
             await emitStatus(
-                agentId: agentId, clientId: clientId, phase: "tool_calling", st: st,
-                extraDetail: toolDetail.map { ["tool": $0] } ?? [:], kernel: kernel)
-
-            // Dispatch, then fold every reply into ONE `role:tool` turn carrying
-            // `<tool_response>` text (mapped to role:user by `renderForModel`).
-            let results = await dispatchToolCalls(
-                passToolCalls, parallel: config.parallelTools, kernel: kernel)
-            let toolContent = results.map {
-                "<tool_response name=\"\($0.0)\">\($0.1)</tool_response>"
-            }.joined(separator: "\n")
-            let toolTurn: JSON = .object([
-                "role": .string("tool"), "content": .string(toolContent),
-            ])
-            messages.append(toolTurn)
-            newTurns.append(toolTurn)
-
-            // The population may have changed (a tool created/deleted an
-            // agent) — rebuild the menu before the next pass.
-            invalidateMenu(agentId)
+                agentId: agentId, clientId: clientId, phase: "done", st: st,
+                extraDetail: ["reason": .string("error")], kernel: kernel)
+            await emitDone(
+                kernel: kernel, agentId: agentId,
+                streamId: streamId, messageId: messageId,
+                clientId: clientId, accumulated: accumulated,
+                error: "\(error)")
+            return
         }
 
-        // Persist the full chat: base (prior + user turn) + the
-        // intermediate tool turns + the final assistant turn. One write of
-        // the whole conversation (matches Rust/Python `save_history`). The
-        // error / FM-interrupt / timeout paths return earlier and leave the
-        // base (with just the user turn) as the persisted record.
-        let finalRows =
-            persistBase + newTurns
-            + [assistantTurn(id: messageId, content: lastText)]
+        // Persist the full chat: base (prior + user turn) + the assistant turn.
+        // One write of the whole conversation (matches Rust/Python
+        // `save_history`). The error / FM-interrupt / timeout paths return
+        // earlier and leave the base (just the user turn) as the record.
+        let finalRows = persistBase + [assistantTurn(id: messageId, content: accumulated)]
         await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: finalRows)
 
         await emitStatus(
@@ -495,24 +426,6 @@ public final class AIBackend: @unchecked Sendable {
             kernel: kernel, agentId: agentId,
             streamId: streamId, messageId: messageId,
             clientId: clientId, accumulated: accumulated, error: nil)
-    }
-
-    /// Compact `{call_id, target, verb}` summary of a tool-call chunk for
-    /// the `status` event / snapshot. `nil` when no call.
-    private func toolEntry(_ call: JSON?) -> JSON? {
-        guard let call else { return nil }
-        let fn = call["function"]
-        var args: JSON = .object([:])
-        if let s = fn["arguments"].asString {
-            args = (try? JSON.parse(s)) ?? .object([:])
-        } else if fn["arguments"].asObject != nil {
-            args = fn["arguments"]
-        }
-        return .object([
-            "call_id": .string(call["id"].asString ?? ""),
-            "target": .string(args["target_id"].asString ?? ""),
-            "verb": .string(args["payload"]["type"].asString ?? ""),
-        ])
     }
 
     // MARK: - status (verb + phase events)
@@ -611,136 +524,48 @@ public final class AIBackend: @unchecked Sendable {
         return .object(out)
     }
 
-    // MARK: - prompt assembly + tool dispatch
+    // MARK: - prompt assembly
 
-    /// Rebuild the system prompt from the live substrate: lean primer
-    /// (id-index of the tree + bundle catalog), the agent's own
-    /// self-reflect, the lazy menu of peers, the universal `send` how-to,
-    /// and any per-backend extra (FM's always-inject memory). Mirrors
-    /// Rust `assemble_messages` / Python `_assemble`.
-    func assembleSystemPrompt(agent: Agent, kernel: Kernel) async -> String {
-        let selfId = agent.id
-        let primer = await kernel.send(
-            AgentId("core"),
-            .object([
-                "type": .string("reflect"),
-                "tree": .string("ids"),
-                "bundles": .string("ids"),
-            ]))
-        let me = await kernel.send(
-            selfId, .object(["type": .string("reflect"), "tree": .string("none")]))
-
-        // Lazy menu: rebuild only on a cache miss.
-        let menu: [JSON]
-        if let cached = cachedMenu(selfId.value) {
-            menu = cached
+    /// Build the DEFAULT system prompt from the live substrate: a lean primer
+    /// (id-index of the tree + bundle catalog), the agent's own self-reflect,
+    /// the context how-to, and any per-backend extra (FM's always-inject
+    /// memory). A caller-supplied `systemPrompt` REPLACES the default (the
+    /// caller teaches its own tool convention there); the per-backend extra is
+    /// still appended. NO agent menu, NO tool how-to. Mirrors Rust
+    /// `assemble_messages` / Python `_assemble`.
+    func assembleSystemPrompt(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
+        var blocks: [String]
+        if let override = systemPrompt,
+            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            blocks = [override]
         } else {
-            let built = await buildMenu(selfId: selfId, kernel: kernel)
-            storeMenu(selfId.value, built)
-            menu = built
+            let selfId = agent.id
+            let primer = await kernel.send(
+                AgentId("core"),
+                .object([
+                    "type": .string("reflect"),
+                    "tree": .string("ids"),
+                    "bundles": .string("ids"),
+                ]))
+            let me = await kernel.send(
+                selfId, .object(["type": .string("reflect"), "tree": .string("none")]))
+            blocks = [
+                renderReflect(primer),
+                "You are `\(selfId.value)`. " + renderReflect(me),
+                CONTEXT_HOWTO,
+            ]
         }
-
-        var blocks: [String] = [
-            renderReflect(primer),
-            "You are `\(selfId.value)`. " + renderReflect(me),
-            renderMenu(menu),
-            SEND_HOWTO,
-        ]
         let extra = await config.systemPromptExtra(agent, kernel)
         if !extra.isEmpty { blocks.append(extra) }
         return blocks.joined(separator: "\n\n")
     }
 
-    /// Drop an agent's cached menu so the next assemble rebuilds it.
-    private func invalidateMenu(_ id: AgentId) {
-        menuLock.lock()
-        defer { menuLock.unlock() }
-        menuCache[id.value] = nil
-    }
-
-    /// Synchronous menu-cache accessors (NSLock can't span `await`).
-    private func cachedMenu(_ id: String) -> [JSON]? {
-        menuLock.lock()
-        defer { menuLock.unlock() }
-        return menuCache[id]
-    }
-
-    private func storeMenu(_ id: String, _ menu: [JSON]) {
-        menuLock.lock()
-        defer { menuLock.unlock() }
-        menuCache[id] = menu
-    }
-
-    /// Dispatch one provider tool-call (always the universal `send`)
-    /// through the kernel and shape the `role:tool` reply message. The
-    /// call's `function.arguments` may be a JSON string (OpenAI/NIM) or a
-    /// parsed object (ollama) — both resolve to `{target_id, payload}`.
-    private func dispatchToolCall(_ call: JSON, kernel: Kernel) async -> (String, String) {
-        let fn = call["function"]
-        let name = fn["name"].asString ?? "send"
-        let rawArgs = fn["arguments"]
-        var args: JSON = .object([:])
-        if let s = rawArgs.asString {
-            args = (try? JSON.parse(s)) ?? .object([:])
-        } else if rawArgs.asObject != nil {
-            args = rawArgs
-        }
-        let target = args["target_id"].asString ?? ""
-        let payload = args["payload"]
-        let reply: JSON
-        if target.isEmpty {
-            reply = .object(["error": .string("empty target_id")])
-        } else {
-            reply = await kernel.send(AgentId(target), payload)
-        }
-        return (name, reply.serialize())
-    }
-
-    /// Dispatch a batch of tool-calls, preserving model-emitted order in the
-    /// returned `(name, replyJSON)` pairs. Concurrent when `parallel` (ollama /
-    /// FM), serial otherwise (NIM).
-    private func dispatchToolCalls(
-        _ calls: [JSON], parallel: Bool, kernel: Kernel
-    ) async -> [(String, String)] {
-        if !parallel {
-            var out: [(String, String)] = []
-            for c in calls {
-                out.append(await dispatchToolCall(c, kernel: kernel))
-            }
-            return out
-        }
-        return await withTaskGroup(of: (Int, (String, String)).self) { group in
-            for (i, c) in calls.enumerated() {
-                group.addTask { (i, await self.dispatchToolCall(c, kernel: kernel)) }
-            }
-            var indexed: [(Int, (String, String))] = []
-            for await r in group { indexed.append(r) }
-            return indexed.sorted { $0.0 < $1.0 }.map { $0.1 }
-        }
-    }
-
-    /// Render one OpenAI-shaped tool-call chunk back into the `<tool_call>`
-    /// text envelope for persistence in the assistant turn.
-    private func renderToolCallChunk(_ call: JSON) -> String {
-        let fn = call["function"]
-        let name = fn["name"].asString ?? "send"
-        let rawArgs = fn["arguments"]
-        let args: JSON
-        if let s = rawArgs.asString {
-            args = (try? JSON.parse(s)) ?? .object([:])
-        } else if rawArgs.asObject != nil {
-            args = rawArgs
-        } else {
-            args = .object([:])
-        }
-        return renderToolCall(name: name, arguments: args)
-    }
-
     /// Project the internal message list to what the model reads — pure text,
-    /// every role a chat template renders. Tool replies are stored as
-    /// `role:tool` (so projection/recall tool-pairing stays intact) but mapped
-    /// to `role:user` here, because many templates (incl. tiny local models)
-    /// don't render a `tool` role. Keeps only role + content.
+    /// every role a chat template renders. Tool replies (a caller may persist
+    /// `role:tool` turns of its own) are mapped to `role:user` here, because
+    /// many templates (incl. tiny local models) don't render a `tool` role.
+    /// Keeps only role + content.
     private func renderForModel(_ messages: [JSON]) -> [JSON] {
         messages.map { m in
             let role = m["role"].asString ?? ""

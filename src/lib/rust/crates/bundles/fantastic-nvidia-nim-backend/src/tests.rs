@@ -336,7 +336,9 @@ async fn rate_limit_retry_once_then_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn raw_tool_call_in_content_split_across_chunks() {
+async fn envelope_text_streams_verbatim_no_dispatch() {
+    // BARE: a `<tool_call>` envelope split across two SSE chunks is just TEXT —
+    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
     let server = MockServer::start().await;
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
@@ -345,96 +347,32 @@ async fn raw_tool_call_in_content_split_across_chunks() {
         .send(&nim, json!({"type": "set_api_key", "api_key": "nvapi-x"}))
         .await;
 
-    // RAW: the `<tool_call>` envelope arrives as plain CONTENT deltas split across
-    // two SSE chunks — ai-core's shared parser buffers across chunks and extracts
-    // the call. The model wants `send(target_id='core', payload={...})`.
     let part_1 = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co";
     let part_2 = "re\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
     let line_1 = json!({"choices":[{"delta":{"content": part_1}}]}).to_string();
     let line_2 = json!({"choices":[{"delta":{"content": part_2}}]}).to_string();
-    let sse_with_tool = format!("data: {line_1}\n\ndata: {line_2}\n\ndata: [DONE]\n\n");
-    // After tool runs, the model returns a final assistant turn.
-    let sse_final = "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n";
-
-    // First request → SSE with tool call.
+    let sse = format!("data: {line_1}\n\ndata: {line_2}\n\ndata: [DONE]\n\n");
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse_with_tool),
+                .set_body_string(sse),
         )
-        .up_to_n_times(1)
-        .expect(1)
-        .mount(&server)
-        .await;
-    // Second request → final answer.
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse_final),
-        )
-        .expect(1)
+        .expect(1) // exactly one pass — no loop
         .mount(&server)
         .await;
 
     let client_id = "test_tool";
-    let mut rx = open_client_inbox(&kernel, client_id);
-    let send_kernel = Arc::clone(&kernel);
-    let nim_for_task = nim.clone();
-    let join = tokio::spawn(async move {
-        send_kernel
-            .send(
-                &nim_for_task,
-                json!({"type": "send", "text": "do it", "client_id": client_id}),
-            )
-            .await
-    });
-
-    let mut tool_invoked = false;
-    let mut saw_done = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    while tokio::time::Instant::now() < deadline && !saw_done {
-        match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Some(ev)) => {
-                let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                if ty == "say" {
-                    let text = ev.get("text").and_then(Value::as_str).unwrap_or("");
-                    // Aggregated args should JSON-parse and yield a
-                    // tool_call against "core" with payload list_agents.
-                    if text.contains("[tool core ->") {
-                        tool_invoked = true;
-                    }
-                } else if ty == "status" {
-                    if let Some(tool) = ev.get("detail").and_then(|d| d.get("tool")) {
-                        if let Some(args) = tool.get("args") {
-                            // The args dict must be FULLY reconstructed.
-                            if args.get("target_id").and_then(Value::as_str) == Some("core")
-                                && args
-                                    .get("payload")
-                                    .and_then(|p| p.get("type"))
-                                    .and_then(Value::as_str)
-                                    == Some("list_agents")
-                            {
-                                tool_invoked = true;
-                            }
-                        }
-                    }
-                } else if ty == "done" {
-                    saw_done = true;
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {}
-        }
-    }
-    let _ = join.await.unwrap();
-    assert!(
-        tool_invoked,
-        "expected the aggregated tool_call args to JSON-parse + dispatch against 'core'",
-    );
+    let _rx = open_client_inbox(&kernel, client_id);
+    let reply = kernel
+        .send(
+            &nim,
+            json!({"type": "send", "text": "do it", "client_id": client_id}),
+        )
+        .await;
+    let expected = format!("{part_1}{part_2}");
+    assert_eq!(reply["response"], expected, "verbatim text: {reply:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

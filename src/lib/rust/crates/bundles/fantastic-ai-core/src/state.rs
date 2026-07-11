@@ -53,8 +53,6 @@ pub struct BackendState {
     pub current_meta: Mutex<Option<CurrentEntry>>,
     /// Entries waiting on `lock`. Front = next to acquire.
     pub queue: Mutex<VecDeque<QueuedEntry>>,
-    /// Lazy menu cache — `None` means "rebuild on next assemble".
-    pub menu: Mutex<Option<Vec<Value>>>,
     /// PUBLIC last context-overflow projection summary (the `context_status`
     /// verb's `last_projection`). `{fired, strategy?, kept_turns?,
     /// dropped_turns?, summarized?, too_small?}`. Free of internal bookkeeping.
@@ -72,7 +70,6 @@ impl BackendState {
             current_task: Mutex::new(None),
             current_meta: Mutex::new(None),
             queue: Mutex::new(VecDeque::new()),
-            menu: Mutex::new(None),
             projection: Mutex::new(None),
             compaction_mark: Mutex::new(None),
         })

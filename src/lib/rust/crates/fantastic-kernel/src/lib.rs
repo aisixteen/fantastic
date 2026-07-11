@@ -23,6 +23,7 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod bundle;
+pub mod call_guard;
 pub mod errors;
 pub mod kernel;
 pub mod lifecycle;

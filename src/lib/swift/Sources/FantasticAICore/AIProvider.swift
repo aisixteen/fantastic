@@ -10,10 +10,10 @@
 //
 // A provider is a PURE RAW-TEXT streamer: it yields `.token`s only and
 // does NOT do tool-calling — Fantastic NEVER uses a provider's native tool
-// API. Tool-calling is owned by the base class (`ToolParse` extracts the
-// `<tool_call>` envelope from this text stream). `.toolCall` exists only as
-// the parser's output type (and a test pass-through); a real backend
-// `chat()` yields only `.token`. The shared loop consumes all backends
+// API. This backend runs ONE provider pass per `send` (no tool loop); a
+// caller that wants tool-calling teaches its own convention via
+// `system_prompt` and drives the loop itself, parsing the completion with
+// the shared `extractToolCalls`. The shared machinery consumes all backends
 // identically.
 //
 // IMPORTANT: this module is provider-agnostic and MUST NOT import
@@ -24,16 +24,13 @@
 import FantasticJSON
 import Foundation
 
-/// One event off a provider stream, in arrival order.
+/// One event off a provider stream, in arrival order. Providers are pure
+/// raw-text streamers, so this carries content tokens only — there is no
+/// tool-call variant (this backend does not run a tool loop; a caller that
+/// wants tool-calling parses the completed text with `extractToolCalls`).
 public enum AIChunk: Sendable {
     /// A content token — streamed to the caller live and accumulated.
     case token(String)
-    /// One completed tool-call, already finalized (arguments parsed /
-    /// fragments joined). The JSON is the OpenAI-style tool-call object
-    /// `{id, type:"function", function:{name, arguments}}` so the
-    /// shared machinery can splice it straight into the persisted
-    /// assistant turn without re-shaping.
-    case toolCall(JSON)
 }
 
 /// Streaming chat adapter for one upstream LLM. Built per `send` by the

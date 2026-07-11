@@ -3,18 +3,22 @@ OpenAI-compatible LLM backend. Thin Provider + Bundle over
 `fantastic-ai-core`: this crate supplies only the NIM `Provider`
 (HTTPS + Bearer auth + SSE streaming raw text + 429 rate-limit retry)
 and a thin `Bundle` that dispatches every verb
-through `fantastic-ai-core`. The FIFO lock, menu cache, prompt
-assembly, agentic loop, and history persistence all live in
-`fantastic-ai-core`.
+through `fantastic-ai-core`. The FIFO lock, prompt assembly, ONE-PASS
+generation, context management, and history all live in
+`fantastic-ai-core`. **No agentic loop.**
 
-## Tool-calling is RAW (no native OpenAI tools)
-This backend NEVER sends the OpenAI `tools`/`tool_choice` fields nor reads
-`delta.tool_calls`. The NIM `Provider` streams plain `content` text; the shared
-`fantastic-ai-core` layer teaches the `send` tool's text envelope in the system prompt
-and parses the call out of the stream (`tool_parse`): the model emits
-`<tool_call>{"name":"send","arguments":{"target_id":"…","payload":{"type":"…"}}}</tool_call>`,
-results return as `<tool_response>…</tool_response>` text. Identical across the
-ollama / nvidia / anthropic backends.
+## Bare completion — the tool loop is the CALLER's
+`send` does exactly ONE provider pass. This backend NEVER sends the OpenAI
+`tools`/`tool_choice` fields nor reads `delta.tool_calls`; the NIM `Provider`
+streams plain `content` text, returned verbatim. Any tool convention is the
+caller's — an authored agent teaches it in the prompt (via `system_prompt`),
+reads the completion, dispatches, and feeds the result back as the next
+`{send, text}` turn.
+
+## Context management — owned HERE
+Per-client `chat.json` history, auto-compaction on overflow (`context_strategy`,
+default `compact`, + `[context-notice]`), and the `recall` / `context_status`
+verbs. The conversation's owner owns its context.
 
 This crate implements the **LLM backend contract** defined in
 `fantastic-ai-core`'s module header. The provider connection differs
@@ -28,7 +32,7 @@ change.
 CALLER's own `client_id` inbox — NOT the backend agent's own inbox.
 A watcher of the backend agent's id does NOT see these events.
 
-Verbs: `send` · `history` · `interrupt` · `status` · `refresh_menu` ·
+Verbs: `send` · `history` · `interrupt` · `status` ·
 `boot` · `shutdown` · `reflect` · `set_api_key` · `clear_api_key`.
 
 Extras beyond the contract:

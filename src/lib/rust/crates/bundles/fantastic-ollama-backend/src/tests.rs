@@ -169,27 +169,17 @@ async fn send_streams_tokens_and_emits_done() {
 }
 
 #[tokio::test]
-async fn raw_tool_call_in_content_parses_and_dispatches() {
+async fn envelope_text_streams_verbatim_no_dispatch() {
+    // BARE: an envelope-looking `<tool_call>…` in the completion is just TEXT —
+    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    // RAW: ollama streams plain CONTENT text containing the `<tool_call>` envelope;
-    // ai-core's shared parser extracts it and dispatches. Second response: final text.
-    let with_tool = ndjson_body(&[json!({
-        "message": {
-            "content": "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"
-        },
-        "done": true
-    })]);
-    let final_body = ndjson_body(&[json!({"message": {"content": "ok"}, "done": true})]);
+    let envelope = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
+    let body = ndjson_body(&[json!({"message": {"content": envelope}, "done": true})]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(with_tool))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/chat"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(final_body))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1) // exactly one pass — no loop
         .mount(&server)
         .await;
 
@@ -202,20 +192,16 @@ async fn raw_tool_call_in_content_parses_and_dispatches() {
             json!({"type": "send", "text": "go", "client_id": client_id}),
         )
         .await;
-    assert_eq!(reply["response"], "ok");
+    assert_eq!(reply["response"], envelope, "verbatim text: {reply:#?}");
 
     let events = drain(&mut rx).await;
-    // The args object must JSON-parse + dispatch against 'core'.
-    let dispatched = events.iter().any(|e| {
-        e.get("type").and_then(Value::as_str) == Some("status")
-            && e.get("detail")
-                .and_then(|d| d.get("tool"))
-                .and_then(|t| t.get("args"))
-                .and_then(|a| a.get("target_id"))
-                .and_then(Value::as_str)
-                == Some("core")
-    });
-    assert!(dispatched, "expected parsed tool args -> core: {events:#?}");
+    assert!(
+        !events.iter().any(|e| {
+            e.get("type").and_then(Value::as_str) == Some("say")
+                || e.get("detail").and_then(|d| d.get("tool")).is_some()
+        }),
+        "bare send must not dispatch anything: {events:#?}"
+    );
 }
 
 #[tokio::test]

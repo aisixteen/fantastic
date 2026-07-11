@@ -1,18 +1,18 @@
-// RAW tool-call parsing — the ONE shared layer that owns tool-calling.
+// RAW tool-call parsing — the shared helpers a CALLER uses to read a
+// completion, and the compaction-reaction reader uses to detect prior calls.
 //
-// Fantastic NEVER uses a provider's native tool API. Providers are pure
-// raw-text streamers (`.token` only); THIS module wraps that stream and
-// extracts the `send` tool calls from the text. Used by `AIBackend` for every
-// backend. Mirrors Rust `tool_parse` / Python `tool_parse`.
+// Fantastic NEVER uses a provider's native tool API, and this backend runs ONE
+// provider pass per `send` (no tool loop). Tool-calling is the caller's: an
+// authored agent teaches its `send` convention via `system_prompt`, then reads
+// the completed text with `extractToolCalls`. Providers stay pure raw-text
+// streamers. Mirrors Rust `tool_parse` / Python `tool_parse` (both trimmed to
+// `parse_one` + `extract_tool_calls`).
 //
-// The envelope (Hermes-style — widely trained, unambiguous, stream-friendly):
+// The envelope (Hermes-style — widely trained, unambiguous):
 //
 //   <tool_call>{"name": "send", "arguments": {"target_id": "...", "payload": {...}}}</tool_call>
 //
-// Text OUTSIDE the tags is content shown to the user. Tags may repeat. The
-// parser yields the SAME `AIChunk`s the loop already consumes; a pre-formed
-// `.toolCall` (e.g. from a test) passes through untouched — real providers
-// never emit one.
+// Text OUTSIDE the tags is content shown to the user. Tags may repeat.
 
 import FantasticJSON
 import Foundation
@@ -21,25 +21,11 @@ import OrderedCollections
 let TOOL_OPEN = "<tool_call>"
 let TOOL_CLOSE = "</tool_call>"
 
-private func mintToolId() -> String {
-    "call_" + UUID().uuidString.prefix(8).lowercased()
-}
-
-/// Serialize a call into the envelope — used in the prompt example and when
-/// persisting an assistant turn so the model re-reads its own call as text.
+/// Serialize a call into the envelope — used to teach the convention by
+/// example, or when a caller records an assistant turn as text.
 func renderToolCall(name: String, arguments: JSON) -> String {
     let obj: JSON = .object(["name": .string(name), "arguments": arguments])
     return TOOL_OPEN + obj.serialize() + TOOL_CLOSE
-}
-
-/// Shape a parsed call into the OpenAI-style tool-call object the loop expects
-/// (`{id, type:"function", function:{name, arguments}}`).
-private func openAIToolCall(name: String, arguments: JSON) -> JSON {
-    .object([
-        "id": .string(mintToolId()),
-        "type": .string("function"),
-        "function": .object(["name": .string(name), "arguments": arguments]),
-    ])
 }
 
 /// Parse the JSON between one tag pair into `(name, arguments)`.
@@ -83,87 +69,4 @@ func extractToolCalls(_ text: String) -> [(String, JSON)] {
         rest = afterOpen[close.upperBound...]
     }
     return out
-}
-
-/// Longest suffix of `s` that is a proper prefix of TOOL_OPEN (a tag possibly
-/// split across chunks) — held back rather than emitted as content.
-private func partialOpenLen(_ s: String) -> Int {
-    let maxK = min(s.count, TOOL_OPEN.count - 1)
-    if maxK <= 0 { return 0 }
-    for k in stride(from: maxK, through: 1, by: -1) where s.hasSuffix(String(TOOL_OPEN.prefix(k))) {
-        return k
-    }
-    return 0
-}
-
-/// Wrap a provider stream → content tokens + finalized tool-calls. Buffers
-/// across chunks (a tag may split mid-token); malformed JSON inside a tag (or
-/// an unterminated tag at EOF) is surfaced as content, never dropped. A
-/// pre-formed `.toolCall` passes through (flushing buffered content first).
-func parseToolCalls(
-    _ inner: AsyncThrowingStream<AIChunk, Error>
-) -> AsyncThrowingStream<AIChunk, Error> {
-    AsyncThrowingStream { continuation in
-        let task = Task {
-            var buf = ""
-            var inside = false
-
-            func drainBuf() {
-                while true {
-                    if !inside {
-                        if let open = buf.range(of: TOOL_OPEN) {
-                            let before = String(buf[buf.startIndex..<open.lowerBound])
-                            if !before.isEmpty { continuation.yield(.token(before)) }
-                            buf = String(buf[open.upperBound...])
-                            inside = true
-                        } else {
-                            let hold = partialOpenLen(buf)
-                            let end = buf.index(buf.endIndex, offsetBy: -hold)
-                            let emit = String(buf[buf.startIndex..<end])
-                            if !emit.isEmpty { continuation.yield(.token(emit)) }
-                            buf = String(buf[end...])
-                            break
-                        }
-                    } else if let close = buf.range(of: TOOL_CLOSE) {
-                        let inner = String(buf[buf.startIndex..<close.lowerBound])
-                        buf = String(buf[close.upperBound...])
-                        inside = false
-                        if let (name, args) = parseOneToolCall(inner) {
-                            continuation.yield(.toolCall(openAIToolCall(name: name, arguments: args)))
-                        } else {
-                            continuation.yield(.token(TOOL_OPEN + inner + TOOL_CLOSE))
-                        }
-                    } else {
-                        break  // need more to close the tag
-                    }
-                }
-            }
-
-            do {
-                for try await chunk in inner {
-                    switch chunk {
-                    case .toolCall(let c):
-                        if !inside && !buf.isEmpty {
-                            continuation.yield(.token(buf))
-                            buf = ""
-                        }
-                        continuation.yield(.toolCall(c))
-                    case .token(let t):
-                        buf += t
-                        drainBuf()
-                    }
-                }
-                // flush
-                if inside {
-                    continuation.yield(.token(TOOL_OPEN + buf))
-                } else if !buf.isEmpty {
-                    continuation.yield(.token(buf))
-                }
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: error)
-            }
-        }
-        continuation.onTermination = { _ in task.cancel() }
-    }
 }
