@@ -94,7 +94,8 @@ extension Kernel {
         guard let hm = target.handlerModule else {
             return (
                 .object([
-                    "error": .string("agent \(target.id) has no handler_module; cannot answer binary")
+                    "error": .string(
+                        "agent \(target.id) has no handler_module; cannot answer binary")
                 ]), Data()
             )
         }
@@ -112,8 +113,7 @@ extension Kernel {
     /// Send WITH explicit sender attribution. State events tag this
     /// dispatch as originating from `senderId`. Mirrors the
     /// `send_json_as` UniFFI helper used by web_ws / proxy_agent.
-    public func sendAs(sender: AgentId, target: AgentId, payload: JSON) async -> JSON
-    {
+    public func sendAs(sender: AgentId, target: AgentId, payload: JSON) async -> JSON {
         await KernelTaskLocals.$currentSender.withValue(sender) {
             await send(target, payload)
         }
@@ -176,6 +176,9 @@ extension Kernel {
             // run-scoped runtime/env/version above): sourced from the persisted
             // root meta, minted once at boot + read back verbatim thereafter.
             obj["guid"] = target.metaValue(forKey: "guid") ?? .null
+            obj["self_extension"] = .string(
+                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:true (the Self-extension section) for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executor here: js_runtime.tools (its script receives turns by awaiting kernel.on_message() in a loop)."
+            )
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)

@@ -96,9 +96,17 @@
             js_runtime — a general-purpose in-process JavaScript executor (JavaScriptCore). \
             The agent record's `code` meta IS the program; `boot` rehydrates it. The script's \
             only capability is the kernel connector: `await kernel.send(target, payload)`, \
-            `await kernel.emit(payload)`, `await kernel.on_message()`, `kernel.self_id`. Any \
-            verb this bundle doesn't own is queued to the script's inbox ({queued:true} ack) \
-            and delivered via on_message(). Verbs: reflect · boot · start · stop · status · shutdown.
+            `await kernel.emit(payload)`, `await kernel.reflect(target?)`, `await kernel.on_message()`, \
+            `kernel.self_id`. Any verb this bundle doesn't own is queued to the script's inbox \
+            ({queued:true} ack) and delivered via on_message(). Verbs: reflect · boot · start · stop · status · shutdown.
+
+            Authoring a durable tool — create_agent handler_module=js_runtime.tools id=<name> \
+            code=<js source>; the record's `code` IS the tool (persists, boots on reboot). \
+            USAGE PATTERNS: \
+            (1) on_message is a PULL for js — loop `while(true){ const m = await kernel.on_message(); if(m===null) break; if(m.type!=='send') continue; /* handle turn */ }`; NEVER pass a callback. \
+            (2) `code` is ONE JSON string — keep each string literal's content on one line (no raw line break inside a string); escape as needed. \
+            (3) every turn MUST `kernel.emit` a `say` (the answer, tagged with the caller's client_id) THEN a `done` (also tagged client_id). \
+            (4) `delete_agent <name>` is how you remove your own tool.
             """
         }
 
@@ -365,6 +373,9 @@
                     "await kernel.on_message()": .string(
                         "Resolves with the next queued inbox payload (null when the agent is stopped/deleted)."
                     ),
+                    "await kernel.reflect(target?)": .string(
+                        "Reflect any agent by id (default 'kernel'); resolves with its reflect reply. Read a bundle's own reflect/readme before authoring `code` against it."
+                    ),
                     "kernel.self_id": .string("This agent's id (string)."),
                 ]),
                 "emits": .object([
@@ -372,6 +383,9 @@
                         "{type:'job_done', source, ok:bool, error?} — the script ran to completion (or crashed). A harness-style script normally never completes."
                     )
                 ]),
+                "authoring": .string(
+                    "This bundle is how you author DURABLE tools: create_agent handler_module=js_runtime.tools id=<name> code=<js source> — the record's `code` IS the tool, it persists and `boot` rehydrates it after reboot; delete_agent removes it. A running script can itself kernel.send('kernel', {type:'create_agent', ...}) MORE script agents — tools compose into tools."
+                ),
             ])
         }
     }

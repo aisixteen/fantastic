@@ -335,7 +335,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "script_api": {
             "kernel.send(target, payload)": "Dispatch to any agent by id; suspends the script until the reply table returns. A _call_stack guard refuses cycles/depth>8.",
             "kernel.emit(payload)": "Emit an event on this agent (watchers + tagged client_id inboxes receive it).",
-            "kernel.on_message()": "Suspend until the next queued inbox payload arrives (nil when the agent is deleted).",
+            "kernel.on_message()": "A PULL you LOOP, not a callback — takes no args, suspends until the next queued inbox payload arrives (nil when the agent is deleted). Call it in `while true do local m = kernel.on_message(); if m == nil then break end ... end`; never pass a function.",
             "kernel.self_id": "This agent's id (string).",
             "kernel.json_decode(str) / kernel.json_encode(v)": "JSON <-> Lua table (decode returns nil on invalid JSON).",
         },

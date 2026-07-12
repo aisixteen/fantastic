@@ -131,6 +131,10 @@ pub fn apply_reflect_flags(
             "persistence".to_string(),
             json!({ "provider": crate::persistence::find_store(kernel).map(|id| id.0) }),
         );
+        obj.insert(
+            "self_extension".to_string(),
+            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:true (the Self-extension section) for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
+        );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
         "all" => {

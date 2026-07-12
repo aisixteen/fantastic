@@ -36,6 +36,23 @@ try:
             b += c
         return b
 
+    _dispatch_q = _q.Queue()
+
+    def _dispatcher():
+        # watch/on_message callbacks run HERE, on a dedicated thread OFF the
+        # reader — so a callback may freely call kernel.send/emit (blocking on a
+        # reply) without deadlocking: the reader thread stays free to read that
+        # reply. Single thread ⇒ callbacks stay strictly ordered.
+        while True:
+            cbs, payload = _dispatch_q.get()
+            for cb in cbs:
+                try:
+                    cb(payload)
+                except Exception:
+                    pass
+
+    _th.Thread(target=_dispatcher, daemon=True).start()
+
     def _reader():
         while True:
             h = _recvn(4)
@@ -55,17 +72,9 @@ try:
                 if q is not None:
                     q.put(m.get("data"))
             elif op == "event":
-                for cb in list(_watchers.get(m.get("src"), ())):
-                    try:
-                        cb(m.get("payload"))
-                    except Exception:
-                        pass
+                _dispatch_q.put((list(_watchers.get(m.get("src"), ())), m.get("payload")))
             elif op == "inbox":
-                for cb in list(_inbox_cbs):
-                    try:
-                        cb(m.get("payload"))
-                    except Exception:
-                        pass
+                _dispatch_q.put((list(_inbox_cbs), m.get("payload")))
 
     _th.Thread(target=_reader, daemon=True).start()
 

@@ -44,3 +44,29 @@ exceeds depth 8 is refused with an error reply.
 **Meta-possibility:** a script can `kernel.send('kernel',
 {type:'create_agent', …})` — including MORE script agents. Tools can author
 tools; harnesses can author their successors and hot-swap.
+
+## Author-code contract — read before writing `code`
+
+1. **`on_message` is a PULL, not a callback.** `await kernel.on_message()` takes
+   NO arguments and RETURNS the next inbox payload (`null` when you are being
+   deleted). Never pass it a function. LOOP to keep receiving turns:
+
+       // event-loop
+       while (true) {
+         const m = await kernel.on_message();   // waits for the next turn
+         if (m === null) break;                 // deleted -> exit
+         if (m.type !== 'send') continue;
+         // ... act, then emit say + done ...
+       }
+
+2. **`code` is ONE JSON string.** Separate statements with `\n` (a JSON `\n`
+   decodes to a real newline) or `;`. NEVER put a raw line break inside a STRING
+   LITERAL's content — keep each string on one line (use a space, not a newline,
+   even in a `system_prompt`); if you truly need an in-string newline write it as
+   `\\n`. Escape as needed.
+3. **Every turn MUST emit both:** a `say` carrying the answer, THEN a `done` —
+   both tagged with the caller's `client_id`. Never finish a turn without the
+   `done`: `kernel.emit({type:'say', text:..., client_id:m.client_id})` then
+   `kernel.emit({type:'done', client_id:m.client_id})`.
+4. **Remove your own tool** with `kernel.send('kernel', {type:'delete_agent',
+   id:kernel.self_id})` (or any id) — the same system verb that created it.

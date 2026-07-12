@@ -319,7 +319,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "script_api": {
             "await kernel.send(target, payload)": "Dispatch to any agent by id; resolves with the reply object. A _call_stack guard refuses cycles/depth>8.",
             "await kernel.emit(payload)": "Emit an event on this agent (watchers + tagged client_id inboxes receive it).",
-            "await kernel.on_message()": "Resolves with the next queued inbox payload (null when the agent is deleted).",
+            "await kernel.on_message()": "A PULL you LOOP, not a callback — takes no args, resolves with the next queued inbox payload (null when the agent is deleted). Call it in `while(true){ const m = await kernel.on_message(); if(m===null) break; ... }`; never pass a function.",
             "kernel.self_id": "This agent's id (string).",
         },
         "emits": {
