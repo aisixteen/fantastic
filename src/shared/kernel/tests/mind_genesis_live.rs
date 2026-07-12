@@ -138,7 +138,9 @@ async fn genesis_run(force_executor: &str) {
                     format!(
                         "- {} — {}",
                         e.get("id").and_then(Value::as_str).unwrap_or("?"),
-                        e.get("handler_module").and_then(Value::as_str).unwrap_or("(bare)")
+                        e.get("handler_module")
+                            .and_then(Value::as_str)
+                            .unwrap_or("(bare)")
                     )
                 })
                 .collect::<Vec<_>>()
@@ -177,7 +179,9 @@ async fn genesis_run(force_executor: &str) {
     );
 
     // ── The mechanical relay: execute the ONE envelope. ──
-    let created = kernel.send(&AgentId::from("kernel"), envelope.clone()).await;
+    let created = kernel
+        .send(&AgentId::from("kernel"), envelope.clone())
+        .await;
     assert!(created.get("error").is_none(), "create mind: {created:#?}");
     let mind_id = envelope["id"].as_str().unwrap_or("mind").to_string();
     let st = kernel
