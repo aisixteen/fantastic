@@ -18,13 +18,16 @@ control fd — the spawner (THIS agent) holds the live kernel and relays. The jo
 never dials a host, never knows a URL: same no-bypass shape as the browser iframe
 connector (child -> spawner -> kernel). Surface:
     kernel.send(target, payload) -> reply     # request/reply to any agent by id
-    kernel.emit(target, payload)              # fire-and-forget
+    kernel.emit(payload)                      # emit an event on YOUR OWN agent (say/done)
+    kernel.emit(target, payload)              # emit an event on another agent
     kernel.reflect(target='kernel')           # = send({type:'reflect'})
     off = kernel.watch(src, cb)               # PUSH: cb(payload) per event from src
-    off = kernel.on_message(cb)               # PUSH: messages on THIS agent's inbox
+    off = kernel.on_message(cb)               # PUSH: ALL inbound payloads (filter type=='send')
+    kernel.self_id                            # THIS agent's public id
 So a job is a first-class routine — read memory anywhere, call an AI, spawn another
-job, push to a panel — all by id, over the same protocol. (watch/on_message run
-their callbacks on a background reader thread.)
+job, push to a panel — all by id, over the same protocol. watch/on_message callbacks
+run on a dedicated dispatcher thread (OFF the reader), so a callback may freely
+kernel.send/emit without deadlocking.
 
 Verbs:
   start     -> spawn a background job; returns {job_id, status:'running'}
@@ -324,7 +327,9 @@ async def _start(id, payload, kernel):
     try:
         env = dict(os.environ)
         env["FANTASTIC_CTRL_FD"] = str(child_sock.fileno())
-        env["FANTASTIC_SELF_ID"] = f"_pyjob_{job_id}"
+        # `kernel.self_id` = the OWNER AGENT id (the tool's public id), NOT the
+        # ephemeral job id — so a tool can address/tag itself by the id others use.
+        env["FANTASTIC_SELF_ID"] = id
         full_code = _CONNECTOR_SRC + "\n" + code
         proc = await asyncio.create_subprocess_exec(
             interp,
@@ -473,6 +478,11 @@ async def _reflect(id, payload, kernel):
         "connector": (
             "Spawned code has a `kernel` global over a private control fd this agent "
             "relays: kernel.send/emit/reflect (pull) + kernel.watch/on_message (push)."
+        ),
+        "authoring": (
+            "This agent's persisted `code` IS a durable tool: create_agent with a "
+            "`code` field, `boot` rehydrates it after restart, `delete_agent` removes "
+            "it. A running job can itself create_agent more agents."
         ),
     }
 
