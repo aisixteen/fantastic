@@ -271,10 +271,16 @@ the next process start.
   special (no `primer`). Compose the reply with flags:
   `tree=all|ids|none` (default `all` — nested distilled subtree; `ids` =
   flat descendant-id index), `bundles=all|ids|none` (default `none` —
-  the installable-bundle catalog), `readme=true` (attach the agent's
-  readme.md). Verb signatures live in
+  the installable-bundle catalog), and `readme` — polymorphic: `true`
+  attaches the agent's SHORT orientation `readme.md`; `"index"` returns
+  the token-annotated topic tree `[{key,desc,tokens,children?}]`;
+  `"<key>"` drills one topic (body + its sub-docs' index); an unknown key
+  → `{error,keys}`. Verb signatures live in
   docstrings; `reflect` derives them. Discovery is one round-trip;
-  transport/wire docs live in the root readme (`reflect readme=true`).
+  transport/wire docs live in the doc tree (`reflect readme=index`, then
+  drill by key). The ROOT reflect always carries `readmes` (the top-level
+  topic index) + a `docs` one-liner, so the manual's map rides the first
+  reflect.
   Each distilled **tree node** also carries the wiring/posture meta it
   has — `ingress_rule`/`egress_rule`/`auth` (a leg's lock: `allow_all` =
   open, `password` = gated, `deny_inbound` or **absent on an io leg** =

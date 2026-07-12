@@ -175,7 +175,11 @@ class Agent:
     def _read_readme(self) -> str | None:
         """The agent's own `readme.md` content, or None if it has none.
         Read-only — the loader seeds the file (copy-if-missing) when it
-        persists the record; Agent just reads it back for `reflect`."""
+        persists the record; Agent just reads it back for `reflect`.
+
+        For an agent whose manual is a keyed doc TREE (a `docs/` dir beside
+        `readme.md`), this is the SHORT orientation; the topics are fetched by
+        key via `_readme_view` (`readme=index` / `readme=<key>`)."""
         p = self._root_path / "readme.md"
         if p.exists():
             try:
@@ -183,6 +187,113 @@ class Agent:
             except OSError:
                 return None
         return None
+
+    # ─── keyed / tiered doc tree ───────────────────────────────
+    # A bundle's manual may be a SHORT `readme.md` orientation + a `docs/`
+    # tree of topic files (nested dirs = tiers). `reflect readme=index`
+    # lists the tree token-annotated; `reflect readme=<key>` drills one
+    # topic. A topic = a `docs/<key>.md` file; a sibling dir `docs/<key>/`
+    # extends it with sub-docs (`<key>/<sub>`). Simple bundles ship one
+    # `readme.md` and no `docs/` — the index is then empty and `readme=true`
+    # returns that single doc, unchanged.
+
+    _CHARS_PER_TOKEN = 4  # mirrors ai_core.context.CHARS_PER_TOKEN (ceil-div)
+
+    @property
+    def _docs_dir(self) -> Path:
+        return self._root_path / "docs"
+
+    @classmethod
+    def _est_tokens(cls, text: str) -> int:
+        """Ceil(chars / 4) — the same cheap estimate ai_core uses, so a doc's
+        advertised cost matches what the model actually pays to read it."""
+        return (len(text) + cls._CHARS_PER_TOKEN - 1) // cls._CHARS_PER_TOKEN
+
+    @staticmethod
+    def _read_desc(text: str) -> str:
+        """A topic's one-line descriptor — the leading `> ` line if present,
+        else the first prose line (skipping headings)."""
+        lines = text.splitlines()
+        for line in lines:
+            if line.startswith("> "):
+                return line[2:].strip()
+        for line in lines:
+            s = line.strip()
+            if s and not s.startswith("#") and not s.startswith(">"):
+                return s
+        return ""
+
+    def _readme_index(self, base: Path | None = None, prefix: str = "") -> list[dict]:
+        """Token-annotated topic index under `docs/` (recursive; nesting
+        preserved). Each entry `{key, desc, tokens, children?}` — NO body."""
+        d = base if base is not None else self._docs_dir
+        if not d.is_dir():
+            return []
+        entries: list[dict] = []
+        for f in sorted(d.iterdir()):
+            if not (f.is_file() and f.suffix == ".md"):
+                continue
+            try:
+                body = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            key = prefix + f.stem
+            entry: dict[str, Any] = {
+                "key": key,
+                "desc": self._read_desc(body),
+                "tokens": self._est_tokens(body),
+            }
+            sub = d / f.stem
+            if sub.is_dir():
+                children = self._readme_index(sub, key + "/")
+                if children:
+                    entry["children"] = children
+            entries.append(entry)
+        return entries
+
+    def _readme_keys(self) -> list[str]:
+        """Flat list of every doc key (for an unknown-key error reply)."""
+        keys: list[str] = []
+
+        def walk(entries: list[dict]) -> None:
+            for e in entries:
+                keys.append(e["key"])
+                walk(e.get("children", []))
+
+        walk(self._readme_index())
+        return keys
+
+    def _readme_view(self, sel: str):
+        """Polymorphic `readme=<str>`: `"index"` → the token-annotated tree;
+        a `<key>` → that topic's body + its immediate sub-docs' index; an
+        unknown/escaping key → `{error, keys}` (the reply stays well-formed)."""
+        if sel == "index":
+            return {"index": self._readme_index()}
+        d = self._docs_dir
+        safe = sel.strip("/").replace("\\", "/")
+        f = d / (safe + ".md")
+        try:
+            f.resolve().relative_to(d.resolve())  # clamp inside docs/
+        except (ValueError, OSError):
+            return {"error": f"bad key {sel!r}", "keys": self._readme_keys()}
+        if not f.is_file():
+            return {"error": f"no doc {sel!r}", "keys": self._readme_keys()}
+        try:
+            body = f.read_text(encoding="utf-8")
+        except OSError:
+            return {"error": f"unreadable {sel!r}", "keys": self._readme_keys()}
+        view: dict[str, Any] = {
+            "key": safe,
+            "desc": self._read_desc(body),
+            "tokens": self._est_tokens(body),
+            "body": body,
+        }
+        sub = d / safe
+        if sub.is_dir():
+            children = self._readme_index(sub, safe + "/")
+            if children:
+                view["children"] = children
+        return view
 
     # ─── record ────────────────────────────────────────────────
 
@@ -276,11 +387,13 @@ class Agent:
         - `bundles=all|ids|none` (default none): `all` is the
           {name, handler_module} catalog; `ids` is bare names; `none`
           omits it.
-        - `readme=true`: attach the
-          agent's readme.md (string or null). Atomic — one agent.
+        - `readme=true`: attach the agent's `readme.md` orientation (string
+          or null). `readme="index"`: the token-annotated topic tree.
+          `readme="<key>"`: one topic's body + its sub-docs' index.
+          Atomic — one agent.
 
-        Transport/wire docs are NOT here — they live in the root readme
-        (`reflect readme=true`)."""
+        Transport/wire docs are NOT here — they live in the doc tree
+        (`reflect readme=index`, then drill by key)."""
         if payload.get("type") != "reflect" or not isinstance(reply, dict):
             return reply
         # `description` is a substrate meta field — surface it on EVERY
@@ -325,8 +438,11 @@ class Agent:
             reply["bundles"] = target._available_bundles()
         elif bundles == "ids":
             reply["bundles"] = [b["name"] for b in target._available_bundles()]
-        if payload.get("readme"):
+        rm = payload.get("readme")
+        if rm is True:
             reply["readme"] = target._read_readme()
+        elif isinstance(rm, str) and rm:
+            reply["readme"] = target._readme_view(rm)
         return reply
 
     def _descendant_ids(self) -> list[str]:

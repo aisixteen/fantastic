@@ -20,7 +20,120 @@ use crate::agent::Agent;
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use serde_json::{json, Map, Value};
+use std::path::Path;
 use std::sync::Arc;
+
+// ─── keyed / tiered doc tree ───────────────────────────────────
+// The root manual is a SHORT `readme.md` orientation + a `docs/` tree of topic
+// files (nested dirs = tiers, `/` in the key). `reflect readme=index` lists the
+// tree token-annotated; `reflect readme=<key>` drills one topic. Read from the
+// seeded on-disk tree (fantastic_core::seed_root_readme), mirroring the readme.
+
+/// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (CHARS, not
+/// bytes — Unicode-safe so the advertised cost is stable across runtimes).
+fn est_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+/// A topic's one-line descriptor: the leading `> ` line if present, else the
+/// first prose line (skipping headings).
+fn read_desc(text: &str) -> String {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("> ") {
+            return rest.trim().to_string();
+        }
+    }
+    for line in text.lines() {
+        let s = line.trim();
+        if !s.is_empty() && !s.starts_with('#') && !s.starts_with('>') {
+            return s.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Token-annotated topic index under `dir` (recursive; nesting preserved). Each
+/// entry `{key, desc, tokens, children?}` — NO body. Absent dir → empty.
+fn readme_index(dir: &Path, prefix: &str) -> Vec<Value> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let mut entries = Vec::new();
+    for path in paths {
+        if !(path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")) {
+            continue;
+        }
+        let (Some(stem), Ok(body)) = (
+            path.file_stem().and_then(|s| s.to_str()),
+            std::fs::read_to_string(&path),
+        ) else {
+            continue;
+        };
+        let key = format!("{prefix}{stem}");
+        let mut entry = Map::new();
+        entry.insert("key".to_string(), json!(key));
+        entry.insert("desc".to_string(), json!(read_desc(&body)));
+        entry.insert("tokens".to_string(), json!(est_tokens(&body)));
+        let sub = dir.join(stem);
+        if sub.is_dir() {
+            let children = readme_index(&sub, &format!("{key}/"));
+            if !children.is_empty() {
+                entry.insert("children".to_string(), Value::Array(children));
+            }
+        }
+        entries.push(Value::Object(entry));
+    }
+    entries
+}
+
+/// Flatten every doc key (for an unknown-key error reply).
+fn readme_keys(dir: &Path) -> Vec<String> {
+    fn walk(entries: &[Value], out: &mut Vec<String>) {
+        for e in entries {
+            if let Some(k) = e.get("key").and_then(Value::as_str) {
+                out.push(k.to_string());
+            }
+            if let Some(ch) = e.get("children").and_then(Value::as_array) {
+                walk(ch, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&readme_index(dir, ""), &mut out);
+    out
+}
+
+/// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a `<key>` →
+/// that topic's body + its immediate sub-docs' index; unknown/escaping key →
+/// `{error, keys}` (the reply stays well-formed).
+fn readme_view(dir: &Path, sel: &str) -> Value {
+    if sel == "index" {
+        return json!({ "index": readme_index(dir, "") });
+    }
+    let safe = sel.trim_matches('/').replace('\\', "/");
+    if safe.is_empty() || safe.split('/').any(|c| c == ".." || c.is_empty()) {
+        return json!({ "error": format!("bad key '{sel}'"), "keys": readme_keys(dir) });
+    }
+    let file = dir.join(format!("{safe}.md"));
+    let Ok(body) = std::fs::read_to_string(&file) else {
+        return json!({ "error": format!("no doc '{sel}'"), "keys": readme_keys(dir) });
+    };
+    let mut view = Map::new();
+    view.insert("key".to_string(), json!(safe));
+    view.insert("desc".to_string(), json!(read_desc(&body)));
+    view.insert("tokens".to_string(), json!(est_tokens(&body)));
+    view.insert("body".to_string(), json!(body));
+    let sub = dir.join(&safe);
+    if sub.is_dir() {
+        let children = readme_index(&sub, &format!("{safe}/"));
+        if !children.is_empty() {
+            view.insert("children".to_string(), Value::Array(children));
+        }
+    }
+    Value::Object(view)
+}
 
 /// Uniform reflect identity for a bare agent (the root, or any node with
 /// no handler_module). Bundle agents build their own identity in their
@@ -133,7 +246,20 @@ pub fn apply_reflect_flags(
         );
         obj.insert(
             "self_extension".to_string(),
-            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:true (the Self-extension section) for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
+            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:'self-extension' for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
+        );
+        // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
+        // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
+        // in front of a caller from the first root reflect — it drills with
+        // readme=index / readme=<key> instead of eating a monolith.
+        let docs_dir = target.root_path.join("docs");
+        obj.insert(
+            "readmes".to_string(),
+            Value::Array(readme_index(&docs_dir, "")),
+        );
+        obj.insert(
+            "docs".to_string(),
+            json!("This kernel's manual is a keyed doc tree. `reflect kernel readme=index` lists every topic with its ~token cost; `reflect kernel readme=<key>` opens one (e.g. readme=self-extension, readme=streams). `readme=true` is the short orientation. Read only what a task needs."),
         );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
@@ -165,19 +291,25 @@ pub fn apply_reflect_flags(
         }
         _ => {} // "none" → omit
     }
-    let want_readme = payload
-        .get("readme")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if want_readme {
-        let readme = std::fs::read_to_string(target.readme_file()).ok();
-        obj.insert(
-            "readme".to_string(),
-            match readme {
-                Some(s) => Value::String(s),
-                None => Value::Null,
-            },
-        );
+    // Polymorphic `readme`: `true` → the SHORT orientation readme.md (string or
+    // null); `"index"` → the token-annotated topic tree; `"<key>"` → one topic's
+    // body + sub-docs' index. Read from the seeded on-disk tree, one agent at a time.
+    match payload.get("readme") {
+        Some(Value::Bool(true)) => {
+            let readme = std::fs::read_to_string(target.readme_file()).ok();
+            obj.insert(
+                "readme".to_string(),
+                match readme {
+                    Some(s) => Value::String(s),
+                    None => Value::Null,
+                },
+            );
+        }
+        Some(Value::String(sel)) if !sel.is_empty() => {
+            let docs_dir = target.root_path.join("docs");
+            obj.insert("readme".to_string(), readme_view(&docs_dir, sel));
+        }
+        _ => {}
     }
 }
 

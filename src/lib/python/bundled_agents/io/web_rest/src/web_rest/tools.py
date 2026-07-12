@@ -104,11 +104,15 @@ def _make_post_endpoint(self_id: str, kernel):
 def _reflect_payload(request: Request) -> dict:
     """Reflect payload, composing the reply from query flags so the
     browser-pastable GET shortcuts work: `?readme=1` attaches the
-    readme; `?tree=all|ids|none` and `?bundles=all|ids|none` pick the
-    tiers (defaults: tree=all, bundles omitted)."""
+    orientation readme, `?readme=index` the topic map, `?readme=<key>` one
+    topic; `?tree=all|ids|none` and `?bundles=all|ids|none` pick the tiers
+    (defaults: tree=all, bundles omitted)."""
     payload: dict = {"type": "reflect"}
-    if request.query_params.get("readme") in ("1", "true", "yes"):
+    rm = request.query_params.get("readme")
+    if rm in ("1", "true", "yes"):
         payload["readme"] = True
+    elif rm and rm not in ("0", "false", "no"):
+        payload["readme"] = rm  # a doc key: `?readme=index` / `?readme=self-extension`
     tree = request.query_params.get("tree")
     if tree in ("all", "ids", "none"):
         payload["tree"] = tree

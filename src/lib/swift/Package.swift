@@ -97,7 +97,7 @@ let package = Package(
                 "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
             ],
-            resources: [.copy("Resources/root_readme.md")]
+            resources: [.copy("Resources/root_readme.md"), .copy("Resources/docs")]
         ),
         .testTarget(
             name: "FantasticKernelTests",

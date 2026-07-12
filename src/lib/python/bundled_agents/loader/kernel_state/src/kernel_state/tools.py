@@ -116,19 +116,21 @@ def write_record(root_path: Path, record: dict) -> None:
 
 
 def _seed_readme(root_path: Path | str, handler_module: str | None) -> None:
-    """Copy a bundle's shipped `readme.md` into the agent's dir on first persist,
-    THROUGH `fs`. Copy-if-missing. The SOURCE is a package resource (installed code
-    via importlib, not user disk); only the WRITE goes through `fs`."""
+    """Copy a bundle's shipped `readme.md` AND its `docs/` topic tree into the
+    agent's dir on first persist, THROUGH `fs`. Copy-if-missing per file (never
+    clobbers operator edits). The SOURCE is a package resource (installed code via
+    importlib, not user disk); only the WRITE goes through `fs`. The `docs/` tree
+    is what `reflect readme=index`/`readme=<key>` serves back."""
     if not handler_module:
         return
     rp = str(root_path)
-    if fs.exists(rp, "readme.md"):
-        return
     pkg = handler_module.split(".")[0]
     try:
-        src = importlib.resources.files(pkg) / "readme.md"
-        if src.is_file():
-            fs.write_text(rp, "readme.md", src.read_text(encoding="utf-8"))
+        base = importlib.resources.files(pkg)
+        readme = base / "readme.md"
+        if readme.is_file() and not fs.exists(rp, "readme.md"):
+            fs.write_text(rp, "readme.md", readme.read_text(encoding="utf-8"))
+        _seed_docs_local(base / "docs", rp, "docs")
     except (
         ModuleNotFoundError,
         FileNotFoundError,
@@ -140,6 +142,27 @@ def _seed_readme(root_path: Path | str, handler_module: str | None) -> None:
         # AttributeError: handler modules that aren't proper packages
         # (single-file modules, synthetic test stubs). Nothing to seed.
         pass
+
+
+def _seed_docs_local(src_dir, rp: str, rel: str) -> None:
+    """Recursively copy a `docs/` topic tree (`.md` files; nested dirs = tiers)
+    into the agent's dir THROUGH `fs`. Copy-if-missing; `src_dir` is an importlib
+    Traversable (absent ⇒ `is_dir()` False ⇒ no-op)."""
+    try:
+        if not src_dir.is_dir():
+            return
+    except (FileNotFoundError, OSError, AttributeError):
+        return
+    for child in src_dir.iterdir():
+        childrel = f"{rel}/{child.name}"
+        if child.is_dir():
+            _seed_docs_local(child, rp, childrel)
+        elif (
+            child.is_file()
+            and child.name.endswith(".md")
+            and not fs.exists(rp, childrel)
+        ):
+            fs.write_text(rp, childrel, child.read_text(encoding="utf-8"))
 
 
 def rmtree(path: Path) -> None:
@@ -268,32 +291,55 @@ async def _persist_via_store(
 async def _seed_readme_via_store(
     agent, store_id: str, reldir: str, handler_module: str | None
 ) -> None:
-    """Copy-if-missing the bundle's shipped readme.md into the agent's dir THROUGH
-    the provider. Source is the installed package (in-process resource); sink is
-    the stream provider."""
+    """Copy-if-missing the bundle's shipped readme.md AND its `docs/` topic tree
+    into the agent's dir THROUGH the provider. Source is the installed package
+    (in-process resource); sink is the stream provider."""
     if not handler_module:
         return
     kernel = agent.ctx
-    path = f"{reldir}/readme.md" if reldir else "readme.md"
-    got = await kernel.send(store_id, {"type": "read_stream", "path": path})
-    if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
-        return  # already present — never clobber operator edits
     pkg = handler_module.split(".")[0]
+    prefix = f"{reldir}/" if reldir else ""
     try:
-        src = importlib.resources.files(pkg) / "readme.md"
-        if src.is_file():
-            data = src.read_text(encoding="utf-8").encode("utf-8")
-            await kernel.send(
-                store_id,
-                {
-                    "type": "write_stream",
-                    "path": path,
-                    "bytes": data,
-                    "truncate": True,
-                },
-            )
+        base = importlib.resources.files(pkg)
+        await _seed_doc_via_store(
+            kernel, store_id, base / "readme.md", f"{prefix}readme.md"
+        )
+        await _seed_docs_via_store(kernel, store_id, base / "docs", f"{prefix}docs")
     except (ModuleNotFoundError, FileNotFoundError, OSError, TypeError, AttributeError):
         pass
+
+
+async def _seed_doc_via_store(kernel, store_id: str, src, path: str) -> None:
+    """Copy one `.md` file THROUGH the provider, copy-if-missing (never clobber)."""
+    if not src.is_file():
+        return
+    got = await kernel.send(store_id, {"type": "read_stream", "path": path})
+    if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
+        return
+    await kernel.send(
+        store_id,
+        {
+            "type": "write_stream",
+            "path": path,
+            "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
+            "truncate": True,
+        },
+    )
+
+
+async def _seed_docs_via_store(kernel, store_id: str, src_dir, rel: str) -> None:
+    """Recursively copy a `docs/` topic tree THROUGH the provider (absent ⇒ no-op)."""
+    try:
+        if not src_dir.is_dir():
+            return
+    except (FileNotFoundError, OSError, AttributeError):
+        return
+    for child in src_dir.iterdir():
+        childrel = f"{rel}/{child.name}"
+        if child.is_dir():
+            await _seed_docs_via_store(kernel, store_id, child, childrel)
+        elif child.is_file() and child.name.endswith(".md"):
+            await _seed_doc_via_store(kernel, store_id, child, childrel)
 
 
 async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
@@ -416,10 +462,23 @@ def reflect_root_extra(agent) -> dict:
     Also surfaces the kernel's stable instance `guid` — the persistence-scoped
     identity minted ONCE at boot and persisted into the root record's meta (unlike
     run-scoped runtime/env/version, which are read inline from the environment each
-    reflect). Sourced from the persisted meta so it round-trips a reboot verbatim."""
+    reflect). Sourced from the persisted meta so it round-trips a reboot verbatim.
+
+    Also surfaces the always-on doc-tree FRAME: `readmes` (the top-level
+    token-annotated topic index) + `docs` (a one-liner teaching keyed fetch).
+    So the manual's map is in front of a caller from the first root reflect —
+    it drills with `readme=index` / `readme=<key>` instead of eating a monolith."""
     return {
         "persistence": {"provider": _find_store(agent)},
         "guid": agent.record.get("guid"),
+        "readmes": agent._readme_index(),
+        "docs": (
+            "This kernel's manual is a keyed doc tree. `reflect kernel "
+            "readme=index` lists every topic with its ~token cost; `reflect "
+            "kernel readme=<key>` opens one (e.g. readme=self-extension, "
+            "readme=streams). `readme=true` is the short orientation. Read only "
+            "what a task needs."
+        ),
         "self_extension": (
             "You can extend yourself: author your own durable tools as script "
             "agents. ADD - send 'kernel' {type:'create_agent', "
@@ -429,9 +488,9 @@ def reflect_root_extra(agent) -> dict:
             "it acks {queued:true} and streams results back as emitted say/done "
             "events tagged with your client_id (watch its id). REMOVE - send "
             "'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing "
-            "`code`, reflect 'kernel' with readme:true (the Self-extension "
-            "section) for each executor's exact script API, receive pattern, and "
-            "code-escaping rules. A running script can itself create_agent more "
+            "`code`, reflect 'kernel' with readme:'self-extension' for each "
+            "executor's exact script API, receive pattern, and code-escaping "
+            "rules. A running script can itself create_agent more "
             "agents - tools compose into more tools. Executor here: "
             "python_runtime.tools (its script receives turns via "
             "kernel.on_message(callback))."

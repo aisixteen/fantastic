@@ -33,7 +33,7 @@ You act by replying with EXACTLY ONE JSON object and NOTHING else, in one of the
   {"final": "<short message>"}
 After an {"act"} I send it for you and reply with the result as your next message.
 
-To LEARN anything, reflect it: {"act":{"target":"<id>","payload":{"type":"reflect"}}}. Reflecting "kernel" returns the system overview, your OWN capabilities, and the agent tree; add "readme":true in that payload for the full guide. DISCOVER what you need by reflecting BEFORE you act — do not assume verb or API shapes.
+To LEARN anything, reflect it: {"act":{"target":"<id>","payload":{"type":"reflect"}}}. Reflecting "kernel" returns the system overview, your OWN capabilities, the agent tree, and a MAP of keyed docs (`readmes`) you can fetch one at a time. DISCOVER what you need by reflecting BEFORE you act — do not assume verb or API shapes.
 
 You are ALONE and AUTONOMOUS — no human will reply between your turns. Never stop to ask, and never announce that you are "ready to proceed" or "understand now": that is NOT done. Reflecting and planning are not completing. Every reply must be a concrete {"act"} that moves the task forward. Only reply {"final":...} once the thing you were asked to build actually EXISTS and you have exercised it and seen it work. If you catch yourself about to declare readiness, instead emit the next {"act"} (a create_agent, or a send)."#;
 
@@ -90,6 +90,11 @@ async fn seed_reflect_first_author_and_use() {
     );
     let _root_rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
+    // Seed the root manual (SHORT orientation + the keyed `docs/` tree) to disk so
+    // the model can `reflect readme=index` / `readme=<key>` and the root reflect's
+    // `readmes` index is populated — the harness builds the kernel directly (no CLI
+    // bootstrap), so nothing else seeds it.
+    let _ = fantastic_core::seed_root_readme(tmp.path());
 
     kernel
         .send(
@@ -208,8 +213,8 @@ async fn seed_reflect_first_author_and_use() {
 
         // Feed the reply back (trimmed) as the next turn.
         let mut shown = result.to_string();
-        if shown.len() > 4000 {
-            shown.truncate(4000);
+        if shown.len() > 8000 {
+            shown.truncate(8000);
             shown.push_str("…(truncated)");
         }
         turn = format!("Result of your send to '{target}':\n{shown}");
@@ -304,6 +309,11 @@ async fn seed_reflect_first_tree_spawns_worker() {
     );
     let _root_rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
+    // Seed the root manual (SHORT orientation + the keyed `docs/` tree) to disk so
+    // the model can `reflect readme=index` / `readme=<key>` and the root reflect's
+    // `readmes` index is populated — the harness builds the kernel directly (no CLI
+    // bootstrap), so nothing else seeds it.
+    let _ = fantastic_core::seed_root_readme(tmp.path());
     kernel
         .send(
             &AgentId::from("kernel"),
@@ -397,8 +407,8 @@ async fn seed_reflect_first_tree_spawns_worker() {
             created_super = true;
         }
         let mut shown = result.to_string();
-        if shown.len() > 4000 {
-            shown.truncate(4000);
+        if shown.len() > 8000 {
+            shown.truncate(8000);
             shown.push_str("…(truncated)");
         }
         turn = format!("Result of your send to '{target}':\n{shown}");
@@ -481,6 +491,11 @@ async fn mind_verify_repair_author_and_use() {
     );
     let _root_rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
+    // Seed the root manual (SHORT orientation + the keyed `docs/` tree) to disk so
+    // the model can `reflect readme=index` / `readme=<key>` and the root reflect's
+    // `readmes` index is populated — the harness builds the kernel directly (no CLI
+    // bootstrap), so nothing else seeds it.
+    let _ = fantastic_core::seed_root_readme(tmp.path());
     kernel
         .send(
             &AgentId::from("kernel"),
@@ -630,8 +645,8 @@ async fn mind_verify_repair_author_and_use() {
             echoed = true;
         }
         let mut shown = result.to_string();
-        if shown.len() > 4000 {
-            shown.truncate(4000);
+        if shown.len() > 8000 {
+            shown.truncate(8000);
             shown.push_str("…(truncated)");
         }
 

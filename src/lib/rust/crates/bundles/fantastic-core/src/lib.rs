@@ -14,24 +14,53 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// readme.md auto-seeded into the agent's dir on creation.
+/// The SHORT orientation readme auto-seeded into `.fantastic/readme.md` on boot.
+/// The full manual is the keyed [`DOCS`] tree — `reflect readme=index` / `=<key>`.
 pub const README: &str = include_str!("readme.md");
 
-/// Seed `<workdir>/.fantastic/readme.md` from [`README`] if missing.
-/// Idempotent: preserves any user-edited content on subsequent calls.
+/// The manual, split into keyed topic docs (nested dirs = tiers via a `/` in the
+/// key). Seeded into `.fantastic/docs/<key>.md`; `reflect readme=index` lists them
+/// token-annotated and `reflect readme=<key>` drills one. Trimmed + reordered so a
+/// self-authoring model reaches `self-extension` first, not a system-manual dump.
+pub const DOCS: &[(&str, &str)] = &[
+    ("self-extension", include_str!("docs/self-extension.md")),
+    ("reflect", include_str!("docs/reflect.md")),
+    ("agents", include_str!("docs/agents.md")),
+    ("memory", include_str!("docs/memory.md")),
+    ("persistence", include_str!("docs/persistence.md")),
+    ("transports", include_str!("docs/transports.md")),
+    ("streams", include_str!("docs/streams.md")),
+    ("daemon", include_str!("docs/daemon.md")),
+];
+
+/// Seed `<workdir>/.fantastic/readme.md` from [`README`] AND the [`DOCS`] tree
+/// into `<workdir>/.fantastic/docs/` if missing. Idempotent per file: preserves
+/// any user-edited content on subsequent calls.
 ///
-/// Substrate's `seed_readme` only fires for agents with a registered
-/// bundle; the root has no handler_module, so the CLI binary calls
-/// this directly after `bootstrap()`.
+/// Substrate's `seed_readme` only fires for agents with a registered bundle; the
+/// root has no handler_module, so the CLI binary calls this directly after
+/// `bootstrap()`.
 pub fn seed_root_readme(workdir: &Path) -> io::Result<()> {
-    let dest = workdir.join(".fantastic/readme.md");
-    if dest.exists() {
-        return Ok(());
+    let fdir = workdir.join(".fantastic");
+    let dest = fdir.join("readme.md");
+    if !dest.exists() {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&dest, README)?;
     }
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+    let docs_dir = fdir.join("docs");
+    for (key, body) in DOCS {
+        let path = docs_dir.join(format!("{key}.md"));
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, body)?;
     }
-    fs::write(&dest, README)
+    Ok(())
 }
 
 #[cfg(test)]
