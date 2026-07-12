@@ -152,7 +152,9 @@ async fn hand_written_lua_mind_drives_bare_nim_through_a_feedback_cycle() {
         )
         .await;
     assert!(r.get("error").is_none(), "create mind: {r:#?}");
-    let st = kernel.send(&AgentId::from("mind"), json!({"type":"status"})).await;
+    let st = kernel
+        .send(&AgentId::from("mind"), json!({"type":"status"}))
+        .await;
     assert_eq!(st["running"], true, "mind booted: {st:#?}");
 
     // Listen to the mind's emits, then hand it a user turn.
