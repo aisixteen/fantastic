@@ -156,7 +156,9 @@ async fn model_authors_a_scatter_gather_judge_mind() {
                     format!(
                         "- {} — {}",
                         e.get("id").and_then(Value::as_str).unwrap_or("?"),
-                        e.get("handler_module").and_then(Value::as_str).unwrap_or("(bare)")
+                        e.get("handler_module")
+                            .and_then(Value::as_str)
+                            .unwrap_or("(bare)")
                     )
                 })
                 .collect::<Vec<_>>()
@@ -176,7 +178,10 @@ async fn model_authors_a_scatter_gather_judge_mind() {
         )
         .await;
     let completion = reply["response"].as_str().unwrap_or("");
-    assert!(!completion.is_empty(), "genesis completion empty: {reply:#?}");
+    assert!(
+        !completion.is_empty(),
+        "genesis completion empty: {reply:#?}"
+    );
     println!("\n════ GENESIS COMPLETION ════\n{completion}\n");
 
     let envelope =
@@ -187,7 +192,9 @@ async fn model_authors_a_scatter_gather_judge_mind() {
         code.lines().next().unwrap_or("")
     );
 
-    let created = kernel.send(&AgentId::from("kernel"), envelope.clone()).await;
+    let created = kernel
+        .send(&AgentId::from("kernel"), envelope.clone())
+        .await;
     assert!(created.get("error").is_none(), "create mind: {created:#?}");
     let mind_id = envelope["id"].as_str().unwrap_or("judge").to_string();
     let st = kernel
