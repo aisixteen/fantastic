@@ -177,7 +177,14 @@ extension Kernel {
             // root meta, minted once at boot + read back verbatim thereafter.
             obj["guid"] = target.metaValue(forKey: "guid") ?? .null
             obj["self_extension"] = .string(
-                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:true (the Self-extension section) for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executor here: js_runtime.tools (its script receives turns by awaiting kernel.on_message() in a loop)."
+                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:'self-extension' for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executor here: js_runtime.tools (its script receives turns by awaiting kernel.on_message() in a loop)."
+            )
+            // Always-on doc-tree FRAME: `readmes` (the token-annotated topic
+            // index) + `docs` (a one-liner teaching keyed fetch). So the manual's
+            // map is in front of a caller from the first root reflect.
+            obj["readmes"] = readmeIndex(target)
+            obj["docs"] = .string(
+                "This kernel's manual is a keyed doc tree. `reflect kernel readme=index` lists every topic with its ~token cost; `reflect kernel readme=<key>` opens one (e.g. readme=self-extension, readme=streams). `readme=true` is the short orientation. Read only what a task needs."
             )
         }
         switch payload["tree"].asString ?? "all" {
@@ -198,8 +205,12 @@ extension Kernel {
             obj["bundles"] = .array(availableBundles().map { .string($0.name) })
         default: break  // "none" → omit
         }
+        // Polymorphic `readme`: `true` → the SHORT orientation; `"index"` → the
+        // topic tree; `"<key>"` → one topic's body. One agent at a time.
         if payload["readme"].asBool == true {
             obj["readme"] = readReadme(target)
+        } else if let sel = payload["readme"].asString, !sel.isEmpty {
+            obj["readme"] = readmeView(target, sel)
         }
         reply = .object(obj)
     }
@@ -219,6 +230,89 @@ extension Kernel {
             return .string(RootReadme.text)
         }
         return .null
+    }
+
+    // ─── keyed / tiered doc tree ───────────────────────────────
+    // The manual is a SHORT `readme.md` orientation + a `docs/` topic tree.
+    // `reflect readme=index` lists it token-annotated; `reflect readme=<key>`
+    // drills one topic. Read from the seeded on-disk tree with an embedded
+    // fallback for the in-memory root (mirrors `readReadme`).
+
+    /// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (Unicode
+    /// scalars = code points, so the advertised cost is stable across runtimes).
+    private func estTokens(_ text: String) -> Int {
+        (text.unicodeScalars.count + 3) / 4
+    }
+
+    /// A topic's one-line descriptor: the leading `> ` line if present, else
+    /// the first prose line (skipping headings).
+    private func readDesc(_ text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        for line in lines where line.hasPrefix("> ") {
+            return String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+        for line in lines {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            if !s.isEmpty, !s.hasPrefix("#"), !s.hasPrefix(">") { return s }
+        }
+        return ""
+    }
+
+    /// `(key, body)` topics for an agent: the seeded on-disk `docs/` tree if
+    /// present, else the embedded canonical docs for the root (in-memory mode).
+    /// FLAT for this runtime.
+    private func docsFor(_ target: Agent) -> [(key: String, body: String)] {
+        let dir = target.rootPath.appendingPathComponent("docs")
+        let fm = FileManager.default
+        if storage.isDisk, let names = try? fm.contentsOfDirectory(atPath: dir.path) {
+            let mds = names.filter { $0.hasSuffix(".md") }.sorted()
+            if !mds.isEmpty {
+                return mds.compactMap { name in
+                    guard
+                        let s = try? String(
+                            contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+                    else { return nil }
+                    return (String(name.dropLast(3)), s)
+                }
+            }
+        }
+        return target.parentId == nil ? RootDocs.all : []
+    }
+
+    /// Token-annotated topic index `[{key, desc, tokens}]` — no bodies.
+    private func readmeIndex(_ target: Agent) -> JSON {
+        .array(
+            docsFor(target).map { key, body in
+                .object([
+                    "key": .string(key),
+                    "desc": .string(readDesc(body)),
+                    "tokens": .integer(Int64(estTokens(body))),
+                ])
+            })
+    }
+
+    /// Polymorphic `readme=<str>`: `"index"` → the token-annotated tree; a
+    /// `<key>` → that topic's body; unknown/escaping key → `{error, keys}`.
+    private func readmeView(_ target: Agent, _ sel: String) -> JSON {
+        if sel == "index" { return .object(["index": readmeIndex(target)]) }
+        let docs = docsFor(target)
+        let keys = JSON.array(docs.map { .string($0.key) })
+        let safe =
+            sel
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .replacingOccurrences(of: "\\", with: "/")
+        if safe.isEmpty || safe.split(separator: "/").contains("..") {
+            return .object(["error": .string("bad key '\(sel)'"), "keys": keys])
+        }
+        guard let hit = docs.first(where: { $0.key == safe }) else {
+            return .object(["error": .string("no doc '\(sel)'"), "keys": keys])
+        }
+        return .object([
+            "key": .string(hit.key),
+            "desc": .string(readDesc(hit.body)),
+            "tokens": .integer(Int64(estTokens(hit.body))),
+            "body": .string(hit.body),
+        ])
     }
 
     // ── internals ───────────────────────────────────────────────

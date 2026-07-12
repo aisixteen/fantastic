@@ -116,4 +116,62 @@ struct ReflectUniformTests {
         #expect(!RootReadme.text.isEmpty)
         #expect(RootReadme.text.contains("reflect"))
     }
+
+    // ─── keyed / tiered doc tree ───────────────────────────────
+
+    @Test func embeddedDocsLoad() {
+        // The `docs/` resource tree must load (Bundle.module wired), each with a
+        // `> ` descriptor line the index reads.
+        #expect(RootDocs.all.count == RootDocs.keys.count)
+        #expect(RootDocs.all.contains { $0.key == "self-extension" })
+        for (key, body) in RootDocs.all {
+            #expect(!body.isEmpty, "empty doc \(key)")
+            #expect(body.hasPrefix("> "), "doc \(key) must open with a `> ` descriptor")
+        }
+    }
+
+    @Test func rootReflectCarriesReadmesFrame() async {
+        let kernel = makeKernel()
+        let r = await kernel.send("core", ["type": "reflect"])
+        let readmes = r["readmes"].asArray
+        #expect(readmes != nil && !(readmes!.isEmpty))
+        #expect(readmes?.contains { $0["key"].asString == "self-extension" } == true)
+        for e in readmes ?? [] {
+            #expect(e["desc"].asString?.isEmpty == false)
+            #expect((e["tokens"].asInt ?? 0) > 0)
+            #expect(e["body"] == nil || e["body"].isNull)  // index carries no bodies
+        }
+        #expect(r["docs"].asString?.contains("readme=index") == true)
+    }
+
+    @Test func readmeIndexKeyedViewAndErrors() async {
+        let kernel = makeKernel()
+        // readme=index → the token-annotated topic tree.
+        let idx = await kernel.send("core", ["type": "reflect", "readme": "index"])
+        #expect(
+            idx["readme"]["index"].asArray?.contains { $0["key"].asString == "self-extension" }
+                == true)
+        // readme=<key> → the topic body + tokens.
+        let doc = await kernel.send("core", ["type": "reflect", "readme": "self-extension"])
+        #expect(doc["readme"]["key"].asString == "self-extension")
+        #expect(doc["readme"]["body"].asString?.lowercased().contains("author") == true)
+        #expect((doc["readme"]["tokens"].asInt ?? 0) > 0)
+        // unknown key → {error, keys}.
+        let miss = await kernel.send("core", ["type": "reflect", "readme": "nope"])
+        #expect(miss["readme"]["error"].asString != nil)
+        #expect(
+            miss["readme"]["keys"].asArray?.contains { $0.asString == "self-extension" } == true)
+        // a `..` escape is refused.
+        let esc = await kernel.send("core", ["type": "reflect", "readme": "../root_readme"])
+        #expect(esc["readme"]["error"].asString != nil)
+    }
+
+    @Test func nonRootHasNoReadmesFrame() async {
+        let kernel = makeKernel()
+        _ = await kernel.send(
+            "core", ["type": "create_agent", "handler_module": "echo.tools", "id": "kid"])
+        let kid = await kernel.send("kid", ["type": "reflect"])
+        #expect(kid["readmes"] == nil || kid["readmes"].isNull)
+        #expect(kid["docs"] == nil || kid["docs"].isNull)
+    }
 }

@@ -156,6 +156,9 @@ public func startKernel(
     // root has no handler_module, so per-bundle readme seeding skips it.
     // Mirrors Rust's `seed_root_readme` / Python's `Core._seed_root_readme`.
     RootReadme.seed(workdir: url)
+    // Seed the keyed doc TREE `.fantastic/docs/<key>.md` too — `reflect
+    // readme=index`/`readme=<key>` serves it back (mirrors Rust's DOCS seeding).
+    RootDocs.seed(workdir: url)
 
     // COLD primitive: seed the root record `.fantastic/agent.json` on a virgin
     // dir. This is the chicken-egg bring-up — it runs BEFORE any agent (and thus
