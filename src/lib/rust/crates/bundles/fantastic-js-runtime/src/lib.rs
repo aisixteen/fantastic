@@ -28,6 +28,7 @@ use rquickjs::function::Async;
 use rquickjs::{async_with, AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -80,6 +81,15 @@ fn stop_job(agent_id: &AgentId) -> bool {
 // ── the script task ─────────────────────────────────────────────────
 
 /// The JS-side prelude: re-expose the string bridge as a plain-object API.
+///
+/// `require('kernel')` is honoured as well as the `kernel` global. Every
+/// JS-trained model reaches for the Node idiom (`const kernel =
+/// require('kernel')`) — observed independently on gemma4:12b and gpt-oss:20b —
+/// and an un-defined `require` throws a ReferenceError that kills the script
+/// before its first line runs. So the runtime SPEAKS the idiom: it resolves the
+/// one name it has and refuses everything else loudly (there is still no module
+/// system, and no second source of truth — `require('kernel')` returns the same
+/// object as the global).
 const PRELUDE: &str = r#"
 globalThis.kernel = {
     self_id: __self_id,
@@ -91,6 +101,20 @@ globalThis.kernel = {
         return s === null || s === undefined ? null : JSON.parse(s);
     },
 };
+globalThis.require = (name) => {
+    if (name === 'kernel') return globalThis.kernel;
+    throw new Error("require: no module '" + name +
+        "' — the only capability is the kernel connector (already the global `kernel`).");
+};
+globalThis.console = (() => {
+    const fmt = (a) => a.map((v) => {
+        if (typeof v === 'string') return v;
+        try { return JSON.stringify(v); } catch (_) { return String(v); }
+    }).join(' ');
+    const at = (level) => (...a) => { __log(level, fmt(a)); };
+    return { log: at('log'), error: at('error'), warn: at('warn'),
+             info: at('info'), debug: at('debug') };
+})();
 "#;
 
 fn spawn_script(agent_id: &AgentId, code: String, kernel: &Arc<Kernel>) {
@@ -99,6 +123,16 @@ fn spawn_script(agent_id: &AgentId, code: String, kernel: &Arc<Kernel>) {
     let self_id = agent_id.clone();
     let kernel = Arc::clone(kernel);
 
+    // Take the registry lock FIRST, then abort → spawn → publish in ONE critical
+    // section. Spawning before locking left a window in which the map still held the
+    // OUTGOING script's `inbox_tx`, while the delivery path (which also locks JOBS)
+    // happily handed an inbound `send` to a script that was about to be aborted — the
+    // message vanished and the tool looked dead. A REPAIRING model re-creates the same
+    // id over and over, so it lands in that window constantly.
+    let mut jobs = JOBS.lock();
+    if let Some(prev) = jobs.remove(agent_id) {
+        prev.task.abort(); // one living script per agent — restart semantics
+    }
     let task = tokio::spawn(async move {
         let outcome = run_script(&self_id, &code, &kernel, inbox_rx).await;
         let ev = match outcome {
@@ -109,11 +143,6 @@ fn spawn_script(agent_id: &AgentId, code: String, kernel: &Arc<Kernel>) {
         };
         kernel.emit(&self_id, ev).await;
     });
-
-    let mut jobs = JOBS.lock();
-    if let Some(prev) = jobs.remove(agent_id) {
-        prev.task.abort(); // one living script per agent — restart semantics
-    }
     jobs.insert(agent_id.clone(), JobState { task, inbox_tx });
 }
 
@@ -129,6 +158,8 @@ async fn run_script(
     // Authored code runs in an async IIFE so top-level `await` works.
     let wrapped = format!("(async () => {{\n{PRELUDE}\n{code}\n}})()");
     let self_str = self_id.as_str().to_string();
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let waiting_drive = Arc::clone(&waiting);
     let kernel_send = Arc::clone(kernel);
     let self_for_send = self_id.clone();
     let kernel_emit = Arc::clone(kernel);
@@ -177,12 +208,19 @@ async fn run_script(
         globals.set("__emit", emit_fn).map_err(|e| e.to_string())?;
 
         // __on_message() -> Promise<payload_json | null>
+        // `waiting` counts scripts parked on their inbox. The driver below uses it to
+        // tell "this script is idle because it is AWAITING MAIL" (keep it alive) from
+        // "this script has genuinely finished" (let it end).
+        let waiting_om = Arc::clone(&waiting);
         let on_msg_fn = Function::new(
             ctx.clone(),
             Async(move || {
                 let inbox_rx = Arc::clone(&inbox_rx);
+                let waiting = Arc::clone(&waiting_om);
                 async move {
+                    waiting.fetch_add(1, Ordering::SeqCst);
                     let msg = inbox_rx.lock().await.recv().await;
+                    waiting.fetch_sub(1, Ordering::SeqCst);
                     msg.map(|v| v.to_string())
                 }
             }),
@@ -191,6 +229,18 @@ async fn run_script(
         globals
             .set("__on_message", on_msg_fn)
             .map_err(|e| e.to_string())?;
+
+        // __log(level, text) — backs `console.*`. QuickJS ships no `console`, and
+        // every JS-trained model writes `console.error` / `console.log` (typically
+        // `main().catch(console.error)`), which throws a ReferenceError and kills the
+        // script before its first line. Route it to the host log rather than
+        // no-op'ing, so an authored tool's own errors stay visible.
+        let log_self = self_str.clone();
+        let log_fn = Function::new(ctx.clone(), move |level: String, text: String| {
+            eprintln!("[js_runtime {log_self} {level}] {text}");
+        })
+        .map_err(|e| e.to_string())?;
+        globals.set("__log", log_fn).map_err(|e| e.to_string())?;
 
         // Evaluate: the IIFE yields a promise; awaiting it drives the script.
         let promise: Promise = ctx
@@ -203,7 +253,50 @@ async fn run_script(
             .catch(&ctx)
             .map_err(|e| e.to_string())
     })
-    .await
+    .await?;
+
+    // The IIFE resolving does NOT mean the script is done. Models overwhelmingly write
+    // a fire-and-forget entry point — `main().catch(console.error)` — which returns at
+    // once, so the wrapper settles while the real message loop is still pending.
+    // Awaiting only the IIFE tore the script down before it ever read its inbox: the
+    // tool existed, reported `running`, and silently never answered.
+    //
+    // A bare `rt.idle()` is not enough either: it returns the moment the JS job queue
+    // drains, which is exactly when the loop is parked awaiting its next message — so
+    // the script would serve ONE message and then die. Drive the queue for as long as
+    // the script is actually waiting for mail; when it is idle AND not awaiting, it has
+    // genuinely finished. Stop/delete aborts this task, which is what normally ends it.
+    // `waiting` dips to 0 for a moment between a message resolving and the JS
+    // continuation re-arming `on_message`, so a single sample is not proof the script
+    // finished — breaking on it kills the loop mid-cycle. Require the "idle AND not
+    // parked on the inbox" state to PERSIST across several polls before concluding the
+    // script is genuinely done.
+    // The IIFE has settled — but that does NOT mean the script is finished. Models
+    // overwhelmingly write a DETACHED entry point (`main().catch(console.error)`), so
+    // the real message loop is still pending, and once `async_with` returns there is
+    // nothing left driving the QuickJS job queue or the futures behind our bindings.
+    //
+    // `idle()` is the wrong tool here: it completes the instant the queue drains, which
+    // is precisely when the loop is parked awaiting its next message — so the script
+    // would serve exactly ONE message and then die (silently, still reporting
+    // `running`). `drive()` is the continuous driver.
+    //
+    // Give a detached entry point a moment to reach its first `on_message`; if it is
+    // parked on the inbox it is a LIVING tool, so drive the runtime for the agent's
+    // lifetime (stop / delete aborts this task, which is what ends it). A genuinely
+    // one-shot script is not parked, and simply finishes here.
+    let drive = rt.drive();
+    tokio::pin!(drive);
+    // Drive briefly so a detached entry point reaches its first `on_message`.
+    // (`DriveFuture` only completes when the runtime is dropped, which can't happen
+    // while `rt` is alive here, so this always hits the timeout — that's fine.)
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), &mut drive).await;
+    // If the script parked on its inbox, it's a LIVING tool — drive it for the
+    // agent's lifetime (stop/delete aborts this task, which is what ends it).
+    if waiting_drive.load(Ordering::SeqCst) > 0 {
+        drive.await;
+    }
+    Ok(())
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────

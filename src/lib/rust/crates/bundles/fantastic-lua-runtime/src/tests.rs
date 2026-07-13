@@ -122,6 +122,42 @@ async fn echo_script_round_trips_inbox_to_emit() {
     assert_eq!(echoed["client_id"], "c1");
 }
 
+/// Sandbox-by-omission is REAL: the dangerous stdlib (`os`, `io`, `require`) is
+/// absent, but pure computation (`string`, `table`, `math`) and the kernel
+/// connector work. Guards the "only capability is the kernel connector" contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sandbox_omits_os_io_but_keeps_pure_libs() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp);
+    let id = id_for(&tmp, "sbx");
+    let code = r#"
+        kernel.emit({
+            type = "probe",
+            has_os = (os ~= nil),
+            has_io = (io ~= nil),
+            has_require = (require ~= nil),
+            has_package = (package ~= nil),
+            math_ok = (math.floor(3.7) == 3),
+            string_ok = (string.upper("a") == "A"),
+            table_ok = (#({1,2,3}) == 3),
+        })
+    "#;
+    create_script(&kernel, &id, code).await;
+    let agent = AgentId::from(id.as_str());
+    let mut rx = agent_inbox(&kernel, &agent);
+    kernel.send(&agent, json!({"type": "start"})).await;
+    let p = recv_until(&mut rx, |v| v["type"] == "probe", 3)
+        .await
+        .expect("probe emitted");
+    assert_eq!(p["has_os"], false, "os must be sandboxed out");
+    assert_eq!(p["has_io"], false, "io must be sandboxed out");
+    assert_eq!(p["has_require"], false, "require/package must be sandboxed out");
+    assert_eq!(p["has_package"], false, "package must be sandboxed out");
+    assert_eq!(p["math_ok"], true, "math must remain");
+    assert_eq!(p["string_ok"], true, "string must remain");
+    assert_eq!(p["table_ok"], true, "table must remain");
+}
+
 /// A script `send`s another agent by id and reads the actual reply —
 /// the connector suspends/resumes across a real kernel dispatch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

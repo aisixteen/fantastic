@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::call_guard::guard_call_stack;
 use fantastic_kernel::{AgentId, Kernel};
-use mlua::{Lua, LuaSerdeExt};
+use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -90,6 +90,15 @@ fn spawn_script(agent_id: &AgentId, code: String, kernel: &Arc<Kernel>) {
     let self_id = agent_id.clone();
     let kernel = Arc::clone(kernel);
 
+    // Lock the registry FIRST, then abort → spawn → insert in ONE critical section.
+    // Spawning before locking left a window in which the map still held the OUTGOING
+    // script's `inbox_tx` while the delivery path (which also locks JOBS) handed an
+    // inbound `send` to a script about to be aborted — the message vanished. Mirrors
+    // the js_runtime fix.
+    let mut jobs = JOBS.lock();
+    if let Some(prev) = jobs.remove(agent_id) {
+        prev.task.abort(); // one living script per agent — restart semantics
+    }
     let task = tokio::spawn(async move {
         let outcome = run_script(&self_id, &code, &kernel, inbox_rx).await;
         let ev = match outcome {
@@ -100,11 +109,6 @@ fn spawn_script(agent_id: &AgentId, code: String, kernel: &Arc<Kernel>) {
         };
         kernel.emit(&self_id, ev).await;
     });
-
-    let mut jobs = JOBS.lock();
-    if let Some(prev) = jobs.remove(agent_id) {
-        prev.task.abort(); // one living script per agent — restart semantics
-    }
     jobs.insert(agent_id.clone(), JobState { task, inbox_tx });
 }
 
@@ -114,7 +118,17 @@ async fn run_script(
     kernel: &Arc<Kernel>,
     inbox_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>>,
 ) -> Result<(), String> {
-    let lua = Lua::new();
+    // "Sandbox by omission" is only true if we actually omit. `Lua::new()` loads
+    // ALL_SAFE, which still includes `os`/`io`/`package` — so `os.execute`,
+    // `io.open`, `io.popen`, `require`, `os.remove` were all live, contradicting
+    // the "only capability is the kernel connector" contract. Load only the pure
+    // computational libraries; the script reaches the outside world solely through
+    // the injected `kernel` connector.
+    let lua = Lua::new_with(
+        StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::COROUTINE,
+        LuaOptions::default(),
+    )
+    .map_err(|e| e.to_string())?;
     let globals = lua.globals();
     let kernel_tbl = lua.create_table().map_err(|e| e.to_string())?;
 

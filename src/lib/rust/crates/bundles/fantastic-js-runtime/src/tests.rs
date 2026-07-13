@@ -117,6 +117,75 @@ async fn echo_script_round_trips_inbox_to_emit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn require_kernel_resolves_the_connector() {
+    // Every JS-trained model reaches for the Node idiom `const kernel =
+    // require('kernel')` (observed on gemma4:12b AND gpt-oss:20b). The runtime
+    // speaks it: `require('kernel')` returns the SAME connector as the global —
+    // not a second source of truth — and any other name throws.
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp);
+    let id = id_for(&tmp, "req");
+    // VERBATIM the shape a live gemma4:12b authored (and gpt-oss:20b too): the Node
+    // `require` idiom, a `main()` wrapper, and `.catch(console.error)`. QuickJS ships
+    // neither `require` nor `console`, so both were ReferenceErrors that killed the
+    // script before its first line — the tool "existed" but never ran.
+    // VERBATIM what a live gemma4:12b authored — including the UN-awaited `emit`s.
+    let code = r#"
+        const kernel = require('kernel');
+        async function main() {
+          while (true) {
+            const msg = await kernel.on_message();
+            if (msg.type === 'send') {
+              kernel.emit({ type: 'echo', text: msg.text, client_id: msg.client_id });
+              kernel.emit({ type: 'done', client_id: msg.client_id });
+            }
+          }
+        }
+        main().catch(console.error);
+    "#;
+    create_script(&kernel, &id, code).await;
+    let agent = AgentId::from(id.as_str());
+    let mut rx = agent_inbox(&kernel, &agent);
+    let st = kernel.send(&agent, json!({"type": "status"})).await;
+    assert_eq!(st["running"], true, "require() script booted: {st:#?}");
+
+    kernel
+        .send(
+            &agent,
+            json!({"type": "send", "text": "hello world", "client_id": "me"}),
+        )
+        .await;
+    let echoed = recv_until(&mut rx, |v| v["type"] == "echo", 3)
+        .await
+        .expect("require('kernel') script echoed");
+    assert_eq!(echoed["text"], "hello world");
+    assert_eq!(echoed["client_id"], "me");
+
+    // A DURABLE tool must serve many turns, not one. A detached entry point
+    // (`main().catch(...)`) leaves the loop pending after the wrapper settles; with
+    // nothing driving the runtime it served exactly ONE message and then died —
+    // silently, while still reporting `running: true`. Prove it keeps answering.
+    for n in 0..5 {
+        let probe = format!("turn {n}");
+        kernel
+            .send(
+                &agent,
+                json!({"type": "send", "text": probe, "client_id": "me"}),
+            )
+            .await;
+        let got = recv_until(&mut rx, |v| v["type"] == "echo" && v["text"] == probe, 5)
+            .await
+            .unwrap_or_else(|| panic!("detached loop must still answer on turn {n}"));
+        assert_eq!(got["text"], probe);
+    }
+    let st = kernel.send(&agent, json!({"type": "status"})).await;
+    assert_eq!(
+        st["running"], true,
+        "script still alive after many turns: {st:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn script_send_reaches_agents_and_returns_reply() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp);
