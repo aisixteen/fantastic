@@ -45,6 +45,7 @@ mod hub;
 mod input;
 mod kernels;
 mod movie;
+mod question_card;
 mod subkernel;
 use chat::{Body, Composer, Route, State, Tabs, WsCmd};
 use fantastic_brain as ai;
@@ -160,6 +161,10 @@ struct App {
     scroll_max: std::cell::Cell<usize>,
     /// The running connector-setup wizard, if any.
     flow: Option<input::SetupFlow>,
+    /// The LIVE question card, if a watched agent raised one (`{type:"question"}`).
+    /// A modal: while `Some`, it owns the keys + floats over the chat; the answer
+    /// `send`s back to the asking agent. One at a time (extra questions are ignored).
+    question: Option<question_card::QuestionCard>,
     /// Kernel agent ids (cached at boot) — the extra "characters" you can address
     /// + Tab-complete beyond the base agents.
     known_agents: Vec<String>,
@@ -416,6 +421,7 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
         scroll: 0,
         scroll_max: std::cell::Cell::new(0),
         flow: None,
+        question: None,
         known_agents,
         pending: VecDeque::new(),
         ai_tx,
@@ -499,9 +505,22 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                         app.ai_phase = Some(p.to_string());
                     }
                 }
-                app.tabs.deliver(agent).on_event(&ev);
-                if is_ai && ty == "done" {
-                    finish_ai_turn(&mut app);
+                if ty == "question" {
+                    // A watched agent raised a LIVE question. Open the modal card
+                    // (one at a time) instead of letting it fall through to the dim
+                    // `[question] …` catch-all note. A second question while one is
+                    // open is dropped; one that fails to parse falls through.
+                    if app.question.is_none() {
+                        match question_card::QuestionCard::from_event(&ev) {
+                            Some(card) => app.question = Some(card),
+                            None => app.tabs.deliver(agent).on_event(&ev),
+                        }
+                    }
+                } else {
+                    app.tabs.deliver(agent).on_event(&ev);
+                    if is_ai && ty == "done" {
+                        finish_ai_turn(&mut app);
+                    }
                 }
             }
             Some(out) = ai_rx.recv() => {
@@ -1025,6 +1044,13 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         return;
     }
+    // A LIVE question card is modal: while it's up it owns the keys (navigate the
+    // options / type the answer, Enter accepts, Esc cancels) and answers back to the
+    // asking agent.
+    if app.question.is_some() {
+        handle_question_key(app, code);
+        return;
+    }
     // A setup flow (`/setup` · `/model`) owns the input while active — its dynamic
     // control (Select / Field) handles the keys instead of the composer.
     if !matches!(app.control, input::Control::Chat) {
@@ -1394,6 +1420,28 @@ fn handle_flow_key(app: &mut App, code: KeyCode) {
         }
         _ => {}
     }
+}
+
+/// Drive the LIVE question card from a key. The card owns the modal logic
+/// ([`question_card::QuestionCard::on_key`]); this shim only forwards the key and,
+/// on Enter/Esc, `send`s the answer payload back to the asking agent (kernel-agnostic
+/// via [`kernels::ActiveKernel::dispatch`], fire-and-forget) and closes the card.
+fn handle_question_key(app: &mut App, code: KeyCode) {
+    let Some(card) = app.question.as_mut() else {
+        return;
+    };
+    let (source, payload) = match card.on_key(code) {
+        question_card::QuestionAction::Pending => return,
+        question_card::QuestionAction::Accept(payload)
+        | question_card::QuestionAction::Cancel(payload) => (card.source.clone(), payload),
+    };
+    app.question = None;
+    let active = app.active.clone();
+    tokio::spawn(async move {
+        active
+            .dispatch(&AgentId::from(source.as_str()), payload)
+            .await;
+    });
 }
 
 /// Persist a completed connector draft (settings + OS keychain), update the live
@@ -1809,7 +1857,7 @@ fn chat_term_grid<B: ratatui::backend::Backend>(term: &Terminal<B>) -> (u16, u16
 /// beneath it). The widget's own glyphs then render on top. The fill fg is
 /// White (not Black) so any UNSTYLED span (e.g. the raw input text) renders
 /// visibly over the panel instead of inheriting an invisible black fg.
-fn fill_black(buf: &mut Buffer, area: Rect) {
+pub(crate) fn fill_black(buf: &mut Buffer, area: Rect) {
     let st = Style::default().bg(Color::Black).fg(Color::White);
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
@@ -2530,6 +2578,10 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     if app.help_open {
         render_help(f, inset);
     }
+    // A LIVE question card floats over the chat as a modal (over the help too).
+    if let Some(card) = &app.question {
+        card.render(f, inset);
+    }
 }
 
 /// The `/help` overlay: the whole interactive surface on one card — routing,
@@ -2930,6 +2982,7 @@ mod e2e {
             scroll: 0,
             scroll_max: std::cell::Cell::new(0),
             flow: None,
+            question: None,
             known_agents: vec!["kernel".into(), "core".into()],
             pending: VecDeque::new(),
             ai_tx,
