@@ -145,8 +145,21 @@ pub async fn context_status(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     })
 }
 
-/// Per-`send` ceiling, in seconds.
+/// Default per-`send` ceiling, in seconds — overridable via the
+/// `FANTASTIC_AI_SEND_TIMEOUT` env (see [`send_timeout_secs`]). Mirrors the
+/// python/swift default; a slow LOCAL model can raise it via the env.
 pub const SEND_TIMEOUT_SECS: u64 = 180;
+
+/// The effective per-`send` ceiling: `FANTASTIC_AI_SEND_TIMEOUT` if set, else
+/// [`SEND_TIMEOUT_SECS`]. Parity with python's `SEND_TIMEOUT` and swift's
+/// `sendTimeoutSeconds`, which read the same env.
+pub fn send_timeout_secs() -> u64 {
+    std::env::var("FANTASTIC_AI_SEND_TIMEOUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(SEND_TIMEOUT_SECS)
+}
 
 /// The shared `send` flow: enqueue → FIFO lock → spawn the agentic loop
 /// → wait with timeout → clean up. The backend supplies a built
@@ -289,7 +302,8 @@ pub async fn send(
     };
 
     // Wait for completion or timeout.
-    let timeout = Duration::from_secs(SEND_TIMEOUT_SECS);
+    let timeout_secs = send_timeout_secs();
+    let timeout = Duration::from_secs(timeout_secs);
     let wait_outcome: Result<Option<Result<String, String>>, &'static str> = {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -362,7 +376,7 @@ pub async fn send(
             .await;
             emit_done(kernel, agent_id, &client_id, route).await;
             json!({
-                "error": format!("send: timeout after {}s", SEND_TIMEOUT_SECS),
+                "error": format!("send: timeout after {timeout_secs}s"),
                 "client_id": client_id,
             })
         }

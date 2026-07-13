@@ -33,7 +33,8 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
 
 
 def make_provider(id, kernel):
-    """Build an OllamaProvider from the agent record (endpoint/model/num_ctx/temperature)."""
+    """Build an OllamaProvider from the agent record
+    (endpoint/model/num_ctx/temperature/num_predict)."""
     from ollama_backend.provider import (
         DEFAULT_ENDPOINT,
         DEFAULT_MODEL,
@@ -43,12 +44,31 @@ def make_provider(id, kernel):
     rec = kernel.get(id) or {}
     num_ctx = rec.get("num_ctx")
     temperature = rec.get("temperature")
+    num_predict = rec.get("num_predict")
+    think = rec.get("think")
     return OllamaProvider(
         endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
         model=rec.get("model", DEFAULT_MODEL),
         num_ctx=int(num_ctx) if num_ctx else None,
         temperature=float(temperature) if temperature is not None else None,
+        num_predict=int(num_predict) if num_predict else None,
+        think=bool(think) if think is not None else None,
     )
+
+
+async def _reflect_extra(id, kernel):
+    """Merged into reflect: the ollama sampling knobs, so `reflect` shows the
+    effective posture (parity with the rust ollama backend). `num_ctx`/
+    `num_predict`/`think` are null unless set on the record; temperature defaults
+    to the provider's 0.3."""
+    rec = kernel.get(id) or {}
+    t = rec.get("temperature")
+    return {
+        "temperature": float(t) if t is not None else 0.3,
+        "num_ctx": int(rec["num_ctx"]) if rec.get("num_ctx") else None,
+        "num_predict": int(rec["num_predict"]) if rec.get("num_predict") else None,
+        "think": bool(rec["think"]) if rec.get("think") is not None else None,
+    }
 
 
 def _build():
@@ -61,6 +81,7 @@ def _build():
         make_provider=make_provider,
         name="ollama_backend",
         module_name=__name__,
+        reflect_extra=_reflect_extra,
     )
 
 
