@@ -205,6 +205,52 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
 }
 
 #[tokio::test]
+async fn sends_temperature_default_and_override() {
+    // The backend ALWAYS sends `options.temperature` to ollama (ollama's own
+    // default 0.8 is wrong for an agentic backend). Default = DEFAULT_TEMPERATURE
+    // (0.3), overridable via the record's `temperature` field; reflect surfaces it.
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    let body = ndjson_body(&[json!({"message": {"content": "ok"}, "done": true})]);
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+    let (kernel, backend) = mk_kernel(&tmp, "temp", &server.uri()).await;
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+
+    // default: reflect + the actual request both carry 0.3.
+    kernel
+        .send(&backend, json!({"type":"send","text":"hi","client_id":"c"}))
+        .await;
+    let r = kernel.send(&backend, json!({"type": "reflect"})).await;
+    assert_eq!(r["temperature"], json!(DEFAULT_TEMPERATURE));
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(sent["options"]["temperature"], json!(DEFAULT_TEMPERATURE));
+
+    // override via the record: reflect + the next request both carry it.
+    kernel
+        .send(
+            &AgentId::from("core"),
+            json!({"type":"update_agent","id": backend.as_str(), "temperature": 0.15}),
+        )
+        .await;
+    let r2 = kernel.send(&backend, json!({"type": "reflect"})).await;
+    assert_eq!(r2["temperature"], json!(0.15));
+    kernel
+        .send(
+            &backend,
+            json!({"type":"send","text":"hi2","client_id":"c"}),
+        )
+        .await;
+    let reqs = server.received_requests().await.unwrap();
+    let last: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
+    assert_eq!(last["options"]["temperature"], json!(0.15));
+}
+
+#[tokio::test]
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;

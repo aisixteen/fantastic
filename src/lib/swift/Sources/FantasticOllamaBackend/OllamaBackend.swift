@@ -13,6 +13,7 @@ import FantasticAICore
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import OrderedCollections
 import NIOCore
 
 public let HANDLER_MODULE = "ollama_backend.tools"
@@ -39,20 +40,32 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 reflectExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),
-                        "model": .string(Self.model(agent: agent)),
+                        "model": Self.model(agent: agent).map(JSON.string) ?? .null,
                     ]
                 },
                 backendStateExtra: { agent in
                     [
                         "host": .string(Self.host(agent: agent)),
-                        "model": .string(Self.model(agent: agent)),
+                        "model": Self.model(agent: agent).map(JSON.string) ?? .null,
                     ]
                 },
                 makeProvider: { agent, _, _ in
-                    .provider(
+                    guard let model = Self.model(agent: agent) else {
+                        return .refused(
+                            .object([
+                                "error": .string(
+                                    "ollama_backend: `model` required — set it on the record "
+                                        + "(e.g. model=gemma4:12b). No model default is guessed.")
+                            ]))
+                    }
+                    return .provider(
                         OllamaProvider(
                             host: Self.host(agent: agent),
-                            model: Self.model(agent: agent)))
+                            model: model,
+                            temperature: Self.temperature(agent: agent),
+                            numCtx: Self.numCtx(agent: agent),
+                            numPredict: Self.numPredict(agent: agent),
+                            think: Self.think(agent: agent)))
                 }
             ))
     }
@@ -79,8 +92,27 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
         agent.metaValue(forKey: "host")?.asString ?? "http://127.0.0.1:11434"
     }
 
-    fileprivate static func model(agent: Agent) -> String {
-        agent.metaValue(forKey: "model")?.asString ?? "llama3.2"
+    /// The model id — REQUIRED (from the record's `model` meta). No default is
+    /// guessed: a bad guess reaches the network (a wrong model 404s). `nil` when
+    /// unset → the backend refuses loudly (see `makeProvider`).
+    fileprivate static func model(agent: Agent) -> String? {
+        agent.metaValue(forKey: "model")?.asString
+    }
+
+    // Sampling knobs (parity with the rust/python ollama backends). ollama's own
+    // defaults (temperature 0.8, num_ctx 4096) are wrong for an agentic backend;
+    // temperature defaults LOW (0.3), the rest pass through only when set.
+    fileprivate static func temperature(agent: Agent) -> Double {
+        agent.metaValue(forKey: "temperature")?.asDouble ?? 0.3
+    }
+    fileprivate static func numCtx(agent: Agent) -> Int64? {
+        agent.metaValue(forKey: "num_ctx")?.asInt
+    }
+    fileprivate static func numPredict(agent: Agent) -> Int64? {
+        agent.metaValue(forKey: "num_predict")?.asInt
+    }
+    fileprivate static func think(agent: Agent) -> Bool? {
+        agent.metaValue(forKey: "think")?.asBool
     }
 }
 
@@ -91,19 +123,35 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 struct OllamaProvider: AIProvider {
     let host: String
     let model: String
+    let temperature: Double
+    let numCtx: Int64?
+    let numPredict: Int64?
+    let think: Bool?
 
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
         let host = host
         let model = model
+        let temperature = temperature
+        let numCtx = numCtx
+        let numPredict = numPredict
+        let think = think
         return AsyncThrowingStream { continuation in
             let task = Task {
                 // RAW: no native `tools` array — ai-core parses the `<tool_call>`
                 // envelope out of the streamed content text.
-                let body: JSON = .object([
+                var options: OrderedDictionary<String, JSON> = ["temperature": .double(temperature)]
+                if let n = numCtx { options["num_ctx"] = .integer(n) }
+                if let n = numPredict { options["num_predict"] = .integer(n) }
+                var fields: OrderedDictionary<String, JSON> = [
                     "model": .string(model),
                     "messages": .array(messages),
                     "stream": .bool(true),
-                ])
+                    "options": .object(options),
+                ]
+                // `think` is a TOP-LEVEL field; only sent when set (non-thinking
+                // models reject it).
+                if let t = think { fields["think"] = .bool(t) }
+                let body: JSON = .object(fields)
                 var req = HTTPClientRequest(url: "\(host)/api/chat")
                 req.method = .POST
                 req.headers.add(name: "Content-Type", value: "application/json")

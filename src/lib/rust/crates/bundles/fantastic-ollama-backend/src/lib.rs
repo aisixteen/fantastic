@@ -45,6 +45,13 @@ pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 /// Default model id (overridable via the agent record's `model` field).
 pub const DEFAULT_MODEL: &str = "gemma4:e2b";
 
+/// Default sampling temperature sent to ollama (overridable via the record's
+/// `temperature` field). ollama's own default is 0.8 (creative) — wrong for an
+/// agentic backend whose output is tool-calls + code. Mirrors the python
+/// canonical default (0.3 — precise, with a touch of variety); a record
+/// `temperature` overrides it.
+pub const DEFAULT_TEMPERATURE: f64 = 0.3;
+
 /// Per-backend config: cli round-trip routing, parallel tool dispatch.
 const CFG: BackendConfig = BackendConfig {
     route: CallerRoute::CliRoundTrip,
@@ -59,6 +66,28 @@ const CFG: BackendConfig = BackendConfig {
 struct OllamaProvider {
     endpoint: String,
     model: String,
+    temperature: f64,
+    /// ollama context window (`num_ctx`). ollama's RUNTIME default is a small
+    /// 4096 regardless of what the model supports (gemma4:12b, e.g., supports
+    /// 262144) — an agentic loop's context (docs + history) overflows that and
+    /// silently TRUNCATES the oldest tokens, dropping the system prompt/task and
+    /// leaving the model to flail. Measured: raising it costs no throughput. The
+    /// record's `num_ctx` lifts it; `None` = leave ollama's default.
+    num_ctx: Option<u64>,
+    /// Generation cap (`num_predict`). Unbounded, a weak model can ramble for
+    /// thousands of tokens instead of emitting one action, blowing the send
+    /// timeout. `None` = leave ollama's default (unbounded). CAUTION on a
+    /// THINKING model: the cap is spent on reasoning tokens first, so too small a
+    /// value truncates mid-thought and yields an EMPTY completion — pair it with
+    /// `think:false`, or leave it unset.
+    num_predict: Option<u64>,
+    /// Reasoning toggle for THINKING models (`think`). A thinking model spends
+    /// hundreds of hidden reasoning tokens before its answer — on gemma4:12b,
+    /// ~250 tokens and ~11x the latency for the SAME one-line tool-call. An
+    /// agentic backend wants the ACTION, not the rumination, so set `think:false`
+    /// on the record. `None` = don't send it (model default) — non-thinking models
+    /// reject the field, so it is opt-in.
+    think: Option<bool>,
 }
 
 #[async_trait]
@@ -68,11 +97,25 @@ impl Provider for OllamaProvider {
     }
 
     async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
-        let body = json!({
+        let mut options = serde_json::Map::new();
+        options.insert("temperature".to_string(), json!(self.temperature));
+        if let Some(n) = self.num_ctx {
+            options.insert("num_ctx".to_string(), json!(n));
+        }
+        if let Some(n) = self.num_predict {
+            options.insert("num_predict".to_string(), json!(n));
+        }
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
+            "options": options,
         });
+        // `think` is a TOP-LEVEL field (not an option). Only sent when set — a
+        // non-thinking model rejects it.
+        if let (Some(t), Some(obj)) = (self.think, body.as_object_mut()) {
+            obj.insert("think".to_string(), json!(t));
+        }
         let client = reqwest::Client::new();
         let url = format!("{}/api/chat", self.endpoint.trim_end_matches('/'));
         let resp = client
@@ -186,9 +229,21 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     if helpers::file_bridge_id(agent_id, kernel).is_none() {
         return json!({"error": "ollama_backend: file_bridge_id required"});
     }
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let temperature = meta
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_TEMPERATURE);
+    let num_ctx = meta.get("num_ctx").and_then(Value::as_u64);
+    let num_predict = meta.get("num_predict").and_then(Value::as_u64);
+    let think = meta.get("think").and_then(Value::as_bool);
     let provider: Arc<dyn Provider> = Arc::new(OllamaProvider {
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
+        temperature,
+        num_ctx,
+        num_predict,
+        think,
     });
     verbs::send(provider, agent_id, payload, kernel, CFG).await
 }
@@ -205,11 +260,22 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("compact")
         .to_string();
+    let temperature = meta
+        .get("temperature")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_TEMPERATURE);
+    let num_ctx = meta.get("num_ctx").and_then(Value::as_u64);
+    let num_predict = meta.get("num_predict").and_then(Value::as_u64);
+    let think = meta.get("think").and_then(Value::as_bool);
     json!({
         "id": agent_id.as_str(),
         "sentence": "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
         "model": model,
         "endpoint": endpoint,
+        "temperature": temperature,
+        "num_ctx": num_ctx,
+        "num_predict": num_predict,
+        "think": think,
         "file_bridge_id": file_bridge_id,
         "generating": generating,
         "context_window": context_window,

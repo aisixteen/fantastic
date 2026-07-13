@@ -19,6 +19,8 @@ class OllamaProvider:
         model: str = DEFAULT_MODEL,
         num_ctx: int | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
+        think: bool | None = None,
     ):
         self._endpoint = endpoint
         self._model = model
@@ -32,6 +34,17 @@ class OllamaProvider:
         # default LOW (0.3 — precise, with a touch of variety); `temperature`
         # on the record overrides.
         self._temperature = 0.3 if temperature is None else float(temperature)
+        # Generation cap. Unbounded, a weak model can ramble for thousands of
+        # tokens instead of emitting one tool-call, blowing the send timeout;
+        # the record's `num_predict` bounds it. None = ollama's default.
+        self._num_predict = num_predict
+        # Reasoning toggle for THINKING models. Such a model spends hundreds of
+        # hidden reasoning tokens before its answer (gemma4:12b: ~250 tok and ~11x
+        # latency for the SAME one-line tool-call), and a `num_predict` cap is spent
+        # on those tokens first — truncating mid-thought into an EMPTY completion.
+        # An agentic backend wants the ACTION, not the rumination: set `think=False`.
+        # None = don't send it (non-thinking models reject the field).
+        self._think = think
         self._client = None
 
     def _get_client(self):
@@ -48,11 +61,17 @@ class OllamaProvider:
         options: dict = {"temperature": self._temperature}
         if self._num_ctx:
             options["num_ctx"] = self._num_ctx
+        if self._num_predict:
+            options["num_predict"] = self._num_predict
+        kwargs: dict = {}
+        if self._think is not None:
+            kwargs["think"] = self._think
         stream = await client.chat(
             model=self._model,
             messages=messages,
             stream=True,
             options=options,
+            **kwargs,
         )
         # ollama sometimes returns `content` as `null` (not absent), so normalize
         # null -> "" with `or ""`. This is protocol normalization, not bug masking.

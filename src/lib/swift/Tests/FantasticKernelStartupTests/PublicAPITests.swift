@@ -33,6 +33,22 @@ struct StartKernelInMemoryTests {
         }
     }
 
+    @Test func ollamaModelHasNoGuessedDefault() async throws {
+        // "By default, no defaults": an ollama agent with no `model` set must NOT
+        // fall back to a guessed model (a wrong guess reaches the network and 404s).
+        // Reflect surfaces `null`, not a baked-in default like "llama3.2".
+        let kernel = try await startKernelInMemory(portHint: 0)
+        _ = await kernel.send(
+            AgentId("core"),
+            .object([
+                "type": .string("create_agent"),
+                "handler_module": .string("ollama_backend.tools"),
+                "id": .string("ollama_nomodel"),
+            ]))
+        let r = await kernel.send(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))
+        #expect(r["model"].isNull, "ollama must not guess a model default: \(r)")
+    }
+
     @Test func httpPortIsZeroPreListener() async throws {
         // `httpPort()` defaults to 0 until a WebServer binds. Use a
         // bare kernel here: `startKernelInMemory` creates a `web`
