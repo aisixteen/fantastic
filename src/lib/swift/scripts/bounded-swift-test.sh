@@ -29,8 +29,12 @@ set --
 [ -n "$FILTER" ] && set -- --filter "$FILTER"
 
 : >"$LOG"
-echo "[run] swift test ${FILTER:+--filter $FILTER}  (cap ${CAP}s, poll ${POLL}s)"
-swift test "$@" >"$LOG" 2>&1 &
+# `--no-parallel` is the ROOT-CAUSE fix for the "swift test hangs" pain: the
+# default parallel executor runs hundreds of tests at once, and the many that
+# boot a kernel + NIO + HTTP/WS listeners thrash the machine into a >10-min hang.
+# Serial runs the whole suite in ~1s. (The cap/poll below stay as a backstop.)
+echo "[run] swift test --no-parallel ${FILTER:+--filter $FILTER}  (cap ${CAP}s, poll ${POLL}s)"
+swift test --no-parallel "$@" >"$LOG" 2>&1 &
 PID=$!
 
 elapsed=0

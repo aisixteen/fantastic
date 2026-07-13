@@ -12,6 +12,10 @@ q_ba = "q_ba"
 q_ab = "q_ab"
 close_b = "close_b"
 close_a = "close_a"
+# `ix`/`iy` are the integer screen-coordinate locals in the TUI panel
+# renderer (`let (ix, iy) = draw_panel(...)`). typos reads `iy` as `it`.
+iy = "iy"
+ix = "ix"
 
 [default.extend-words]
 # Python tests sometimes use single-letter or two-letter locals
@@ -27,6 +31,10 @@ ab = "ab"
 # nvidia_nim_backend's tests — simulates an SSE delta that only
 # carries the first 3 chars of "hello". Not a typo of `help`.
 hel = "hel"
+# `helo` is the DELIBERATE misspelling a TUI composer test types, then
+# corrects mid-word by inserting the missing 'l' (`chat.rs`
+# composer_cursor_insert_move_and_delete). Fixing it would defeat the test.
+helo = "helo"
 # `unparseable` is a valid English spelling (less common than
 # `unparsable` but in OED). Used in nvidia_nim_backend's Rust doc
 # comment + Python test name. Allowlisted rather than rewritten to
