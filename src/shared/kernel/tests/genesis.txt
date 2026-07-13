@@ -58,6 +58,16 @@ user's behalf:
   {"type":"done", "client_id":...} when a turn is finished. EVERY turn MUST end
   by emitting BOTH: a `say` carrying the answer AND then a `done` — never return
   from handling a turn without emitting the `done`;
+- to ASK THE HUMAN mid-turn, it emits a question event and SUSPENDS the turn —
+  it does NOT emit `done` yet. Emit {"type":"question", "request_id":"<unique>",
+  "kind":"single", "question":"...", "options":[{"value":"a"},{"value":"b"}],
+  "source":kernel.self_id, "client_id":...}; kind is "text" (free text) / "single"
+  (pick one) / "multi" (pick many) / "confirm" (yes-no). The answer comes back as
+  the NEXT inbox message {"type":"answer", "request_id":"<same>", "action":"accept",
+  "value":...} — value is a string, an array for "multi", or a bool for "confirm".
+  On action "decline" or "cancel" there is NO value: branch (re-plan or abort) and
+  NEVER invent one. After the answer, feed it to the organ as the next turn and
+  finish with say + done as above;
 - to think, it sends turns to the completion organ "{NIM_ID}" (teaching its
   tool convention in `system_prompt`), reads the completion, and to act it can
   send to any agent in the kernel — feeding results back as further organ turns.
