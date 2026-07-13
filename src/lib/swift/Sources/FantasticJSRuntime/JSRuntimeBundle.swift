@@ -129,8 +129,8 @@
             case "boot":
                 // Rehydration: revive the persisted program if not already running.
                 if let code = metaCode(agentId, kernel), !running(agentId) {
-                    startJob(agentId, code: code, kernel: kernel)
-                    return .object(["started": .bool(true)])
+                    let started = startJob(agentId, code: code, kernel: kernel)
+                    return .object(["started": .bool(started)])
                 }
                 return .null
             case "start":
@@ -148,8 +148,18 @@
                     _ = agent.updateMeta(["code": .string(code)])
                     await kernel.persistRecord(agent)
                 }
-                startJob(agentId, code: code, kernel: kernel)
-                return .object(["started": .bool(true), "running": .bool(true)])
+                // Report the REAL outcome — never an optimistic `running:true`. If
+                // the JS context could not be created the job was NOT installed; fail
+                // loud rather than lie (no-fallbacks rule).
+                guard startJob(agentId, code: code, kernel: kernel) else {
+                    return .object([
+                        "started": .bool(false),
+                        "error": .string(
+                            "start: could not create a JavaScript context (JavaScriptCore returned nil)"
+                        ),
+                    ])
+                }
+                return .object(["started": .bool(true), "running": .bool(running(agentId))])
             case "stop":
                 return .object(["stopped": .bool(stopJob(agentId))])
             case "status":
@@ -195,10 +205,12 @@
         // MARK: - lifecycle
 
         /// (Re)start the script. One living script per agent — an existing one is
-        /// aborted first (restart semantics, matching Rust/Python).
-        private func startJob(_ agentId: AgentId, code: String, kernel: Kernel) {
+        /// aborted first (restart semantics, matching Rust/Python). Returns whether
+        /// the job was installed: `false` iff the JS context could not be created.
+        @discardableResult
+        private func startJob(_ agentId: AgentId, code: String, kernel: Kernel) -> Bool {
             _ = stopJob(agentId)
-            guard let context = JSContext() else { return }
+            guard let context = JSContext() else { return false }
             let queue = DispatchQueue(label: "js.\(agentId.value)")
             let job = Job(queue: queue, context: context)
             lock.lock()
@@ -282,6 +294,14 @@
                 let doneBlock: @convention(block) (Bool, JSValue?) -> Void = {
                     [weak self, weak kernel, weak job] ok, err in
                     guard let self, let job else { return }
+                    // Already terminated EXTERNALLY (a `stop`, or a `start`/`boot`
+                    // restart that superseded this incarnation). `stopJob` set
+                    // `dead` and — on a restart — installed a REPLACEMENT job under
+                    // the same id. This late completion is that dead incarnation's
+                    // loop breaking on the null `on_message`; it must NOT touch the
+                    // registry (it would evict the live replacement) nor emit a
+                    // `job_done` for an already-torn-down job. Just stop here.
+                    if job.dead { return }
                     // A DETACHED entry point (`main().catch(...)` — the idiom most
                     // JS-trained models write) settles the wrapper IIFE on the first
                     // microtask while the real message loop is still parked on
@@ -289,10 +309,12 @@
                     // NOT tear it down on a successful settle while a resolver is
                     // parked. Genuine completion (loop exited → no parked resolver) and
                     // any error still end the job. (Runs on the JS queue → safe read.)
-                    if ok, !job.dead, !job.pendingResolvers.isEmpty { return }
+                    if ok, !job.pendingResolvers.isEmpty { return }
                     let errStr = (err?.isString == true) ? err?.toString() : nil
+                    // Evict by IDENTITY, never blindly by key: only ever remove
+                    // OURSELVES so a stale callback can never clobber a replacement.
                     self.lock.lock()
-                    self.jobs.removeValue(forKey: selfId)
+                    if self.jobs[selfId] === job { self.jobs.removeValue(forKey: selfId) }
                     self.lock.unlock()
                     job.dead = true
                     let event: JSON =
@@ -325,6 +347,7 @@
                     doneBlock(false, JSValue(object: "compile error: \(msg)", in: ctx))
                 }
             }
+            return true
         }
 
         /// Abort the running script. Resolves any parked `on_message()` with
