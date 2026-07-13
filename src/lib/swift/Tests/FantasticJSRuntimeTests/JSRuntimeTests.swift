@@ -144,6 +144,66 @@ struct JSRuntimeTests {
         #expect(echo?["client_id"].asString == "c1")
     }
 
+    /// A DETACHED entry point (`main().catch(console.error)` — the idiom most JS
+    /// models write) must service its inbox for the agent's LIFETIME. The wrapper
+    /// IIFE settles on the first microtask while the loop is still parked, so a
+    /// naive `.then(__done)` tore the tool down before it read a single message.
+    @Test func detachedEntryPointServesManyMessages() async throws {
+        let code = #"""
+            const kernel = require('kernel');
+            async function main() {
+                while (true) {
+                    const m = await kernel.on_message();
+                    if (m === null) break;
+                    if (m.type === 'send') {
+                        kernel.emit({ type: 'echo', text: m.text, client_id: m.client_id });
+                    }
+                }
+            }
+            main().catch(console.error);
+            """#
+        let kernel = freshKernel()
+        let agent = await createScript(kernel, id: "detached", code: code)
+        _ = await kernel.send(agent, .object(["type": .string("start")]))
+
+        // Deliver several turns; the tool must answer EACH (not just the first).
+        for n in 0..<4 {
+            let stream = watchInbox(kernel, agent)
+            let text = "turn \(n)"
+            _ = await kernel.send(
+                agent,
+                .object([
+                    "type": .string("send"), "text": .string(text),
+                    "client_id": .string("c"),
+                ]))
+            let events = await waitForEvent(stream) {
+                $0["type"].asString == "echo" && $0["text"].asString == text
+            }
+            #expect(
+                events.contains { $0["type"].asString == "echo" && $0["text"].asString == text },
+                "detached loop must still answer on \(text)")
+        }
+        let status = await kernel.send(agent, .object(["type": .string("status")]))
+        #expect(status["running"].asBool == true, "detached tool still alive after many turns")
+    }
+
+    /// A COMPILE error in authored code must NOT leave a silent `running:true`
+    /// zombie: the wrapper (incl. its `.then(__done)`) never installs, so the
+    /// runtime itself must fire the terminal failure.
+    @Test func compileErrorIsNotASilentZombie() async throws {
+        let kernel = freshKernel()
+        let agent = await createScript(kernel, id: "badsyntax", code: "const x = ;")
+        let stream = watchInbox(kernel, agent)
+        _ = await kernel.send(agent, .object(["type": .string("start")]))
+
+        let events = await waitForEvent(stream) { $0["type"].asString == "job_done" }
+        let done = events.first { $0["type"].asString == "job_done" }
+        #expect(done != nil, "a compile error must emit job_done, not vanish")
+        #expect(done?["ok"].asBool == false)
+        let status = await kernel.send(agent, .object(["type": .string("status")]))
+        #expect(status["running"].asBool == false, "no running:true zombie after a compile error")
+    }
+
     @Test func scriptSendReachesAgentsAndReturnsReplyAndSelfId() async throws {
         let code = #"""
             const r = await kernel.send('core', { type: 'list_agents' });

@@ -369,3 +369,58 @@ async def test_connector_on_message_in_job(seeded_kernel):
     await seeded_kernel.emit(pid, {"type": "hello", "v": 123})
     j = await _poll_done(seeded_kernel, pid, jid)
     assert "123" in j["stdout"]
+
+
+# ─── connector import + restart-dedupe regressions ──────────────
+
+# A durable echo tool that reaches the connector via the Node-style `import
+# kernel` idiom (models write it constantly). Without the sys.modules shim this
+# would import the substrate `kernel` PACKAGE and the tool would never emit.
+_ECHO_VIA_IMPORT = (
+    "import kernel, threading\n"
+    "def _on(m):\n"
+    "    if isinstance(m, dict) and m.get('type') == 'send':\n"
+    "        kernel.emit({'type':'say','text':m.get('text'),'client_id':m.get('client_id')})\n"
+    "kernel.on_message(_on)\n"
+    "threading.Event().wait()\n"
+)
+
+
+async def _collect_says(q, text: str, window: float = 1.5) -> list:
+    """Drain a watcher queue for `window` seconds; return all `say` events for `text`."""
+    out = []
+    end = time.monotonic() + window
+    while time.monotonic() < end:
+        try:
+            ev = await asyncio.wait_for(
+                q.get(), timeout=max(0.05, end - time.monotonic())
+            )
+        except asyncio.TimeoutError:
+            break
+        if ev.get("type") == "say" and ev.get("text") == text:
+            out.append(ev)
+    return out
+
+
+async def test_import_kernel_resolves_the_connector(seeded_kernel):
+    """`import kernel` inside a job resolves to the INJECTED connector (not the
+    substrate package), so a tool authored with that idiom actually echoes."""
+    pid = await _make(seeded_kernel, id="imp_echo", code=_ECHO_VIA_IMPORT)
+    await asyncio.sleep(0.4)  # boot → auto-run → on_message registered
+    q = _watch(seeded_kernel, pid)
+    await seeded_kernel.send(pid, {"type": "send", "text": "hi", "client_id": "c"})
+    says = await _collect_says(q, "hi")
+    assert len(says) == 1 and says[0]["client_id"] == "c", f"got {says}"
+
+
+async def test_restart_does_not_double_deliver(seeded_kernel):
+    """A durable tool re-started (a repairing model does this constantly) must not
+    leave two harnesses both processing the owner inbox — exactly ONE echo."""
+    pid = await _make(seeded_kernel, id="restart_echo", code=_ECHO_VIA_IMPORT)
+    await asyncio.sleep(0.4)  # first (boot) job registered on_message
+    await seeded_kernel.send(pid, {"type": "start"})  # durable restart → 2nd job
+    await asyncio.sleep(0.4)  # 2nd job supersedes the inbox subscription
+    q = _watch(seeded_kernel, pid)
+    await seeded_kernel.send(pid, {"type": "send", "text": "once", "client_id": "c"})
+    says = await _collect_says(q, "once")
+    assert len(says) == 1, f"expected exactly one echo after restart, got {len(says)}"

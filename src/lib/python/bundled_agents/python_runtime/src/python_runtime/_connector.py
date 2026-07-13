@@ -15,6 +15,7 @@ rather than inline — it is exec'd in the JOB subprocess, never imported here.
 CONNECTOR_SRC = r"""# --- fantastic kernel connector (injected; talks to spawner over control fd) ---
 try:
     import os as _o, json as _j, socket as _sk, struct as _st, threading as _th, queue as _q
+    import sys as _sys
     _ctrl = _sk.socket(fileno=int(_o.environ["FANTASTIC_CTRL_FD"]))
     _wlock = _th.Lock()
     _pending = {}
@@ -135,6 +136,13 @@ try:
         onMessage = on_message
 
     kernel = _Kernel()
+    # A model that sees `kernel.send(...)` in the docs often writes the natural
+    # idiom `import kernel`. Without this that would rebind the name to the
+    # substrate `kernel` PACKAGE (installed in the venv), silently breaking the
+    # tool. Register the injected connector under that name so `import kernel`
+    # returns the connector (mirrors the js_runtime `require('kernel')` fix). Safe:
+    # the job runs in its OWN subprocess, so this doesn't touch the host's modules.
+    _sys.modules["kernel"] = kernel
 except Exception as _e:
     class _Kernel:
         def _dead(self, *a, **k):
@@ -143,5 +151,11 @@ except Exception as _e:
         send = emit = reflect = watch = on_message = onMessage = _dead
 
     kernel = _Kernel()
+    try:
+        import sys as _sys
+
+        _sys.modules["kernel"] = kernel
+    except Exception:
+        pass
 # --- end connector ---
 """

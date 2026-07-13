@@ -52,6 +52,15 @@
             reflect: async (target) =>
                 JSON.parse(await __send(target === undefined ? 'kernel' : target, JSON.stringify({ type: 'reflect' }))),
         };
+        globalThis.require = (name) => {
+            if (name === 'kernel') return globalThis.kernel;
+            throw new Error("require: no module '" + name +
+                "' — the only capability is the kernel connector (already the global `kernel`).");
+        };
+        if (typeof globalThis.console === 'undefined') {
+            const _noop = () => {};
+            globalThis.console = { log: _noop, error: _noop, warn: _noop, info: _noop, debug: _noop };
+        }
         """
 
     public final class JsRuntimeBundle: AgentBundle, @unchecked Sendable {
@@ -200,7 +209,16 @@
             queue.async { [weak self, weak kernel, weak job] in
                 guard let self, let job else { return }
                 let ctx = job.context
-                ctx.exceptionHandler = { _, _ in /* surfaced via __done error path */ }
+                // Capture a COMPILE/parse error. A runtime error inside the async IIFE
+                // rejects its promise and routes to `.catch → __done(false)`; only a
+                // failure to PARSE the wrapper reaches the exception handler — and that
+                // failure means the wrapper (incl. its `.then(__done)`) never installed,
+                // so __done could never fire. Without catching it, a syntactically-bad
+                // `code` left a silent `running:true` zombie.
+                let compileError = Unchecked(NSMutableString())
+                ctx.exceptionHandler = { _, exc in
+                    if let s = exc?.toString() { compileError.value.setString(s) }
+                }
                 ctx.setObject(selfId, forKeyedSubscript: "__self_id" as NSString)
 
                 // __send(target, payloadJSON) -> Promise<replyJSON>. The async kernel
@@ -264,6 +282,14 @@
                 let doneBlock: @convention(block) (Bool, JSValue?) -> Void = {
                     [weak self, weak kernel, weak job] ok, err in
                     guard let self, let job else { return }
+                    // A DETACHED entry point (`main().catch(...)` — the idiom most
+                    // JS-trained models write) settles the wrapper IIFE on the first
+                    // microtask while the real message loop is still parked on
+                    // `on_message`. That is a LIVING tool, not a finished script — do
+                    // NOT tear it down on a successful settle while a resolver is
+                    // parked. Genuine completion (loop exited → no parked resolver) and
+                    // any error still end the job. (Runs on the JS queue → safe read.)
+                    if ok, !job.dead, !job.pendingResolvers.isEmpty { return }
                     let errStr = (err?.isString == true) ? err?.toString() : nil
                     self.lock.lock()
                     self.jobs.removeValue(forKey: selfId)
@@ -289,6 +315,15 @@
                     PRELUDE + "\n(async () => {\n" + code + "\n})()"
                     + ".then(() => __done(true, null), (e) => __done(false, String(e)));"
                 ctx.evaluateScript(wrapped)
+                // If the exception handler tripped during eval, the wrapped script
+                // failed to PARSE (a runtime error inside the async IIFE rejects its
+                // promise and routes to `.catch → __done`, never here). That means the
+                // `.then(__done)` never installed, so fire the terminal failure here
+                // instead of leaving a running:true zombie.
+                if compileError.value.length > 0 {
+                    let msg = compileError.value as String
+                    doneBlock(false, JSValue(object: "compile error: \(msg)", in: ctx))
+                }
             }
         }
 

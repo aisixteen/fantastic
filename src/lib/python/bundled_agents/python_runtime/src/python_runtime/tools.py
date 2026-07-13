@@ -67,6 +67,13 @@ from python_runtime._connector import CONNECTOR_SRC as _CONNECTOR_SRC
 # Module-global (shared across python_runtime agents); every op filters by owner.
 _jobs: dict[str, dict] = {}
 
+# The single job currently subscribed to each OWNER agent's inbox (on_message).
+# owner_id -> {"job_id", "proxy", "task"}. Many jobs can run in parallel on one
+# agent, but exactly ONE receives the owner's inbox mail — otherwise a durable
+# tool re-started (or two `start`s) would `kernel.watch` the owner twice and
+# process every inbound `send` in duplicate.
+_owner_inbox: dict[str, dict] = {}
+
 
 def _resolve_python(rec: dict, payload: dict | None = None) -> str:
     """payload.python → payload.venv → record.python → record.venv → sys.executable.
@@ -269,10 +276,23 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     t.cancel()
             elif op == "onmessage":
                 if self_sub[0] is None:
+                    # Exactly ONE job per owner receives the owner inbox. If another
+                    # job for this owner is already subscribed (a re-started durable
+                    # tool whose predecessor lingers, or two starts), SUPERSEDE it —
+                    # else every inbound `send` is delivered to both and doubled.
+                    prev = _owner_inbox.pop(owner_id, None)
+                    if prev is not None:
+                        kernel.unwatch(owner_id, prev["proxy"])
+                        prev["task"].cancel()
                     proxy = f"_pyself_{job_id}"
                     kernel.watch(owner_id, proxy)
                     t = asyncio.create_task(drain(proxy, _inbox_framer))
                     self_sub[0] = (proxy, t)
+                    _owner_inbox[owner_id] = {
+                        "job_id": job_id,
+                        "proxy": proxy,
+                        "task": t,
+                    }
             elif op == "offmessage":
                 ent = self_sub[0]
                 self_sub[0] = None
@@ -280,6 +300,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     proxy, t = ent
                     kernel.unwatch(owner_id, proxy)
                     t.cancel()
+                    cur = _owner_inbox.get(owner_id)
+                    if cur and cur["job_id"] == job_id:
+                        _owner_inbox.pop(owner_id, None)
     finally:
         for src, (proxy, t) in subs.items():
             kernel.unwatch(src, proxy)
@@ -288,6 +311,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             proxy, t = self_sub[0]
             kernel.unwatch(owner_id, proxy)
             t.cancel()
+            cur = _owner_inbox.get(owner_id)
+            if cur and cur["job_id"] == job_id:
+                _owner_inbox.pop(owner_id, None)
         try:
             writer.close()
         except OSError:
