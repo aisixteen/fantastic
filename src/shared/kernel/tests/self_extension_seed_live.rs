@@ -35,7 +35,7 @@ After an {"act"} I send it for you and reply with the result as your next messag
 
 To LEARN anything, reflect it: {"act":{"target":"<id>","payload":{"type":"reflect"}}}. Reflecting "kernel" returns the system overview, your OWN capabilities, the agent tree, and a MAP of keyed docs (`readmes`) you can fetch one at a time. DISCOVER what you need by reflecting BEFORE you act — do not assume verb or API shapes.
 
-You are ALONE and AUTONOMOUS — no human will reply between your turns. Never stop to ask, and never announce that you are "ready to proceed" or "understand now": that is NOT done. Reflecting and planning are not completing. Every reply must be a concrete {"act"} that moves the task forward. Only reply {"final":...} once the thing you were asked to build actually EXISTS and you have exercised it and seen it work. If you catch yourself about to declare readiness, instead emit the next {"act"} (a create_agent, or a send)."#;
+You are ALONE and AUTONOMOUS — no human will reply between your turns. Never stop to ask, and never announce that you are "ready to proceed" or "understand now": that is NOT done. Reflecting and planning are not completing. Every reply must be a concrete {"act"} that moves the task forward. Only reply {"final":...} once the thing you were asked to build actually EXISTS and you have exercised it and seen it work. If you catch yourself about to declare readiness, instead emit the next {"act"} (a create_agent, or a send). Do NOT reflect the same target or doc twice — reading is not progress. The MOMENT a doc shows you how to build the tool (e.g. the self-extension doc's copy-pasteable example), your NEXT act MUST be a create_agent, not another reflect."#;
 
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.trim().is_empty())
@@ -43,6 +43,14 @@ fn env(k: &str) -> Option<String> {
 
 /// First complete JSON object from `s` (models fence/preface); tolerant of a
 /// trailing brace and `\'` like the genesis extractor.
+///
+/// Also BALANCES a missing trailing `}`. Weak models routinely emit an otherwise
+/// perfect act and drop the final closing brace — observed repeatedly on
+/// gemma4:12b, whose `create_agent` payload (correct code and all) parsed as
+/// invalid JSON purely for one absent `}`, so the act never registered and the
+/// tool was never created. Repairing a truncated envelope is ordinary driver
+/// hygiene; it relays what the model plainly meant and changes nothing in the
+/// kernel.
 fn first_json(s: &str) -> Option<Value> {
     let start = s.find('{')?;
     let tail = &s[start..];
@@ -52,7 +60,38 @@ fn first_json(s: &str) -> Option<Value> {
             .next()?
             .ok()
     };
-    parse(tail).or_else(|| parse(&tail.replace("\\'", "'")))
+    parse(tail)
+        .or_else(|| parse(&tail.replace("\\'", "'")))
+        .or_else(|| parse(&balance_braces(tail)?))
+}
+
+/// Append the closing braces a truncated JSON object is missing (string-aware, so
+/// `{`/`}` inside the `code` payload don't skew the count). Returns None when the
+/// text is already balanced (nothing to repair).
+fn balance_braces(tail: &str) -> Option<String> {
+    let end = tail.rfind('}')? + 1; // drop any trailing fence / prose
+    let body = &tail[..end];
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    for c in body.chars() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        match c {
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '{' if !in_str => depth += 1,
+            '}' if !in_str => depth -= 1,
+            _ => {}
+        }
+    }
+    (depth > 0).then(|| {
+        let mut fixed = body.to_string();
+        for _ in 0..depth {
+            fixed.push('}');
+        }
+        fixed
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -107,7 +146,16 @@ async fn seed_reflect_first_author_and_use() {
         .send(
             &AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"ollama_backend.tools","id":ORGAN,
-                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint}),
+                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint,
+                   // NOTE: ollama's stock runtime default is a small 4096, which silently
+                   // TRUNCATES the agentic context (system+task+docs+history) and makes a
+                   // weak model flail. We send no `num_ctx` here so the operator's server
+                   // setting governs (this box is configured for the model's full 262144);
+                   // set `num_ctx` on the record when the server default is small.
+                   // THINKING models burn hundreds of hidden reasoning tokens before the
+                   // answer (gemma4:12b: ~250 tok and ~11x latency for the SAME one-line
+                   // act). An agentic loop wants the ACTION, not the rumination.
+                   "think": false}),
         )
         .await;
     assert!(r.get("error").is_none(), "create organ: {r:#?}");
@@ -325,7 +373,11 @@ async fn seed_reflect_first_tree_spawns_worker() {
         .send(
             &AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"ollama_backend.tools","id":ORGAN,
-                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint}),
+                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint,
+                   // THINKING models burn hundreds of hidden reasoning tokens before the
+                   // answer (gemma4:12b: ~250 tok and ~11x latency for the SAME one-line
+                   // act). An agentic loop wants the ACTION, not the rumination.
+                   "think": false}),
         )
         .await;
     assert!(r.get("error").is_none(), "create organ: {r:#?}");
@@ -507,7 +559,11 @@ async fn mind_verify_repair_author_and_use() {
         .send(
             &AgentId::from("kernel"),
             json!({"type":"create_agent","handler_module":"ollama_backend.tools","id":ORGAN,
-                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint}),
+                   "file_bridge_id":"ff_live", "model": model, "endpoint": endpoint,
+                   // THINKING models burn hundreds of hidden reasoning tokens before the
+                   // answer (gemma4:12b: ~250 tok and ~11x latency for the SAME one-line
+                   // act). An agentic loop wants the ACTION, not the rumination.
+                   "think": false}),
         )
         .await;
     assert!(r.get("error").is_none(), "create organ: {r:#?}");
@@ -531,6 +587,7 @@ async fn mind_verify_repair_author_and_use() {
     let mut last_tool: Option<String> = None;
     let mut acts = 0usize;
     let mut repairs = 0usize;
+    let mut reflect_streak = 0usize;
 
     let drain = |wrx: &mut tokio::sync::mpsc::Receiver<Value>| -> bool {
         let mut hit = false;
@@ -641,6 +698,15 @@ async fn mind_verify_repair_author_and_use() {
                     .await;
             }
         }
+        // LOOP-BREAKER (generic agency): a weak model reflects endlessly and
+        // never commits. Count reflects while no tool exists; reset on any
+        // create_agent. This is agency, not the answer — the model still writes
+        // the `code` itself; the driver only refuses to keep feeding docs.
+        if !created_any && verb == "reflect" {
+            reflect_streak += 1;
+        } else if verb == "create_agent" {
+            reflect_streak = 0;
+        }
         if drain(&mut wrx) {
             echoed = true;
         }
@@ -688,6 +754,22 @@ async fn mind_verify_repair_author_and_use() {
             break;
         }
         turn = format!("Result of your send to '{target}':\n{shown}{verify_note}");
+        // After a couple of reflects with nothing built, STOP feeding docs and
+        // force the authoring step — the model has enough to act.
+        if reflect_streak >= 2 && !created_any {
+            repairs += 1;
+            turn = format!(
+                "You have now reflected {reflect_streak} times and built NOTHING — reading is not \
+                 progress and you are burning your turns. STOP reflecting. You have ALREADY read the \
+                 self-extension doc; it contains a COMPLETE copy-pasteable example. Your NEXT reply \
+                 MUST be exactly ONE create_agent act (target 'kernel') that authors a durable tool \
+                 on a *_runtime executor. Its `code`, on a turn where type=='send', must ECHO THE \
+                 INBOUND TEXT VERBATIM — emit {{type:'say', text: <the incoming msg's own `text` \
+                 field, copied unchanged>, client_id: <the incoming client_id>}} then {{type:'done', \
+                 client_id}}. It is an ECHO, not a greeting: never hardcode a message like 'Hello'. \
+                 Do NOT reflect again — author it now."
+            );
+        }
     }
 
     println!(

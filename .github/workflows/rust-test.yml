@@ -1,0 +1,39 @@
+name: Rust Tests
+
+# Build + clippy + test the Rust workspace. This is the gate that would have
+# caught the js_runtime / lua / ollama bug class (detached-loop death, spawn
+# races, sandbox holes) — none of it was visible to CI before, because CI ran
+# only lint/spellcheck/CodeQL, never the Rust tests.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/lib/rust/**'
+      - '.github/workflows/rust-test.yml'
+
+jobs:
+  rust-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/lib/rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/lib/rust
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (strict)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
