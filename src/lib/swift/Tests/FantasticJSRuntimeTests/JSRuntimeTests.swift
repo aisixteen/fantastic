@@ -244,16 +244,14 @@ struct JSRuntimeTests {
         let code = "while (true) { const m = await kernel.on_message(); if (m === null) break; }"
         let kernel = freshKernel()
         let agent = await createScript(kernel, id: "stopme", code: code)
-        _ = await kernel.send(agent, .object(["type": .string("start")]))
-
-        var status = await kernel.send(agent, .object(["type": .string("status")]))
-        #expect(status["running"].asBool == true)
+        let started = await kernel.send(agent, .object(["type": .string("start")]))
+        #expect(started["running"].asBool == true, "script should be running after start")
 
         let stopped = await kernel.send(agent, .object(["type": .string("stop")]))
         #expect(stopped["stopped"].asBool == true)
 
-        status = await kernel.send(agent, .object(["type": .string("status")]))
-        #expect(status["running"].asBool == false)
+        let after = await kernel.send(agent, .object(["type": .string("status")]))
+        #expect(after["running"].asBool == false, "script should be stopped after stop")
 
         // A further inbox verb errors — no running script to receive it.
         let mail = await kernel.send(agent, .object(["type": .string("ping")]))
