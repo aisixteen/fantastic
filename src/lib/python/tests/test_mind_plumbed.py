@@ -13,6 +13,7 @@ mind just sends text turns and teaches its tool convention via `system_prompt`.
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
 
@@ -20,13 +21,17 @@ import ollama_backend.tools as ot
 
 
 class _FakeProvider:
-    """Yields a scripted token stream per `chat()` call (one per pass)."""
+    """Yields a scripted token stream per `chat()` call (one per pass). Records
+    the `messages` of every pass in `requests`, so a test can prove a human
+    answer became the NEXT organ turn (mirrors the rust `_RecordProvider`)."""
 
     def __init__(self, scripts: list[list]):
         self._scripts = list(scripts)
         self.calls = 0
+        self.requests: list = []
 
     async def chat(self, messages):
+        self.requests.append(messages)
         items = self._scripts.pop(0) if self._scripts else []
         self.calls += 1
         for x in items:
@@ -161,3 +166,282 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
         assert fp.calls == 2, f"expected 2 provider passes, got {fp.calls}"
     finally:
         ot._providers.pop(ai, None)
+
+
+# ─── plan / execute + ask-the-human (the human-in-the-loop protocol) ──────────
+#
+# A richer mind: it lays out a PLAN, executes steps (a `CALL` tool dispatch OR an
+# `ASK` to the human), and on an ASK it emits a {type:"question"} event, SUSPENDS
+# (emits NO `done`), and resumes when the matching {type:"answer"} arrives as the
+# next turn. This is the emergent side of the human-loop protocol — nothing in the
+# backend or kernel changes; the mind owns the ask. The question/answer SHAPES
+# (kind: single|multi|text|confirm · action: accept|decline|cancel) are the wire
+# the live TUI question-card renders. See src/cli/design/27_ask_plan_execute.md.
+PLAN_MIND_CODE = r"""
+# plan/execute + ask harness (pull loop): PLAN lays out steps; a step CALLs a tool
+# or ASKs the human; an ASK emits {type:question}, suspends on the inbox, resumes on
+# the matching {type:answer} — NEVER fabricating a value on decline/cancel.
+import queue, json, re
+inbox = queue.Queue()
+pending = []
+def _on(m):
+    if isinstance(m, dict) and m.get("type") in ("send", "answer"):
+        inbox.put(m)
+kernel.on_message(_on)
+kernel.reflect("kernel")  # FIFO round-trip: ensure on_message is registered upstream
+print("READY", flush=True)
+SYSTEM = ("You drive a kernel with a plan/execute loop. Reply EXACTLY one line: "
+          "`PLAN: a | b` to lay out steps; `CALL <target> <verb>` to run a tool; "
+          "`ASK <json>` to ask the human "
+          "(json={\"kind\":\"single|multi|text|confirm\",\"question\":\"...\",\"options\":[...]}); "
+          "`FINAL: <answer>` when done.")
+_n = [0]
+def await_answer(rid):
+    while True:
+        m = inbox.get()
+        if m.get("type") == "answer" and m.get("request_id") == rid:
+            return m
+        pending.append(m)  # a user turn arrived mid-question — handle it after
+def run_turn(text, cid):
+    for _ in range(16):
+        reply = kernel.send("the_ai", {"type": "send", "text": text,
+                                       "system_prompt": SYSTEM, "client_id": cid})
+        resp = ((reply or {}).get("response") or (reply or {}).get("error") or "").strip()
+        body = re.sub(r"^STEP \d+:\s*", "", resp)
+        if body.startswith("PLAN:"):
+            text = "Execute the plan step by step."
+            continue
+        mc = re.match(r"^CALL (\S+) (\S+)", body)
+        if mc:
+            r = kernel.send(mc.group(1), {"type": mc.group(2)})
+            text = "RESULT: " + json.dumps(r)
+            continue
+        if body.startswith("ASK "):
+            spec = json.loads(body[4:])
+            _n[0] += 1
+            rid = "q_" + str(_n[0])
+            q = {"type": "question", "request_id": rid,
+                 "kind": spec.get("kind", "text"), "question": spec.get("question", ""),
+                 "source": kernel.self_id, "client_id": cid}
+            if spec.get("options"): q["options"] = spec["options"]
+            if spec.get("header"): q["header"] = spec["header"]
+            if "default" in spec: q["default"] = spec["default"]
+            kernel.emit(q)
+            ans = await_answer(rid)
+            if ans.get("action") == "accept":
+                text = "ANSWER " + rid + ": " + json.dumps(ans.get("value"))
+                continue
+            # decline/cancel: NEVER fabricate a value — branch to an abort.
+            kernel.emit({"type": "say",
+                         "text": "(question " + str(ans.get("action")) + " — aborting)",
+                         "client_id": cid})
+            kernel.emit({"type": "done", "client_id": cid})
+            return
+        ans_text = body[6:].strip() if body.startswith("FINAL:") else body
+        kernel.emit({"type": "say", "text": ans_text, "client_id": cid})
+        kernel.emit({"type": "done", "client_id": cid})
+        return
+while True:
+    msg = pending.pop(0) if pending else inbox.get()
+    if msg.get("type") == "send":
+        run_turn(msg.get("text", ""), msg.get("client_id"))
+"""
+
+
+async def _collect(q, until_type: str, timeout: float = 8.0):
+    """Drain a watcher queue until an event of `until_type`; return (event, all_seen)."""
+    seen: list = []
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            ev = await asyncio.wait_for(
+                q.get(), timeout=max(0.05, end - time.monotonic())
+            )
+        except asyncio.TimeoutError:
+            break
+        seen.append(ev)
+        if ev.get("type") == until_type:
+            return ev, seen
+    return None, seen
+
+
+async def _spawn_plan_mind(k, store_agent, scripts):
+    """Create the `the_ai` organ (deterministic `_FakeProvider`) + the plan/execute
+    mind; return (mind_id, fake_provider). Caller pops `ot._providers` in a finally."""
+    ai = (
+        await k.send(
+            "kernel_state",
+            {
+                "type": "create_agent",
+                "handler_module": "ollama_backend.tools",
+                "id": "the_ai",
+                "file_bridge_id": store_agent,
+            },
+        )
+    )["id"]
+    fp = _FakeProvider(scripts)
+    ot._providers[ai] = fp
+    mind = (
+        await k.send(
+            "kernel_state",
+            {
+                "type": "create_agent",
+                "handler_module": "python_runtime.tools",
+                "id": "the_mind",
+            },
+        )
+    )["id"]
+    r = await k.send(mind, {"type": "start", "code": PLAN_MIND_CODE})
+    await _wait_ready(k, mind, r["job_id"])
+    return mind, fp
+
+
+async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
+    """The mind plans, executes a CALL step, then ASKs a SINGLE-choice question — it
+    emits {type:question} and SUSPENDS (no done). Answering `accept` feeds the choice
+    back as the next organ turn, and only then does the turn seal."""
+    k = seeded_kernel
+    mind, fp = await _spawn_plan_mind(
+        k,
+        store_agent,
+        [
+            ["PLAN: list the agents, then confirm"],
+            ["STEP 1: CALL kernel_state list_agents"],
+            [
+                'STEP 2: ASK {"kind":"single","question":"Proceed?","header":"Go",'
+                '"options":[{"value":"yes"},{"value":"no"}]}'
+            ],
+            ["FINAL: proceeded with yes"],
+        ],
+    )
+    try:
+        q = _watch(k, mind)
+        ack = await k.send(
+            mind, {"type": "send", "text": "set it up", "client_id": "c"}
+        )
+        assert ack.get("queued") is True, ack
+
+        qev, before = await _collect(q, "question")
+        assert qev is not None, f"no question emitted; saw {before}"
+        assert qev["kind"] == "single" and qev.get("options"), qev
+        assert qev.get("client_id") == "c" and qev.get("source"), qev
+        # The turn genuinely SUSPENDED — no done leaked before the human was asked.
+        assert all(e.get("type") != "done" for e in before), (
+            f"done before question: {before}"
+        )
+
+        rid = qev["request_id"]
+        a = await k.send(
+            mind,
+            {"type": "answer", "request_id": rid, "action": "accept", "value": "yes"},
+        )
+        assert a.get("queued") is True, a
+
+        done_ev, rest = await _collect(q, "done")
+        assert done_ev is not None, f"turn never sealed; saw {rest}"
+        say = next((e for e in rest if e.get("type") == "say"), None)
+        assert say and "yes" in say.get("text", ""), f"final say: {say}"
+        # The full cycle ran: plan + call + ask + post-answer final = 4 organ passes,
+        assert fp.calls == 4, f"expected 4 organ passes, got {fp.calls}"
+        # and the human answer really became the NEXT organ turn.
+        assert "yes" in json.dumps(fp.requests[3], default=str), fp.requests[3]
+    finally:
+        ot._providers.pop("the_ai", None)
+
+
+async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
+    """MULTI-answer: the accepted `value` is an ARRAY; every chosen value must reach
+    the next organ turn."""
+    k = seeded_kernel
+    mind, fp = await _spawn_plan_mind(
+        k,
+        store_agent,
+        [
+            ["PLAN: choose features"],
+            [
+                'STEP 1: ASK {"kind":"multi","question":"Enable which?",'
+                '"options":[{"value":"cache"},{"value":"audit"},{"value":"sso"}]}'
+            ],
+            ["FINAL: enabled cache and sso"],
+        ],
+    )
+    try:
+        q = _watch(k, mind)
+        ack = await k.send(
+            mind, {"type": "send", "text": "configure", "client_id": "c"}
+        )
+        assert ack.get("queued") is True, ack
+
+        qev, before = await _collect(q, "question")
+        assert qev is not None and qev["kind"] == "multi", (qev, before)
+        assert all(e.get("type") != "done" for e in before), (
+            f"done before question: {before}"
+        )
+
+        rid = qev["request_id"]
+        a = await k.send(
+            mind,
+            {
+                "type": "answer",
+                "request_id": rid,
+                "action": "accept",
+                "value": ["cache", "sso"],
+            },
+        )
+        assert a.get("queued") is True, a
+
+        done_ev, rest = await _collect(q, "done")
+        assert done_ev is not None, f"turn never sealed; saw {rest}"
+        assert fp.calls == 3, f"expected 3 organ passes, got {fp.calls}"
+        # BOTH selected values became the next organ turn (the array survived).
+        blob = json.dumps(fp.requests[2], default=str)
+        assert "cache" in blob and "sso" in blob, fp.requests[2]
+    finally:
+        ot._providers.pop("the_ai", None)
+
+
+async def test_mind_ask_declined(seeded_kernel, store_agent):
+    """NO-FALLBACKS at the mind boundary: a `decline` (no value) makes the mind take a
+    distinct branch (here: abort) and it NEVER invents a value or runs another organ
+    pass as if one were chosen."""
+    k = seeded_kernel
+    mind, fp = await _spawn_plan_mind(
+        k,
+        store_agent,
+        [
+            ["PLAN: confirm the destructive step"],
+            ['STEP 1: ASK {"kind":"confirm","question":"Delete everything?"}'],
+            # No further script: a decline MUST NOT trigger another organ pass.
+        ],
+    )
+    try:
+        q = _watch(k, mind)
+        ack = await k.send(mind, {"type": "send", "text": "clean up", "client_id": "c"})
+        assert ack.get("queued") is True, ack
+
+        qev, before = await _collect(q, "question")
+        assert qev is not None and qev["kind"] == "confirm", (qev, before)
+
+        rid = qev["request_id"]
+        a = await k.send(
+            mind, {"type": "answer", "request_id": rid, "action": "decline"}
+        )
+        assert a.get("queued") is True, a
+
+        done_ev, rest = await _collect(q, "done")
+        assert done_ev is not None, f"turn never sealed; saw {rest}"
+        say = next((e for e in rest if e.get("type") == "say"), None)
+        txt = (say or {}).get("text", "").lower()
+        assert "abort" in txt or "declin" in txt, (
+            f"expected an abort/decline branch: {say}"
+        )
+        # It did NOT run a post-answer organ pass (plan + ask only)…
+        assert fp.calls == 2, (
+            f"a declined ask must not run another pass, got {fp.calls}"
+        )
+        # …and never injected a fabricated answer into any organ turn.
+        assert all(
+            "ANSWER" not in json.dumps(req, default=str) for req in fp.requests
+        ), fp.requests
+    finally:
+        ot._providers.pop("the_ai", None)
