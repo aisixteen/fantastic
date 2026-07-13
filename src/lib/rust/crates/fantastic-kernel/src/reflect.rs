@@ -246,7 +246,7 @@ pub fn apply_reflect_flags(
         );
         obj.insert(
             "self_extension".to_string(),
-            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, reflect 'kernel' with readme:'self-extension' for each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
+            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, send 'kernel' the payload {type:'reflect', readme:'self-extension'} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
         );
         // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
         // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
@@ -259,7 +259,7 @@ pub fn apply_reflect_flags(
         );
         obj.insert(
             "docs".to_string(),
-            json!("This kernel's manual is a keyed doc tree. `reflect kernel readme=index` lists every topic with its ~token cost; `reflect kernel readme=<key>` opens one (e.g. readme=self-extension, readme=streams). `readme=true` is the short orientation. Read only what a task needs."),
+            json!("This kernel's manual is a keyed doc tree. To read it, send 'kernel' a reflect payload with a string `readme` field: {type:'reflect', readme:'index'} lists every topic with its ~token cost; {type:'reflect', readme:'<key>'} opens one (e.g. readme:'self-extension', readme:'streams'); {type:'reflect', readme:true} is the short orientation. The field is named exactly `readme` (a string) - not 'readme_key'. Read only what a task needs."),
         );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {

@@ -158,7 +158,7 @@ async def test_root_reflect_carries_readmes_and_docs(kernel):
     keys = {e["key"] for e in r["readmes"]}
     assert "self-extension" in keys
     assert isinstance(r["docs"], str)
-    assert "readme=index" in r["docs"]
+    assert "keyed doc tree" in r["docs"] and "readme" in r["docs"]
 
 
 # ─── non-root bundle: keyed-fetchable, no root frame ───────────

@@ -45,8 +45,11 @@ fn reflect_returns_uniform_json() {
         "reflect missing id key: {stdout}"
     );
     assert!(stdout.contains("\"tree\""), "reflect missing tree key");
+    // No top-level `transports` PRIMER key (transports docs moved into the readme).
+    // Match the key form `"transports":` — the word also appears as a VALUE now
+    // (the `readmes` doc index carries a topic keyed "transports"), which is fine.
     assert!(
-        !stdout.contains("\"transports\""),
+        !stdout.contains("\"transports\":"),
         "transports should have moved to the readme: {stdout}"
     );
     assert!(
