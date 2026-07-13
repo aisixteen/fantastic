@@ -272,7 +272,7 @@ async fn readme_doctree_frame_index_view_and_errors() {
     let plain = bare_reflect(&kernel, &root, &json!({"type":"reflect","tree":"none"}));
     let readmes = plain["readmes"].as_array().unwrap();
     assert!(readmes.iter().any(|e| e["key"] == "self-extension"));
-    assert!(plain["docs"].as_str().unwrap().contains("readme=index"));
+    assert!(plain["docs"].as_str().unwrap().contains("keyed doc tree"));
 
     // readme=true → the SHORT orientation string.
     let r = bare_reflect(

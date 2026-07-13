@@ -141,7 +141,7 @@ struct ReflectUniformTests {
             #expect((e["tokens"].asInt ?? 0) > 0)
             #expect(e["body"] == nil || e["body"].isNull)  // index carries no bodies
         }
-        #expect(r["docs"].asString?.contains("readme=index") == true)
+        #expect(r["docs"].asString?.contains("keyed doc tree") == true)
     }
 
     @Test func readmeIndexKeyedViewAndErrors() async {
