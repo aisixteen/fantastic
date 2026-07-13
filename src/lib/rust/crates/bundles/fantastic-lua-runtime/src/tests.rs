@@ -151,7 +151,10 @@ async fn sandbox_omits_os_io_but_keeps_pure_libs() {
         .expect("probe emitted");
     assert_eq!(p["has_os"], false, "os must be sandboxed out");
     assert_eq!(p["has_io"], false, "io must be sandboxed out");
-    assert_eq!(p["has_require"], false, "require/package must be sandboxed out");
+    assert_eq!(
+        p["has_require"], false,
+        "require/package must be sandboxed out"
+    );
     assert_eq!(p["has_package"], false, "package must be sandboxed out");
     assert_eq!(p["math_ok"], true, "math must remain");
     assert_eq!(p["string_ok"], true, "string must remain");
