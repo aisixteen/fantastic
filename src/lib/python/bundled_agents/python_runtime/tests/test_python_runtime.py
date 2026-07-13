@@ -424,3 +424,30 @@ async def test_restart_does_not_double_deliver(seeded_kernel):
     await seeded_kernel.send(pid, {"type": "send", "text": "once", "client_id": "c"})
     says = await _collect_says(q, "once")
     assert len(says) == 1, f"expected exactly one echo after restart, got {len(says)}"
+
+
+async def test_durable_tool_self_reaps_when_control_socket_closes(seeded_kernel):
+    """A durable tool parked on its inbox (on_message + Event().wait()) must
+    SELF-REAP when its control socket EOFs — i.e. when the kernel/spawner is gone.
+    Otherwise it lingers as an ORPHAN forever (this is how 33 leaked). We tear down
+    ONLY the control relay (exactly what a kernel-process exit does to the parent
+    socket) and call NO proc.kill() — the child must exit on its own."""
+    from python_runtime import tools as pt
+
+    pid = await _make(seeded_kernel, id="orphan_reap", code=_ECHO_VIA_IMPORT)
+    await asyncio.sleep(0.4)  # boot → durable job parked on Event().wait()
+    job = next(v for v in pt._jobs.values() if v["owner"] == pid)
+    proc = job["proc"]
+    assert proc.returncode is None, "durable tool should be parked + alive"
+
+    # Simulate the kernel going away: cancel the relay so `_serve_ctrl`'s finally
+    # closes the parent socket, EOF-ing the child's control fd. NO proc.kill().
+    job["ctrl_task"].cancel()
+    try:
+        await job["ctrl_task"]
+    except asyncio.CancelledError:
+        pass
+
+    # Without the self-reap this hangs (orphan); with it the child exits cleanly.
+    await asyncio.wait_for(proc.wait(), timeout=5.0)
+    assert proc.returncode == 0, "child must self-reap on EOF, not orphan"
