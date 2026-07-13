@@ -68,6 +68,20 @@ private func waitForEvent(
     return await sink.events
 }
 
+/// Poll a long-lived `sink` until `pred` matches or `timeout` s pass. Unlike
+/// `waitForEvent` (which owns + cancels its own drain), this observes events across
+/// MULTIPLE phases on ONE drain — e.g. see the `question`, answer it, then see `done`.
+private func waitUntil(
+    _ sink: EventSink, timeout: Double = 5,
+    where pred: @escaping @Sendable (JSON) -> Bool
+) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await sink.has(pred) { return }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+}
+
 /// A minimal synchronous "backend" — answers `send` from a scripted response
 /// list (each `send` pops the next). Stands in for a context-managed AI
 /// backend so the JS mind's connector + feedback loop is tested deterministically.
@@ -76,6 +90,9 @@ private final class StubBackend: AgentBundle, @unchecked Sendable {
     private let lock = NSLock()
     private var scripts: [String]
     private(set) var calls = 0
+    /// The `text` of every `send` pass — lets a test prove a human answer became
+    /// the NEXT organ turn (mirrors the python `_FakeProvider.requests`).
+    private(set) var texts: [String] = []
     init(_ scripts: [String]) { self.scripts = scripts }
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -88,6 +105,7 @@ private final class StubBackend: AgentBundle, @unchecked Sendable {
         case "send":
             let r: String = lock.withLock {
                 calls += 1
+                texts.append(payload["text"].asString ?? "")
                 return scripts.isEmpty ? "" : scripts.removeFirst()
             }
             return .object([
@@ -331,5 +349,123 @@ struct JSRuntimeTests {
         #expect((say?["text"].asString ?? "").contains("populated"))
         // The feedback cycle really ran: TWO backend passes (act → result → answer).
         #expect(stub.calls == 2)
+    }
+
+    @Test func plumbedMindPlansExecutesAndAsksTheHuman() async throws {
+        // The mind PLANs, executes a CALL step, then ASKs the human — it emits a
+        // {type:question} event and SUSPENDS (no done). Answering `accept` feeds the
+        // choice back as the next backend turn; only then does the turn seal. The
+        // ask/answer protocol is the mind's (emergent), not the substrate's.
+        // (Mirrors python test_mind_plumbed.py::test_mind_plans_executes_and_asks_single.)
+        let mindJS = #"""
+            const SYSTEM = "plan/execute: PLAN: a|b, CALL <t> <v>, ASK <json>, FINAL: <a>";
+            let n = 0;
+            async function awaitAnswer(rid) {
+                while (true) {
+                    const a = await kernel.on_message();
+                    if (a === null) return null;
+                    if (a.type === 'answer' && a.request_id === rid) return a;
+                }
+            }
+            while (true) {
+                const m = await kernel.on_message();
+                if (m === null) break;
+                if (m.type !== 'send') continue;
+                let text = m.text;
+                const cid = m.client_id;
+                for (let i = 0; i < 16; i++) {
+                    const reply = await kernel.send('the_ai', {
+                        type: 'send', text: text, system_prompt: SYSTEM, client_id: cid
+                    });
+                    const resp = (((reply && (reply.response || reply.error)) || '')).trim();
+                    const body = resp.replace(/^STEP \d+:\s*/, '');
+                    if (body.indexOf('PLAN:') === 0) { text = 'Execute the plan step by step.'; continue; }
+                    const mm = /^CALL (\S+) (\S+)/.exec(body);
+                    if (mm) {
+                        const r = await kernel.send(mm[1], { type: mm[2] });
+                        text = 'RESULT: ' + JSON.stringify(r);
+                        continue;
+                    }
+                    if (body.indexOf('ASK ') === 0) {
+                        const spec = JSON.parse(body.slice(4));
+                        n += 1;
+                        const rid = 'q_' + n;
+                        const q = { type: 'question', request_id: rid, kind: spec.kind || 'text',
+                                    question: spec.question || '', source: kernel.self_id, client_id: cid };
+                        if (spec.options) q.options = spec.options;
+                        await kernel.emit(q);
+                        const ans = await awaitAnswer(rid);
+                        if (ans && ans.action === 'accept') {
+                            text = 'ANSWER ' + rid + ': ' + JSON.stringify(ans.value);
+                            continue;
+                        }
+                        await kernel.emit({ type: 'say', text: '(aborted)', client_id: cid });
+                        await kernel.emit({ type: 'done', client_id: cid });
+                        break;
+                    }
+                    const fin = body.indexOf('FINAL:') === 0 ? body.slice(6).trim() : body;
+                    await kernel.emit({ type: 'say', text: fin, client_id: cid });
+                    await kernel.emit({ type: 'done', client_id: cid });
+                    break;
+                }
+            }
+            """#
+        let stub = StubBackend([
+            "PLAN: list, then confirm",
+            "STEP 1: CALL core list_agents",
+            "STEP 2: ASK {\"kind\":\"single\",\"question\":\"Proceed?\",\"options\":[{\"value\":\"yes\"},{\"value\":\"no\"}]}",
+            "FINAL: proceeded with yes",
+        ])
+        let kernel = freshKernel(extra: [("stub_backend.tools", stub)])
+        _ = await kernel.send(
+            AgentId("core"),
+            .object([
+                "type": .string("create_agent"),
+                "handler_module": .string("stub_backend.tools"),
+                "id": .string("the_ai"),
+            ]))
+        let mind = await createScript(kernel, id: "the_mind", code: mindJS)
+        let stream = watchInbox(kernel, mind)
+
+        // One long-lived drain observes BOTH phases (question, then done).
+        let sink = EventSink()
+        let consumer = Task { for await ev in stream { await sink.add(ev) } }
+        defer { consumer.cancel() }
+
+        let ack = await kernel.send(
+            mind,
+            .object([
+                "type": .string("send"), "text": .string("set it up"),
+                "client_id": .string("probe"),
+            ]))
+        #expect(ack["queued"].asBool == true)
+
+        // The question surfaces mid-turn, BEFORE any done (the turn suspended).
+        await waitUntil(sink) { $0["type"].asString == "question" }
+        let seen = await sink.events
+        let question = seen.first { $0["type"].asString == "question" }
+        #expect(question != nil, "the mind must emit a question")
+        #expect(question?["kind"].asString == "single")
+        #expect(seen.allSatisfy { $0["type"].asString != "done" }, "no done before the question")
+        let rid = question?["request_id"].asString ?? ""
+        #expect(!rid.isEmpty)
+
+        // Answer it → the choice becomes the next backend turn.
+        _ = await kernel.send(
+            mind,
+            .object([
+                "type": .string("answer"), "request_id": .string(rid),
+                "action": .string("accept"), "value": .string("yes"),
+            ]))
+
+        await waitUntil(sink) { $0["type"].asString == "done" }
+        let final = await sink.events
+        let say = final.first { $0["type"].asString == "say" }
+        #expect(final.contains { $0["type"].asString == "done" }, "turn must seal after the answer")
+        #expect((say?["text"].asString ?? "").contains("yes"))
+        // Full cycle: plan + call + ask + post-answer final = 4 backend passes,
+        #expect(stub.calls == 4)
+        // and the human answer really became the next backend turn.
+        #expect(stub.texts.contains { $0.contains("yes") })
     }
 }
