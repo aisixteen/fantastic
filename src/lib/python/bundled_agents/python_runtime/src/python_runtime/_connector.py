@@ -76,6 +76,16 @@ try:
                 _dispatch_q.put((list(_watchers.get(m.get("src"), ())), m.get("payload")))
             elif op == "inbox":
                 _dispatch_q.put((list(_inbox_cbs), m.get("payload")))
+        # EOF on the control socket ⇒ the spawner (kernel) is GONE. A durable tool
+        # parked on its inbox (threading.Event().wait(), an on_message loop) would
+        # otherwise linger as an ORPHAN forever — the lifeline is severed, there is
+        # no kernel left to serve. Reap the whole process, not just this daemon
+        # thread. This is what makes a kernel exit (parent dies → socket closes)
+        # cascade-reap every durable job even when the parent dies too abruptly to
+        # run its own proc.kill() loop (the orphaned connectors the audit found).
+        # A short compute job exits via its main thread BEFORE any EOF, so this
+        # only ever fires for a job still alive when its kernel left.
+        _o._exit(0)
 
     _th.Thread(target=_reader, daemon=True).start()
 
