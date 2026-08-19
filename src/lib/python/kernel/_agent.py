@@ -47,11 +47,14 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Callable
 
+from kernel._authz import DEFAULT_CAN_CALL, authorize_call
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
     Kernel,
     _current_sender,
+    _current_task,
     _summarize_payload,
+    operator_context,
 )
 
 
@@ -65,12 +68,50 @@ _SYSTEM_VERBS = frozenset(
         "delete_agent",
         "update_agent",
         "list_agents",
+        # The TASK TABLE — work in flight, universal. `ps` reads it, `cancel`
+        # kills a task and its subtree. Baked into the substrate, NOT a bundle:
+        # cancellation is a property of the one primitive (`send`), so EVERY
+        # agent is cancelable and a caller never needs to know which bundle it
+        # faces. Plain verbs — an AGENT can call them on another agent.
+        "ps",
+        "cancel",
         # Root-only control verb — gated inside its handler to the tree
         # root (a non-root agent answers with an error). Stops the whole
         # kernel process gracefully; see `_verb_shutdown_kernel`.
         "shutdown_kernel",
     }
 )
+
+# One line per system verb — the honest reflect surface. Bundle verbs are
+# derived from their VERBS docstrings; these are the substrate's own, so they
+# appear in no bundle's map and are advertised here (root reflect).
+# The verbs that CHANGE something. Distilled reflect carries their argument line;
+# read-only verbs carry only their name (their reply teaches the rest).
+_MUTATING_VERBS = frozenset(
+    {"create_agent", "update_agent", "delete_agent", "cancel", "shutdown_kernel"}
+)
+
+_SYSTEM_VERB_DOCS = {
+    "create_agent": (
+        "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it."
+    ),
+    "update_agent": "args: id:str, **meta — patch a record's meta.",
+    "delete_agent": (
+        "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses)."
+    ),
+    "list_agents": "No args. Every agent's record, flat.",
+    "ps": (
+        "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, "
+        "started_at}]}. One row per in-flight dispatch; `parent` chains them "
+        "into the send tree."
+    ),
+    "cancel": (
+        "args: task_id:str — kill that task AND ITS SUBTREE (children first). "
+        "Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` "
+        "resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}."
+    ),
+    "shutdown_kernel": "No args. ROOT ONLY — stop the kernel process gracefully.",
+}
 
 
 class Agent:
@@ -141,7 +182,7 @@ class Agent:
         self.ctx = ctx
         self.ctx.register(self)
         # Inbox lives on ctx — same dict that synthetic browser clients
-        # share, so the webapp proxy's _ensure_inbox(client_id) and
+        # share, so the webapp proxy's ctx.ensure_inbox(client_id) and
         # routing fanout both look up here.
         self._inbox: asyncio.Queue = self.ctx.ensure_inbox(self.id)
         # No disk I/O here — the agent is pure in-memory. A loader agent
@@ -331,6 +372,11 @@ class Agent:
         around the dispatch so nested send/emit attribute correctly.
         Verbs in `_SYSTEM_VERBS` are answered natively by the target
         Agent without consulting handler_module.
+
+        The dispatch runs as a REGISTERED asyncio.Task (one row in the
+        kernel task table) — that is what makes any send cancelable
+        (`cancel`). A cancelled dispatch does NOT raise out of `send`:
+        it resolves to `{"cancelled": True}`.
         """
         if target_id == "kernel":
             target = self._root()
@@ -338,7 +384,7 @@ class Agent:
             # read — answer it from the root's identity without a full
             # dispatch (no telemetry fanout); flags applied below.
             if payload.get("type") == "reflect":
-                return self._apply_reflect_flags(
+                return await self._apply_reflect_flags(
                     target, payload, target._reflect_identity()
                 )
         else:
@@ -346,9 +392,84 @@ class Agent:
             # `web_loader`) to its agent id; a literal id resolves to itself.
             target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
         if target is None:
-            return {"error": f"no agent {target_id!r}"}
-        reply = await target._dispatch(payload)
-        return self._apply_reflect_flags(target, payload, reply)
+            return self.ctx.unknown_agent(target_id)
+        # ── CALL GATE — deny-all for agent-originated sends ──────────────
+        # The trust boundary is who ORIGINATED the send. An operator send
+        # (`_current_sender` is None — CLI / cold bootstrap / loader-at-boot /
+        # test driver) is the root of trust and passes ungated. An agent send
+        # (a handler/script calling out; `_current_sender` is its id) is
+        # DENY-ALL: permitted only by an explicit grant on the sender's record.
+        # `reflect` is never gated (discovery moat).
+        verb = payload.get("type")
+        sender_id = _current_sender.get()
+        if sender_id is not None and verb != "reflect":
+            # A sender with no record cannot be vouched for → an empty grant,
+            # which is deny-all (never a hole).
+            sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
+            sender_agent = self.ctx.agents.get(sender_id)
+            child_ids = (
+                frozenset(sender_agent._children) if sender_agent is not None else None
+            )
+            d = authorize_call(
+                sender_rec,
+                verb,
+                target.id,
+                loader_id=self._loader_id(),
+                child_ids=child_ids,
+            )
+            if not d.allowed:
+                return {"error": d.reason, "reason": "unauthorized", "hint": d.hint}
+        reply = await self._run_dispatch(target, payload)
+        return await self._apply_reflect_flags(target, payload, reply)
+
+    def _loader_id(self) -> str | None:
+        """The id `$loader` resolves to in a grant — the persistence loader, which
+        IS the tree root (`kernel_state`, where `persist_blob`/`load_blob` live).
+        A per-namespace sub-loader (e.g. the frontend's `web/<session>`) would
+        refine this to the nearest loader ancestor; the host kernel has one."""
+        return self._root().id
+
+    async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
+        """Run ONE dispatch as a registered, abortable asyncio.Task and await
+        it — the unit of the task table.
+
+        Parent propagation: the task stamps its own id on `_current_task`, so
+        any `send` the handler issues registers as a CHILD of this task. The
+        table is a tree; `cancel` walks it.
+
+        The cancellation contract, and why it is not ambiguous. Both cases
+        surface as a `CancelledError` at this one await:
+          - THE DISPATCH was cancelled (someone sent `cancel`) → the awaiting
+            caller is NOT being killed; it gets the reply `{"cancelled": True}`.
+            Cancellation never raises out of `send`.
+          - WE were cancelled (our own task is inside the killed subtree) →
+            `current_task().cancelling()` is non-zero, so we re-raise and take
+            the dispatch down with us. Swallowing here would resurrect a task
+            the kernel just killed.
+        """
+        ctx = self.ctx
+        task_id = ctx.mint_task_id(target.id)
+        task = asyncio.create_task(
+            target._dispatch_task(task_id, payload), name=f"fantastic:{task_id}"
+        )
+        ctx.register_task(
+            task_id,
+            target.id,
+            payload.get("type"),
+            task,
+            parent=_current_task.get(),
+        )
+        try:
+            return await task
+        except asyncio.CancelledError:
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling() > 0:
+                if not task.done():
+                    task.cancel()
+                raise
+            if task.cancelled():
+                return {"cancelled": True}
+            raise
 
     def _reflect_identity(self) -> dict:
         """Uniform reflect identity for a bare agent (the root, or any
@@ -377,11 +498,67 @@ class Agent:
             )
         return "Bare agent (no handler_module) — answers substrate verbs only."
 
-    @staticmethod
-    def _apply_reflect_flags(target, payload, reply):
+    _MORE_HINT = (
+        "Distilled: every agent and what it is FOR. Reflect one agent for its verbs "
+        "({type:'reflect'}). Manual: {type:'reflect', readme:'index'} - keys include "
+        "system-verbs (ps/cancel/create_agent args) and self-extension (author your own "
+        "durable tools). {type:'reflect', detail:'full'} adds wiring and posture - ask "
+        "for it only when you need to see how agents are plumbed, not to find one."
+    )
+
+    async def _roster(self, a) -> dict:
+        """`{id, sentence, mode?, children:[...]}` — the tree, but carrying what
+        each agent is FOR instead of how it is wired.
+
+        Same nesting as `_tree` (ownership is real information, and every caller
+        already walks it that way); the swap is the FIELDS. `_tree` gives
+        `handler_module` + posture — an operator's view, asked once. This gives
+        `sentence` + `mode` — the router's view, asked every turn. Two agents of
+        the same bundle are indistinguishable in the former and obvious here.
+
+        The sentence is ASKED FROM THE AGENT ITSELF (its own reflect), never
+        mirrored into a parallel source, so it cannot drift from what the agent
+        actually says. `_run_dispatch` (not `send`) is deliberate: it skips
+        `_apply_reflect_flags`, so building a roster cannot recurse into
+        building rosters.
+        """
+        if a.handler_module:
+            raw = await self._run_dispatch(a, {"type": "reflect"})
+        else:
+            raw = a._reflect_identity()
+        raw = raw if isinstance(raw, dict) else {}
+        node: dict[str, Any] = {"id": a.id}
+        if raw.get("sentence"):
+            node["sentence"] = raw["sentence"]
+        # Operator-set purpose. More specific than the bundle sentence when
+        # present ("the prod deploy key" vs "a yaml store"), so it belongs
+        # in the router's view above all else.
+        if a.description is not None:
+            node["description"] = a.description
+        # Purpose comes from the agent's REFLECT, not its record: `mode` is often
+        # a bundle default (yaml_state is "data" unless told otherwise), so a
+        # record-only read reports nothing for exactly the agents whose purpose
+        # you most need — and would be a second source of truth.
+        for k in self._PURPOSE_KEYS:
+            if raw.get(k) is not None:
+                node[k] = raw[k]
+        node["children"] = [await self._roster(c) for c in a._children.values()]
+        return node
+
+    async def _apply_reflect_flags(self, target, payload, reply):
         """Compose any reflect reply with the universal flags — applied
         uniformly to bare-agent and bundle reflects alike:
 
+        - `detail=distilled|full` (default distilled). DISTILLED answers the
+          question a caller actually has most turns — *who do I send to?* — with
+          a roster of `{id, sentence, mode?}` and nothing else. FULL is the
+          orientation document: wiring/posture on every node, verb docstrings,
+          and the inlined doc frame. The default is distilled because selection
+          happens every turn while orientation happens once, and because the
+          full view is NOT a superset: it carries `handler_module` and
+          `file_bridge_id` but no `sentence`, so two agents of the same bundle
+          are indistinguishable in it at any price. Escalation rides in the
+          reply's own `more` line, not in any caller's system prompt.
         - `tree=all|ids|none` (default all): `all` nests the distilled
           subtree; `ids` is a flat descendant-id index; `none` omits it.
         - `bundles=all|ids|none` (default none): `all` is the
@@ -396,6 +573,7 @@ class Agent:
         (`reflect readme=index`, then drill by key)."""
         if payload.get("type") != "reflect" or not isinstance(reply, dict):
             return reply
+        full = payload.get("detail") == "full"
         # `description` is a substrate meta field — surface it on EVERY
         # reflect (bundle handlers don't know about it), unless the
         # reply already set one.
@@ -410,10 +588,45 @@ class Agent:
         # are RUN-scoped (never persisted to the portable .fantastic workdir,
         # which can move host↔container). Same field names + key order
         # (runtime → env → version) across all four runtimes.
+        # SYSTEM VERBS — on EVERY reflect, not just the root.
+        #
+        # They are universal: every agent answers create/update/delete/ps/cancel
+        # natively, and they appear in no bundle's `verbs` map. Advertising them
+        # only on the ROOT was an optimization that put them where they were least
+        # needed — gemma4:12b reflected `assets`/`transcripts`/`secrets` (that is
+        # where the descriptions are), never reflected the root, and so never saw
+        # `update_agent`'s signature at all. It guessed the args from neighbouring
+        # names, guessed wrong, and abandoned the task. Placement has to follow
+        # WHERE A CALLER LOOKS, not where the field is cheapest to attach.
+        #
+        # Distilled carries every NAME plus the ARGUMENTS of the mutating verbs;
+        # full carries every docstring. The split is by BLAST RADIUS: a wrong guess
+        # about `ps` costs one failed read and the reply teaches you; a wrong guess
+        # about `update_agent` blocks the task or mutates the wrong thing — and
+        # those are the calls a weak model will not fire blind to find out.
+        #
+        # Costs ~115 tok, +11-17% on a per-agent reflect. Measured, and accepted.
+        reply["system_verbs"] = (
+            dict(_SYSTEM_VERB_DOCS)
+            if full
+            else {
+                k: (
+                    _SYSTEM_VERB_DOCS[k].split("—")[0].strip()
+                    if k in _MUTATING_VERBS
+                    else ""
+                )
+                for k in sorted(_SYSTEM_VERB_DOCS)
+            }
+        )
         if target.parent is None:
             reply["runtime"] = "python"
             reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
             reply["version"] = os.environ.get("FANTASTIC_VERSION")
+            # The substrate's OWN verbs — answered natively by EVERY agent, so
+            # they appear in no bundle's `verbs` map. Advertised here (once, on
+            # the root) so the reflect surface stays honest: a caller learns
+            # from one round-trip that work in flight is inspectable (`ps`) and
+            # killable (`cancel`), on any agent.
             # Duck-typed root extension: the root's handler_module (the loader) may
             # contribute root-only fields the substrate can't compute without coupling
             # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
@@ -423,16 +636,28 @@ class Agent:
                 try:
                     extra = importlib.import_module(
                         target.handler_module
-                    ).reflect_root_extra(target)
+                    ).reflect_root_extra(target, full=full)
                     if isinstance(extra, dict):
                         reply.update(extra)
                 except Exception:
                     pass
+        # NOTE: the identity fields (`parent_id`, `handler_module`, `guid`,
+        # `version`, `display_name`) are NOT trimmed in distilled. Dropping them
+        # was tried: it saves ~50 tok of a ~600 tok payload and breaks 10 tests,
+        # because they are not trivia — `guid` is the kernel INSTANCE identity a
+        # relay peer advertises as `owner_guid`, `version` names the build, and
+        # `parent_id` is structure. Cheap fields with real consumers stay.
         tree = payload.get("tree", "all")
         if tree == "all":
-            reply["tree"] = target._tree(depth=None, details=False, current_depth=0)
+            reply["tree"] = (
+                target._tree(depth=None, details=False, current_depth=0)
+                if full
+                else await self._roster(target)
+            )
         elif tree == "ids":
             reply["tree"] = target._descendant_ids()
+        if not full:
+            reply["more"] = self._MORE_HINT
         bundles = payload.get("bundles", "none")
         if bundles == "all":
             reply["bundles"] = target._available_bundles()
@@ -494,20 +719,6 @@ class Agent:
         src = self.ctx.agents.get(src_id)
         if src is not None:
             src._watcher_ids.discard(tgt_id)
-
-    # ─── webapp-proxy compat shims ─────────────────────────────
-
-    def _ensure_inbox(self, client_id: str) -> asyncio.Queue:
-        """Lazy-create a queue for a synthetic non-agent id (used by
-        the webapp WS proxy for browser client connections)."""
-        return self.ctx.ensure_inbox(client_id)
-
-    @property
-    def _inboxes(self) -> dict[str, asyncio.Queue]:
-        """Direct ctx.inboxes for compat with code reaching into the
-        old Kernel's `_inboxes` dict (mostly the webapp proxy
-        cleanup)."""
-        return self.ctx.inboxes
 
     # ─── public API: record CRUD ───────────────────────────────
 
@@ -594,7 +805,7 @@ class Agent:
         """
         target = self.ctx.agents.get(agent_id)
         if target is None:
-            return {"error": f"no agent {agent_id!r}", "deleted": False}
+            return self.ctx.unknown_agent(agent_id, deleted=False)
         blocked_by = target._find_locked_descendant()
         if blocked_by is not None:
             return {
@@ -618,6 +829,15 @@ class Agent:
         return self.ctx.state_snapshot()
 
     # ─── dispatch (internal) ───────────────────────────────────
+
+    async def _dispatch_task(self, task_id: str, payload: dict) -> dict | None:
+        """The body of a registered task: stamp `_current_task` so nested sends
+        become CHILDREN of this task, then dispatch. The contextvar is set (not
+        wrapped in try/finally) because an asyncio task owns a COPY of the
+        context — the stamp cannot leak to the caller. The table entry drops via
+        the task's done-callback, cancelled or not."""
+        _current_task.set(task_id)
+        return await self._dispatch(payload)
 
     async def _dispatch(self, payload: dict) -> dict | None:
         """Resolve verb → native or handler_module."""
@@ -731,9 +951,34 @@ class Agent:
             return await self._verb_update_agent(payload)
         if verb == "delete_agent":
             return await self._verb_delete_agent(payload)
+        if verb == "ps":
+            return self._verb_ps(payload)
+        if verb == "cancel":
+            return await self._verb_cancel(payload)
         if verb == "shutdown_kernel":
             return await self._verb_shutdown_kernel(payload)
         return {"error": f"unhandled system verb {verb!r}"}
+
+    def _verb_ps(self, payload: dict) -> dict:
+        """No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb,
+        started_at}]}. Kernel-wide (like `list_agents`), not per-agent: one row
+        per in-flight dispatch, `parent` chaining them into the send tree, so a
+        caller sees the whole tree and who spawned what. `ps` shows its own row
+        too — it is itself a dispatch."""
+        return {"tasks": self.ctx.task_rows()}
+
+    async def _verb_cancel(self, payload: dict) -> dict:
+        """args: task_id:str — kill that task AND ITS SUBTREE (children first,
+        depth-first, like killing a process group). Each bundle's `on_cancel`
+        hook runs BEFORE the abort so real resources (OS subprocesses, PTYs)
+        die with it. Returns {cancelled:True, killed:[task_id, ...]}; an unknown
+        or already-finished id returns {cancelled:False, killed:[]} — it does
+        not pretend. The cancelled dispatch's blocked caller gets the reply
+        {"cancelled": True}."""
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return {"error": "cancel: task_id (str) required"}
+        return await self.ctx.cancel_task(task_id)
 
     async def _verb_shutdown_kernel(self, payload: dict) -> dict:
         """Gracefully stop the whole kernel PROCESS (root control surface
@@ -774,11 +1019,65 @@ class Agent:
             asyncio.get_running_loop().call_later(0.1, ev.set)
         return {"type": "shutdown_kernel", "ok": True}
 
+    _LIST_HINT = (
+        "Raw records — how agents are WIRED, not what they are FOR, and no manual. "
+        "{type:'reflect'} on the root is the briefing: each agent's purpose, plus "
+        "`self_extension` (how to author your own durable tools in THIS kernel — which "
+        "executor, and the fields without which the agent is created and never runs) "
+        "and `readmes` (the manual index). Reflect the root before building anything."
+    )
+
     def _verb_list_agents(self, payload: dict) -> dict:
         # Flat list of every agent's record (global registry). For
         # own-children only, callers use the `list_children` Python
         # method on the Agent instance, or walk a `reflect` tree.
-        return {"agents": [a.record for a in self.ctx.agents.values()]}
+        #
+        # `more` is not decoration. Measured 2026-08-07 (probe 06 A/B, gemma-4-12B):
+        # the arm that opened with `reflect` received `self_extension` and attempted
+        # `create_agent` 10 times; the arm that opened with `list_agents` got these
+        # bare records, never learned that authoring a script agent was the mechanism,
+        # spent 8 turns reasoning "it doesn't explicitly say how to call send from
+        # inside the script" — which `self_extension` states outright — and made 0
+        # authoring attempts. Same model, same task; the whole divergence was the
+        # FIRST call. This verb is advertised in every reflect's `system_verbs`, so
+        # "list the agents" is a natural opener, and it was a dead end with no
+        # signpost back.
+        return {
+            "agents": [a.record for a in self.ctx.agents.values()],
+            "more": self._LIST_HINT,
+        }
+
+    @staticmethod
+    def _refuse_meta(
+        handler_module: str | None, meta: dict, record: dict | None = None
+    ) -> str | None:
+        """A bundle's own objection to this meta patch, or None. Optional + duck-typed.
+
+        `record` is the agent's CURRENT record (`{}` at create, where none exists yet),
+        so a bundle validates the state the write WILL produce rather than the patch in
+        isolation. Without it a cross-field rule is unenforceable: `exec_bridge` refuses
+        an `interpreter` that is not in `interpreters`, and validating the patch alone
+        rejected `update_agent id=x interpreter=<already on x's allowlist>` — a legal
+        write refused because the key it must be checked against was not in the same
+        payload. A false refusal is worse than no check: it makes the correct operation
+        look impossible.
+
+        ONE implementation, used by BOTH `create_agent` and `update_agent`. It was only
+        wired into update, and the asymmetry was live: `create_agent
+        handler_module=file_bridge.tools ingress_rule=bogus` returned a record with
+        `ingress_rule: "bogus"` while the identical `update_agent` was refused by the
+        identical function. Measured 2026-08-07. The argument the update path already
+        makes applies verbatim at create — accepting a value you cannot honour and
+        reporting success is the worst of both, and it is worse at create because there
+        is no prior good state to fall back to.
+        """
+        if not handler_module:
+            return None
+        try:
+            validate = importlib.import_module(handler_module).validate_meta
+        except (ImportError, AttributeError):
+            return None
+        return validate(meta, record or {})
 
     async def _verb_create_agent(self, payload: dict) -> dict:
         handler_module = payload.get("handler_module")
@@ -789,12 +1088,31 @@ class Agent:
             for k, v in payload.items()
             if k not in ("type", "handler_module", "id")
         }
+        # Every created agent carries the structural baseline (command your own
+        # subtree, answer your creator, persist your own state through the loader).
+        # It's a BASELINE, not a lateral grant, so it MERGES: an explicit `can_call`
+        # in the payload adds lateral edges on top (and may override a baseline key
+        # by naming it), but never has to re-declare $self/$parent/$children/$loader.
+        # Deny-all still governs every edge NOT in the merged grant.
+        grant = dict(DEFAULT_CAN_CALL)
+        grant.update(meta.get("can_call") or {})
+        meta["can_call"] = grant
+        # Refuse BEFORE the agent exists, so a bad wiring value never becomes a record
+        # that boots, half-works, and fails three calls later somewhere else.
+        # No record exists yet, so the merged view IS the patch — an `interpreter`
+        # with no `interpreters` beside it genuinely cannot run and is refused here.
+        if why := self._refuse_meta(handler_module, meta, {}):
+            return {"error": why, "created": False}
         rec = self.create(handler_module, id=payload.get("id"), **meta)
         if "error" in rec:
             return rec
-        # Boot via kernel routing.
+        # Boot via kernel routing. This send is a SIDE EFFECT of the already-
+        # authorized create_agent — the kernel initializing the child it was
+        # told to make, not the parent reaching out — so it runs with operator
+        # authority (ungated), never against the parent's own grant.
         try:
-            await self.send(rec["id"], {"type": "boot"})
+            with operator_context():
+                await self.send(rec["id"], {"type": "boot"})
         except Exception as e:
             print(f"  [create_agent] {rec['id']} boot raised: {e}")
         # Lifecycle event on self's inbox.
@@ -809,9 +1127,25 @@ class Agent:
             return {"error": "update_agent: id required"}
         meta = {k: v for k, v in payload.items() if k not in ("type", "id")}
         changed = list(meta.keys())
+        target = self.ctx.agents.get(target_id)
+        if target is None:
+            return self.ctx.unknown_agent(target_id, updated=False)
+        # WRITE-TIME VALIDATION, duck-typed. A record can carry meta only its bundle
+        # understands, so the substrate cannot judge it — but the bundle can. If the
+        # handler_module exposes `validate_meta(meta) -> str | None`, a returned
+        # string REFUSES the patch and is reported at the point of the mistake.
+        #
+        # Without this, `update_agent` accepted anything: on 2026-08-02 an agent set
+        # `ingress_rule="password:kernel-internal-transcripts"`, got `{"updated":
+        # true}` back, and only discovered it was meaningless when the next call to
+        # that agent failed. Accepting a value you cannot honour, and reporting
+        # success, is the worst of both — the caller believes a security control is
+        # in place that is not. Same discovery + optionality as `on_delete`.
+        if why := self._refuse_meta(target.handler_module, meta, target.record):
+            return {"error": why, "id": target_id, "updated": False}
         rec = self.update(target_id, **meta)
         if rec is None:
-            return {"error": f"no agent {target_id!r}"}
+            return self.ctx.unknown_agent(target_id, updated=False)
         # Emit lifecycle event on self's inbox for watchers (canvas
         # frame chrome, panels) — same convention as create/delete.
         await self.emit(
@@ -899,6 +1233,30 @@ class Agent:
             except Exception as e:
                 print(f"  [cascade] {self.id} bundle on_delete raised: {e}")
 
+    async def on_cancel(self, task_id: str) -> None:
+        """Cancel hook — invoked once per agent in a cancelled subtree, BEFORE
+        the asyncio.Task is aborted. The SIGTERM half of `cancel` (the abort is
+        the SIGKILL half).
+
+        Cancelling an asyncio.Task frees NO real resource: it unwinds Python
+        coroutines and nothing else. A bundle holding an OS subprocess, a PTY,
+        or a socket for that task MUST release it here — this is where the
+        orphaned-subprocess class of bug is fixed.
+
+        Default: if `handler_module` exposes `async def on_cancel(id, task_id,
+        kernel)`, call it. Optional — a pure-async bundle needs nothing (same
+        discovery + optionality as the `on_delete` cascade hook). A hook that
+        raises is logged and the abort still happens: cancel is not refusable."""
+        if not self.handler_module:
+            return
+        try:
+            mod = importlib.import_module(self.handler_module)
+            fn = getattr(mod, "on_cancel", None)
+            if fn is not None:
+                await fn(self.id, task_id, self)
+        except Exception as e:
+            print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")
+
     async def shutdown(self) -> None:
         """Graceful process-shutdown walk. Depth-first like
         cascade-delete, but DOES NOT touch records, disk, or tree
@@ -960,6 +1318,10 @@ class Agent:
     # `password` (gated) and acts per the keystone readme (read-key == write-key);
     # ABSENT on an io leg ⇒ sealed-by-default. `root`/`file_bridge_id` show the binding.
     _POSTURE_KEYS = ("ingress_rule", "egress_rule", "auth", "root", "file_bridge_id")
+    # PURPOSE, not wiring. Posture answers "how is this plumbed" (an operator
+    # question, asked once); purpose answers "what is this for" (a routing
+    # question, asked every turn). The roster carries purpose.
+    _PURPOSE_KEYS = ("mode",)
 
     def _node_summary(self, *, details: bool) -> dict:
         node: dict[str, Any] = {

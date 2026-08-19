@@ -9,8 +9,24 @@ from __future__ import annotations
 
 
 async def test_send_to_missing_agent_returns_error(kernel):
+    """The error names the LIVE ids, because a bare `no agent 'x'` teaches the caller
+    nothing. Reading the flat index is a dict lookup, not a reflect — see
+    `Kernel.unknown_agent`."""
     r = await kernel.send("nope", {"type": "reflect"})
-    assert r == {"error": "no agent 'nope'"}
+    assert r["error"] == "no agent 'nope'"
+    assert r["agents"] == sorted(kernel.ctx.agents)
+    assert r["agent_count"] == len(kernel.ctx.agents)
+    assert "hint" not in r  # a plain unknown id is not a placeholder
+
+
+async def test_placeholder_id_is_called_out_as_a_placeholder(kernel):
+    """Measured 2026-08-04: a model copied `<id>` out of the prompt's own example and
+    got `no agent '<id>'` thirty-four times without ever correcting. Angle brackets
+    are structurally a SLOT — no id this kernel mints can contain them."""
+    r = await kernel.send("<id>", {"type": "reflect"})
+    assert r["error"] == "no agent '<id>'"
+    assert "PLACEHOLDER" in r["hint"]
+    assert "agents" in r
 
 
 async def test_send_with_bad_handler_module_returns_error(kernel):

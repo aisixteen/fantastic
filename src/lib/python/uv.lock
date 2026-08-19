@@ -7,18 +7,17 @@ members = [
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cli",
+    "fantastic-exec-bridge",
     "fantastic-file-bridge",
     "fantastic-io-bridge",
     "fantastic-kernel",
     "fantastic-kernel-state",
-    "fantastic-local-runner",
+    "fantastic-llamacpp-backend",
     "fantastic-nvidia-nim-backend",
     "fantastic-ollama-backend",
-    "fantastic-python-runtime",
     "fantastic-relay-connector",
-    "fantastic-runner-core",
     "fantastic-scheduler",
-    "fantastic-ssh-runner",
+    "fantastic-static-loader",
     "fantastic-terminal-backend",
     "fantastic-web",
     "fantastic-web-rest",
@@ -227,6 +226,17 @@ version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
 
 [[package]]
+name = "fantastic-exec-bridge"
+version = "0.1.0"
+source = { editable = "bundled_agents/io/exec_bridge" }
+dependencies = [
+    { name = "fantastic-io-bridge" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" }]
+
+[[package]]
 name = "fantastic-file-bridge"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/file_bridge" }
@@ -250,17 +260,16 @@ dependencies = [
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
+    { name = "fantastic-exec-bridge" },
     { name = "fantastic-file-bridge" },
     { name = "fantastic-io-bridge" },
     { name = "fantastic-kernel-state" },
-    { name = "fantastic-local-runner" },
+    { name = "fantastic-llamacpp-backend" },
     { name = "fantastic-nvidia-nim-backend" },
     { name = "fantastic-ollama-backend" },
-    { name = "fantastic-python-runtime" },
     { name = "fantastic-relay-connector" },
-    { name = "fantastic-runner-core" },
     { name = "fantastic-scheduler" },
-    { name = "fantastic-ssh-runner" },
+    { name = "fantastic-static-loader" },
     { name = "fantastic-terminal-backend" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
@@ -283,17 +292,16 @@ requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
+    { name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" },
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
-    { name = "fantastic-local-runner", editable = "bundled_agents/runner/local_runner" },
+    { name = "fantastic-llamacpp-backend", editable = "bundled_agents/ai/llamacpp/llamacpp_backend" },
     { name = "fantastic-nvidia-nim-backend", editable = "bundled_agents/ai/nvidia/nvidia_nim_backend" },
     { name = "fantastic-ollama-backend", editable = "bundled_agents/ai/ollama/ollama_backend" },
-    { name = "fantastic-python-runtime", editable = "bundled_agents/python_runtime" },
     { name = "fantastic-relay-connector", editable = "bundled_agents/io/relay_connector" },
-    { name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
-    { name = "fantastic-ssh-runner", editable = "bundled_agents/runner/ssh_runner" },
+    { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
@@ -323,18 +331,18 @@ dependencies = [
 requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
 
 [[package]]
-name = "fantastic-local-runner"
+name = "fantastic-llamacpp-backend"
 version = "0.1.0"
-source = { editable = "bundled_agents/runner/local_runner" }
+source = { editable = "bundled_agents/ai/llamacpp/llamacpp_backend" }
 dependencies = [
-    { name = "fantastic-file-bridge" },
-    { name = "fantastic-runner-core" },
+    { name = "fantastic-ai-core" },
+    { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
-    { name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" },
+    { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
+    { name = "httpx" },
 ]
 
 [[package]]
@@ -368,11 +376,6 @@ requires-dist = [
 ]
 
 [[package]]
-name = "fantastic-python-runtime"
-version = "0.1.0"
-source = { editable = "bundled_agents/python_runtime" }
-
-[[package]]
 name = "fantastic-relay-connector"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/relay_connector" }
@@ -388,31 +391,24 @@ requires-dist = [
 ]
 
 [[package]]
-name = "fantastic-runner-core"
-version = "0.1.0"
-source = { editable = "bundled_agents/runner/runner_core" }
-dependencies = [
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "websockets" }]
-
-[[package]]
 name = "fantastic-scheduler"
 version = "0.1.0"
 source = { editable = "bundled_agents/scheduler" }
 
 [[package]]
-name = "fantastic-ssh-runner"
+name = "fantastic-static-loader"
 version = "0.1.0"
-source = { editable = "bundled_agents/runner/ssh_runner" }
+source = { editable = "bundled_agents/loader/static_loader" }
 dependencies = [
-    { name = "fantastic-runner-core" },
+    { name = "fantastic-file-bridge" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fantastic-runner-core", editable = "bundled_agents/runner/runner_core" }]
+requires-dist = [
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "pyyaml", specifier = ">=6" },
+]
 
 [[package]]
 name = "fantastic-terminal-backend"

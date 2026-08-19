@@ -140,7 +140,7 @@ usage: fantastic [subcommand]
   ai|ask \"<prompt>\"     one-shot AI turn (requires an explicit connector:
                         `config set ai.backend …` + `config set ai.model …`)
   config show|set|clear persisted settings (keys: ai.backend, ai.model,
-                        ai.num_ctx; ai.key goes to the OS keychain)
+                        ai.endpoint, ai.num_ctx; ai.key goes to the OS keychain)
   up [--container] [--image X] [--runtime rust|python|swift]
                         attach to (or spawn) the workspace kernel in cwd
   k <id> <verb> [k=v …] send a verb to a workspace agent (over the gateway)

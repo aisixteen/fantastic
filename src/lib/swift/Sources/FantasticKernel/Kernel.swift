@@ -24,6 +24,21 @@ import OrderedCollections
 /// `CURRENT_SENDER` task-local.
 public enum KernelTaskLocals {
     @TaskLocal public static var currentSender: AgentId? = nil
+
+    /// The id of the TASK whose dispatch is running right now — the task-table
+    /// twin of `currentSender`. Stamped INSIDE the spawned dispatch (an
+    /// unstructured `Task {}` inherits its creator's task-locals, so each
+    /// dispatch must overwrite it with its OWN id), read by the next `send` to
+    /// record its PARENT. That is what makes the table a tree. `nil` outside any
+    /// dispatch (the WS/REST surface, a one-shot CLI verb, a test) — such a task
+    /// is a root of the table, like a process spawned by init.
+    @TaskLocal public static var currentTask: TaskId? = nil
+
+    /// "My own task is inside a subtree the kernel is killing." Set by
+    /// `Kernel.cancelTask` on every marked row BEFORE any task is stopped, so a
+    /// handler woken by its child's death cannot register fresh work while its
+    /// own kill is in flight. Mirrors Rust's `CURRENT_KILLED`.
+    @TaskLocal public static var currentKilled: KilledFlag? = nil
 }
 
 /// Subscriber token returned by `Kernel.subscribe`; pass to
@@ -65,6 +80,11 @@ public final class Kernel: @unchecked Sendable {
     public let bundles: BundleRegistry
     public let storage: StorageMode
     public let inboxBound: Int
+
+    /// The TASK TABLE — every in-flight dispatch, keyed by a task id
+    /// (`"<agent_id>:<n>"`, a pid). Tasks form a TREE through the send chain;
+    /// the `ps` system verb reads it, `cancel` kills a subtree. See `Tasks.swift`.
+    public let tasks = TaskTable()
 
     public init(
         storage: StorageMode = .inMemory,

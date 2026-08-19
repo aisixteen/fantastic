@@ -17,7 +17,14 @@ def client(seeded_kernel):
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so inbound frames dispatch (mirrors
     # test_gate.py::test_open_leg_dispatches).
-    seeded_kernel.create("web_ws.tools", id="test_web_ws", ingress_rule="allow_all")
+    # Deny-all: opening the leg (ingress_rule) says WHO may call in; the surface's
+    # can_call says WHERE those calls may land. `fb_ws` is the read_stream target.
+    seeded_kernel.create(
+        "web_ws.tools",
+        id="test_web_ws",
+        ingress_rule="allow_all",
+        can_call={"fb_ws": "*"},
+    )
     # Mount what web_ws.get_routes would publish — lets the proxy
     # tests use client.websocket_connect("/kernel_state/ws") without spinning
     # up a real `web` agent + child registration cycle.

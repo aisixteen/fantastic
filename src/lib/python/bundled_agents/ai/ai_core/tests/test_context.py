@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import types
 
-import ai_core.core as core
+from ai_core import core
 from ai_core.context import (
     DEFAULT_CONTEXT_WINDOW,
     ProjectionCtx,
@@ -329,6 +329,61 @@ async def test_recall_filters_paginates_and_caps(monkeypatch):
     # the bulky turn is content-capped in the reply (never the store)
     rbig = await core._recall("ai", {"query": "xxxx"}, None)
     assert len(rbig["messages"][0]["content"]) <= 2000
+
+
+async def test_recall_resolves_the_calling_conversations_client(monkeypatch):
+    """Bare `recall` mid-generation reads the thread the call was issued FROM.
+
+    The combined probe measured the old behaviour: builder under client 'probe',
+    bare recall defaulted to 'cli', empty reply, and the model concluded its own
+    history was gone. `_current[id].client_id` is a fact about the in-flight turn.
+    """
+    seen = []
+
+    async def fake_load(self_id, kernel, client_id):
+        seen.append(client_id)
+        return [_turn("user", "the ask")] if client_id == "probe" else []
+
+    monkeypatch.setattr(core, "_load_history", fake_load)
+    core._current["ai"] = {"client_id": "probe"}
+    try:
+        r = await core._recall("ai", {}, None)
+        assert r["client_id"] == "probe" and r["total"] == 1
+        # an explicit client_id still wins over the in-flight one
+        r2 = await core._recall("ai", {"client_id": "cli"}, None)
+        assert r2["client_id"] == "cli"
+    finally:
+        core._current.pop("ai", None)
+    assert seen == ["probe", "cli"]
+
+
+async def test_recall_empty_page_says_why(monkeypatch):
+    """An empty page carries a `note` naming the reason — the bare `{total: 0}` was
+    read by a live model as "there is no durable transcript" when the truth was
+    "nothing has been compacted"."""
+    store = {"probe": [_turn("user", "hello")]}
+
+    async def fake_load(self_id, kernel, client_id):
+        return store.get(client_id, [])
+
+    monkeypatch.setattr(core, "_load_history", fake_load)
+    _projection.pop("ai", None)
+    # no compaction ever fired ⇒ the note says the live context is complete
+    r = await core._recall("ai", {"client_id": "cli"}, None)
+    assert r["total"] == 0 and "compacted" in r["note"]
+    # query matched nothing in a NON-empty thread ⇒ the note says that instead
+    rq = await core._recall("ai", {"client_id": "probe", "query": "zzz"}, None)
+    assert rq["total"] == 0 and "matched none" in rq["note"]
+    # compaction HAS fired but the named thread is empty ⇒ points at per-client keying
+    _projection["ai"] = {"fired": True}
+    try:
+        re_ = await core._recall("ai", {"client_id": "cli"}, None)
+        assert "client" in re_["note"]
+    finally:
+        _projection.pop("ai", None)
+    # a non-empty page carries no note at all
+    rf = await core._recall("ai", {"client_id": "probe"}, None)
+    assert rf["total"] == 1 and "note" not in rf
 
 
 # ── context_status.last_reaction (derived 'ack') ────────────────────

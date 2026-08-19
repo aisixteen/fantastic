@@ -11,7 +11,7 @@ gate) + the cold bootstrap ONLY; every other bundle does disk IO by `send`ing ve
 gated file_bridge agent (referenced by `file_bridge_id`, opened on demand), so the
 deny-all gate is unbypassable too — not just the clamp. `yaml_state` / `scheduler` /
 `ai_core` already route this way (no `fs` import). `kernel_state` (boot-read), and the
-orchestration tools that reach OUTSIDE cwd (`local_runner`/`terminal`/`web`) still import
+orchestration tools that reach OUTSIDE cwd (`terminal`) still import
 `fs` for now — the latter pending agent-routing once file_bridge agents accept an explicit
 external root.
 
@@ -21,7 +21,7 @@ Two surfaces, ONE per call site (never tried in sequence — not a fallback):
     The running-dir law guarantees the kernel can't escape its own dir.
   - **external** (`external=True`) — `root` is an operator/peer-chosen base that may live
     ANYWHERE; `path` is still clamped within it (can't escape the base via `..`). This is
-    for surfaces that legitimately operate OUTSIDE the running dir BY DESIGN: `local_runner`
+    for surfaces that legitimately operate OUTSIDE the running dir BY DESIGN: `terminal`
     orchestrating a SIBLING fantastic project (reading its `.fantastic/lock.json`, spawning
     it) and `terminal_backend` writing a clipboard image into a system temp scratch dir. The
     running-dir law does NOT apply (the base isn't the kernel's own state) — but the open()

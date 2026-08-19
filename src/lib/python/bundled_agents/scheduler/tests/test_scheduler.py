@@ -8,7 +8,13 @@ async def _make_scheduler(kernel):
     also depend on the `store_agent` fixture so the loader has a store.)"""
     rec = await kernel.send(
         "kernel_state",
-        {"type": "create_agent", "handler_module": "scheduler.tools"},
+        {
+            "type": "create_agent",
+            "handler_module": "scheduler.tools",
+            # Deny-all: firing at `cli` is lateral egress → an explicit grant.
+            # (These tests all schedule against cli.)
+            "can_call": {"cli": "*"},
+        },
     )
     return rec["id"]
 
@@ -175,14 +181,22 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
     )
     sch_id = r["schedule_id"]
     await seeded_kernel.send(sid, {"type": "tick_now", "schedule_id": sch_id})
-    # cli's inbox should have a schedule_fired event AND the original {say} payload
-    q = seeded_kernel._ensure_inbox("cli")
+    # ONE delivery per tick: the target gets the PAYLOAD and nothing else. The old
+    # contract also echoed `schedule_fired` at the target, so a live program's
+    # on_message saw every tick twice (measured 2026-08-07 — opus had to design a
+    # filter around it). Telemetry rides the scheduler's OWN inbox + history.
+    q = seeded_kernel.ctx.ensure_inbox("cli")
     msgs = []
     while not q.empty():
         msgs.append(q.get_nowait())
     types = [m["type"] for m in msgs]
-    assert "schedule_fired" in types
     assert "say" in types
+    assert "schedule_fired" not in types, "telemetry echoed at the target again"
+    own = seeded_kernel.ctx.ensure_inbox(sid)
+    own_types = []
+    while not own.empty():
+        own_types.append(own.get_nowait()["type"])
+    assert "schedule_fired" in own_types, "the scheduler's own inbox lost the event"
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):

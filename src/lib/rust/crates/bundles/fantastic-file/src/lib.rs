@@ -27,7 +27,7 @@ use base64::Engine;
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -48,6 +48,37 @@ pub struct FileBundle;
 
 #[async_trait]
 impl Bundle for FileBundle {
+    /// Refuse an `ingress_rule` no resolver implements. Mirrors py
+    /// `file_bridge.validate_meta`: an unknown rule now SEALS rather than erroring,
+    /// so the edge is safe either way — but reporting `{"updated": true}` for a
+    /// security control that does not exist is its own failure, and the complaint
+    /// belongs at the write, next to the typo.
+    fn validate_meta(
+        &self,
+        meta: &serde_json::Map<String, Value>,
+        _record: &serde_json::Map<String, Value>,
+    ) -> Option<String> {
+        let spec = meta.get("ingress_rule")?;
+        let rule = fantastic_io_bridge::authorizer::ingress::resolve(Some(spec)).ok()?;
+        let probe = fantastic_io_bridge::authorizer::Action {
+            kind: "call",
+            target: "",
+            verb: "reflect",
+            token: None,
+        };
+        match rule.authorize(&probe) {
+            fantastic_io_bridge::authorizer::Decision::Deny(r)
+                if r.contains("unknown ingress rule") =>
+            {
+                Some(format!(
+                    "ingress_rule={spec} is not a rule this bundle implements — \
+                 legal values: allow_all, deny_inbound, password"
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -116,7 +147,7 @@ impl Bundle for FileBundle {
                 };
                 match verb {
                     "list" => list_reply(&root, payload, &hidden),
-                    "read" => read_reply(&root, payload),
+                    "read" => read_reply(&root, payload, &meta),
                     "write" if readonly => json!({"error": "agent is readonly"}),
                     "write" => write_reply(&root, payload),
                     "delete" if readonly => json!({"error": "agent is readonly"}),
@@ -624,7 +655,66 @@ fn list_reply(root: &Path, payload: &Value, hidden: &[String]) -> Value {
     })
 }
 
-fn read_reply(root: &Path, payload: &Value) -> Value {
+/// Default text-read window (chars). Py parity: `DEFAULT_MAX_READ_CHARS`.
+const DEFAULT_MAX_READ_CHARS: usize = 16384;
+
+/// The leg's text-read window — per-record like `hidden`; the default protects a
+/// conversation from one call. Measured 2026-08-07 on py: an unbounded 86 KB read
+/// drove an LLM's context to 21k tokens and the next turn was cancelled
+/// mid-prefill.
+fn max_read_chars(meta: &Map<String, Value>) -> usize {
+    match meta.get("max_read_chars").and_then(Value::as_i64) {
+        Some(n) if n > 0 => n as usize,
+        _ => DEFAULT_MAX_READ_CHARS,
+    }
+}
+
+/// `(slice, reply-extras)` — `offset`/`limit` page a large file explicitly.
+/// Py parity: `_window_text` (field-for-field, hint included).
+fn window_text(
+    meta: &Map<String, Value>,
+    payload: &Value,
+    text: &str,
+) -> (String, Map<String, Value>) {
+    let chars: Vec<char> = text.chars().collect();
+    let total = chars.len();
+    let offset = payload
+        .get("offset")
+        .and_then(Value::as_i64)
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(0);
+    let cap = max_read_chars(meta);
+    let limit = payload
+        .get("limit")
+        .and_then(Value::as_i64)
+        .map(|n| (n.max(1) as usize).min(cap))
+        .unwrap_or(cap);
+    let end = (offset + limit).min(total);
+    let chunk: String = chars[offset.min(total)..end].iter().collect();
+    let mut extras = Map::new();
+    if offset == 0 && end >= total {
+        return (chunk, extras);
+    }
+    extras.insert("total_chars".into(), json!(total));
+    extras.insert("offset".into(), json!(offset));
+    extras.insert("returned_chars".into(), json!(chunk.chars().count()));
+    extras.insert("truncated".into(), json!(end < total));
+    if end < total {
+        extras.insert("next_offset".into(), json!(end));
+        extras.insert(
+            "hint".into(),
+            json!(format!(
+                "{} of {total} chars unread — continue with {{type:'read', path:…, \
+                 offset:{end}}} (max {cap} per call, raise the leg's \
+                 `max_read_chars` to widen it)",
+                total - end
+            )),
+        );
+    }
+    (chunk, extras)
+}
+
+fn read_reply(root: &Path, payload: &Value, meta: &Map<String, Value>) -> Value {
     let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
         return json!({"error": "read requires path"});
     };
@@ -655,7 +745,14 @@ fn read_reply(root: &Path, payload: &Value) -> Value {
         return read_binary(&target, path_str, &ext_lower);
     }
     match std::fs::read_to_string(&target) {
-        Ok(content) => json!({"path": path_str, "content": content}),
+        Ok(content) => {
+            let (chunk, extras) = window_text(meta, payload, &content);
+            let mut reply = Map::new();
+            reply.insert("path".into(), json!(path_str));
+            reply.insert("content".into(), json!(chunk));
+            reply.extend(extras);
+            Value::Object(reply)
+        }
         // ENOENT / EACCES / etc. genuinely failed — propagate.
         Err(e) if e.kind() != std::io::ErrorKind::InvalidData => {
             json!({"error": format!("read {}: {e}", target.display())})

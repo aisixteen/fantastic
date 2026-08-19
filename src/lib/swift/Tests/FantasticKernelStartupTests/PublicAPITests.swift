@@ -33,6 +33,31 @@ struct StartKernelInMemoryTests {
         }
     }
 
+    /// The SHIPPED registry's self_extension, not a synthetic one. `js_runtime` is
+    /// `#if canImport(JavaScriptCore)` and `python_runtime` is `#if os(macOS)`, so a
+    /// hard-coded "Executor here: js_runtime.tools" was wrong in both directions:
+    /// python_runtime went unnamed here, and on a non-Apple build the named module
+    /// is not registered at all. Assert against what THIS build registered.
+    @Test func selfExtensionNamesTheExecutorsThisBuildShips() async throws {
+        let kernel = try await startKernelInMemory(portHint: 0)
+        let s = try #require(
+            await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))[
+                "self_extension"
+            ].asString)
+        let catalog = await kernel.send(
+            AgentId("core"),
+            .object(["type": .string("reflect"), "bundles": .string("all")]))
+        let registered = Set(
+            (catalog["bundles"].asArray ?? []).compactMap { $0["handler_module"].asString })
+        for module in ["js_runtime.tools", "python_runtime.tools"] {
+            #expect(
+                s.contains(module) == registered.contains(module),
+                "registered=\(registered.contains(module)) named=\(s.contains(module)) for \(module): \(s)"
+            )
+        }
+        #expect(!s.contains("NO script executor"), "\(s)")
+    }
+
     @Test func ollamaModelHasNoGuessedDefault() async throws {
         // "By default, no defaults": an ollama agent with no `model` set must NOT
         // fall back to a guessed model (a wrong guess reaches the network and 404s).

@@ -5,6 +5,7 @@
 //! sidecars + the per-client inbox.
 
 use super::*;
+use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
 use fantastic_kernel::Agent;
 use serde_json::Map;
 use std::time::Duration;
@@ -218,7 +219,8 @@ async fn send_streams_tokens_via_sse() {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
                         tokens.push(t.to_string());
                     }
-                } else if ty == "done" {
+                } else if ty == "status" && ev.get("phase").and_then(Value::as_str) == Some("done")
+                {
                     saw_done = true;
                 }
             }
@@ -231,6 +233,102 @@ async fn send_streams_tokens_via_sse() {
     let joined: String = tokens.join("");
     assert_eq!(joined, "hello", "tokens were {tokens:?}");
     assert_eq!(r["response"], "hello");
+}
+
+/// Join a decoded pass into the text ai-core would see.
+fn decoded_text(deltas: &[Value]) -> String {
+    let mut wrap = ThinkWrap::new();
+    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
+    for d in deltas {
+        decode_delta_into(d, &mut wrap, &mut out);
+    }
+    if let Some(m) = wrap.close_marker() {
+        out.push(Ok(ProviderEvent::Token(m.to_string())));
+    }
+    out.into_iter()
+        .map(|e| match e.expect("no decode errors") {
+            ProviderEvent::Token(t) => t,
+        })
+        .collect()
+}
+
+#[test]
+fn reasoning_channel_is_wrapped_once_per_turn() {
+    // nemotron/deepseek-style NIM models stream most tokens as `reasoning_content`
+    // and only the conclusion as `content`. THREE reasoning deltas + one content
+    // delta must produce exactly ONE open and ONE close — per delta it would be a
+    // confetti of tags, and ai-core's stripper would eat the answer with it.
+    let text = decoded_text(&[
+        json!({"reasoning_content": "step one "}),
+        json!({"reasoning_content": "step two "}),
+        json!({"reasoning_content": "step three"}),
+        json!({"content": "the answer"}),
+    ]);
+    assert_eq!(text.matches(THINK_OPEN).count(), 1, "one open: {text:?}");
+    assert_eq!(text.matches(THINK_CLOSE).count(), 1, "one close: {text:?}");
+    assert_eq!(
+        text,
+        format!("{THINK_OPEN}step one step two step three{THINK_CLOSE}the answer")
+    );
+}
+
+#[test]
+fn a_reasoning_only_delta_is_not_an_empty_completion() {
+    // Observed live: the model spent an entire pass on `reasoning_content`, we read
+    // only `content`, and the chain died with no error anywhere. The span closes at
+    // end-of-stream even though content never started.
+    let text = decoded_text(&[json!({"reasoning_content": "740 chars of it"})]);
+    assert_eq!(text, format!("{THINK_OPEN}740 chars of it{THINK_CLOSE}"));
+    // A non-string / absent channel is shape, not content.
+    let none = decoded_text(&[
+        json!({"reasoning_content": null, "content": null}),
+        json!({}),
+    ]);
+    assert_eq!(none, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thinking_streams_wrapped_and_persists_stripped() {
+    // End-to-end over the real SSE transport: the caller gets the wrapped raw
+    // text, the durable turn keeps only the conclusion.
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let endpoint = format!("{}/v1", server.uri());
+    let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    kernel
+        .send(&nim, json!({"type": "set_api_key", "api_key": "nvapi-x"}))
+        .await;
+    let l1 = json!({"choices":[{"delta":{"reasoning_content":"deliberating"}}]}).to_string();
+    let l2 = json!({"choices":[{"delta":{"content":"ack"}}]}).to_string();
+    let sse = format!("data: {l1}\n\ndata: {l2}\n\ndata: [DONE]\n\n");
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client_id = "test_think";
+    let _rx = open_client_inbox(&kernel, client_id);
+    let reply = kernel
+        .send(
+            &nim,
+            json!({"type": "send", "text": "hi", "client_id": client_id}),
+        )
+        .await;
+    assert_eq!(
+        reply["response"],
+        json!(format!("{THINK_OPEN}deliberating{THINK_CLOSE}ack"))
+    );
+    let h = kernel
+        .send(&nim, json!({"type": "history", "client_id": client_id}))
+        .await;
+    let messages = h["messages"].as_array().expect("messages array");
+    assert_eq!(messages.last().unwrap()["content"], "ack");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -336,19 +434,35 @@ async fn rate_limit_retry_once_then_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn envelope_text_streams_verbatim_no_dispatch() {
-    // BARE: a `<tool_call>` envelope split across two SSE chunks is just TEXT —
-    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
+async fn an_envelope_split_across_sse_chunks_dispatches() {
+    // A `<tool_call>` split across two SSE chunks must REASSEMBLE and dispatch.
+    // This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
+    // — "just TEXT, nothing parsed, nothing dispatched"). That was a gap, not a
+    // principle: python's ai_core has dispatched this envelope since 2026-08-02 and
+    // this crate's own header already said ai-core owns the parse. The transport's
+    // remaining duty is the reassembly + verbatim delivery asserted below — an
+    // envelope broken across chunk boundaries is the failure mode SSE actually has.
+    //
+    // `reply_to:null` keeps it to ONE pass: the stub answers with the same envelope
+    // every time, so a default `reply_to` would (correctly) chain against a mock
+    // that never says anything else.
     let server = MockServer::start().await;
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
-    let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let (kernel, nim, fid) = mk_kernel(&tmp, Some(endpoint)).await;
     kernel
         .send(&nim, json!({"type": "set_api_key", "api_key": "nvapi-x"}))
         .await;
 
-    let part_1 = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co";
-    let part_2 = "re\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
+    // Address the nvidia agent's OWN file agent: its write lands on disk, which is
+    // proof the dispatch happened and not just that nothing crashed.
+    let whole = format!(
+        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"{fid}\",\
+         \"payload\":{{\"type\":\"write\",\"path\":\"routed.txt\",\"content\":\"ok\"}},\
+         \"reply_to\":null}}}}</tool_call>"
+    );
+    let split = whole.len() / 2;
+    let (part_1, part_2) = whole.split_at(split);
     let line_1 = json!({"choices":[{"delta":{"content": part_1}}]}).to_string();
     let line_2 = json!({"choices":[{"delta":{"content": part_2}}]}).to_string();
     let sse = format!("data: {line_1}\n\ndata: {line_2}\n\ndata: [DONE]\n\n");
@@ -359,7 +473,7 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(sse),
         )
-        .expect(1) // exactly one pass — no loop
+        .expect(1) // one pass: the call discards its reply, so nothing follows
         .mount(&server)
         .await;
 
@@ -371,12 +485,28 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
             json!({"type": "send", "text": "do it", "client_id": client_id}),
         )
         .await;
-    let expected = format!("{part_1}{part_2}");
-    assert_eq!(reply["response"], expected, "verbatim text: {reply:#?}");
+    assert_eq!(reply["response"], whole, "verbatim text: {reply:#?}");
+
+    let routed = tmp.path().join(".fantastic").join("routed.txt");
+    for _ in 0..250 {
+        if routed.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        routed.exists(),
+        "the chunk-split envelope never dispatched: {routed:?} missing"
+    );
+    assert_eq!(std::fs::read_to_string(&routed).unwrap(), "ok");
 }
 
+/// The in-flight HTTP request is killed by the SUBSTRATE (`ps` → `cancel`), not
+/// by a backend-private `interrupt`: the `send` dispatch IS a kernel task, and
+/// killing it drops the reqwest stream. The bundle's `on_cancel` closes the turn
+/// out first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interrupt_cancels_in_flight() {
+async fn kernel_cancel_kills_an_in_flight_send() {
     let server = MockServer::start().await;
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
@@ -384,8 +514,8 @@ async fn interrupt_cancels_in_flight() {
     kernel
         .send(&nim, json!({"type": "set_api_key", "api_key": "nvapi-x"}))
         .await;
-    // Slow-loris SSE: server delays then streams. The interrupt path
-    // should abort before tokens land.
+    // Slow-loris SSE: server delays then streams. The cancel path should drop
+    // the request before tokens land.
     let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"never\"}}]}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -413,11 +543,30 @@ async fn interrupt_cancels_in_flight() {
 
     // Give the spawn a moment to acquire the lock and start the request.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let r = kernel.send(&nim, json!({"type": "interrupt"})).await;
-    assert_eq!(r["interrupted"], true);
+    let table = kernel
+        .send(&AgentId::from("kernel"), json!({"type": "ps"}))
+        .await;
+    let task_id = table["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["agent"] == json!(nim.as_str()) && t["verb"] == json!("send"))
+        .and_then(|t| t["id"].as_str())
+        .expect("the in-flight send must be in `ps`")
+        .to_string();
+    let r = kernel
+        .send(
+            &AgentId::from("kernel"),
+            json!({"type": "cancel", "task_id": task_id}),
+        )
+        .await;
+    assert_eq!(r["cancelled"], true);
     let send_reply = tokio::time::timeout(Duration::from_secs(1), join)
         .await
-        .expect("send must return promptly after interrupt")
+        .expect("send must return promptly after cancel")
         .unwrap();
-    assert_eq!(send_reply["interrupted"], true);
+    assert_eq!(send_reply, json!({"cancelled": true}));
+    // No phantom generation left behind — the hook cleared it.
+    let st = kernel.send(&nim, json!({"type": "status"})).await;
+    assert_eq!(st["generating"], false);
 }

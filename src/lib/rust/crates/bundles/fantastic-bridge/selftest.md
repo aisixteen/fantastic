@@ -1,7 +1,7 @@
 # fantastic-kernel-bridge selftest
 
 > scopes: kernel, ws, bridge
-> requires: `cargo build --release --bin fantastic`. `reflect`/`boot`
+> requires: `cargo build --release --bin fantastic_kernel`. `reflect`/`boot`
 > are stateless one-shots; `forward`/`watch_remote` need a LIVE remote
 > daemon serving `web_ws` over WS (boot a second `fantastic` on a free
 > port first — same live-daemon rule as ollama/terminal/web).
@@ -27,7 +27,7 @@ kernel (the remote peer) on `$PORT_B` as a background daemon.
 ```bash
 rm -rf /tmp/kb_test && mkdir -p /tmp/kb_test/a /tmp/kb_test/b
 cd /tmp/kb_test/a
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT_B=18190
 ```
 

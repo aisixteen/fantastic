@@ -11,7 +11,11 @@
 //! ### HTTP
 //!
 //! `POST {endpoint}/api/chat` with `{model, messages, stream:true}` →
-//! line-delimited JSON; each line carries `{message:{content?}}`. NO `tools`
+//! line-delimited JSON; each line carries `{message:{content?, thinking?}}`.
+//! BOTH text channels are read: a reasoning model streams its deliberation as
+//! `thinking` and only its conclusion as `content`, so reading `content` alone
+//! reports the whole turn as an empty completion. The deliberation is wrapped in
+//! `<think>…</think>` once per turn (see `fantastic_ai_core::think`). NO `tools`
 //! array is sent and NO `tool_calls` are read — tool-calling is RAW
 //! prompt-and-parse owned by ai-core (the model emits a `<tool_call>` envelope
 //! in the content text).
@@ -20,9 +24,10 @@
 
 use async_trait::async_trait;
 use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, events::CallerRoute, helpers, state, verbs};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -133,10 +138,15 @@ impl Provider for OllamaProvider {
         let mut byte_stream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
+        // ONE wrapper for the whole pass — the reasoning span is per TURN.
+        let mut wrap = ThinkWrap::new();
         while let Some(chunk) = byte_stream.next().await {
             let bytes = match chunk {
                 Ok(b) => b,
                 Err(e) => {
+                    // A span left open here stays unterminated on purpose: the
+                    // stream was cut mid-thought, and `without_thinking` drops
+                    // an unterminated tail rather than persisting a fragment.
                     out.push(Err(format!("ollama: stream error: {e}")));
                     return Ok(Box::pin(futures_util::stream::iter(out)));
                 }
@@ -151,27 +161,64 @@ impl Provider for OllamaProvider {
                 let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
                     continue;
                 };
-                decode_chunk_into(&parsed, &mut out);
+                decode_chunk_into(&parsed, &mut wrap, &mut out);
             }
         }
         if !buf.is_empty() {
             if let Ok(parsed) = serde_json::from_slice::<Value>(&buf) {
-                decode_chunk_into(&parsed, &mut out);
+                decode_chunk_into(&parsed, &mut wrap, &mut out);
             }
+        }
+        // The turn ended while still reasoning (content never started) — close
+        // the span exactly once so the deliberation is strippable.
+        if let Some(m) = wrap.close_marker() {
+            out.push(Ok(ProviderEvent::Token(m.to_string())));
         }
         Ok(Box::pin(futures_util::stream::iter(out)))
     }
 }
 
-fn decode_chunk_into(parsed: &Value, out: &mut Vec<Result<ProviderEvent, String>>) {
+/// Decode ONE ollama NDJSON chunk into content tokens, reading BOTH text
+/// channels. `wrap` carries the per-TURN reasoning span across chunks.
+///
+/// THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
+/// ollama streams a reasoning model's tokens as `message.thinking` and only its
+/// conclusion as `message.content`. Measured on gemma4:12b: 336 chars of
+/// thinking to 38 of content. Reading `content` alone silently drops whole
+/// turns — observed live on 2026-08-02, where gemma spent all 578 generated
+/// tokens reasoning, we saw an EMPTY completion, and the chain ended at pass one
+/// with no tool call and no error. ollama's own log showed the request answered
+/// normally, so it looked like the server had wedged.
+///
+/// Same defect and same fix as NIM's `reasoning_content`. A raw text protocol
+/// reads the text the model produced; it does not let the provider decide which
+/// of its fields counts as output. (Non-string / explicit `null` normalizes to
+/// empty — protocol shape, not bug masking.) The reasoning is WRAPPED once, so
+/// ai-core can parse it but not persist it (`fantastic_ai_core::think`): opened
+/// on the first thinking chunk, closed when content starts or the stream ends —
+/// not per chunk, or the text would be a confetti of tags.
+fn decode_chunk_into(
+    parsed: &Value,
+    wrap: &mut ThinkWrap,
+    out: &mut Vec<Result<ProviderEvent, String>>,
+) {
     let Some(msg) = parsed.get("message") else {
         return;
     };
-    // RAW: content text ONLY. ai-core parses any `<tool_call>` envelope out of it.
-    if let Some(content) = msg.get("content").and_then(Value::as_str) {
-        if !content.is_empty() {
-            out.push(Ok(ProviderEvent::Token(content.to_string())));
+    let think = msg.get("thinking").and_then(Value::as_str).unwrap_or("");
+    if !think.is_empty() {
+        if let Some(m) = wrap.open_marker() {
+            out.push(Ok(ProviderEvent::Token(m.to_string())));
         }
+        out.push(Ok(ProviderEvent::Token(think.to_string())));
+    }
+    // RAW: text only. ai-core parses any `<tool_call>` envelope out of it.
+    let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+    if !content.is_empty() {
+        if let Some(m) = wrap.close_marker() {
+            out.push(Ok(ProviderEvent::Token(m.to_string())));
+        }
+        out.push(Ok(ProviderEvent::Token(content.to_string())));
     }
 }
 
@@ -205,10 +252,12 @@ impl Bundle for OllamaBackendBundle {
                 Value::Null
             }
             "send" => send_reply(agent_id, payload, kernel).await,
+            "list_models" => list_models_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "ollama_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
+            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
-            "interrupt" => verbs::interrupt(agent_id),
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("ollama: unknown type {other:?}")}),
         };
@@ -221,6 +270,19 @@ impl Bundle for OllamaBackendBundle {
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         state::drop_state(agent_id);
+        Ok(())
+    }
+
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate drops
+    /// the future (which frees the HTTP stream + the FIFO guard by itself).
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
         Ok(())
     }
 }
@@ -246,6 +308,55 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         think,
     });
     verbs::send(provider, agent_id, payload, kernel, CFG).await
+}
+
+/// `list_models` — model autocomplete + reachability probe. Resolves the endpoint
+/// from `payload["endpoint"]` FIRST (so a caller can probe an ARBITRARY endpoint
+/// with no configured record), else the record's `endpoint` meta, else
+/// [`DEFAULT_ENDPOINT`]. Does `GET {endpoint}/api/tags`, parses ollama's
+/// `{"models":[{"name":…}, …]}` shape, and returns `{"models":[name, …]}` in
+/// order. ANY failure (connection refused, DNS, timeout, non-2xx, bad JSON)
+/// returns `{"error": "<human-readable message including the endpoint>"}` — this
+/// doubles as the TUI's reachability probe, so the message must name the URL.
+async fn list_models_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
+    // Endpoint precedence: explicit payload override → record meta → DEFAULT.
+    let endpoint = payload
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT));
+    let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
+    // Reuse reqwest (the same client type used for /api/chat) — no new http dep.
+    let client = reqwest::Client::new();
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => return json!({"error": format!("ollama: can't reach {url} ({e})")}),
+    };
+    if !resp.status().is_success() {
+        return json!({"error": format!("ollama: {url} returned HTTP {}", resp.status())});
+    }
+    let body: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return json!({"error": format!("ollama: bad response from {url} ({e})")}),
+    };
+    json!({ "models": parse_tag_names(&body) })
+}
+
+/// Extract model names from ollama's `/api/tags` body
+/// (`{"models":[{"name":"gemma3:12b", …}, …]}`) → `["gemma3:12b", …]`, in order.
+/// Missing / oddly-shaped entries are skipped (never a panic).
+fn parse_tag_names(body: &Value) -> Vec<String> {
+    body.get("models")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
@@ -283,22 +394,23 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "verbs": {
             "reflect": "Identity + model + endpoint + generating flag + file_bridge_id binding. No args.",
             "boot": "No-op. Returns null.",
-            "shutdown": "Aborts any in-flight send and drops process-memory state. Returns {stopped:bool}.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Per-backend FIFO lock. Returns {response, final, client_id}.",
+            "shutdown": "Drops process-memory state. Returns null.",
+            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. Per-backend FIFO lock. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}.",
+            "list_models": "args: endpoint:str? (default the record's endpoint, else http://localhost:11434). GET {endpoint}/api/tags. Returns {models:[name,...]} in order on success, or {error:'<msg naming the endpoint>'} on any failure — doubles as the reachability probe.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id} — that client's persisted chat.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "interrupt": "No args. Cancels any in-flight send. Returns {interrupted:bool}.",
             "status": "args: client_id:str?. Returns the in-flight/queue snapshot (text redacted for other clients).",
         },
+        "cancel": fantastic_ai_core::CANCEL_DOC,
         "emits": {
             "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...}} — phase transitions.",
             "token": "{type:'token', text, source, client_id} — one per streaming chunk.",
             "say": "{type:'say', text:'[tool target → reply]', source, client_id} — one per tool-call summary.",
-            "done": "{type:'done', source, client_id} — final event after streaming completes (or interrupt).",
+            "done": "{type:'done', source, client_id} — final event after streaming completes (or a cancel).",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called — a failfast). Pull counterpart: the context_status verb.",
         },
-        "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait + receive a queued status event. reflect/history/interrupt/status skip the lock.",
+        "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait + receive a queued status event. reflect/history/status skip the lock.",
     })
 }
 

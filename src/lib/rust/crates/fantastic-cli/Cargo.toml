@@ -25,14 +25,10 @@ fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend
 fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
 fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../bundles/fantastic-tools" }
-fantastic-lua-runtime = { path = "../bundles/fantastic-lua-runtime" }
-fantastic-js-runtime = { path = "../bundles/fantastic-js-runtime" }
 # Full-tier-only bundles — subprocess-using; only compiled into the
 # `full` feature build. iOS embedded slice MUST NOT pull them in.
 fantastic-terminal-backend = { path = "../bundles/fantastic-terminal-backend", optional = true }
-fantastic-python-runtime = { path = "../bundles/fantastic-python-runtime", optional = true }
-fantastic-local-runner = { path = "../bundles/fantastic-local-runner", optional = true }
-fantastic-ssh-runner = { path = "../bundles/fantastic-ssh-runner", optional = true }
+fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -50,9 +46,7 @@ default = ["full"]
 # allowed. Server, CLI, macOS Pro app.
 full = [
     "dep:fantastic-terminal-backend",
-    "dep:fantastic-python-runtime",
-    "dep:fantastic-local-runner",
-    "dep:fantastic-ssh-runner",
+    "dep:fantastic-exec-bridge",
     "fantastic-bridge/full",
 ]
 

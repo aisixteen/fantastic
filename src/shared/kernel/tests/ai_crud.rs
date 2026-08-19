@@ -17,13 +17,15 @@ fn ai_connector_crud_roundtrip() {
     let c = ai_config();
     assert_eq!(c.backend, None);
     assert_eq!(c.model, None);
+    assert_eq!(c.endpoint, None);
     assert!(!c.key_present);
 
-    // CREATE: a connector with a key.
-    set_ai_connector("nvidia", "model-a", Some("sk-secret")).expect("set connector");
+    // CREATE: a connector with a key, no endpoint (a cloud backend).
+    set_ai_connector("nvidia", "model-a", None, Some("sk-secret")).expect("set connector");
     let c = ai_config();
     assert_eq!(c.backend.as_deref(), Some("nvidia"));
     assert_eq!(c.model.as_deref(), Some("model-a"));
+    assert_eq!(c.endpoint, None, "no endpoint when None is passed");
     assert!(c.key_present, "key should be present after set");
 
     // The raw key lives ONLY in the keychain, NEVER in settings.json.
@@ -34,17 +36,29 @@ fn ai_connector_crud_roundtrip() {
         "the key must NEVER appear in settings.json: {raw}"
     );
 
-    // UPDATE: change the model + rotate the key.
-    set_ai_connector("nvidia", "model-b", Some("sk-2")).expect("update connector");
+    // UPDATE: change the model + rotate the key + attach an endpoint (as an
+    // ollama-style local connector would).
+    set_ai_connector("nvidia", "model-b", Some("http://box:11434"), Some("sk-2"))
+        .expect("update connector");
     let c = ai_config();
     assert_eq!(c.model.as_deref(), Some("model-b"));
+    assert_eq!(c.endpoint.as_deref(), Some("http://box:11434"));
     assert_eq!(secret::get_key("nvidia").as_deref(), Some("sk-2"));
 
-    // HYDRATE: the key flows keychain → `FANTASTIC_AI_KEY` (so `ensure_brain` sees it).
+    // UPDATE again with endpoint=None CLEARS the stale endpoint (no leak).
+    set_ai_connector("nvidia", "model-b", None, None).expect("clear endpoint");
+    assert_eq!(ai_config().endpoint, None, "None clears ai.endpoint");
+    // Re-attach it for the hydrate check below.
+    set_ai_connector("nvidia", "model-b", Some("http://box:11434"), None)
+        .expect("re-attach endpoint");
+
+    // HYDRATE: the key flows keychain → `FANTASTIC_AI_KEY`, and the endpoint flows
+    // settings → `FANTASTIC_OLLAMA_ENDPOINT` (so `ensure_brain` sees both).
     for v in [
         "FANTASTIC_AI_KEY",
         "FANTASTIC_AI_BACKEND",
         "FANTASTIC_AI_MODEL",
+        "FANTASTIC_OLLAMA_ENDPOINT",
     ] {
         std::env::remove_var(v);
     }
@@ -57,11 +71,16 @@ fn ai_connector_crud_roundtrip() {
         std::env::var("FANTASTIC_AI_KEY").ok().as_deref(),
         Some("sk-2")
     );
+    assert_eq!(
+        std::env::var("FANTASTIC_OLLAMA_ENDPOINT").ok().as_deref(),
+        Some("http://box:11434")
+    );
 
-    // DELETE: connector + key gone.
+    // DELETE: connector + key + endpoint gone.
     clear_ai_connector().expect("clear connector");
     let c = ai_config();
     assert_eq!(c.backend, None);
+    assert_eq!(c.endpoint, None);
     assert!(!c.key_present);
     assert_eq!(secret::get_key("nvidia"), None);
 

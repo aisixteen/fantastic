@@ -1,7 +1,7 @@
 # proxy_agent selftest
 
 > scopes: bundle wire-shape, graceful-degrade
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: bidirectional streaming (no embedding host in the CLI)
 
 CLI-driven smoke for the verb wire shape. The streaming +
@@ -13,7 +13,7 @@ proxy_mock_session`), since the CLI has no embedding host wired in.
 
 ```bash
 rm -rf /tmp/fk_proxy && mkdir -p /tmp/fk_proxy && cd /tmp/fk_proxy
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 ```
 
 ## Tests

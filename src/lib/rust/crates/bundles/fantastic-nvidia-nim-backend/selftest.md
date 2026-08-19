@@ -1,14 +1,15 @@
 # fantastic-nvidia-nim-backend selftest
 
 > scopes: kernel, ai, persistence, http
-> requires: `cargo build --release --bin fantastic`; an `NVAPI_KEY`
+> requires: `cargo build --release --bin fantastic_kernel`; an `NVAPI_KEY`
 > env var (`nvapi-...` from https://build.nvidia.com) for any AI test.
 > out-of-scope: live single-shot generation + per-client thread
 > persistence + status phase machine — those need a live daemon + WS
 > (see the python spec, marked AI); chat UI flow (TS `ai_view` in `ts/`)
 
 NVIDIA NIM LLM agent (OpenAI-compatible). Same surface as
-`ollama_backend` (send/history/interrupt) plus `set_api_key`/
+`ollama_backend` (send/history/status; an in-flight `send` is cancelled
+with the kernel's `ps` + `cancel`, not a bundle `interrupt`) plus `set_api_key`/
 `clear_api_key`. The api_key is a sidecar at
 `.fantastic/agents/<id>/api_key` via `file_agent_id` — never in
 `agent.json`, never returned by reflect. The failfast guards below
@@ -20,7 +21,7 @@ All test state lives under `/tmp/nim_test/`.
 
 ```bash
 rm -rf /tmp/nim_test && mkdir -p /tmp/nim_test && cd /tmp/nim_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/nim_test | jq -r .id)
 NB=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools file_agent_id=$FA | jq -r .id)
 NB2=$($FANTASTIC core create_agent handler_module=nvidia_nim_backend.tools | jq -r .id)

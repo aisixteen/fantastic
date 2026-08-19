@@ -12,6 +12,7 @@ use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::state::{KernelState, CURRENT_VERSION};
 use crate::storage::StorageMode;
+use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use serde_json::Value;
@@ -71,6 +72,10 @@ pub struct Kernel {
     /// in-kernel verb stop the process remotely (over web_rest / web_ws),
     /// not just via an OS signal.
     shutdown: Notify,
+    /// The TASK TABLE — every in-flight dispatch, a tree through the send
+    /// chain. The `ps` system verb reads it; `cancel` kills a task and its
+    /// subtree. See [`crate::tasks`].
+    pub tasks: TaskTable,
 }
 
 impl Default for Kernel {
@@ -114,6 +119,7 @@ impl Kernel {
             inbox_bound: bound,
             storage,
             shutdown: Notify::new(),
+            tasks: TaskTable::new(),
         }
     }
 

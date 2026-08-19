@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
+from ai_core.core import THINK_CLOSE, THINK_OPEN
+
 DEFAULT_ENDPOINT = "http://localhost:11434"
 DEFAULT_MODEL = "gemma4:e2b"
 
@@ -73,12 +75,40 @@ class OllamaProvider:
             options=options,
             **kwargs,
         )
-        # ollama sometimes returns `content` as `null` (not absent), so normalize
-        # null -> "" with `or ""`. This is protocol normalization, not bug masking.
+        # THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
+        # ollama streams a reasoning model's tokens as `message.thinking` and only
+        # its conclusion as `message.content`. Measured on gemma4:12b: 336 chars of
+        # thinking to 38 of content. Reading `content` alone silently drops whole
+        # turns — observed live on 2026-08-02, where gemma spent all 578 generated
+        # tokens reasoning, we saw an EMPTY completion, and the chain ended at pass
+        # one with no tool call and no error. ollama's own log showed the request
+        # answered normally, so it looked like the server had wedged.
+        #
+        # Same defect and same fix as nvidia_nim's `reasoning_content`. A raw text
+        # protocol reads the text the model produced; it does not let the provider
+        # decide which of its fields counts as output. (`or ""` also normalizes
+        # ollama's occasional explicit `null` — protocol shape, not bug masking.)
+        # The reasoning is WRAPPED, once, so ai_core can parse it but not persist
+        # it (see `ai_core.core.without_thinking`). Opened on the first thinking
+        # chunk and closed when content starts or the stream ends — not per chunk,
+        # or the text would be a confetti of tags.
+        thinking = False
         async for chunk in stream:
-            content = (chunk.get("message") or {}).get("content") or ""
+            message = chunk.get("message") or {}
+            think = message.get("thinking") or ""
+            if think:
+                if not thinking:
+                    thinking = True
+                    yield THINK_OPEN
+                yield think
+            content = message.get("content") or ""
             if content:
+                if thinking:
+                    thinking = False
+                    yield THINK_CLOSE
                 yield content
+        if thinking:
+            yield THINK_CLOSE
 
     @property
     def model(self) -> str:

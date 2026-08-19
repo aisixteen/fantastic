@@ -35,7 +35,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
                 verbs: [
                     "send": "args: text, client_id?. Streams a response via SSE.",
                     "history": "args: client_id?. Returns prior turns.",
-                    "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "cancel": .string(CANCEL_DOC),
                     "status":
                         "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
@@ -91,6 +91,14 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
         await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate
+    /// cancels it (which drops the SSE stream + releases the FIFO lock on its
+    /// own). There is no `interrupt` verb any more: cancellation is the kernel's.
+    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
+        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
+    }
+
     // MARK: - meta helpers
 
     fileprivate static func host(agent: Agent) -> String {
@@ -103,8 +111,10 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
 }
 
 /// NIM `/v1/chat/completions` SSE provider — Bearer auth, 429 retry with
-/// exponential backoff (1s, 2s, 4s). PURE RAW TEXT: yields `.token`s only; no
-/// native tool-calls (ai-core parses the `<tool_call>` envelope from the text).
+/// exponential backoff (1s, 2s, 4s). PURE RAW TEXT: yields `.token`s only,
+/// decoded from BOTH of the model's channels (`reasoning_content` wrapped in
+/// `<think>…</think>`, `content` bare — see `decodeNimSSELine`); no native
+/// tool-calls (ai-core parses the `<tool_call>` envelope from the text).
 struct NvidiaNimProvider: AIProvider {
     let host: String
     let model: String
@@ -148,18 +158,20 @@ struct NvidiaNimProvider: AIProvider {
                             continuation.finish(throwing: NimError.http(statusCode))
                             return
                         }
+                        // ONE wrapper for the whole turn — the reasoning markers
+                        // open and close once, not per chunk (`ThinkingWrap`).
+                        // Built here, after the 429 retry decision: a retried
+                        // attempt streamed nothing, so it starts clean.
+                        var wrap = ThinkingWrap()
                         for try await line in bytesToLines(response.body) {
-                            guard line.hasPrefix("data: ") else { continue }
-                            let payload = String(line.dropFirst(6))
-                            if payload == "[DONE]" { break }
-                            guard let data = payload.data(using: .utf8),
-                                let parsed = try? JSON.parse(data)
-                            else { continue }
-                            let delta = parsed["choices"][0]["delta"]
-                            if let chunk = delta["content"].asString {
-                                continuation.yield(.token(chunk))
-                            }
+                            let decoded = decodeNimSSELine(line, wrap: &wrap)
+                            for token in decoded.tokens { continuation.yield(.token(token)) }
+                            if decoded.done { break }
                         }
+                        // The model spent the tail of its turn (or all of it)
+                        // reasoning: close the span so the text a reader parses
+                        // stays balanced.
+                        for token in wrap.finish() { continuation.yield(.token(token)) }
                         break  // success — exit retry loop
                     } catch {
                         continuation.finish(throwing: error)

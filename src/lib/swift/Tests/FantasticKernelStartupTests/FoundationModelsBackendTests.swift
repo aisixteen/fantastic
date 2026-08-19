@@ -38,8 +38,11 @@ struct FoundationModelsBackendTests {
         #expect(r["provider"].asString == "apple_foundation_models")
         #expect(r["verbs"]["send"].asString != nil)
         #expect(r["verbs"]["history"].asString != nil)
-        #expect(r["verbs"]["interrupt"].asString != nil)
         #expect(r["verbs"]["backend_state"].asString != nil)
+        // No bundle-private `interrupt`: an in-flight `send` IS a kernel task,
+        // so the backend advertises the substrate's `ps` + `cancel` instead.
+        #expect(r["verbs"]["interrupt"].asString == nil)
+        #expect(r["verbs"]["cancel"].asString?.contains("task_id") == true)
     }
 
     @Test func backendStateReportsAvailability() async throws {

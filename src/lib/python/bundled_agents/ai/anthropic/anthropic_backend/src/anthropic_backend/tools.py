@@ -7,13 +7,16 @@ it. ALL shared machinery (queue / FIFO lock / menu cache, prompt
 assembly, the agentic `_run` loop, the verb bodies) lives in
 `ai_core.core`. State dicts + the patchable `SEND_TIMEOUT` /
 `MAX_CALL_DEPTH` are re-exported from `ai_core.core` so any test
-monkeypatch seam keeps working on the shared core path.
+monkeypatch seam keeps working on the shared core path — and so is
+`on_cancel`, the shared bundle CANCEL hook the substrate discovers on this
+module (there is no `interrupt` verb: an in-flight `send` is a kernel TASK,
+killed with the universal `ps` → `cancel` system verbs).
 """
 
 from __future__ import annotations
 
 from ai_core import build
-from ai_core.core import (  # noqa: F401 — re-exported test seams
+from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
@@ -22,7 +25,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     _locks,
     _providers,
     _queue,
-    _tasks,
+    on_cancel,
 )
 
 

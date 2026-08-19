@@ -78,7 +78,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     """
     """Drive one WebSocket connection."""
     client_id = _make_client_id()
-    kernel._ensure_inbox(client_id)
+    kernel.ctx.ensure_inbox(client_id)
     # AUTH GATE for the connect-time convenience auto-watch. Only mirror the
     # connected host's inbox if THIS leg's ingress rule permits an inbound `watch`
     # with NO credential (i.e. an open `allow_all` leg). On a sealed (`deny_inbound`)
@@ -96,7 +96,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         watching = set()
 
     async def drain_outbound() -> None:
-        q = kernel._ensure_inbox(client_id)
+        q = kernel.ctx.ensure_inbox(client_id)
         while True:
             payload = await q.get()
             if ws.application_state != WebSocketState.CONNECTED:
@@ -301,4 +301,4 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         for fn in state_unsubs:
             fn()
         state_unsubs.clear()
-        kernel._inboxes.pop(client_id, None)
+        kernel.ctx.inboxes.pop(client_id, None)

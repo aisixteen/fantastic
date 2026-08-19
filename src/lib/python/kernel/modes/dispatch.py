@@ -25,6 +25,8 @@ async def dispatch_argv(kernel, argv: list[str]) -> Any:
         cmd = argv[0]
         if cmd == "reflect":
             return await reflect(kernel, argv[1:])
+        if cmd == "init":
+            return await init(kernel, argv[1:])
         # Generic <id> <verb> [k=v ...].
         if len(argv) >= 2:
             return await call(kernel, cmd, argv[1:])
@@ -74,6 +76,56 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         if kernel.root is not None:
             await kernel.send(kernel.root.id, {"type": "boot"})
         reply = await kernel.send(target, body)
+        print(json.dumps(reply, indent=2, default=str))
+        loop = getattr(kernel.root, "_fs_flush_loop", None)
+        if loop is not None:
+            await loop.aflush()
+    return None
+
+
+async def init(kernel, rest: list[str]) -> None:
+    """`fantastic init <loader_bundle> <manifest>` — seed a declarative loader.
+
+    Creates a loader agent (e.g. `static_loader`) under the root with a
+    `manifest` field pointing at the config file, then boots it — the loader
+    reads the manifest and hydrates the declared roster (as operator). Example:
+
+        fantastic init static_loader ./fantastic.yaml
+
+    Takes the PID lock (it mutates the tree) and persists through the root
+    loader, exactly like a one-shot `create_agent`. The loader agent's id is the
+    bundle name, so a second `init` is idempotent (create refuses a dup id)."""
+    if len(rest) < 2:
+        print(
+            "usage: fantastic init <loader_bundle> <manifest>\n"
+            "   e.g. fantastic init static_loader ./fantastic.yaml",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    loader_name, manifest = rest[0], rest[1]
+    cur = _read_lock()
+    if cur and isinstance(cur.get("pid"), int) and _pid_alive(cur["pid"]):
+        print(
+            f"[init] another fantastic owns this dir (pid={cur.get('pid')}). "
+            "Stop it first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    with FantasticLock():
+        if kernel.root is not None:
+            # Boot the root loader so the new records subscribe + persist.
+            await kernel.send(kernel.root.id, {"type": "boot"})
+        # create_agent boots the loader child → its own boot reads the manifest
+        # and hydrates the roster. The kernel never parses YAML; the loader does.
+        reply = await kernel.send(
+            kernel.root.id,
+            {
+                "type": "create_agent",
+                "handler_module": f"{loader_name}.tools",
+                "id": loader_name,
+                "manifest": manifest,
+            },
+        )
         print(json.dumps(reply, indent=2, default=str))
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:

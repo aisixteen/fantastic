@@ -20,7 +20,7 @@
 //! - `history`      args `{limit?, schedule_id?}`              → tail of history.jsonl
 //!
 //! After every fire the scheduler emits `{type:"schedule_fired", ...}` to
-//! its OWN inbox AND the target's inbox.
+//! its OWN inbox only — the target gets the payload, which is the tick.
 
 #![deny(missing_docs)]
 
@@ -373,10 +373,11 @@ async fn fire_schedule(agent_id: &AgentId, kernel: &Arc<Kernel>, sch: &Value) {
     if let Err(e) = append_history(agent_id, kernel, &event).await {
         tracing::warn!(error = %e, "scheduler: history append failed");
     }
-    kernel.emit(agent_id, event.clone()).await;
-    if !target.is_empty() && target != agent_id.0 {
-        kernel.emit(&AgentId::from(target.as_str()), event).await;
-    }
+    // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
+    // `schedule_fired` doubled every delivery to a live program's on_message —
+    // the payload send IS the tick; telemetry rides the scheduler's own inbox
+    // and history.jsonl.
+    kernel.emit(agent_id, event).await;
 }
 
 fn now_secs() -> f64 {
@@ -427,7 +428,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
             "history": "args: limit:int?, schedule_id:str?.",
         },
         "emits": {
-            "schedule_fired": "{type, schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} broadcast to scheduler's inbox AND target's inbox on every fire",
+            "schedule_fired": "{type, schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} emitted on the scheduler's OWN inbox on every fire (never the target's)",
         }
     })
 }

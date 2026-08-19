@@ -16,7 +16,7 @@
 //
 // The Lite tier targets iOS, iPadOS, visionOS, tvOS, watchOS, and
 // sandboxed macOS. Sandbox-incompatible bundles (terminal_backend,
-// local_runner, python_runtime, ssh_runner) are compile-time
+// exec_bridge) are compile-time
 // excluded by `#if os(macOS)` gates inside the kernel — importing
 // this module on iOS is safe and never reaches subprocess code.
 

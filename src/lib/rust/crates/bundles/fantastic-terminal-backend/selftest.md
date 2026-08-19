@@ -1,7 +1,7 @@
 # fantastic-terminal-backend selftest
 
 > scopes: pty, process
-> requires: live daemon + WS — `cargo build --release --bin fantastic`,
+> requires: live daemon + WS — `cargo build --release --bin fantastic_kernel`,
 > a parent web + web_ws, a real shell at `/bin/sh`, free port (suggest
 > 18920). PTYs are process-memory; they can't survive a separate
 > `fantastic call` invocation, so drive a running daemon over WS.
@@ -22,7 +22,7 @@ peer. We boot one persistent daemon and drive it through one-shot WS
 rm -rf /tmp/ftb_test
 mkdir -p /tmp/ftb_test
 cd /tmp/ftb_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18920
 $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws

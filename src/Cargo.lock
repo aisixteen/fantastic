@@ -536,6 +536,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-author"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-brain"
 version = "0.1.0"
 dependencies = [
@@ -587,6 +597,7 @@ dependencies = [
  "directories",
  "fantastic-ai-core",
  "fantastic-anthropic-backend",
+ "fantastic-author",
  "fantastic-bridge",
  "fantastic-core",
  "fantastic-file",
@@ -717,6 +728,7 @@ dependencies = [
  "async-trait",
  "fantastic-bundle",
  "fantastic-kernel",
+ "libc",
  "nix 0.29.0",
  "serde_json",
  "tokio",
@@ -810,6 +822,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tui-term",
+ "tui-textarea",
  "vt100",
 ]
 
@@ -2698,6 +2711,16 @@ checksum = "72af159125ce32b02ceaced6cffae6394b0e6b6dfd4dc164a6c59a2db9b3c0b0"
 dependencies = [
  "ratatui",
  "vt100",
+]
+
+[[package]]
+name = "tui-textarea"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a5318dd619ed73c52a9417ad19046724effc1287fb75cdcc4eca1d6ac1acbae"
+dependencies = [
+ "ratatui",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

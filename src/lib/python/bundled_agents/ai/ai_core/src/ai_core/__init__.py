@@ -13,11 +13,17 @@ ollama / anthropic / nvidia_nim backends. Holds:
     bound to THAT backend. The module-global STATE is shared by id; the
     CONFIG is per-backend, so an ollama agent and an anthropic agent in
     the same kernel never clobber each other.
+  - `on_cancel(id, task_id, kernel)`: the shared bundle CANCEL hook. A
+    backend re-exports it from its `tools` module and the substrate
+    discovers it there (same mechanism as `on_delete`). There is no
+    `interrupt` verb — an in-flight `send` is a kernel TASK, killed with
+    the universal `ps` → `cancel` system verbs; this hook closes the turn
+    out for the client.
 """
 
 from __future__ import annotations
 
-from .core import build
+from .core import CANCEL_DOC, build, on_cancel
 from .provider import Provider
 
-__all__ = ["Provider", "build"]
+__all__ = ["CANCEL_DOC", "Provider", "build", "on_cancel"]

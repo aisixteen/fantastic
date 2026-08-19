@@ -13,7 +13,7 @@ provider holds no agent state — queue / lock / history live in `ai_core.core`.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 
 class Provider(ABC):

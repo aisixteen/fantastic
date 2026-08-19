@@ -79,9 +79,12 @@ impl Browser {
 mod tests {
     use super::*;
 
-    fn scratch() -> PathBuf {
-        // A unique temp subtree we control (no RNG: use the process id + a fixed tag).
-        let base = std::env::temp_dir().join(format!("ft-browser-test-{}", std::process::id()));
+    /// A temp subtree this test owns (no RNG: the process id + the CALLER's tag). The
+    /// tag is per-test on purpose — a shared path made these tests race: they run in
+    /// parallel, and one's `remove_dir_all` would delete the tree the other was walking.
+    fn scratch(tag: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("ft-browser-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("alpha")).unwrap();
         std::fs::create_dir_all(base.join("beta")).unwrap();
@@ -92,7 +95,7 @@ mod tests {
 
     #[test]
     fn lists_dirs_only_dotdirs_hidden_dotdot_first() {
-        let base = scratch();
+        let base = scratch("lists");
         let b = Browser::open(base.clone());
         assert_eq!(b.entries[0], "..");
         assert_eq!(&b.entries[1..], &["alpha".to_string(), "beta".to_string()]);
@@ -103,7 +106,7 @@ mod tests {
 
     #[test]
     fn nav_clamps_and_enter_descends_and_climbs() {
-        let base = scratch();
+        let base = scratch("nav");
         let mut b = Browser::open(base.clone());
         b.up(); // clamped at 0
         assert_eq!(b.sel, 0);
@@ -119,7 +122,7 @@ mod tests {
 
     #[test]
     fn choose_returns_current_dir() {
-        let base = scratch();
+        let base = scratch("choose");
         let b = Browser::open(base.clone());
         assert_eq!(b.choose(), base);
         let _ = std::fs::remove_dir_all(&base);

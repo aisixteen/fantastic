@@ -20,14 +20,20 @@ pub use password::Password;
 
 /// Resolve an ingress rule spec (string | `{type, env}` | null) BY NAME. Absent ⇒
 /// `DenyInbound` — **SEALED by default** (every io leg + the fs edge denies until
-/// opened with `ingress_rule=allow_all`/`password`). Unknown type ⇒ `Err` (fail loudly).
+/// opened with `ingress_rule=allow_all`/`password`).
+///
+/// UNKNOWN TYPE ⇒ `DenyInbound::unknown(name)` — seal, and name the bad rule in every
+/// denial. It used to be `Err`, on the theory of failing loudly; but resolution runs
+/// PER CALL, and in python that `Err` surfaced as an unhandled exception out of the
+/// handler which killed the caller's whole chain with no reply. An unresolvable rule
+/// is not an authorization, so deny. Mirrors py.
 pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn IngressRule>, String> {
     let (name, token_env) = parse_spec(spec)?;
     let rule: Arc<dyn IngressRule> = match name.as_deref() {
-        None | Some("deny_inbound") => Arc::new(DenyInbound),
+        None | Some("deny_inbound") => Arc::new(DenyInbound::sealed()),
         Some("allow_all") => Arc::new(AllowAll),
         Some("password") => Arc::new(Password::new(token_env)),
-        Some(other) => return Err(format!("unknown ingress rule type {other:?}")),
+        Some(other) => Arc::new(DenyInbound::unknown(other)),
     };
     Ok(rule)
 }

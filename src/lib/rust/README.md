@@ -64,9 +64,9 @@ client-agnostic by construction.
 ## Run
 
 ```bash
-cd rust
-cargo build --release --bin fantastic
-BIN=$(pwd)/target/release/fantastic
+cd src/lib/rust
+cargo build --release --bin fantastic_kernel
+BIN=$(pwd)/target/release/fantastic_kernel
 
 # One-shot RPCs:
 $BIN reflect                                  # substrate identity + tree of root (id="core")
@@ -186,7 +186,7 @@ rust/
 │       ├── fantastic-local-runner/        supervises child fantastic (thin binding over runner-core; full-tier)
 │       └── fantastic-ssh-runner/          remote fantastic via SSH (thin binding over runner-core; full-tier)
 ├── scripts/
-│   ├── build-cli.sh                       cargo build --release --bin fantastic
+│   ├── build-cli.sh                       cargo build --release --bin fantastic_kernel
 │   ├── bench-coldstart.sh                 3-metric boot benchmark
 │   ├── quality.sh                         canonical pre-push gate
 │   └── compat-python.sh                   black-box wire-protocol probes
@@ -296,8 +296,8 @@ tempdir. CI runs the same script with 2× ceilings via
 Run locally:
 
 ```bash
-cd rust
-cargo build --release --bin fantastic
+cd src/lib/rust
+cargo build --release --bin fantastic_kernel
 ./scripts/bench-coldstart.sh
 ```
 
@@ -311,7 +311,8 @@ drive the wire surface against either binary by swapping `PATH`.
 Rust-specific behaviour lives in [`selftest/`](selftest/):
 
 - `feature_gates.md` — `full` vs `embedded` compile matrix
-- `python_runtime_resolution.md` — the 8-step interpreter ladder
+- `python_runtime_resolution.md` — the 6-tier interpreter ladder (no PATH
+  probing; an explicit unresolvable `venv` refuses)
 - `binary_frame_chunking.md` — chunked WS uploads protocol
 - `cross_runtime_workdir.md` — round-trip workdir loading
 
@@ -336,7 +337,7 @@ Single command — `./scripts/quality.sh` runs the canonical gate
 `cargo-machete`).
 
 ```bash
-cd rust
+cd src/lib/rust
 ./scripts/quality.sh                    # default — skip missing tools
 ./scripts/quality.sh --install          # install missing tools first
 ./scripts/quality.sh --section deny     # run one section only

@@ -37,12 +37,14 @@ async def test_subscriber_receives_send_events(seeded_kernel):
     assert "summary" in e and "token" in e["summary"] and "x" in e["summary"]
 
 
-async def test_summary_trims_long_payload_and_handles_bytes(seeded_kernel):
-    """The `summary` field on state events must (1) replace bytes
-    values with `<bytes:N>` so JSON-on-the-wire telemetry doesn't choke
-    on binary protocol payloads and (2) trim to a fixed ceiling so a
-    huge text payload can't blow up the per-event WS frame size.
-    """
+async def test_summary_shrinks_bytes_but_never_truncates(seeded_kernel):
+    """The `summary` field replaces bytes values with `<bytes:N>` so JSON-on-the-wire
+    telemetry doesn't choke on binary protocol payloads — and it does NOT trim.
+
+    It used to cut at 160 chars + an ellipsis. That makes the telemetry view lie:
+    the reader cannot tell a short payload from a truncated one, and the part that
+    got dropped is exactly the part you go looking at telemetry to find. Eliding is
+    a RENDER decision, where whoever is looking can see that it happened."""
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     huge = "z" * 5000
@@ -50,9 +52,9 @@ async def test_summary_trims_long_payload_and_handles_bytes(seeded_kernel):
         "cli", {"type": "blob", "data": b"\x00\x01\x02\x03", "tail": huge}
     )
     e = next(x for x in events if x["kind"] == "emit")
-    assert "<bytes:4>" in e["summary"]
-    assert len(e["summary"]) < 200, f"summary not trimmed: {len(e['summary'])} chars"
-    assert e["summary"].endswith("…")
+    assert "<bytes:4>" in e["summary"], "bytes must still be shrunk, not serialized"
+    assert huge in e["summary"], "the payload must survive whole"
+    assert not e["summary"].endswith("…")
 
 
 async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
@@ -65,6 +67,18 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
     and calling kernel.send. Same code path the kernel takes around
     its `await mod.handler(...)` call."""
     from kernel import _current_sender
+
+    # A real sender agent, granted to call `cli` — deny-all denies a phantom
+    # sender, and this test is about the telemetry `sender` tag, not authz.
+    await seeded_kernel.send(
+        "kernel_state",
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "id": "alice_xxx",
+            "can_call": {"cli": ["token"]},
+        },
+    )
 
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
@@ -132,7 +146,7 @@ async def test_non_agent_watcher_does_not_emit_state_events(seeded_kernel):
     up in the state stream — they aren't real agents and would mint
     phantom sprites in the telemetry view."""
     fake_ws = "_ws_test_pseudo"
-    seeded_kernel._ensure_inbox(fake_ws)  # mirror what _proxy.run does
+    seeded_kernel.ctx.ensure_inbox(fake_ws)  # mirror what _proxy.run does
     seeded_kernel.watch("cli", fake_ws)
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))

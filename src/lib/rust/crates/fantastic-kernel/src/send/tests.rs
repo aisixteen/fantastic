@@ -17,11 +17,17 @@ fn make_agent(id: &str) -> Arc<Agent> {
 }
 
 #[test]
-fn summarize_truncates_long_payloads() {
-    let v = json!({"text": "x".repeat(500)});
+fn summarize_never_truncates() {
+    // It used to cut at 160 chars + "...". A summary that silently drops the end of
+    // a payload lies about what was sent, and the reader cannot tell a short payload
+    // from a cut one — while the dropped part is exactly what you opened telemetry
+    // to find. Eliding is a RENDER decision, where whoever is looking can see it
+    // happen. Mirrors py `test_summary_shrinks_bytes_but_never_truncates`.
+    let big = "x".repeat(500);
+    let v = json!({ "text": big });
     let s = summarize_payload(&v);
-    assert!(s.len() <= 160);
-    assert!(s.ends_with("..."));
+    assert!(s.contains(&big), "the payload must survive whole");
+    assert!(!s.ends_with("..."));
 }
 
 #[test]

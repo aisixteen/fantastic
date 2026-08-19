@@ -33,6 +33,7 @@ pub mod reflect;
 pub mod send;
 pub mod state;
 pub mod storage;
+pub mod tasks;
 
 #[doc(hidden)]
 pub mod test_support;
@@ -44,3 +45,4 @@ pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
 pub use send::{current_sender, with_sender, CURRENT_SENDER};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
+pub use tasks::{current_killed, current_task, TaskId, TaskTable, CURRENT_TASK};

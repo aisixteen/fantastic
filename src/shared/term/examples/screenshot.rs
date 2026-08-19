@@ -36,6 +36,7 @@ fn key_bytes(name: &str) -> Vec<u8> {
         "ctrl-c" => vec![0x03],
         "ctrl-f" => vec![0x06],
         "ctrl-q" => vec![0x11],
+        "ctrl-s" => vec![0x13], // the in-frame editor's save (28)
         "up" => vec![0x1b, b'[', b'A'],
         "down" => vec![0x1b, b'[', b'B'],
         "right" => vec![0x1b, b'[', b'C'],

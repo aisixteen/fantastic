@@ -28,7 +28,7 @@ use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -326,6 +326,7 @@ async fn consume_sse(
     let mut buf: Vec<u8> = Vec::new();
     let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
     let mut stop = false;
+    let mut stop_reason: Option<String> = None;
 
     while let Some(chunk_res) = stream.next().await {
         let bytes = match chunk_res {
@@ -368,18 +369,41 @@ async fn consume_sse(
                         .unwrap_or("anthropic stream error");
                     return Err(format!("stream: {msg}"));
                 }
+                "message_delta" => {
+                    stop_reason = obj
+                        .get("delta")
+                        .and_then(|d| d.get("stop_reason"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(stop_reason);
+                }
                 "message_stop" => {
                     stop = true;
                     break;
                 }
-                _ => {} // message_start, message_delta, ping — ignored
+                _ => {} // message_start, ping — ignored
             }
         }
         if stop {
             break;
         }
     }
-    Ok(out)
+    // A stream that did not END TURN did not finish — say so, loudly (py-canonical,
+    // measured 2026-08-07): a completion cut by max_tokens, a refusal, or a dropped
+    // connection was returned as if the model had finished; a create_agent turn
+    // stopped mid-`code`, the partial parsed as an unterminated envelope, and the
+    // chain died with no visible cause.
+    match stop_reason.as_deref() {
+        Some("end_turn") | Some("stop_sequence") => Ok(out),
+        Some(other) => Err(format!(
+            "anthropic stream ended without end_turn: stop_reason={other:?}"
+        )),
+        None => Err(
+            "anthropic stream ended without end_turn: no stop_reason seen \
+             (connection cut mid-stream)"
+                .to_string(),
+        ),
+    }
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────
@@ -410,14 +434,28 @@ impl Bundle for AnthropicBundle {
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "anthropic_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
+            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
-            "interrupt" => verbs::interrupt(agent_id),
             "set_api_key" => set_api_key_reply(agent_id, payload, kernel).await,
             "clear_api_key" => clear_api_key_reply(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("anthropic_backend: unknown type {other:?}")}),
         };
         Ok(Some(reply))
+    }
+
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate drops
+    /// the future (which frees the HTTP stream + the FIFO guard by itself).
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        Ok(())
     }
 
     async fn on_delete(
@@ -490,15 +528,15 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "verbs": {
             "reflect": "Identity + model + endpoint + max_tokens + has_api_key + generating + file_bridge_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
             "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Failfast if file_bridge_id unset OR api_key not set.",
+            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR api_key not set.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "interrupt": "No args. Cancels any in-flight `send`. Returns {interrupted:bool}.",
             "set_api_key": "args: api_key:str (req). Persists to .fantastic/agents/<id>/api_key via file agent. Drops cached client.",
             "clear_api_key": "No args. Deletes the api_key sidecar. Returns {ok:true, deleted:bool}.",
             "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
         },
+        "cancel": fantastic_ai_core::CANCEL_DOC,
         "emits": {
             "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
             "token": "{type:'token', text, source, client_id} — streaming chunk.",
@@ -507,7 +545,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "done": "{type:'done', source, client_id} — back-compat end marker.",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. Pull counterpart: the context_status verb.",
         },
-        "concurrency": "Per-backend FIFO lock around `send`. reflect/history/interrupt/set_api_key/clear_api_key skip the lock.",
+        "concurrency": "Per-backend FIFO lock around `send`. reflect/history/set_api_key/clear_api_key skip the lock.",
     })
 }
 

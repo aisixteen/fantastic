@@ -123,6 +123,17 @@ async def _read(id, payload, agent):
     key = payload.get("key")
     if key is None:
         return {"doc": doc}
+    # `_set` already refuses a non-str key; `_read` used to take one straight into
+    # `doc.get(key)`, and an unhashable key (a caller passing the `keys` table-of-
+    # contents ENTRY `{"key":…,"size":…}` instead of the string inside it) raised
+    # `TypeError: unhashable type: 'dict'` out of the handler. A raise out of a
+    # handler is the failure mode already paid for once, on 2026-08-02 with the
+    # unknown ingress rule: it kills the caller's chain with no reply at all.
+    if not isinstance(key, str):
+        return {
+            "error": f"yaml_state.read: key must be a str, got {type(key).__name__}",
+            "hint": "`keys` returns [{key, size}] — pass the `key` field, not the entry",
+        }
     return {"key": key, "value": doc.get(key)}
 
 

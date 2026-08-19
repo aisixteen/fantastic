@@ -5,7 +5,6 @@ import asyncio
 import json
 from pathlib import Path
 
-from _testkit import boot_root
 from kernel_state.tools import (
     _find_store,
     on_shutdown,
@@ -13,6 +12,8 @@ from kernel_state.tools import (
     rmtree,
     write_record,
 )
+
+from _testkit import boot_root
 from kernel import Kernel
 
 

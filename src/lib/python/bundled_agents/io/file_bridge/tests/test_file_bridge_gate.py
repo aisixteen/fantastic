@@ -116,3 +116,49 @@ async def test_reflect_surfaces_posture(seeded_kernel):
     assert r["ingress_rule"] == "allow_all"
     assert r["sealed"] is False
     assert True  # see removed from posture
+
+
+# ─── (e) write-time refusal, on BOTH write verbs ────────────────
+
+
+async def test_an_unimplementable_rule_is_refused_at_CREATE_not_just_update(
+    seeded_kernel,
+):
+    """`validate_meta` was wired into `update_agent` only, and the asymmetry was live:
+    `create_agent … ingress_rule=bogus` returned a record carrying `ingress_rule:
+    "bogus"` while the IDENTICAL `update_agent` was refused by the IDENTICAL function.
+    Measured 2026-08-07.
+
+    The argument the update path already makes applies verbatim at create — accepting a
+    value you cannot honour and reporting success is the worst of both — and it is worse
+    at create, because there is no prior good state to fall back to and the agent boots
+    believing it has a security posture it does not have."""
+    r = await seeded_kernel.send(
+        "kernel_state",
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "root": "x",
+            "ingress_rule": "bogus_rule",
+        },
+    )
+    assert "error" in r, f"create must refuse an unimplementable rule, got {r}"
+    assert "legal values" in r["error"], "the refusal must NAME what would work"
+    assert r.get("created") is False
+    assert "id" not in r, "nothing may be created"
+
+    # And the same value on update is refused identically — one implementation.
+    good = await _make(seeded_kernel, ingress_rule="allow_all")
+    u = await seeded_kernel.send(
+        "kernel_state",
+        {"type": "update_agent", "id": good, "ingress_rule": "bogus_rule"},
+    )
+    assert "error" in u and "legal values" in u["error"]
+    assert u.get("updated") is False
+
+
+async def test_a_legal_rule_still_creates(seeded_kernel):
+    """The refusal must not have made the gate paranoid — the happy path is untouched."""
+    fid = await _make(seeded_kernel, ingress_rule="allow_all")
+    r = await seeded_kernel.send(fid, {"type": "reflect"})
+    assert r["ingress_rule"] == "allow_all" and r["sealed"] is False

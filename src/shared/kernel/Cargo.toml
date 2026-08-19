@@ -40,6 +40,7 @@ fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-
 fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
 fantastic-lua-runtime = { path = "../../lib/rust/crates/bundles/fantastic-lua-runtime" }
 fantastic-js-runtime = { path = "../../lib/rust/crates/bundles/fantastic-js-runtime" }
+fantastic-author = { path = "../../lib/rust/crates/bundles/fantastic-author" }
 fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-terminal-backend" }
 fantastic-python-runtime = { path = "../../lib/rust/crates/bundles/fantastic-python-runtime" }
 fantastic-local-runner = { path = "../../lib/rust/crates/bundles/fantastic-local-runner" }

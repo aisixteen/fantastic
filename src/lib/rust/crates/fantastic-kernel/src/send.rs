@@ -26,6 +26,9 @@
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
+use crate::tasks::{
+    current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
+};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use tokio::task_local;
@@ -57,21 +60,13 @@ where
 /// One-line, bytes-stripped, max-160-char summary for telemetry.
 /// Mirrors what Python emits as `summary` on state events.
 fn summarize_payload(payload: &Value) -> String {
-    let mut s = match serde_json::to_string(payload) {
+    let s = match serde_json::to_string(payload) {
         Ok(s) => s,
         Err(_) => format!("{payload:?}"),
     };
-    if s.len() > 160 {
-        // Walk back to the nearest char boundary so we don't slice a
-        // multi-byte UTF-8 sequence (terminal output is full of those
-        // — Box-drawing glyphs in TUI redraws are 3-byte runs).
-        let mut cut = 157usize.min(s.len());
-        while cut > 0 && !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        s.truncate(cut);
-        s.push_str("...");
-    }
+    // NOT TRUNCATED — mirrors python. A summary that silently drops the end
+    // of a payload lies about what was sent, and the reader cannot tell a
+    // short payload from a cut one. Elide visibly at render time instead.
     s
 }
 
@@ -101,15 +96,11 @@ impl Kernel {
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let verb = verb_of(&payload).to_string();
 
-        // Run dispatch under a fresh CURRENT_SENDER scope so nested
-        // sends attribute to this target (matches Python contextvars).
-        let kernel = Arc::clone(self);
-        let target_for_dispatch = Arc::clone(&target);
-        let payload_clone = payload.clone();
-        let mut reply = with_sender(target.id.clone(), async move {
-            dispatch(&kernel, target_for_dispatch, &payload_clone).await
-        })
-        .await;
+        // Run the dispatch as a REGISTERED, killable task (one row in the
+        // kernel's task table) and await it — that is what makes ANY send
+        // cancelable, on any bundle. A cancelled dispatch does NOT raise out of
+        // `send`: it resolves to `{"cancelled": true}`.
+        let mut reply = self.run_dispatch(&target, &payload, &verb).await;
 
         // Universal post-process: compose every reflect reply with the
         // tree/bundles/readme flags (mirrors Python's
@@ -136,6 +127,108 @@ impl Kernel {
         self.fanout_to_watchers(&target, &payload).await;
 
         reply
+    }
+
+    /// Run ONE dispatch as a registered, killable task and await it — the unit
+    /// of the task table.
+    ///
+    /// **Parent propagation.** `tokio::spawn` MOVES the future onto a fresh
+    /// task, and task-locals do NOT inherit across that move — so the scopes
+    /// are re-established INSIDE the spawned task: `CURRENT_SENDER` (the target,
+    /// as before), `CURRENT_TASK` (this dispatch's own id, so any `send` the
+    /// handler issues registers as a CHILD of it — the table is a tree), and
+    /// `CURRENT_KILLED` (its own dying flag). The PARENT link is read here, in
+    /// the caller's task, before the move.
+    ///
+    /// **The cancellation contract, and why it is not ambiguous.** Both cases
+    /// surface at this one await as `Ok(None)` (the dispatch's `select!` took
+    /// the stop branch):
+    ///   - THE DISPATCH was killed (someone sent `cancel`) → the awaiting caller
+    ///     is NOT being killed; it gets the reply `{"cancelled": true}`.
+    ///     Cancellation never raises out of `send`.
+    ///   - WE were killed (our own task is inside the killed subtree) →
+    ///     `current_killed()` is true, so we PARK and let our own stop signal
+    ///     land instead of resuming. Getting this backwards would silently
+    ///     resurrect a task the kernel just killed: the kill loop is
+    ///     synchronous, but on a multi-thread runtime a parent woken by its
+    ///     child's death can be polled on another worker before its own stop
+    ///     lands — the flag (set for the WHOLE subtree before anything is
+    ///     stopped) closes that window.
+    async fn run_dispatch(
+        self: &Arc<Self>,
+        target: &Arc<Agent>,
+        payload: &Value,
+        verb: &str,
+    ) -> Value {
+        // Register BEFORE spawning: the row (and its stop handle) must exist
+        // the instant the handler can run, or a nested `send` could claim a
+        // parent that isn't in the table yet.
+        let task_id = self.tasks.mint(&target.id);
+        let handle = TaskHandle::new();
+        self.tasks.register(
+            &task_id,
+            &target.id,
+            verb,
+            current_task(), // the dispatch we are nested inside, if any
+            handle.clone(),
+        );
+
+        let join = {
+            let kernel = Arc::clone(self);
+            let tgt = Arc::clone(target);
+            let payload = payload.clone();
+            let sender = target.id.clone();
+            let tid = task_id.clone();
+            let cancel = handle.cancel_signal();
+            let killed = handle.killed_flag();
+            tokio::spawn(async move {
+                CURRENT_SENDER
+                    .scope(
+                        sender,
+                        CURRENT_TASK.scope(
+                            tid,
+                            CURRENT_KILLED.scope(killed, async move {
+                                tokio::select! {
+                                    biased;
+                                    // Stopped: DROP the dispatch future — the
+                                    // abort half of `cancel`.
+                                    _ = cancel.notified() => None,
+                                    v = dispatch(kernel, tgt, payload) => Some(v),
+                                }
+                            }),
+                        ),
+                    )
+                    .await
+            })
+        };
+
+        // Structured concurrency: if the CALLER goes away (its own future is
+        // dropped — a `select!` loser, a timeout, its own cancellation), the
+        // dispatch it spawned goes with it, exactly as when dispatch ran inline.
+        // Also the row's self-cleaner: dropped on every exit path.
+        let _guard = DispatchGuard {
+            kernel: Arc::clone(self),
+            id: task_id,
+            handle,
+        };
+
+        match join.await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                if current_killed() {
+                    // We are in the killed subtree — park; our own stop signal
+                    // lands at this yield and drops us. Never resume.
+                    std::future::pending::<()>().await;
+                    unreachable!("a killed task is dropped at its next yield");
+                }
+                json!({ "cancelled": true })
+            }
+            // The dispatch panicked — propagate, exactly as an inline dispatch
+            // would have. (Nothing tokio-aborts a dispatch: `cancel` stops it
+            // through the select branch above.)
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(_) => json!({ "cancelled": true }),
+        }
     }
 
     /// Send a binary-framed verb. Mirrors [`Self::send`] except the
@@ -272,36 +365,66 @@ impl Kernel {
     }
 }
 
+/// Caller-side guard for one dispatch: on ANY exit path (reply, kill, or the
+/// caller's own future being dropped) it stops the dispatch task and drops its
+/// row. Stopping a task that already finished is a no-op; forgetting a row that
+/// `cancel` already removed is a no-op — both are idempotent by design.
+struct DispatchGuard {
+    kernel: Arc<Kernel>,
+    id: TaskId,
+    handle: TaskHandle,
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.handle.stop();
+        self.kernel.tasks.forget(&self.id);
+    }
+}
+
 /// Resolve verb → system handler or bundle handler.
-async fn dispatch(kernel: &Arc<Kernel>, target: Arc<Agent>, payload: &Value) -> Value {
-    let verb = verb_of(payload);
-    if is_system_verb(verb) {
-        return handle_system_verb(kernel, &target, verb, payload).await;
-    }
-    // No handler_module → only system verbs answerable.
-    let Some(hm) = target.handler_module.as_deref() else {
-        // Universal answers for bare agents.
-        return match verb {
-            "boot" | "shutdown" => Value::Null,
-            "reflect" => crate::reflect::reflect_identity(&target),
-            _ => json!({
-                "error": format!(
-                    "agent {:?} has no handler_module; cannot answer verb {:?}",
-                    target.id.0, verb
-                ),
-            }),
+///
+/// BOXED, not `async fn`, and deliberately so: the dispatch path recurses
+/// (`send` → dispatch → `create_agent` → `send` → …), and since `send` now
+/// SPAWNS its dispatch, that cycle would force the compiler to prove
+/// `Send`-ness of a future in terms of itself — auto-trait inference gives up
+/// and reports "not Send". Declaring one concrete `dyn Future + Send` at the
+/// recursion point cuts the cycle.
+fn dispatch(
+    kernel: Arc<Kernel>,
+    target: Arc<Agent>,
+    payload: Value,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    Box::pin(async move {
+        let verb = verb_of(&payload);
+        if is_system_verb(verb) {
+            return handle_system_verb(&kernel, &target, verb, &payload).await;
+        }
+        // No handler_module → only system verbs answerable.
+        let Some(hm) = target.handler_module.as_deref() else {
+            // Universal answers for bare agents.
+            return match verb {
+                "boot" | "shutdown" => Value::Null,
+                "reflect" => crate::reflect::reflect_identity(&target),
+                _ => json!({
+                    "error": format!(
+                        "agent {:?} has no handler_module; cannot answer verb {:?}",
+                        target.id.0, verb
+                    ),
+                }),
+            };
         };
-    };
-    let Some(bundle) = kernel.bundles.get(hm) else {
-        return json!({
-            "error": format!("no bundle for handler_module {hm:?}"),
-        });
-    };
-    match bundle.handle(&target.id, payload, kernel).await {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Null,
-        Err(e) => json!({ "error": e.to_string() }),
-    }
+        let Some(bundle) = kernel.bundles.get(hm) else {
+            return json!({
+                "error": format!("no bundle for handler_module {hm:?}"),
+            });
+        };
+        match bundle.handle(&target.id, &payload, &kernel).await {
+            Ok(Some(v)) => v,
+            Ok(None) => Value::Null,
+            Err(e) => json!({ "error": e.to_string() }),
+        }
+    })
 }
 
 /// Binary-frame dispatch: route to the target bundle's `handle_binary`.
@@ -339,6 +462,13 @@ async fn dispatch_binary(
 }
 
 /// Substrate verbs answered natively on every agent — explicitly
+/// `list_agents`' pointer back to the briefing — py-canonical `_LIST_HINT`.
+const LIST_HINT: &str = "Raw records — how agents are WIRED, not what they are FOR, \
+and no manual. {type:'reflect'} on the root is the briefing: each agent's purpose, \
+plus `self_extension` (how to author your own durable tools in THIS kernel — which \
+executor, and the fields without which the agent is created and never runs) and \
+`readmes` (the manual index). Reflect the root before building anything.";
+
 /// excludes `reflect`. Reflect is per-bundle (each handler customizes
 /// its `sentence` + state shape); the substrate's reflect path only
 /// fires for bare agents (no `handler_module`), which is handled
@@ -351,10 +481,35 @@ fn is_system_verb(verb: &str) -> bool {
             | "update_agent"
             | "list_agents"
             | "get"
+            // The TASK TABLE — work in flight, universal. Baked into the
+            // substrate, in no bundle's verb map: cancellation is a property of
+            // the one primitive (`send`), so EVERY agent is cancelable and a
+            // caller never needs to know which bundle it faces. Plain verbs — an
+            // AGENT can call them on another agent's work.
+            | "ps"
+            | "cancel"
             // Root-only control verb — gated inside `handle_system_verb`
             // to the tree root; a non-root target answers with an error.
             | "shutdown_kernel"
     )
+}
+
+/// One line per system verb — the honest reflect surface. Bundle verbs are
+/// derived from each bundle's own reflect; these are the SUBSTRATE's own, so
+/// they appear in no bundle's map and are advertised on the ROOT reflect (see
+/// [`crate::reflect::apply_reflect_flags`]). Mirrors Python's
+/// `_SYSTEM_VERB_DOCS`.
+pub fn system_verb_docs() -> Value {
+    json!({
+        "create_agent": "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it.",
+        "update_agent": "args: id:str, **meta — patch a record's meta.",
+        "delete_agent": "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses).",
+        "list_agents": "No args. Every agent's record, flat.",
+        "get": "args: id:str — one agent's record (null if unknown).",
+        "ps": "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}. One row per in-flight dispatch; `parent` chains them into the send tree.",
+        "cancel": "args: task_id:str — kill that task AND ITS SUBTREE (children first). Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}.",
+        "shutdown_kernel": "No args. ROOT ONLY — stop the kernel process gracefully.",
+    })
 }
 
 async fn handle_system_verb(
@@ -377,11 +532,29 @@ async fn handle_system_verb(
                     .unwrap_or("")
                     .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
             });
-            json!({ "agents": out })
+            // `more` is not decoration (py-canonical, measured 2026-08-07): a model
+            // that opened with `list_agents` got bare records, never learned that
+            // authoring a script agent was the mechanism, and made 0 attempts; the
+            // arm that opened with `reflect` got `self_extension` and tried 10
+            // times. This verb rides every reflect's `system_verbs`, so it needs a
+            // signpost back to the briefing.
+            json!({ "agents": out, "more": LIST_HINT })
         }
         "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
         "delete_agent" => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
         "update_agent" => update_from_payload(kernel, target, payload).await,
+        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
+        // one row per in-flight dispatch, `parent` chaining them into the send
+        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
+        "ps" => json!({ "tasks": kernel.tasks.rows() }),
+        // Kill a task AND ITS SUBTREE (children first, like killing a process
+        // group). Each bundle's `on_cancel` hook runs BEFORE the abort so real
+        // resources (OS subprocesses, PTYs, sockets) die with it. An unknown or
+        // already-finished id returns {cancelled:false} — it does not pretend.
+        "cancel" => match payload.get("task_id").and_then(Value::as_str) {
+            Some(t) if !t.is_empty() => kernel.cancel_task(&TaskId::from(t)).await,
+            _ => json!({ "error": "cancel: task_id (str) required" }),
+        },
         "shutdown_kernel" => {
             // Privileged: root control surface only. Gate on rootness
             // (parent_id is None) so it holds whether the verb was
@@ -441,6 +614,18 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
             }
             patch.insert(k.clone(), v.clone());
             changed.push(k.clone());
+        }
+    }
+    // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
+    // patch before anything changes — a refusal names the bad field at the point of
+    // the mistake instead of surfacing calls later. Mirrors python's duck-typed
+    // `validate_meta`; the trait default accepts everything.
+    if let Some(hm) = target.handler_module.as_deref() {
+        if let Some(bundle) = kernel.bundles.get(hm) {
+            let current = target.meta.read().expect("meta poisoned").clone();
+            if let Some(why) = bundle.validate_meta(&patch, &current) {
+                return json!({ "error": why, "id": id.to_string(), "updated": false });
+            }
         }
     }
     let rec = target.update_meta(patch);

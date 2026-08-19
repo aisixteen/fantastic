@@ -200,9 +200,15 @@ extension AIBackend {
         var recallCount: Int64 = 0
         for m in store.dropFirst(idx) {
             guard m["role"].asString == "assistant" else { continue }
-            // Tool calls now live as `<tool_call>` text inside the assistant
-            // content — extract them with the same shared parser the loop uses.
-            for (_, args) in extractToolCalls(m["content"].asString ?? "") {
+            // Tool calls live as envelope TEXT inside the assistant content —
+            // extract them with the shared parser. It now reads all three
+            // envelopes and accepts an unterminated-but-call-shaped block, so
+            // this read-model SEES reactions it previously scored as absent (a
+            // model that reacted in a shape the old scanner dropped was recorded
+            // as not having reacted at all). Pinned by
+            // `theReactionReaderSeesShapesItUsedToDrop`.
+            for call in extractToolCalls(m["content"].asString ?? "") {
+                let args = call.arguments
                 let target = args["target_id"].asString
                 let ptype = args["payload"]["type"].asString
                 if target == key && ptype == "recall" {
@@ -235,7 +241,13 @@ extension AIBackend {
     /// conversation, never trimmed). Read-only. args: client_id?, query?
     /// (case-insensitive substring), limit? (default 20, max 100), before?.
     func recallVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
-        let clientId = safeClient(payload["client_id"].asString ?? "cli")
+        // No explicit client: the model calls recall MID-GENERATION, and that
+        // generation knows which conversation it is — reading the in-flight
+        // entry's client is a fact, not a default. Py-canonical, measured
+        // 2026-08-07: the 'cli' default handed a builder running under client
+        // 'probe' an empty thread and it concluded its history was gone.
+        let inflight = await runState(agent.id.value).currentSnapshot()?.clientId
+        let clientId = safeClient(payload["client_id"].asString ?? inflight ?? "cli")
         let full = await loadHistory(agent: agent, client: clientId, kernel: kernel)
         let q = (payload["query"].asString ?? "").lowercased()
             .trimmingCharacters(in: .whitespaces)
@@ -256,10 +268,33 @@ extension AIBackend {
                 "content": .string(recallRender(m)),
             ])
         }
-        return .object([
+        var reply: OrderedDictionary<String, JSON> = [
             "messages": .array(messages), "total": .integer(Int64(total)),
             "truncated": .bool(truncated), "client_id": .string(clientId),
-        ])
+        ]
+        if page.isEmpty {
+            // An empty page with no reason reads as "your history is lost" — the
+            // opposite of what it usually means (py-canonical `note`).
+            let fired = getProjection(agent.id.value)["fired"].asBool ?? false
+            let note: String
+            if !q.isEmpty && !full.isEmpty {
+                note =
+                    "query '\(q)' matched none of the \(full.count) stored turns "
+                    + "for client '\(clientId)'."
+            } else if !fired {
+                note =
+                    "nothing has been compacted away — recall pages back turns that "
+                    + "compaction DROPPED, and none have been. If you can see this "
+                    + "reply, your live context already holds the whole conversation."
+            } else {
+                note =
+                    "no stored turns for client '\(clientId)' in this page; the "
+                    + "durable thread is keyed per client_id — name one to read "
+                    + "another thread."
+            }
+            reply["note"] = .string(note)
+        }
+        return .object(reply)
     }
 
     /// `context_status` verb: the context-budget posture + the last overflow

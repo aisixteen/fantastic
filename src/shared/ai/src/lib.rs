@@ -59,6 +59,23 @@ fn err_of(v: &Value) -> Option<String> {
     v.get("error").and_then(Value::as_str).map(String::from)
 }
 
+/// Normalize a raw `FANTASTIC_OLLAMA_ENDPOINT`: trim, treat blank as unset. Pure
+/// core of [`endpoint_from_env`], testable without mutating process env.
+fn clean_endpoint(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// The ollama endpoint override, read from `FANTASTIC_OLLAMA_ENDPOINT` (the same
+/// var `hydrate_ai_env` fills from the connector's `ai.endpoint` setting). `None`
+/// when unset/blank → the create_agent payload OMITS `endpoint` and the backend
+/// falls back to its own `DEFAULT_ENDPOINT` (no behavior change for existing
+/// users). Only meaningful for the ollama backend; other backends ignore it.
+fn endpoint_from_env() -> Option<String> {
+    clean_endpoint(std::env::var("FANTASTIC_OLLAMA_ENDPOINT").ok().as_deref())
+}
+
 /// Provision the brain once: an open file_bridge (history sink) + the backend
 /// agent bound to it. Idempotent — a re-create returns the existing record.
 /// Returns the backend label (handler · model) for display.
@@ -89,12 +106,14 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(16384);
-    let brain = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":handler,"id":BRAIN_ID,"model":model,"file_bridge_id":FS_ID,"num_ctx":num_ctx}),
-        )
-        .await;
+    let mut create = json!({"type":"create_agent","handler_module":handler,"id":BRAIN_ID,"model":model,"file_bridge_id":FS_ID,"num_ctx":num_ctx});
+    // Thread the configured ollama endpoint through when one is set; OMIT it
+    // otherwise so the backend's own DEFAULT_ENDPOINT still applies (no change for
+    // existing localhost:11434 users). Cloud backends ignore the field.
+    if let Some(endpoint) = endpoint_from_env() {
+        create["endpoint"] = json!(endpoint);
+    }
+    let brain = kernel.send(&AgentId::from("kernel"), create).await;
     if let Some(e) = err_of(&brain) {
         return Err(format!("brain: {e}"));
     }
@@ -258,5 +277,19 @@ mod tests {
     fn err_of_extracts_error_string() {
         assert_eq!(err_of(&json!({"error": "boom"})).as_deref(), Some("boom"));
         assert_eq!(err_of(&json!({"ok": true})), None);
+    }
+
+    #[test]
+    fn clean_endpoint_trims_and_treats_blank_as_unset() {
+        // Unset / blank → None, so the create payload omits `endpoint` and the
+        // backend keeps its own DEFAULT_ENDPOINT.
+        assert_eq!(clean_endpoint(None), None);
+        assert_eq!(clean_endpoint(Some("")), None);
+        assert_eq!(clean_endpoint(Some("   ")), None);
+        // A real value is trimmed and passed through verbatim (no guessing).
+        assert_eq!(
+            clean_endpoint(Some("  http://box:11434 ")).as_deref(),
+            Some("http://box:11434")
+        );
     }
 }

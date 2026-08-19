@@ -414,7 +414,7 @@ def make_verbs(
             "connected": st.transport is not None and not st.transport.closed,
             "pending_count": len(st.pending),
             # The active per-leg rule TYPE names — keyed by the field you SET (config
-            # like a `token_env` is never surfaced). `ingress_rule` (default
+            # like a `env` is never surfaced). `ingress_rule` (default
             # `deny_inbound`, the SEAL) + `egress_rule` (default `silent`): read-key ==
             # write-key, so `reflect` → edit is a direct mirror. IO legs SEAL by default;
             # SECURING is the default, OPENING is the conscious act.

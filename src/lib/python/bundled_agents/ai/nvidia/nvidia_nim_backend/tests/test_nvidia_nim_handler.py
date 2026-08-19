@@ -31,9 +31,21 @@ class _FakeProvider:
 
 
 async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None):
-    meta = {"handler_module": "nvidia_nim_backend.tools"}
+    # `context_window` explicitly: the 4096 default leaves only ~1k for the conversation
+    # once the reflect primer + howtos are in the system block, so these tests (about
+    # queueing, history and status — not context math) would fail on
+    # `context_insufficient` for reasons unrelated to what they assert.
+    # Deny-all: the backend streams its turn to `cli` via send (default client),
+    # and writes its api_key sidecar to its store directly — both explicit grants.
+    can_call = {"cli": "*"}
+    meta = {
+        "handler_module": "nvidia_nim_backend.tools",
+        "context_window": 32768,
+        "can_call": can_call,
+    }
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
+        can_call[file_bridge_id] = "*"
     rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
     nid = rec["id"]
     if with_key and file_bridge_id is not None:
@@ -272,13 +284,19 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
             await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
 
         cli_tokens = [p for t, p in sends if t == "cli" and p.get("type") == "token"]
-        cli_done = [p for t, p in sends if t == "cli" and p.get("type") == "done"]
+        cli_done = [
+            p
+            for t, p in sends
+            if t == "cli" and (p.get("type") == "status" and p.get("phase") == "done")
+        ]
         assert len(cli_tokens) == 2
         assert len(cli_done) == 1
         own_stream = [
             p
             for t, p in emits
-            if t == nid and p.get("type") in ("token", "say", "done")
+            if t == nid
+            and p.get("type") in ("token", "say")
+            or (p.get("type") == "status" and p.get("phase") == "done")
         ]
         assert own_stream == []
         assert all(p.get("client_id") == "cli" for p in cli_tokens + cli_done)
@@ -298,14 +316,20 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
             )
 
         own_tokens = [p for t, p in emits if t == nid and p.get("type") == "token"]
-        own_done = [p for t, p in emits if t == nid and p.get("type") == "done"]
+        own_done = [
+            p
+            for t, p in emits
+            if t == nid and (p.get("type") == "status" and p.get("phase") == "done")
+        ]
         assert len(own_tokens) == 2
         assert len(own_done) == 1
         assert all(p["client_id"] == "web_xyz" for p in own_tokens + own_done)
         cli_stream = [
             p
             for t, p in sends
-            if t == "cli" and p.get("type") in ("token", "say", "done")
+            if t == "cli"
+            and p.get("type") in ("token", "say")
+            or (p.get("type") == "status" and p.get("phase") == "done")
         ]
         assert cli_stream == []
     finally:
@@ -351,7 +375,9 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         bob_queued = [
             p
             for t, p in emits
-            if t == nid and p.get("type") == "queued" and p.get("client_id") == "bob"
+            if t == nid
+            and (p.get("type") == "status" and p.get("phase") == "queued")
+            and p.get("client_id") == "bob"
         ]
         assert len(bob_queued) == 1
         all_pairs = [("send", t, p) for t, p in sends] + [
@@ -360,7 +386,8 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         alice_queued = [
             p
             for kind, t, p in all_pairs
-            if p.get("type") == "queued" and p.get("client_id") == "alice"
+            if (p.get("type") == "status" and p.get("phase") == "queued")
+            and p.get("client_id") == "alice"
         ]
         assert alice_queued == []
     finally:
@@ -757,12 +784,16 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     assert "text_so_far" not in snap["current"]
 
 
-async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agent):
+async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent):
+    """No bespoke `interrupt` verb: an in-flight `send` is a KERNEL task, killed via
+    `ps` → `cancel`. The shared `on_cancel` hook (inherited from ai_core) closes the
+    turn out; the blocked caller gets {'cancelled': True} and no phantom generation
+    survives."""
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
 
     class _SlowProvider:
         async def chat(self, messages, tools=None):
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(5.0)
             yield "never"
 
     nt._providers[nid] = _SlowProvider()
@@ -775,15 +806,34 @@ async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agen
                 )
             )
             await asyncio.sleep(0.10)
-            await seeded_kernel.send(nid, {"type": "interrupt"})
-            await send_task
+            table = await seeded_kernel.send("kernel", {"type": "ps"})
+            rows = [
+                t for t in table["tasks"] if t["agent"] == nid and t["verb"] == "send"
+            ]
+            assert len(rows) == 1, table["tasks"]
+            task_id = rows[0]["id"]
+            r = await seeded_kernel.send(
+                "kernel", {"type": "cancel", "task_id": task_id}
+            )
+            assert r == {"cancelled": True, "killed": [task_id]}
+            assert await send_task == {"cancelled": True}
+
         done_status = [
             p
             for _, p in emits
             if p.get("type") == "status" and p.get("phase") == "done"
         ]
         assert len(done_status) == 1
-        assert done_status[0]["detail"]["reason"] == "interrupted"
+        assert done_status[0]["detail"]["reason"] == "cancelled"
+        assert any(
+            (p.get("type") == "status" and p.get("phase") == "done") for _, p in emits
+        )
+
+        snap = await seeded_kernel.send(nid, {"type": "status"})
+        assert snap["generating"] is False
+        rr = await seeded_kernel.send(nid, {"type": "reflect"})
+        assert rr["generating"] is False
+        assert "interrupt" not in rr["verbs"]
     finally:
         nt._providers.pop(nid, None)
 

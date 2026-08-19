@@ -236,6 +236,12 @@ pub fn apply_reflect_flags(
             "version".to_string(),
             json!(std::env::var("FANTASTIC_VERSION").ok()),
         );
+        // The substrate's OWN verbs — answered natively by EVERY agent, so they
+        // appear in no bundle's `verbs` map. Advertised here (once, on the root)
+        // so the reflect surface stays honest: one round-trip tells a caller
+        // that work in flight is inspectable (`ps`) and killable (`cancel`), on
+        // any agent.
+        obj.insert("system_verbs".to_string(), crate::send::system_verb_docs());
         // WHICH file_bridge the loader auto-persists records THROUGH (the
         // discovered store), or null = nothing wired (state in RAM). With the
         // provider's posture inline in the tree, a client sees in one reflect
@@ -244,9 +250,20 @@ pub fn apply_reflect_flags(
             "persistence".to_string(),
             json!({ "provider": crate::persistence::find_store(kernel).map(|id| id.0) }),
         );
+        // The EXECUTION MODEL rides here, not only the affordance. Measured twice on
+        // gemma-4-12B (2026-08-06): "the `code` IS the tool" reads as "the code
+        // DEFINES the tool", so the model authored `def run(payload): ...` and sent
+        // {type:'run'} expecting a call. Two agents shipped inert (one was valid
+        // Python), nothing was ever written, and {queued:true} never appeared because
+        // no job stayed alive. It had planned the structure correctly and lost on the
+        // contract — so the SCRIPT semantics live in the pointer a weak model reads,
+        // word-for-word with python's.
+        //
+        // The tail (which executors, and each one's receive shape) is DERIVED from the
+        // registry by `executor_clause` — never hand-written, see `EXECUTORS`.
         obj.insert(
             "self_extension".to_string(),
-            json!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, send 'kernel' the payload {type:'reflect', readme:'self-extension'} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executors here: js_runtime.tools and lua_runtime.tools (their scripts receive turns by awaiting kernel.on_message() in a loop)."),
+            json!(format!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {{type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits - put the work at module level. To handle later sends, keep the script running and take each turn from kernel.on_message - each executor's exact shape is named below. USE - send the tool a turn by its id; a LIVE script acks {{queued:true}} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {{type:'delete_agent', id:'<name>'}}. LEARN - before writing `code`, send 'kernel' the payload {{type:'reflect', readme:'self-extension'}} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. {}", executor_clause(kernel))),
         );
         // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
         // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
@@ -408,6 +425,64 @@ fn available_bundles(kernel: &Arc<Kernel>) -> Vec<Value> {
             .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
     });
     out
+}
+
+/// The SCRIPT-EXECUTOR table: `handler_module` → how its script receives later
+/// turns. THE single source for the root `self_extension`'s executor tail, which
+/// renders this list INTERSECTED with what is actually registered — so the
+/// advertised set can neither name an executor a caller cannot use nor omit one
+/// it can.
+///
+/// WHY derived rather than hand-written: the tail used to read literally
+/// "Executors here: js_runtime.tools and lua_runtime.tools", while
+/// `python_runtime.tools` registers unconditionally in the shared kernel and
+/// under `--features full` in the CLI. A model on a full build was therefore
+/// never told its own executor existed — the defect class python fixed on
+/// 2026-08-05, when opus-5 invented `handler_module:'local_runner.script'`
+/// because the real module was never named, and built nothing.
+///
+/// The keys are the same strings the bundles export as
+/// `fantastic_{js,lua,python}_runtime::HANDLER_MODULE`. They are repeated as
+/// literals here (and only here) because bundles depend on the kernel, not the
+/// reverse — a const reference would be a dependency cycle. The registries
+/// themselves must use the consts.
+const EXECUTORS: &[(&str, &str)] = &[(
+    "exec_bridge.tools",
+    "its script takes turns through a CALLBACK it registers - kernel.on_message(cb) - and must keep running; the leg's reflect advertises its interpreter allowlist and shims",
+)];
+
+/// [`EXECUTORS`] ∩ the bundles this build actually registered, in table order.
+fn registered_executors(kernel: &Arc<Kernel>) -> Vec<(&'static str, &'static str)> {
+    // Reuse the same introspection the `bundles` flag renders from — one truth
+    // about what is installed, so the pointer cannot drift from the catalog.
+    let installed: Vec<String> = available_bundles(kernel)
+        .iter()
+        .filter_map(|b| b.get("handler_module").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    EXECUTORS
+        .iter()
+        .copied()
+        .filter(|(module, _)| installed.iter().any(|hm| hm == module))
+        .collect()
+}
+
+/// The root `self_extension`'s closing clause. Empty intersection → say the
+/// build ships no script executor; naming an absent module is the failure this
+/// whole derivation exists to prevent.
+fn executor_clause(kernel: &Arc<Kernel>) -> String {
+    let found = registered_executors(kernel);
+    if found.is_empty() {
+        return "NOTE - this build registers NO script executor, so there is no \
+                handler_module here that can run authored `code`: self-extension is \
+                unavailable until one is installed."
+            .to_string();
+    }
+    let listed: Vec<String> = found
+        .iter()
+        .map(|(module, receive)| format!("{module} ({receive})"))
+        .collect();
+    format!("Executors here: {}.", listed.join("; "))
 }
 
 #[cfg(test)]

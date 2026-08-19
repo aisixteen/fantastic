@@ -1,7 +1,7 @@
 # fantastic-file selftest
 
 > scopes: persistence, fs
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: HTTP file proxy (covered by web selftest)
 
 Filesystem-as-agent. Path safety, hidden-file filter, read-only
@@ -16,7 +16,7 @@ All test state lives under `/tmp/ff_test/` — both the substrate's
 rm -rf /tmp/ff_test /tmp/ff_root
 mkdir -p /tmp/ff_test /tmp/ff_root
 cd /tmp/ff_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 $FANTASTIC core create_agent handler_module=file_bridge.tools id=ff root=/tmp/ff_root
 ```
 

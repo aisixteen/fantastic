@@ -1,7 +1,7 @@
 # fantastic-web-rest selftest
 
 > scopes: HTTP, REST
-> requires: free port (suggest 18181), `cargo build --release --bin fantastic`, parent web agent
+> requires: free port (suggest 18181), `cargo build --release --bin fantastic_kernel`, parent web agent
 
 REST verb channel. `POST /<self_id>/<target_id>` body=payload →
 kernel.send → JSON reply. Browser-pastable shortcuts:
@@ -13,7 +13,7 @@ kernel.send → JSON reply. Browser-pastable shortcuts:
 rm -rf /tmp/fwr_test
 mkdir -p /tmp/fwr_test
 cd /tmp/fwr_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
 $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_rest.tools id=wr

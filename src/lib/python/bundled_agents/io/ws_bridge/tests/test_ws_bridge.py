@@ -260,7 +260,7 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
 
 async def _boot_solo_bridge(kernel, *, auth=None):
     """One real bridge (with read_loop) + a raw peer transport — same shape as
-    test_inbound_call_to_unknown_target_replies_error; `auth` sets the policy."""
+    test_inbound_call_to_unknown_target_replies_error; `auth` sets both legs' rules."""
     meta = {
         "type": "create_agent",
         "handler_module": "ws_bridge.tools",
@@ -268,7 +268,9 @@ async def _boot_solo_bridge(kernel, *, auth=None):
         "peer_id": "test_peer",
     }
     if auth is not None:
-        meta["auth"] = auth
+        # `auth` used to be a shorthand for both legs. It is gone — say which leg.
+        meta["ingress_rule"] = auth
+        meta["egress_rule"] = auth
     rec = await kernel.send("kernel_state", meta)
     a_id = rec["id"]
     mt_a, mt_test = MemoryTransport.pair()
@@ -316,7 +318,7 @@ async def test_deny_inbound_default_refuses_inbound_call(two_kernels):
     assert reply["data"].get("reason") == "unauthorized", reply["data"]
 
 
-_PASSWORD_AUTH = {"policy": "password", "token_env": "FANTASTIC_GROUP_TOKEN"}
+_PASSWORD_AUTH = {"type": "password", "env": "FANTASTIC_GROUP_TOKEN"}
 
 
 async def test_password_dispatches_inbound_call_with_valid_token(
@@ -556,6 +558,13 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
         },
     )
     fb = rec["id"]
+    # Deny-all: the receiving bridge relays the inbound call to `fb` AS ITSELF, so
+    # its local reach is an explicit grant (ingress_rule says WHO may call in; the
+    # bridge's can_call says WHERE into this kernel those calls may land).
+    await kb_kern.send(
+        "kernel_state",
+        {"type": "update_agent", "id": b_id, "can_call": {fb: "*"}},
+    )
     blob = bytes(range(256)) * 50  # 12800 bytes, binary
     w = await kb_kern.send(
         fb,

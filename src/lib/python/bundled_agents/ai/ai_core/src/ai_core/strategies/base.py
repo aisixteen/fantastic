@@ -15,8 +15,8 @@ leading `role:tool` messages so the projected body is always wire-valid.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from ai_core.context import ProjectionCtx, estimate_one
 

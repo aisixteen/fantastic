@@ -15,8 +15,10 @@ second 429 surfaces a clean error
 and propagates without retry to avoid duplicate tokens.
 
 NVIDIA NIM-backed LLM agent (OpenAI-compatible). Same surface as
-`ollama_backend` (send/history/interrupt/refresh_menu) plus
-`set_api_key`/`clear_api_key`. The api_key is stored as a sidecar
+`ollama_backend` (send/history/status/recall/context_status) plus
+`set_api_key`/`clear_api_key`. There is no `interrupt` verb — an in-flight
+`send` is a kernel task, killed with the universal `ps` → `cancel` system
+verbs (the bundle's `on_cancel` closes the turn out). The api_key is stored as a sidecar
 file at `.fantastic/agents/<id>/api_key` via `file_bridge_id` —
 never in `agent.json`, never returned by reflect.
 
@@ -207,7 +209,7 @@ Skip if `NVAPI_KEY` is unset. Manual / browser-based.
 
 The chat UI is now `ai_view` — a TS view-agent in `ts/` that renders
 INLINE in the canvas, fronting any backend answering
-send/history/interrupt/status. The backend surface is covered by Tests
+send/history/status. The backend surface is covered by Tests
 5-10; this is the end-to-end browser check.
 
 ```bash
@@ -220,7 +222,8 @@ call $NB2 "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}"
 echo "open the TS canvas in a browser, point ai_view at $NB2 — see ts/SERVE.md"
 ```
 Expected: the inline chat view loads, typing streams tokens, stop button
-or ESC interrupts mid-stream. ai_view is provider-agnostic.
+or ESC cancels mid-stream (`ps` → `cancel` on the in-flight send task).
+ai_view is provider-agnostic.
 
 ## Summary
 

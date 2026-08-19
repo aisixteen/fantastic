@@ -23,17 +23,33 @@ REGISTRY: dict[str, type[IngressRule]] = {
 
 def resolve_ingress(record: dict) -> IngressRule:
     """Resolve the leg's INGRESS rule: `ingress_rule` if the record carries it, else
-    the legacy `auth` shorthand. Absent ⇒ `DenyInbound` — **sealed by default**: an IO
     edge denies until the operator opens it consciously (the deny-all design; the open
-    interior is unaffected — only IO legs resolve a rule). Unknown type ⇒ `ValueError`
-    (fail the boot loudly rather than silently mis-securing)."""
+    interior is unaffected — only IO legs resolve a rule).
+
+    UNKNOWN TYPE ⇒ `DenyInbound(unknown=<name>)` — seal, and name the bad rule in
+    every denial. It used to raise `ValueError`. The intent was "fail the boot
+    loudly", but resolution happens PER CALL, not at boot: on 2026-08-02 an agent
+    set `ingress_rule="password:kernel-internal-transcripts"`, `update_agent`
+    accepted it, and the next call to that agent raised out of the handler — an
+    unhandled task exception that killed the caller's chain with no reply at all.
+    An unresolvable rule is not an authorization, so the honest answer is to deny;
+    raising mis-secures nothing but takes the whole dispatch down with it.
+
+    `auth` is the both-directions shorthand and the per-direction field WINS over it.
+    Reading it here is not a convenience: measured 2026-08-07, this function read only
+    `ingress_rule` while `describe()` (the same package, what `reflect` reports) read
+    `ingress_rule` else `auth`. So a leg carrying `auth:"allow_all"` reflected
+    `{ingress_rule:"allow_all", sealed:false}` and denied every inbound call. Fail-CLOSED,
+    so nothing was exposed — but the posture an operator reads has to be the posture the
+    gate enforces. Rust (`fantastic-bridge/src/lib.rs:404`) and Swift
+    (`Authorizer.swift:116`) already resolved it this way; python was the outlier."""
     spec = record["ingress_rule"] if "ingress_rule" in record else record.get("auth")
     name, cfg = parse_spec(spec)
     if name is None:
         return DenyInbound()
     cls = REGISTRY.get(name)
     if cls is None:
-        raise ValueError(f"unknown ingress rule type {name!r}")
+        return DenyInbound(unknown=name)
     return construct(cls, cfg)
 
 

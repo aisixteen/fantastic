@@ -33,6 +33,20 @@ async def test_list_agents(seeded_kernel):
     assert "cli" in ids
 
 
+async def test_list_agents_points_back_at_the_briefing(seeded_kernel):
+    """`list_agents` is a natural first call and must not be a dead end.
+
+    Probe 06's two arms differed only in their opening call: `reflect` got
+    `self_extension` and tried to author 10 times, `list_agents` got bare records
+    and never tried at all. The pointer has to name the verb that carries the
+    recipe AND the field, or a caller has no way from here to there.
+    """
+    r = await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    more = r.get("more", "")
+    assert "reflect" in more
+    assert "self_extension" in more
+
+
 async def test_create_agent_requires_handler_module(seeded_kernel):
     r = await seeded_kernel.send("kernel_state", {"type": "create_agent"})
     assert "error" in r
@@ -40,12 +54,12 @@ async def test_create_agent_requires_handler_module(seeded_kernel):
 
 async def test_create_agent_emits_agent_created(seeded_kernel):
     seeded_kernel.watch("kernel_state", "watcher")
-    seeded_kernel._ensure_inbox("watcher")
+    seeded_kernel.ctx.ensure_inbox("watcher")
     await seeded_kernel.send(
         "kernel_state",
         {"type": "create_agent", "handler_module": "file_bridge.tools"},
     )
-    q = seeded_kernel._ensure_inbox("watcher")
+    q = seeded_kernel.ctx.ensure_inbox("watcher")
     events = []
     while not q.empty():
         events.append(q.get_nowait())
@@ -68,10 +82,10 @@ async def test_delete_agent_emits_event(seeded_kernel):
         "kernel_state",
         {"type": "create_agent", "handler_module": "file_bridge.tools"},
     )
-    seeded_kernel._ensure_inbox("w")
+    seeded_kernel.ctx.ensure_inbox("w")
     seeded_kernel.watch("kernel_state", "w")
     await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": rec["id"]})
-    q = seeded_kernel._ensure_inbox("w")
+    q = seeded_kernel.ctx.ensure_inbox("w")
     events = []
     while not q.empty():
         events.append(q.get_nowait())
@@ -131,10 +145,10 @@ async def test_update_agent_emits_event_with_changed_keys(seeded_kernel):
         "kernel_state",
         {"type": "create_agent", "handler_module": "file_bridge.tools"},
     )
-    seeded_kernel._ensure_inbox("w")
+    seeded_kernel.ctx.ensure_inbox("w")
     seeded_kernel.watch("kernel_state", "w")
     # drain creation events
-    q = seeded_kernel._ensure_inbox("w")
+    q = seeded_kernel.ctx.ensure_inbox("w")
     while not q.empty():
         q.get_nowait()
     await seeded_kernel.send(

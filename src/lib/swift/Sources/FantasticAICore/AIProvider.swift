@@ -10,10 +10,12 @@
 //
 // A provider is a PURE RAW-TEXT streamer: it yields `.token`s only and
 // does NOT do tool-calling — Fantastic NEVER uses a provider's native tool
-// API. This backend runs ONE provider pass per `send` (no tool loop); a
-// caller that wants tool-calling teaches its own convention via
-// `system_prompt` and drives the loop itself, parsing the completion with
-// the shared `extractToolCalls`. The shared machinery consumes all backends
+// API. Tool-calling is RAW prompt-and-parse and it belongs to the SHARED
+// BACKEND: `Assembly` teaches the `send` envelope in the system prompt, the
+// model types the call as ordinary text, `ToolParse` reads it back out of the
+// stream and `Routing` dispatches it. A provider learns nothing about any of
+// that — there is no `tools=[]`, no `tool_choice`, no native `tool_use` block,
+// and no `.toolCall` chunk to yield. The shared machinery consumes all backends
 // identically.
 //
 // IMPORTANT: this module is provider-agnostic and MUST NOT import
@@ -25,9 +27,9 @@ import FantasticJSON
 import Foundation
 
 /// One event off a provider stream, in arrival order. Providers are pure
-/// raw-text streamers, so this carries content tokens only — there is no
-/// tool-call variant (this backend does not run a tool loop; a caller that
-/// wants tool-calling parses the completed text with `extractToolCalls`).
+/// raw-text streamers, so this carries content tokens only — there is
+/// deliberately no tool-call variant: a call arrives as TEXT like everything
+/// else, and `ToolParse` reads it out of the completion afterwards.
 public enum AIChunk: Sendable {
     /// A content token — streamed to the caller live and accumulated.
     case token(String)
@@ -43,17 +45,12 @@ public protocol AIProvider: Sendable {
     /// Stream a plain-text completion for `messages` (already assembled by
     /// the shared core: history snapshot + the new user turn). Returns a
     /// stream yielding `.token`s in order. NO tools — the base class teaches
-    /// the `send` tool in the prompt and parses the call from this text
-    /// stream. Transport / HTTP failures finish the stream with a thrown error.
+    /// the `send` tool in the prompt, parses the call from this text stream and
+    /// dispatches it. Transport / HTTP failures finish the stream with a thrown error.
+    /// There is NO `stop()` hook: a generation IS a kernel task, so cancelling
+    /// it (`ps` → `cancel`) drops this stream — the `AsyncThrowingStream`
+    /// finishes and its `onTermination` cancels the upstream HTTP task, which is
+    /// the only teardown a provider ever needed. Cancellation belongs to the one
+    /// primitive, not to a per-provider seam.
     func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error>
-
-    /// Cooperative stop hook. Called when an `interrupt` targets an
-    /// in-flight stream. Providers that can proactively tear down an
-    /// upstream connection do so here; pure-polling providers (FM,
-    /// which polls the cancel epoch each snapshot) may no-op.
-    func stop() async
-}
-
-extension AIProvider {
-    public func stop() async {}
 }

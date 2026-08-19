@@ -1,7 +1,7 @@
 # binary_frame_chunking selftest (Rust)
 
 > scopes: WS, transport, multi-modal
-> requires: Rust `fantastic` binary built with `--features full`; a WebSocket client (Python `websockets` or `wscat`)
+> requires: Rust `fantastic_kernel` binary built with `--features full`; a WebSocket client (Python `websockets` or `wscat`)
 
 The Rust binary frame channel supports two modes:
 
@@ -16,9 +16,9 @@ This spec drives both modes against a running Rust daemon.
 ## Pre-flight
 
 ```bash
-cd rust
-cargo build --release --bin fantastic --features full
-BIN=$(pwd)/target/release/fantastic
+cd src/lib/rust
+cargo build --release --bin fantastic_kernel --features full
+BIN=$(pwd)/target/release/fantastic_kernel
 WORK=$(mktemp -d)
 cd "$WORK"
 

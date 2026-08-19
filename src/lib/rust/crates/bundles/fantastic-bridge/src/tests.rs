@@ -481,26 +481,51 @@ fn ingress_resolves_allow_and_deny() {
             .authorize(&call_action(None)),
         Decision::Allow
     ));
-    // string + object form (both `type` and legacy `policy`)
+    // string + object form; `type` is the ONLY object spelling (the `policy` alias was
+    // rust-only and is deleted — python's parse_spec never accepted it)
     let s = resolve(Some(&json!("deny_inbound"))).unwrap();
     assert!(matches!(s.authorize(&call_action(None)), Decision::Deny(_)));
     let o = resolve(Some(&json!({"type": "deny_inbound"}))).unwrap();
     assert!(matches!(o.authorize(&call_action(None)), Decision::Deny(_)));
-    let legacy = resolve(Some(&json!({"policy": "deny_inbound"}))).unwrap();
-    assert!(matches!(
-        legacy.authorize(&call_action(None)),
-        Decision::Deny(_)
-    ));
-    // watch/unwatch not gated by deny_inbound
+    // an object with no `type` is not a rule — refuse rather than silently defaulting
+    assert!(resolve(Some(&json!({"policy": "deny_inbound"}))).is_err());
+    // The SEAL refuses EVERY inbound kind — dispatch AND telemetry (py-canonical;
+    // this used to pin `watch` as allowed, which made the rust seal partial and
+    // let a "sealed" leg leak state to watchers).
     let watch = s.authorize(&Action {
         kind: "watch",
         target: "t",
         verb: "watch",
         token: None,
     });
-    assert!(matches!(watch, Decision::Allow));
-    // unknown ⇒ Err (fails the boot loudly)
-    assert!(resolve(Some(&json!("nope"))).is_err());
+    assert!(matches!(watch, Decision::Deny(_)));
+    // UNKNOWN ⇒ SEALS and names the bad rule — it does NOT Err.
+    //
+    // It used to be `Err`, on the theory of failing loudly. But resolution runs PER
+    // CALL, not at boot: in python that error surfaced as an unhandled exception out
+    // of the handler, which killed the caller's whole chain with no reply at all. An
+    // unresolvable rule is not an authorization, so deny — and say which name was
+    // wrong. Mirrors py `test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule`.
+    let unknown = resolve(Some(&json!("password:kernel-internal-transcripts")))
+        .expect("unknown rule must resolve to a seal, not an error");
+    match unknown.authorize(&Action {
+        kind: "call",
+        target: "t",
+        verb: "reflect",
+        token: None,
+    }) {
+        Decision::Deny(reason) => {
+            assert!(
+                reason.contains("password:kernel-internal-transcripts"),
+                "{reason}"
+            );
+            assert!(
+                reason.contains("allow_all"),
+                "must teach the legal set: {reason}"
+            );
+        }
+        Decision::Allow => panic!("an unknown ingress rule must never allow"),
+    }
 }
 
 #[test]
@@ -537,10 +562,11 @@ fn egress_resolves_and_presents() {
         .unwrap()
         .credential()
         .is_none());
-    // password ⇒ presents the env token (legacy `token_env` spelling accepted)
+    // password ⇒ presents the env token. `env` is the only spelling for the secret key
+    // (the `token_env` wire alias was rust-only and is deleted).
     let env = "FANTASTIC_GROUP_TOKEN_RS_EG";
     std::env::set_var(env, "abc");
-    let p = resolve(Some(&json!({"type": "password", "token_env": env}))).unwrap();
+    let p = resolve(Some(&json!({"type": "password", "env": env}))).unwrap();
     assert_eq!(p.credential().as_deref(), Some("abc"));
     std::env::remove_var(env);
     assert!(p.credential().is_none()); // unset ⇒ presents nothing
@@ -748,7 +774,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
-                "auth": {"policy": "password", "token_env": env},
+                "auth": {"type": "password", "env": env},
             }),
         )
         .await;

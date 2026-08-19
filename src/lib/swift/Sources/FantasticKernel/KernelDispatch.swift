@@ -32,10 +32,11 @@ extension Kernel {
         let outerSender = KernelTaskLocals.currentSender ?? target.id
         let verb = payload["type"].asString ?? ""
 
-        // Dispatch under a fresh currentSender(target.id) scope.
-        var reply = await KernelTaskLocals.$currentSender.withValue(target.id) {
-            await dispatch(target: target, payload: payload)
-        }
+        // Run the dispatch as a REGISTERED, killable task (one row in the
+        // kernel's task table) and await it — that is what makes ANY send
+        // cancelable, on any bundle. A cancelled dispatch does NOT throw out of
+        // `send`: it resolves to `{"cancelled": true}`.
+        var reply = await runDispatch(target: target, payload: payload, verb: verb)
 
         // Universal reflect post-process: compose every reflect reply
         // with the tree/bundles/readme flags + the `description` field.
@@ -165,6 +166,12 @@ extension Kernel {
             obj["version"] =
                 ProcessInfo.processInfo.environment["FANTASTIC_VERSION"].map { JSON.string($0) }
                 ?? .null
+            // The substrate's OWN verbs — answered natively by EVERY agent, so
+            // they appear in no bundle's `verbs` map. Advertised here (once, on
+            // the root) so the reflect surface stays honest: one round-trip tells
+            // a caller that work in flight is inspectable (`ps`) and killable
+            // (`cancel`), on any agent.
+            obj["system_verbs"] = Kernel.systemVerbDocs()
             // WHICH file_bridge the loader auto-persists records THROUGH (the
             // discovered store), or null = nothing wired (state in RAM). With the
             // provider's posture inline in the tree, a client sees whether
@@ -176,8 +183,40 @@ extension Kernel {
             // run-scoped runtime/env/version above): sourced from the persisted
             // root meta, minted once at boot + read back verbatim thereafter.
             obj["guid"] = target.metaValue(forKey: "guid") ?? .null
+            // The execution model is stated HERE, not only behind
+            // `readme:'self-extension'`. Measured twice on gemma-4-12B (2026-08-06):
+            // the old "the `code` IS the tool" reads as "the code DEFINES the tool",
+            // so the model authored `def run(payload): ...` and sent {type:'run'}
+            // expecting a call. Two agents shipped inert (one was valid Python),
+            // nothing was written, and {queued:true} never appeared because no job
+            // stayed alive. It had planned the structure correctly and lost on the
+            // contract.
+            //
+            // WHAT IS SHARED, AND WHAT IS NOT — this used to claim
+            // "python/rust/swift say it verbatim", which is not true of rust. Shared
+            // word-for-word are the SCRIPT facts, the ones that cost those runs: the
+            // `code` is a SCRIPT, it runs TOP TO BOTTOM when created and again on
+            // reboot, it survives a reboot, and a bare `def` only defines and exits —
+            // so the work goes at module level.
+            //
+            // The RECEIVE clause is per-runtime BY DESIGN, because the executors are.
+            // Python ships one executor and names its shape inline ("call
+            // kernel.on_message(cb) and keep running"). Rust advertises THREE with
+            // three different shapes, so it parameterizes the clause instead ("take
+            // each turn from kernel.on_message — each executor's exact shape is named
+            // below"): the callback wording is WRONG for js/lua, whose readme says
+            // "Never pass it a function" — they CALL (js: await) `on_message()` in a
+            // LOOP and it returns the next payload. This kernel keeps python's inline
+            // clause and lets `executorClause()` append each REGISTERED executor's own
+            // receive shape after it (see `Kernel.scriptExecutors`), so a js author
+            // reading it is corrected by the tail.
+            //
+            // Overstating agreement is the same defect class as two copies of one fact
+            // where one is wrong: it invites the next editor to "restore parity" by
+            // copying a clause that is false for another runtime's executors.
             obj["self_extension"] = .string(
-                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` IS the tool - it persists across reboot and auto-runs. USE - send the tool a turn by its id; it acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, send 'kernel' the payload {type:'reflect', readme:'self-extension'} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. Executor here: js_runtime.tools (its script receives turns by awaiting kernel.on_message() in a loop)."
+                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits — put the work at module level. To handle later sends, call kernel.on_message(cb) and keep running. USE - send the tool a turn by its id; a LIVE script acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, send 'kernel' the payload {type:'reflect', readme:'self-extension'} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. "
+                    + executorClause()
             )
             // Always-on doc-tree FRAME: `readmes` (the token-annotated topic
             // index) + `docs` (a one-liner teaching keyed fetch). So the manual's
@@ -317,6 +356,80 @@ extension Kernel {
 
     // ── internals ───────────────────────────────────────────────
 
+    /// Run ONE dispatch as a registered, killable task and await it — the unit
+    /// of the task table.
+    ///
+    /// **Parent propagation.** An unstructured `Task {}` INHERITS the enclosing
+    /// task-locals, so the scopes are re-established INSIDE the spawned task:
+    /// `currentSender` (the target, as before), `currentTask` (this dispatch's
+    /// OWN id, so any `send` the handler issues registers as a CHILD of it — the
+    /// table is a tree), and `currentKilled` (its own dying flag). The PARENT
+    /// link is read HERE, in the caller's task, before the spawn.
+    ///
+    /// **The cancellation contract, and why it is not ambiguous.** Both cases
+    /// surface at this one await as `nil` (the box was resolved by a `stop`):
+    ///   - THE DISPATCH was killed (someone sent `cancel`) → the awaiting caller
+    ///     is NOT being killed; it gets the reply `{"cancelled": true}`.
+    ///     Cancellation never throws out of `send`.
+    ///   - WE were killed too (our own task is inside the killed subtree) → the
+    ///     same `{"cancelled": true}` lets our handler unwind through its OWN
+    ///     cleanup (Swift cannot force-unwind it the way Rust drops a future, and
+    ///     parking it forever would strand every lock it holds). It cannot
+    ///     resurrect itself: the `currentKilled` guard below refuses every
+    ///     further `send` from a killed task — no new row, no handler — which is
+    ///     exactly the point at which Rust would have dropped the future.
+    private func runDispatch(target: Agent, payload: JSON, verb: String) async -> JSON {
+        // My own task is in a subtree the kernel is killing: register no new work
+        // and run no handler. The kernel is INERT to a killed task from the
+        // moment of the kill.
+        if KernelTaskLocals.currentKilled?.isKilled == true {
+            return .object(["cancelled": .bool(true)])
+        }
+
+        // Register BEFORE spawning: the row (and its stop handle) must exist the
+        // instant the handler can run, or a nested `send` could claim a parent
+        // that isn't in the table yet.
+        let taskId = tasks.mint(target.id)
+        let handle = TaskHandle()
+        tasks.register(
+            id: taskId,
+            agent: target.id,
+            verb: verb,
+            parent: KernelTaskLocals.currentTask,  // the dispatch we are nested inside, if any
+            handle: handle
+        )
+
+        let box = DispatchBox()
+        let work = Task {
+            let reply = await KernelTaskLocals.$currentSender.withValue(target.id) {
+                await KernelTaskLocals.$currentTask.withValue(taskId) {
+                    await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
+                        await self.dispatch(target: target, payload: payload)
+                    }
+                }
+            }
+            box.resolve(reply)
+        }
+        handle.attach(task: work, box: box)
+
+        // Structured concurrency: if the CALLER goes away (its own task is
+        // cancelled — a timeout, a dropped request, its own kill), the dispatch
+        // it spawned goes with it, exactly as when dispatch ran inline.
+        let outcome = await withTaskCancellationHandler {
+            await box.wait()
+        } onCancel: {
+            handle.stop()
+        }
+
+        // The row's self-cleaner: the dispatch is over on every exit path.
+        // (`cancel` may already have removed it — `forget` is idempotent.)
+        handle.stop()
+        tasks.forget(taskId)
+
+        // `nil` = the task was stopped. Cancellation is a REPLY, never a throw.
+        return outcome ?? .object(["cancelled": .bool(true)])
+    }
+
     private func dispatch(target: Agent, payload: JSON) async -> JSON {
         let verb = payload["type"].asString ?? ""
 
@@ -353,7 +466,14 @@ extension Kernel {
                 agentId: target.id, payload: payload, kernel: self)
             return reply ?? .null
         } catch {
-            return .object(["error": .string("\(error)")])
+            // An exception is a RESULT. A handler that throws must not take its
+            // caller down with it — the caller can act on `{"error": …}` and can
+            // act on nothing at all. `raised: true` distinguishes a handler that
+            // BLEW UP from one that deliberately answered `{"error": …}`, which is
+            // the difference between a bug in the target and a refusal by it. The
+            // AI routing path relies on it (python builds the same three-key body
+            // in `_route_reply`'s own `except`, adding the `target`).
+            return .object(["error": .string("\(error)"), "raised": .bool(true)])
         }
     }
 
@@ -364,6 +484,13 @@ extension Kernel {
         switch verb {
         case "create_agent", "delete_agent", "update_agent", "list_agents", "get":
             return true
+        // The TASK TABLE — work in flight, universal. Baked into the substrate,
+        // in no bundle's verb map: cancellation is a property of the one
+        // primitive (`send`), so EVERY agent is cancelable and a caller never
+        // needs to know which bundle it faces. Plain verbs — an AGENT can call
+        // them on another agent's work.
+        case "ps", "cancel":
+            return true
         default:
             return false
         }
@@ -372,12 +499,12 @@ extension Kernel {
 
 // MARK: - Telemetry helper
 
-/// Compact, character-bounded summary for state events. Mirrors
-/// Rust's `summarize_payload` (max 160 chars; UTF-8 safe truncation).
+/// Compact summary for state events. Mirrors py/rust `summarize_payload`.
+///
+/// NOT TRUNCATED. This used to cut at 160 chars + "...". A summary that silently
+/// drops the end of a payload lies about what was sent — the reader cannot tell a
+/// short payload from a cut one, and the dropped part is exactly what you opened
+/// telemetry to find. Eliding is a RENDER decision, where it is visible.
 func summarize(_ payload: JSON) -> String {
-    let s = payload.serialize()
-    guard s.count > 160 else { return s }
-    var truncated = String(s.prefix(157))
-    truncated.append("...")
-    return truncated
+    payload.serialize()
 }

@@ -32,7 +32,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 verbs: [
                     "send": "args: text, client_id?. Streams a response.",
                     "history": "args: client_id?. Returns prior turns.",
-                    "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "cancel": .string(CANCEL_DOC),
                     "status":
                         "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight.",
@@ -73,7 +73,8 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     public var readme: String? {
         """
         ollama_backend — local LLM agent; thin over FantasticAICore.
-        Per-client chat threads, FIFO lock; verbs: send, history, interrupt, backend_state.
+        Per-client chat threads, FIFO lock; verbs: send, history, status, backend_state. \
+        No `interrupt`: an in-flight `send` IS a kernel task — kill it with `ps` + `cancel`.
         Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
         """
     }
@@ -84,6 +85,14 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
         kernel: Kernel
     ) async throws -> JSON? {
         await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+    }
+
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate
+    /// cancels it (which drops the HTTP stream + releases the FIFO lock on its
+    /// own). There is no `interrupt` verb any more: cancellation is the kernel's.
+    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
+        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     // MARK: - meta helpers
@@ -116,10 +125,11 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// Ollama `/api/chat` streaming provider — PURE RAW TEXT: `.token` per NDJSON
-/// chunk carrying `message.content`. NO native `tools` array is sent and NO
-/// `tool_calls` are read; ai-core parses the `<tool_call>` envelope from the
-/// content text. Mirrors Rust/Python ollama providers.
+/// Ollama `/api/chat` streaming provider — PURE RAW TEXT: `.token`s decoded per
+/// NDJSON line from BOTH of the model's channels (`message.thinking` wrapped in
+/// `<think>…</think>`, `message.content` bare — see `decodeOllamaLine`). NO
+/// native `tools` array is sent and NO `tool_calls` are read; ai-core parses the
+/// `<tool_call>` envelope from the text. Mirrors Rust/Python ollama providers.
 struct OllamaProvider: AIProvider {
     let host: String
     let model: String
@@ -158,18 +168,17 @@ struct OllamaProvider: AIProvider {
                 req.body = .bytes(ByteBuffer(string: body.serialize()))
                 do {
                     let response = try await HTTPClient.shared.execute(req, timeout: .seconds(600))
+                    // ONE wrapper for the whole turn — the reasoning markers open
+                    // and close once, not per chunk (see `ThinkingWrap`).
+                    var wrap = ThinkingWrap()
                     for try await line in bytesToLines(response.body) {
-                        guard let data = line.data(using: .utf8),
-                            let parsed = try? JSON.parse(data)
-                        else { continue }
-                        let msg = parsed["message"]
-                        if let delta = msg["content"].asString, !delta.isEmpty {
-                            continuation.yield(.token(delta))
-                        }
-                        if parsed["done"].asBool == true {
-                            break
-                        }
+                        let decoded = decodeOllamaLine(line, wrap: &wrap)
+                        for token in decoded.tokens { continuation.yield(.token(token)) }
+                        if decoded.done { break }
                     }
+                    // The model spent the tail of its turn (or all of it) thinking:
+                    // close the span so the text a reader parses stays balanced.
+                    for token in wrap.finish() { continuation.yield(.token(token)) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

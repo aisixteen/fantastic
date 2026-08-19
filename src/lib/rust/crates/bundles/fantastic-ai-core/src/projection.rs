@@ -198,23 +198,39 @@ pub async fn derive_reaction(
         _ => return None,
     };
     let store = load_history(self_id, kernel, &client_id).await;
+    Some(reaction_from(
+        self_id.as_str(),
+        store.get(idx..).unwrap_or_default(),
+    ))
+}
+
+/// The reaction read itself, over the durable turns AFTER the notice cursor: did
+/// the model `recall` to its OWN id, or write to memory (`set`/`append`/`replace`)?
+///
+/// Pure, so the SHAPES it recognizes can be pinned. The parser rewrite widened
+/// that set on purpose: an UNTERMINATED envelope (nemotron omits the closing tag)
+/// and a verb-in-the-tool-name call (`{"name":"recall","arguments":{"target_id":…}}`)
+/// were both dropped here before, so a model that DID react was read as not having
+/// reacted.
+pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
     let mut recalled = false;
     let mut persisted = false;
     let mut recall_count: u64 = 0;
-    for m in store.iter().skip(idx) {
+    for m in turns {
         if m.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
         }
-        // Tool calls now live as `<tool_call>` text inside the assistant content —
-        // extract them with the same shared parser the loop uses.
+        // Tool calls live as envelope TEXT inside the assistant content — extract
+        // them with the shared parser, which is the one authority on the shapes.
         let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-        for (_name, args) in crate::tool_parse::extract_tool_calls(content) {
+        for call in crate::tool_parse::extract_tool_calls(content) {
+            let args = &call.arguments;
             let target = args.get("target_id").and_then(Value::as_str);
             let ptype = args
                 .get("payload")
                 .and_then(|p| p.get("type"))
                 .and_then(Value::as_str);
-            if target == Some(self_id.as_str()) && ptype == Some("recall") {
+            if target == Some(self_id) && ptype == Some("recall") {
                 recalled = true;
                 recall_count += 1;
             } else if matches!(ptype, Some("set") | Some("append") | Some("replace")) {
@@ -226,5 +242,55 @@ pub async fn derive_reaction(
     out.insert("recalled".to_string(), json!(recalled));
     out.insert("persisted".to_string(), json!(persisted));
     out.insert("recall_count".to_string(), json!(recall_count));
-    Some(Value::Object(out))
+    Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reaction_from;
+    use serde_json::json;
+
+    fn turn(content: &str) -> serde_json::Value {
+        json!({"role": "assistant", "content": content})
+    }
+
+    #[test]
+    fn the_reaction_reader_sees_the_shapes_the_parser_rewrite_added() {
+        // DELIBERATE widening. Both of these are reactions the reader used to miss:
+        // the first because the scanner gave up without a closing tag, the second
+        // because the verb sat in the tool NAME with no `payload` at all.
+        let turns = [
+            turn(
+                r#"<tool_call>{"name":"send","arguments":{"target_id":"me","payload":{"type":"recall"}}}"#,
+            ),
+            turn(
+                r#"<tool_call>{"name":"set","arguments":{"target_id":"mem","key":"k"}}</tool_call>"#,
+            ),
+        ];
+        let r = reaction_from("me", &turns);
+        assert_eq!(r["recalled"], true, "unterminated recall must count: {r}");
+        assert_eq!(r["recall_count"], 1);
+        assert_eq!(r["persisted"], true, "verb-in-name write must count: {r}");
+    }
+
+    #[test]
+    fn a_turn_with_no_call_is_no_reaction() {
+        let turns = [
+            turn("I have finished."),
+            json!({"role": "user", "content": "go"}),
+        ];
+        let r = reaction_from("me", &turns);
+        assert_eq!(r["recalled"], false);
+        assert_eq!(r["persisted"], false);
+        assert_eq!(r["recall_count"], 0);
+    }
+
+    #[test]
+    fn a_recall_addressed_elsewhere_is_not_this_agents_reaction() {
+        let turns = [turn(
+            r#"<tool_call>{"name":"send","arguments":{"target_id":"other","payload":{"type":"recall"}}}</tool_call>"#,
+        )];
+        let r = reaction_from("me", &turns);
+        assert_eq!(r["recalled"], false, "{r}");
+    }
 }

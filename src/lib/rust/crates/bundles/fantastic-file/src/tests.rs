@@ -142,3 +142,45 @@ fn gate_seals_by_default_and_opens_with_allow_all() {
     assert!(gate(&open, &id, "read_stream").is_none());
     assert!(gate(&open, &id, "write_stream").is_none());
 }
+
+#[test]
+fn windowed_read_pages_and_says_how_to_continue() {
+    // Py parity (`_window_text`, measured 2026-08-07): an unbounded read once put
+    // 86 KB into an LLM conversation and the next turn died mid-prefill. A read
+    // under the cap is untouched (no windowing keys); an over-cap read carries
+    // total/offset/truncated/next_offset and a hint naming the continuation.
+    let meta = serde_json::Map::new();
+    let small = window_text(&meta, &serde_json::json!({}), "abc");
+    assert_eq!(small.0, "abc");
+    assert!(
+        small.1.is_empty(),
+        "small read must carry NO windowing keys"
+    );
+
+    let big = "x".repeat(DEFAULT_MAX_READ_CHARS + 100);
+    let (chunk, extras) = window_text(&meta, &serde_json::json!({}), &big);
+    assert_eq!(chunk.len(), DEFAULT_MAX_READ_CHARS);
+    assert_eq!(extras["truncated"], serde_json::json!(true));
+    assert_eq!(
+        extras["next_offset"],
+        serde_json::json!(DEFAULT_MAX_READ_CHARS)
+    );
+    assert!(extras["hint"].as_str().unwrap().contains("offset:16384"));
+
+    // Explicit paging: the offset walk reaches the tail and the tail is final.
+    let (tail, tail_extras) = window_text(
+        &meta,
+        &serde_json::json!({"offset": DEFAULT_MAX_READ_CHARS}),
+        &big,
+    );
+    assert_eq!(tail.len(), 100);
+    assert_eq!(tail_extras["truncated"], serde_json::json!(false));
+    assert!(tail_extras.get("next_offset").is_none());
+
+    // The per-record override widens the cap.
+    let mut wide = serde_json::Map::new();
+    wide.insert("max_read_chars".into(), serde_json::json!(100_000));
+    let (all, none) = window_text(&wide, &serde_json::json!({}), &big);
+    assert_eq!(all.len(), big.len());
+    assert!(none.is_empty());
+}

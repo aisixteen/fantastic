@@ -4,21 +4,36 @@ Anthropic Messages-API LLM backend. Thin Provider + Bundle over
 (HTTPS + `x-api-key` auth + event-typed SSE streaming raw text + 429
 rate-limit retry) and a thin `Bundle` that dispatches every verb
 through `fantastic-ai-core`. The FIFO lock, prompt assembly, ONE-PASS
-generation, context management, and history all live in
-`fantastic-ai-core`. **No agentic loop.**
+generation, tool-call parsing + reply routing, context management, and history
+all live in `fantastic-ai-core`. **No loop.**
 
 This crate implements the **LLM backend contract** defined in
 `fantastic-ai-core`'s module header. Verbs + events are identical across
 backends, so a caller retargets by changing one id.
 
-## Bare completion — the tool loop is the CALLER's
-`send` does exactly ONE provider pass. This backend NEVER sends Anthropic
-`tools`/`input_schema` nor reads `tool_use` blocks; the Anthropic `Provider`
-streams plain `text_delta` content, returned verbatim. Wire translation is just
-the `system` role → Anthropic's top-level `system` param + alternating
-user/assistant TEXT turns. Any tool convention is the caller's — an authored
-authored agent teaches it via `system_prompt`, reads the completion, dispatches, and
-feeds the result back as the next `{send, text}` turn.
+## ONE pass — and the model routes its own output
+`send` does exactly ONE provider pass. **No loop**: nothing iterates on the
+model's behalf, and emitting no `<tool_call>` ends the turn — stop is the
+default and costs nothing.
+
+Tool-calling is RAW and belongs to `fantastic-ai-core`. This backend NEVER sends
+Anthropic `tools`/`input_schema` nor reads `tool_use` blocks: the model writes the
+envelope as TEXT, the Anthropic `Provider` streams that text through as plain
+`text_delta` content knowing nothing about it, and ai-core parses and dispatches
+it. Wire translation is just the `system` role → Anthropic's top-level `system`
+param + alternating user/assistant TEXT turns.
+
+```
+<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>
+```
+
+Each call is dispatched and its reply delivered to that call's `reply_to`, which
+DEFAULTS TO SELF — leave it out and the answer arrives as the model's next turn,
+tagged `[reply to <id>]`; `null`/`"none"` discards it. `reply_to:"self"` is what
+makes a chain, one pass at a time, and only because the model asked again. A
+caller's optional `send_to` hands the pass's TEXT to one agent id instead, once,
+without propagating. A `system_prompt` override replaces the default system block
+whole, for a caller that wants a different role.
 
 ## Context management — owned HERE
 Per-client `chat.json` history, auto-compaction on overflow, and the `recall` /
@@ -30,8 +45,16 @@ CALLER's own `client_id` inbox — NOT the backend agent's own inbox.
 A watcher of the backend agent's id does NOT see these events.
 
 Verbs: `send` · `history` · `recall` · `context_status` ·
-`interrupt` · `status` · `boot` · `shutdown` ·
+`status` · `boot` · `shutdown` ·
 `reflect` · `set_api_key` · `clear_api_key`.
+
+There is NO `interrupt` verb: an in-flight `send` IS a kernel task. Cancel a
+turn with the substrate's universal system verbs — `send "kernel" {type:"ps"}`,
+find the row `{agent:<this id>, verb:"send"}`, then `send "kernel"
+{type:"cancel", task_id:"<agent>:<n>"}`. The turn closes with
+`status(phase="done", reason="cancelled")` + `done`, the HTTP stream and the
+FIFO lock are released, and the blocked caller's `send` resolves to
+`{cancelled:true}`.
 
 Extras beyond the contract:
 

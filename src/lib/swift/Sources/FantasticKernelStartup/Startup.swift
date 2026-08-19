@@ -24,9 +24,6 @@ import FantasticProxyAgent
 import FantasticScheduler
 import FantasticTools
 
-#if canImport(JavaScriptCore)
-    import FantasticJSRuntime
-#endif
 import FantasticWeb
 import FantasticWebRest
 import FantasticWebWS
@@ -34,9 +31,7 @@ import FantasticYamlState
 import Foundation
 
 #if os(macOS)
-    import FantasticLocalRunner
-    import FantasticPythonRuntime
-    import FantasticSshRunner
+    import FantasticExecBridge
     import FantasticTerminalBackend
 #endif
 
@@ -50,11 +45,6 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
     r.register("scheduler.tools", SchedulerBundle())
-    #if canImport(JavaScriptCore)
-        // In-process JS executor (durable authored agents). Apple platforms
-        // ship JavaScriptCore; mirrors the Rust js_runtime bundle.
-        r.register("js_runtime.tools", JsRuntimeBundle())
-    #endif
     // TWO io_bridge derivations sharing one engine (mirrors py's separate
     // ws_bridge + relay_connector bundles): ws/memory transports vs the relay-kernel router.
     r.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
@@ -69,9 +59,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     // unavailable on non-Apple, mirroring foundation_models_backend.
     r.register("apple_kvs.tools", AppleKVSBundle())
     #if os(macOS)
-        r.register("local_runner.tools", LocalRunnerBundle())
-        r.register("python_runtime.tools", PythonRuntimeBundle())
-        r.register("ssh_runner.tools", SshRunnerBundle())
+        r.register("exec_bridge.tools", ExecBridgeBundle())
         r.register("terminal_backend.tools", TerminalBackendBundle())
     #endif
     return r

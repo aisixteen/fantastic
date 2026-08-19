@@ -20,6 +20,11 @@ futures-util = "0.3"
 # Terminal-proxy mode render + startup billboard.
 tui-term = "0.2"
 vt100 = "0.15"
+# Native in-frame code editor for authoring custom JS connectors (design 28). Driven
+# via TextArea's EXPLICIT edit methods (not `input(Event)`), so no crossterm Event
+# crosses the tui-textarea boundary. `ratatui`-only features → it reuses ratatui
+# 0.29 with NO second crossterm pulled in (the mismatch the design warns about).
+tui-textarea = { version = "0.7", default-features = false, features = ["ratatui"] }
 
 fantastic-kernel = { path = "../lib/rust/crates/fantastic-kernel" }
 fantastic-host = { path = "../shared/kernel" }

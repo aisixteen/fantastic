@@ -60,7 +60,7 @@ The Rust runtime ships the same 21 bundles as Python and serves the
 same user-facing wire surfaces (CLI, HTTP, WS, REST, PTY, browser).
 Two kinds of specs apply:
 
-### Cross-runtime — drive Python's per-bundle specs against `./target/release/fantastic`
+### Cross-runtime — drive Python's per-bundle specs against `./target/release/fantastic_kernel`
 
 The Python `selftest.md` index ([`../python/selftest.md`](../python/selftest.md))
 points at 19 per-bundle specs. They describe user-facing behaviour
@@ -69,11 +69,11 @@ the Rust binary by substituting the binary path:
 
 ```bash
 # Build the Rust binary once:
-cd rust && cargo build --release --bin fantastic
+cd src/lib/rust && cargo build --release --bin fantastic_kernel
 
 # Then run Python selftests as written, but with the Rust binary:
 export PATH="$(pwd)/target/release:$PATH"
-which fantastic    # → /<your-repo>/rust/target/release/fantastic
+which fantastic    # → /<your-repo>/rust/target/release/fantastic_kernel
 fantastic --version 2>&1 | head -1
 
 # Drive each Python per-bundle spec as written.
@@ -105,8 +105,8 @@ exercise:
 | File | Scopes | Requires |
 |---|---|---|
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `cargo` |
-| [`selftest/python_runtime_resolution.md`](selftest/python_runtime_resolution.md) | python_runtime, env, PATH | Rust `fantastic` binary, optional Python on PATH |
-| [`selftest/binary_frame_chunking.md`](selftest/binary_frame_chunking.md) | WS, transport, multi-modal | Rust `fantastic` binary, websocket client |
+| [`selftest/python_runtime_resolution.md`](selftest/python_runtime_resolution.md) | python_runtime, env | Rust `fantastic_kernel` binary, a real Python to name (one test skips without it) |
+| [`selftest/binary_frame_chunking.md`](selftest/binary_frame_chunking.md) | WS, transport, multi-modal | Rust `fantastic_kernel` binary, websocket client |
 | [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md) | persistence, cross-runtime | Both Python `uv sync` and Rust binary |
 
 These four specs run only against the Rust runtime — they assert

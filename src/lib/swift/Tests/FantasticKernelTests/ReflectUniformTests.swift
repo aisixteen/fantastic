@@ -130,6 +130,19 @@ struct ReflectUniformTests {
         }
     }
 
+    /// The authoring doc must teach the SAME execution model as the distilled
+    /// `self_extension`, and BOTH receive shapes — js/lua await `on_message()` in a
+    /// registers a CALLBACK — the ONE receive shape now that exec_bridge is the
+    /// one executor (the in-proc loop engines are deleted).
+    @Test func selfExtensionDocStatesScriptModelAndTheReceiveShape() throws {
+        let body = try #require(RootDocs.all.first { $0.key == "self-extension" }?.body)
+        #expect(body.contains("SCRIPT"), "\(body)")
+        #expect(body.contains("top to bottom"), "\(body)")
+        #expect(body.contains("module level"), "\(body)")
+        #expect(body.contains("kernel.on_message(callback)"), "\(body)")
+        #expect(!body.contains("IS the tool"), "\(body)")
+    }
+
     @Test func rootReflectCarriesReadmesFrame() async {
         let kernel = makeKernel()
         let r = await kernel.send("core", ["type": "reflect"])
@@ -173,5 +186,71 @@ struct ReflectUniformTests {
         let kid = await kernel.send("kid", ["type": "reflect"])
         #expect(kid["readmes"] == nil || kid["readmes"].isNull)
         #expect(kid["docs"] == nil || kid["docs"].isNull)
+    }
+
+    // ─── self_extension: the authoring contract ────────────────
+    //
+    // Measured twice on gemma-4-12B (2026-08-06): with the old "the `code` IS the
+    // tool" the model read "the code DEFINES the tool", authored
+    // `def run(payload): ...` and sent {type:'run'} expecting a call. Two agents
+    // shipped inert, nothing was written, {queued:true} never appeared because no
+    // job stayed alive. Both facts below cost a whole run when wrong, and neither
+    // was pinned by any swift test.
+
+    @Test func selfExtensionStatesTheExecutionModel() async throws {
+        let kernel = makeKernel()
+        let s = try #require(
+            await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+        #expect(s.contains("SCRIPT"), "\(s)")
+        #expect(s.contains("top to bottom"), "\(s)")
+        // The specific misread that burned two runs: a bare `def` is inert.
+        #expect(s.contains("`def`"), "\(s)")
+        #expect(s.contains("module level"), "\(s)")
+        #expect(s.contains("kernel.on_message(cb)"), "\(s)")
+        // The superseded phrasing must be gone, not merely supplemented.
+        #expect(!s.contains("IS the tool"), "\(s)")
+        // Only a LIVE script acks — the model waited for {queued:true} from a
+        // script that had already exited.
+        #expect(s.contains("a LIVE script acks {queued:true}"), "\(s)")
+    }
+
+    /// The advertised executor list must be DERIVED, never hard-coded: it named
+    /// `js_runtime.tools` unconditionally, so on macOS `python_runtime.tools`
+    /// (registered under `#if os(macOS)`) went unnamed, and on a non-Apple build
+    /// the string named a module that is not registered at all. Both directions
+    /// are asserted here against `availableBundles()`.
+    @Test func selfExtensionNamesOnlyRegisteredExecutors() async throws {
+        for (module, shape) in Kernel.scriptExecutors {
+            let registry = BundleRegistry()
+            registry.register("echo.tools", EchoBundle())
+            registry.register(module, EchoBundle())
+            let kernel = Kernel(storage: .inMemory, bundles: registry)
+            let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+            kernel.register(root)
+            kernel.setRoot(root)
+
+            let s = try #require(
+                await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+            #expect(s.contains(module), "registered \(module) but self_extension omits it: \(s)")
+            #expect(s.contains(shape), "\(module) named without its receive shape: \(s)")
+            // A registered echo bundle is no script executor.
+            #expect(!s.contains("echo.tools"), "\(s)")
+            for other in Kernel.scriptExecutors.map(\.handlerModule) where other != module {
+                #expect(!s.contains(other), "phantom executor \(other) named: \(s)")
+            }
+        }
+    }
+
+    @Test func selfExtensionSaysSoWhenNoExecutorIsRegistered() async throws {
+        // makeKernel registers echo only — no handler_module here runs authored
+        // `code`, and a caller must learn that from the same round-trip rather
+        // than being pointed at a module that cannot be created.
+        let kernel = makeKernel()
+        let s = try #require(
+            await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+        #expect(s.contains("NO script executor"), "\(s)")
+        for module in Kernel.scriptExecutors.map(\.handlerModule) {
+            #expect(!s.contains(module), "unregistered \(module) named: \(s)")
+        }
     }
 }

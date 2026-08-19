@@ -11,7 +11,7 @@ bundles.
 ## Pre-flight
 
 ```bash
-cd rust
+cd src/lib/rust
 cargo --version
 rustc --version
 ```
@@ -58,7 +58,7 @@ logs the weak-load skip line.
 ```bash
 WORK=$(mktemp -d)
 cargo build -p fantastic-cli --release --no-default-features --features embedded
-BIN=./target/release/fantastic
+BIN=./target/release/fantastic_kernel
 
 # Stage a record without booting (just write agent.json directly).
 mkdir -p "$WORK/.fantastic/agents/tb"
