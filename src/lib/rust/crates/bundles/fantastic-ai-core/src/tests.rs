@@ -312,6 +312,10 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
                 "file_bridge_id": file_id,
                 "model": "test-model",
                 "context_window": 32768,
+                // Deny-all: the backend persists history to its store directly and
+                // streams its turn to `cli` — both explicit grants (wiring pairs
+                // with granting).
+                "can_call": { file_id: "*", "cli": "*" },
             }),
         )
         .await;

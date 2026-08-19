@@ -22,6 +22,7 @@ import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
 import FantasticProxyAgent
 import FantasticScheduler
+import FantasticStaticLoader
 import FantasticTools
 
 import FantasticWeb
@@ -45,6 +46,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
     r.register("scheduler.tools", SchedulerBundle())
+    r.register(StaticLoaderBundle.handlerModule, StaticLoaderBundle())
     // TWO io_bridge derivations sharing one engine (mirrors py's separate
     // ws_bridge + relay_connector bundles): ws/memory transports vs the relay-kernel router.
     r.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))

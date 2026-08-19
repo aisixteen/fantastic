@@ -372,6 +372,7 @@ dependencies = [
  "fantastic-ollama-backend",
  "fantastic-proxy-agent",
  "fantastic-scheduler",
+ "fantastic-static-loader",
  "fantastic-terminal-backend",
  "fantastic-tools",
  "fantastic-web",
@@ -500,6 +501,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fantastic-static-loader"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-kernel",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

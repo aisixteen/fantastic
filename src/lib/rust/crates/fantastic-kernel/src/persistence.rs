@@ -117,11 +117,13 @@ async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str) ->
     // Box::pin breaks the async TYPE-recursion cycle: a persist (reached from
     // `send`'s dispatch) sends to the provider, whose dispatch could re-enter
     // `send`. Boxing erases the future type at this hop.
-    let (meta, body) = Box::pin(kernel.send_with_binary(
+    // Operator authority: the substrate reading its OWN store is persistence
+    // bookkeeping, not an agent reaching out — it never runs against a grant.
+    let (meta, body) = Box::pin(crate::send::with_operator(kernel.send_with_binary(
         store_id,
         serde_json::json!({"type": "read_stream", "path": path}),
         Vec::new(),
-    ))
+    )))
     .await;
     if meta.get("error").is_some() {
         return Vec::new();
@@ -208,11 +210,12 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     };
     let json = serde_json::to_string_pretty(&Value::Object(on_disk))
         .expect("merged record is JSON-serializable");
-    Box::pin(kernel.send_with_binary(
+    // Operator authority: the loader persisting a record to its own store.
+    Box::pin(crate::send::with_operator(kernel.send_with_binary(
         &store_id,
         serde_json::json!({"type": "write_stream", "path": af, "truncate": true}),
         json.into_bytes(),
-    ))
+    )))
     .await;
     if let Some(code) = code {
         let cf = if reldir.is_empty() {
@@ -220,11 +223,11 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
         } else {
             format!("{reldir}/{CODE_FILE}")
         };
-        Box::pin(kernel.send_with_binary(
+        Box::pin(crate::send::with_operator(kernel.send_with_binary(
             &store_id,
             serde_json::json!({"type": "write_stream", "path": cf, "truncate": true}),
             code.into_bytes(),
-        ))
+        )))
         .await;
     }
     Ok(())
@@ -253,11 +256,11 @@ pub async fn seed_readme(kernel: &Arc<Kernel>, agent: &Agent, readme: &str) -> K
     if !read_via_store(kernel, &store_id, &path).await.is_empty() {
         return Ok(());
     }
-    Box::pin(kernel.send_with_binary(
+    Box::pin(crate::send::with_operator(kernel.send_with_binary(
         &store_id,
         serde_json::json!({"type": "write_stream", "path": path, "truncate": true}),
         readme.as_bytes().to_vec(),
-    ))
+    )))
     .await;
     Ok(())
 }
@@ -280,10 +283,10 @@ pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     if reldir.is_empty() {
         return Ok(()); // never remove the root
     }
-    let _ = Box::pin(kernel.send(
+    let _ = Box::pin(crate::send::with_operator(kernel.send(
         &store_id,
         serde_json::json!({"type": "delete", "path": reldir}),
-    ))
+    )))
     .await;
     Ok(())
 }

@@ -62,12 +62,16 @@ async fn mk_kernel(
             }),
         )
         .await;
+    let store_grant = fid.clone();
     let mut create = json!({
         "type":"create_agent",
         "handler_module":HANDLER_MODULE,
         "id": ant,
-        "file_bridge_id": fid,
+        "file_bridge_id": fid.clone(),
         "model": "test-model",
+        // Deny-all: the backend persists its api_key/history to its store directly
+        // and streams its turn to `cli` — both explicit grants.
+        "can_call": { store_grant: "*", "cli": "*" },
     });
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);

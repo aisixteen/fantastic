@@ -32,6 +32,23 @@ extension Kernel {
         let outerSender = KernelTaskLocals.currentSender ?? target.id
         let verb = payload["type"].asString ?? ""
 
+        // ── CALL GATE — deny-all for agent-originated sends ──────────────
+        // Trust boundary = who ORIGINATED the send. An operator send
+        // (`currentSender` is nil: CLI/bootstrap/loader-at-boot/test, or a verb
+        // completing its own side effect under `withValue(nil)`) is the root of
+        // trust → ungated. An agent send is DENY-ALL: permitted only by a grant on
+        // the sender's record. `reflect` is never gated.
+        if verb != "reflect", let orig = KernelTaskLocals.currentSender {
+            let decision = gate(sender: orig, verb: verb, target: target)
+            if !decision.allowed {
+                return .object([
+                    "error": .string(decision.reason),
+                    "reason": .string("unauthorized"),
+                    "hint": .string(decision.hint),
+                ])
+            }
+        }
+
         // Run the dispatch as a REGISTERED, killable task (one row in the
         // kernel's task table) and await it — that is what makes ANY send
         // cancelable, on any bundle. A cancelled dispatch does NOT throw out of
@@ -73,6 +90,20 @@ extension Kernel {
             return (.object(["error": .string("no agent \(targetId)")]), Data())
         }
         let verb = header["type"].asString ?? ""
+        // Call gate (see `send`) — the binary path carries the same agent-originated
+        // write_stream/read_stream sends. Operator + reflect skip.
+        if verb != "reflect", let orig = KernelTaskLocals.currentSender {
+            let decision = gate(sender: orig, verb: verb, target: target)
+            if !decision.allowed {
+                return (
+                    .object([
+                        "error": .string(decision.reason),
+                        "reason": .string("unauthorized"),
+                        "hint": .string(decision.hint),
+                    ]), Data()
+                )
+            }
+        }
         let (reply, body): (JSON?, Data) = await KernelTaskLocals.$currentSender.withValue(
             target.id
         ) {
@@ -507,4 +538,25 @@ extension Kernel {
 /// telemetry to find. Eliding is a RENDER decision, where it is visible.
 func summarize(_ payload: JSON) -> String {
     payload.serialize()
+}
+
+extension Kernel {
+    /// The call gate's authorization decision for an agent-originated send.
+    /// Reads the SENDER's `can_call` + tree facts (parent, children, root) and
+    /// delegates to `authorizeCall`. A sender with no record cannot be vouched
+    /// for → empty grant → deny-all (never a hole).
+    func gate(sender: AgentId, verb: String, target: Agent) -> Decision {
+        let loaderId = root?.id.value
+        guard let senderAgent = agent(sender) else {
+            return authorizeCall(
+                canCall: .null, verb: verb, targetId: target.id.value,
+                senderId: sender.value, parentId: nil, childIds: [], loaderId: loaderId)
+        }
+        let canCall = senderAgent.metaValue(forKey: "can_call") ?? .null
+        let parentId = senderAgent.parentId?.value
+        let childIds = Set(senderAgent.childIds().map { $0.value })
+        return authorizeCall(
+            canCall: canCall, verb: verb, targetId: target.id.value,
+            senderId: sender.value, parentId: parentId, childIds: childIds, loaderId: loaderId)
+    }
 }

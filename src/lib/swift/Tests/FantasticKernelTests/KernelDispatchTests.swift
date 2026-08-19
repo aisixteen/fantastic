@@ -158,8 +158,11 @@ struct KernelSubscribeTests {
         let kernel = makeKernel()
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
+        // `reflect` (ungated) isolates this test to sender ATTRIBUTION — a
+        // synthetic "ui" sender is not a real agent, so a gated verb would be
+        // deny-all; attribution on the state event is what's under test here.
         _ = await kernel.sendAs(
-            sender: "ui", target: "core", payload: ["type": "list_agents"])
+            sender: "ui", target: "core", payload: ["type": "reflect"])
         let evs = cap.snapshot()
         let sends = evs.filter { $0["type"].asString == "send" }
         #expect(sends.last?["sender"].asString == "ui")

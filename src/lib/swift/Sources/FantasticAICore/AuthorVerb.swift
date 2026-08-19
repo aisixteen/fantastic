@@ -249,7 +249,14 @@ extension AIBackend {
                     + "missing one of them. Emit your next act now."
                 continue
             }
-            let result = await kernel.send(AgentId(target), actPayload)
+            // The tools an author builds are ITS OWN subtree. Route every
+            // structural mutation through this agent's own id, so create_agent
+            // lands the tool as a child of the author and later delete/update edit
+            // it — all baseline authority (fork + $children), zero grants, and the
+            // tools are owned + cleaned up with the author.
+            let actVerb = actPayload["type"].asString ?? ""
+            let dispatchTarget = privilegedVerbs.contains(actVerb) ? agent.id : AgentId(target)
+            let result = await kernel.send(dispatchTarget, actPayload)
             if actPayload["type"].asString == "create_agent",
                 actPayload["handler_module"].asString == "exec_bridge.tools",
                 result["error"].asString == nil,

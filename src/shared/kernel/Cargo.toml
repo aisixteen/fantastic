@@ -27,6 +27,7 @@ fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
 fantastic-core = { path = "../../lib/rust/crates/bundles/fantastic-core" }
 fantastic-file = { path = "../../lib/rust/crates/bundles/fantastic-file" }
 fantastic-yaml-state = { path = "../../lib/rust/crates/bundles/fantastic-yaml-state" }
+fantastic-static-loader = { path = "../../lib/rust/crates/bundles/fantastic-static-loader" }
 fantastic-web = { path = "../../lib/rust/crates/bundles/fantastic-web" }
 fantastic-web-ws = { path = "../../lib/rust/crates/bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../../lib/rust/crates/bundles/fantastic-web-rest" }
@@ -38,13 +39,7 @@ fantastic-anthropic-backend = { path = "../../lib/rust/crates/bundles/fantastic-
 fantastic-bridge = { path = "../../lib/rust/crates/bundles/fantastic-bridge" }
 fantastic-proxy-agent = { path = "../../lib/rust/crates/bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../../lib/rust/crates/bundles/fantastic-tools" }
-fantastic-lua-runtime = { path = "../../lib/rust/crates/bundles/fantastic-lua-runtime" }
-fantastic-js-runtime = { path = "../../lib/rust/crates/bundles/fantastic-js-runtime" }
-fantastic-author = { path = "../../lib/rust/crates/bundles/fantastic-author" }
 fantastic-terminal-backend = { path = "../../lib/rust/crates/bundles/fantastic-terminal-backend" }
-fantastic-python-runtime = { path = "../../lib/rust/crates/bundles/fantastic-python-runtime" }
-fantastic-local-runner = { path = "../../lib/rust/crates/bundles/fantastic-local-runner" }
-fantastic-ssh-runner = { path = "../../lib/rust/crates/bundles/fantastic-ssh-runner" }
 
 [dev-dependencies]
 # Gateway discover() unit tests build fixture `.fantastic/` trees in temp dirs.

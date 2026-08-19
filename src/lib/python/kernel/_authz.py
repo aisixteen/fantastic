@@ -149,8 +149,10 @@ def authorize_call(
         False,
         reason=f"{sender_id} may not call {verb!r} on {target_id}",
         hint=(
-            "grant it on the sender's record (operator only): "
-            f"update_agent {sender_id} can_call.{target_id}='[\"{verb}\"]' "
-            "— or '*' for all verbs. Agents are deny-all by default."
+            f"grant it on {sender_id}'s can_call — set it at create_agent, ask the "
+            f"operator, or open your OWN reach: "
+            f"send({sender_id}, {{type:'update_agent', id:'{sender_id}', "
+            f"can_call:{{'{target_id}':['{verb}']}}}}) (use '*' for all verbs). "
+            "Agents are deny-all by default."
         ),
     )

@@ -21,6 +21,7 @@
 #![deny(missing_docs)]
 
 pub mod agent;
+pub mod authz;
 pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;
@@ -39,10 +40,11 @@ pub mod tasks;
 pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord};
+pub use authz::{authorize_call, default_can_call, Decision, PRIVILEGED_VERBS};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
-pub use send::{current_sender, with_sender, CURRENT_SENDER};
+pub use send::{current_sender, with_operator, with_sender, CURRENT_SENDER};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, TaskId, TaskTable, CURRENT_TASK};

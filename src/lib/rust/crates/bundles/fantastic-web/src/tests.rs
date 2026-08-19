@@ -268,6 +268,10 @@ async fn web_with_rest_child_serves_rest() {
                 "type": "create_agent",
                 "handler_module": "web_rest.tools",
                 "id": rest_id,
+                // Deny-all: an inbound relay dispatches browser calls into the
+                // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
+                // says WHERE into the kernel it lands. This test POSTs to `core`.
+                "can_call": { "core": "*" },
             }),
         )
         .await;

@@ -37,6 +37,10 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
     reg.register(
+        fantastic_static_loader::HANDLER_MODULE,
+        fantastic_static_loader::StaticLoaderBundle,
+    );
+    reg.register(
         "ollama_backend.tools",
         fantastic_ollama_backend::OllamaBackendBundle,
     );
