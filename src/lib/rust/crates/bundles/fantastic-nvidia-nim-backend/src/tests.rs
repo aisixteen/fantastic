@@ -60,12 +60,15 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
             }),
         )
         .await;
+    let store_grant = fid.clone();
     let mut create = json!({
         "type":"create_agent",
         "handler_module":HANDLER_MODULE,
         "id": nim,
-        "file_bridge_id": fid,
+        "file_bridge_id": fid.clone(),
         "model": "test-model",
+        // Deny-all: persists to its store directly + streams to `cli`.
+        "can_call": { store_grant: "*", "cli": "*" },
     });
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);

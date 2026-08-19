@@ -9,6 +9,7 @@
 
 import FantasticJSON
 import FantasticKernel
+import OrderedCollections
 import Foundation
 import Testing
 
@@ -422,6 +423,14 @@ func bootMockKernel(
             "handler_module": .string("mock_slow.tools"),
             "id": .string("slowpoke"),
         ]))
+    // Deny-all: a backend persists to its `store`, streams to `cli`, and routes
+    // replies to its peers (probe/raiser/slowpoke + the other backends). Grant
+    // exactly those lateral edges — wiring pairs with granting.
+    var grant: OrderedCollections.OrderedDictionary<String, JSON> = [
+        "store": .string("*"), "cli": .string("*"),
+        "probe": .string("*"), "raiser": .string("*"), "slowpoke": .string("*"),
+    ]
+    for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
     for id in backendIds {
         let r = await kernel.send(
@@ -432,6 +441,7 @@ func bootMockKernel(
                 "id": .string(id),
                 "file_bridge_id": .string("store"),
                 "context_window": .integer(contextWindow),
+                "can_call": .object(grant),
             ]))
         out[id] = AgentId(r["id"].asString ?? id)
     }

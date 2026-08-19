@@ -144,6 +144,17 @@ extension Kernel {
             }
         }
 
+        // Stamp the Unix baseline grant, MERGED under any explicit `can_call`:
+        // every created agent may command its own subtree ($self/$children) and
+        // answer its creator ($parent). A BASELINE, not a lateral grant — explicit
+        // keys in the payload add edges on top; deny-all governs every edge NOT here.
+        var grant: OrderedDictionary<String, JSON> = [:]
+        if case .object(let base) = defaultCanCall() { grant = base }
+        if case .object(let explicit) = meta["can_call"] ?? .null {
+            for (k, v) in explicit { grant[k] = v }
+        }
+        meta["can_call"] = .object(grant)
+
         // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
         // used to bypass it, so a record could be born with meta its own bundle
         // refuses). Record is empty at create: the merged view IS the patch.
@@ -184,7 +195,12 @@ extension Kernel {
 
         // Fire `boot` on the new agent. Failures are logged via the
         // reply but don't undo the create — matches Rust's behaviour.
-        let bootReply = await send(newAgent.id, .object(["type": .string("boot")]))
+        // Operator authority: booting the child is a side effect of the already-
+        // authorized create_agent, not the parent reaching out — so it never runs
+        // against the parent's grant.
+        let bootReply = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await send(newAgent.id, .object(["type": .string("boot")]))
+        }
         if let err = bootReply["error"].asString {
             // Telemetry-only — boot errors don't cancel the create.
             _ = err

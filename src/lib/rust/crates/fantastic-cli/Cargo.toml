@@ -19,6 +19,7 @@ fantastic-web = { path = "../bundles/fantastic-web" }
 fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
 fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
+fantastic-static-loader = { path = "../bundles/fantastic-static-loader" }
 fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
 fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }

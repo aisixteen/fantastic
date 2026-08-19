@@ -100,6 +100,21 @@ pub(crate) async fn create_from_payload(
         }
     }
 
+    // Stamp the Unix baseline grant, MERGED under any explicit `can_call`: every
+    // created agent may command its own subtree ($self/$children) and answer its
+    // creator ($parent). It is a BASELINE, not a lateral grant — explicit keys in
+    // the payload add edges on top (and may override a baseline key by naming it),
+    // but never have to re-declare it. Deny-all still governs every edge NOT here.
+    {
+        let mut grant = crate::authz::default_can_call();
+        if let Some(Value::Object(explicit)) = meta.get("can_call").cloned() {
+            for (k, v) in explicit {
+                grant.insert(k, v);
+            }
+        }
+        meta.insert("can_call".into(), Value::Object(grant));
+    }
+
     // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical: create
     // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
     // and REFUSED one update later — two answers for one field). Record is empty
@@ -163,8 +178,13 @@ pub(crate) async fn create_from_payload(
     // async future is recursive and Rust requires explicit indirection.
     let new_id = new_agent.id.clone();
     let kernel_for_boot = Arc::clone(kernel);
-    let boot_reply =
-        Box::pin(async move { kernel_for_boot.send(&new_id, json!({"type": "boot"})).await }).await;
+    // Operator authority: booting the child is a side effect of the already-
+    // authorized create_agent (the kernel initializing what it was told to make),
+    // not the parent reaching out — so it never runs against the parent's grant.
+    let boot_reply = Box::pin(crate::send::with_operator(async move {
+        kernel_for_boot.send(&new_id, json!({"type": "boot"})).await
+    }))
+    .await;
     let new_id = new_agent.id.clone();
     if let Some(err) = boot_reply.get("error").and_then(Value::as_str) {
         tracing::warn!(agent = %new_id, error = %err, "boot after create_agent errored");

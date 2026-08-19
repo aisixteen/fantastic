@@ -53,7 +53,13 @@ async fn create_tools_agent(kernel: &Arc<Kernel>) -> AgentId {
     let r = kernel
         .send(
             &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":HANDLER_MODULE,"id":"tools"}),
+            json!({
+                "type":"create_agent","handler_module":HANDLER_MODULE,"id":"tools",
+                // Deny-all: `dispatch` routes to the registered tool's target agent
+                // (a sibling proxy) — lateral egress, so grant the proxy ids these
+                // tests dispatch to.
+                "can_call": { "calc": "*", "echo": "*", "stub": "*", "x": "*" },
+            }),
         )
         .await;
     assert_eq!(r["id"], "tools", "create_agent reply: {r}");

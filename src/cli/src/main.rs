@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         Some("config") => return cmd_config(&args[1..]),
         Some("up") => return cmd_up(&args[1..]).await,
         Some("k") => return cmd_k(&args[1..]).await,
+        Some("init") => return cmd_init(&args[1..]).await,
         Some("down") => return cmd_down().await,
         Some("--help") | Some("-h") | Some("help") => {
             print!("{}", usage());
@@ -125,7 +126,9 @@ async fn main() -> Result<()> {
 
 /// Every recognized top-level subcommand / flag. Anything else is refused with
 /// the usage text (exit 2) instead of silently launching the TUI.
-const KNOWN_SUBCOMMANDS: [&str; 8] = ["config", "up", "k", "down", "demo", "--smoke", "ai", "ask"];
+const KNOWN_SUBCOMMANDS: [&str; 9] = [
+    "config", "up", "k", "init", "down", "demo", "--smoke", "ai", "ask",
+];
 
 /// The `--help` / unknown-subcommand usage text — the headless surface in one
 /// screen (the interactive surface is documented in-app via `/help`).
@@ -144,6 +147,8 @@ usage: fantastic [subcommand]
   up [--container] [--image X] [--runtime rust|python|swift]
                         attach to (or spawn) the workspace kernel in cwd
   k <id> <verb> [k=v …] send a verb to a workspace agent (over the gateway)
+  init <loader> <file>  seed a declarative-roster loader (e.g.
+                        `init static_loader ./fantastic.yaml`) + boot it
   down                  shut the workspace kernel down
   demo                  play the headless A→Z composition demo
   --smoke               compose the host, print the reflect tree, exit
@@ -231,6 +236,43 @@ async fn cmd_k(args: &[String]) -> Result<()> {
     let ws = Workspace::new(std::env::current_dir()?);
     let handle = ws.attach_or_spawn(Runtime::Rust).await?;
     let reply = handle.send(id, Value::Object(payload)).await?;
+    println!("{}", serde_json::to_string_pretty(&reply)?);
+    Ok(())
+}
+
+/// `fantastic init <loader_bundle> <manifest>` — seed a DECLARATIVE loader into
+/// the cwd workspace kernel. Creates a loader agent (e.g. `static_loader`) under
+/// the root with a `manifest` field, then relies on `create_agent` auto-booting
+/// it — the loader reads the manifest and hydrates the declared roster (as
+/// operator). One send: create_agent boots the child.
+///
+///     fantastic init static_loader ./fantastic.yaml
+async fn cmd_init(args: &[String]) -> Result<()> {
+    if args.len() < 2 {
+        eprintln!(
+            "usage: fantastic init <loader_bundle> <manifest>\n   \
+             e.g. fantastic init static_loader ./fantastic.yaml"
+        );
+        std::process::exit(2);
+    }
+    let loader = &args[0];
+    let manifest = &args[1];
+    let ws = Workspace::new(std::env::current_dir()?);
+    let handle = ws.attach_or_spawn(Runtime::Rust).await?;
+    // create_agent to the root (`core`): the loader becomes a child of root and
+    // auto-boots → it hydrates the manifest's roster. The kernel never parses
+    // YAML; the loader bundle does.
+    let reply = handle
+        .send(
+            "core",
+            json!({
+                "type": "create_agent",
+                "handler_module": format!("{loader}.tools"),
+                "id": loader,
+                "manifest": manifest,
+            }),
+        )
+        .await?;
     println!("{}", serde_json::to_string_pretty(&reply)?);
     Ok(())
 }

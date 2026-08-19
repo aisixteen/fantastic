@@ -186,7 +186,15 @@ public actor InMemoryBridge {
         guard let remote = remoteKernel else {
             return .object(["error": .string("remote kernel gone")])
         }
-        return await remote.send(target, payload)
+        // Operator authority on the REMOTE: a forwarded frame is a fresh transport
+        // entry — the local sender is meaningless in the remote kernel (in a real
+        // cross-process bridge it wouldn't cross at all), and admission was already
+        // gated by the bridge leg's ingress_rule. Without this the in-memory
+        // backbone leaks the local sender into the remote, where it's an unknown
+        // agent → deny-all.
+        return await KernelTaskLocals.$currentSender.withValue(nil) {
+            await remote.send(target, payload)
+        }
     }
 
     /// Binary forward — ships a raw chunk to the remote on the symmetric binary
@@ -195,7 +203,10 @@ public actor InMemoryBridge {
         guard let remote = remoteKernel else {
             return (.object(["error": .string("remote kernel gone")]), Data())
         }
-        return await remote.sendWithBinary(target, header, blob)
+        // Operator on the remote — see `forward`.
+        return await KernelTaskLocals.$currentSender.withValue(nil) {
+            await remote.sendWithBinary(target, header, blob)
+        }
     }
 
     /// Wire up a watch on the remote kernel: every emit on

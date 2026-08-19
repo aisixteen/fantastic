@@ -146,6 +146,14 @@ let package = Package(
             dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
         .target(
+            name: "FantasticStaticLoader",
+            dependencies: [
+                "FantasticKernel", "FantasticJSON",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "Yams", package: "Yams"),
+            ]
+        ),
+        .target(
             name: "FantasticCliBundle",
             dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
@@ -257,7 +265,7 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticScheduler", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
@@ -359,7 +367,7 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticScheduler", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",

@@ -62,8 +62,15 @@ extension Kernel {
 
     /// Read a store-relative path's text content through the provider (`nil` on
     /// any error / missing file).
+    /// A store I/O send made with OPERATOR authority — the substrate persisting to
+    /// its OWN discovered store is bookkeeping (like create_agent's child boot),
+    /// not an agent reaching out, so it never runs against a grant.
+    private func storeSend(_ storeId: AgentId, _ payload: JSON) async -> JSON {
+        await KernelTaskLocals.$currentSender.withValue(nil) { await send(storeId, payload) }
+    }
+
     private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
-        let got = await send(storeId, .object(["type": .string("read"), "path": .string(path)]))
+        let got = await storeSend(storeId, .object(["type": .string("read"), "path": .string(path)]))
         if got["error"].asString != nil { return nil }
         return got["content"].asString
     }
@@ -98,7 +105,7 @@ extension Kernel {
             existing[Persistence.codeField] = nil
         }
         let serialized = JSON.object(existing).serializePretty(indent: 2)
-        _ = await send(
+        _ = await storeSend(
             storeId,
             .object([
                 "type": .string("write"), "path": .string(af), "content": .string(serialized),
@@ -106,7 +113,7 @@ extension Kernel {
         if let code {
             let cf = reldir.isEmpty
                 ? Persistence.codeFile : "\(reldir)/\(Persistence.codeFile)"
-            _ = await send(
+            _ = await storeSend(
                 storeId,
                 .object([
                     "type": .string("write"), "path": .string(cf), "content": .string(code),
@@ -122,7 +129,7 @@ extension Kernel {
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
         let path = reldir.isEmpty ? "readme.md" : "\(reldir)/readme.md"
         if await readViaStore(storeId, path) != nil { return }  // already present
-        _ = await send(
+        _ = await storeSend(
             storeId,
             .object([
                 "type": .string("write"), "path": .string(path), "content": .string(content),
@@ -136,6 +143,6 @@ extension Kernel {
         guard let storeId = findStore(), let rootAgent = root else { return }
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
         if reldir.isEmpty { return }  // never remove the root
-        _ = await send(storeId, .object(["type": .string("delete"), "path": .string(reldir)]))
+        _ = await storeSend(storeId, .object(["type": .string("delete"), "path": .string(reldir)]))
     }
 }

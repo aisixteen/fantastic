@@ -15,6 +15,7 @@
 
 import FantasticJSON
 import Foundation
+import OrderedCollections
 import Testing
 
 @testable import FantasticKernel
@@ -139,14 +140,15 @@ private func makeSlowKernel(_ sh: Shared) -> Kernel {
     return kernel
 }
 
-private func makeAgent(_ kernel: Kernel, _ id: String) async -> AgentId {
-    let r = await kernel.send(
-        AgentId("core"),
-        .object([
-            "type": .string("create_agent"),
-            "handler_module": .string("slow.tools"),
-            "id": .string(id),
-        ]))
+private func makeAgent(_ kernel: Kernel, _ id: String, canCall: JSON = .null) async -> AgentId {
+    var payload: OrderedDictionary<String, JSON> = [
+        "type": .string("create_agent"),
+        "handler_module": .string("slow.tools"),
+        "id": .string(id),
+    ]
+    // Deny-all: a `chain` send to a SIBLING is lateral egress → an explicit grant.
+    if case .object = canCall { payload["can_call"] = canCall }
+    let r = await kernel.send(AgentId("core"), .object(payload))
     #expect(r["id"].asString == id, "create_agent failed: \(r.serialize())")
     return AgentId(id)
 }
@@ -230,7 +232,7 @@ struct TaskTablePsTests {
         // what.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
         let b = await makeAgent(kernel, "slow_b")
 
         let caller = spawnCaller(
@@ -276,7 +278,7 @@ struct TaskTableCancelTests {
         // `send` RESOLVES to {"cancelled": true}; it never throws.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
         let b = await makeAgent(kernel, "slow_b")
 
         let caller = spawnCaller(
@@ -311,7 +313,7 @@ struct TaskTableCancelTests {
         // say so: {"cancelled": false, "killed": []}. No pretending, no crash.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
 
         let unknown = await cancel(kernel, "no_such_agent:7")
         #expect(unknown == .object(["cancelled": .bool(false), "killed": .array([])]))
@@ -374,7 +376,7 @@ struct TaskTableCancelTests {
         // bug).
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
 
         let caller = spawnCaller(kernel, a, .object(["type": .string("slow")]))
         defer { caller.cancel() }
@@ -402,7 +404,7 @@ struct TaskTableCancelTests {
         // makes "cancel the turn" also kill the work the turn spawned.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
         let b = await makeAgent(kernel, "slow_b")
 
         let caller = spawnCaller(
@@ -436,7 +438,7 @@ struct TaskTableCancelTests {
         // work in flight is inspectable and killable.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
-        let a = await makeAgent(kernel, "slow_a")
+        let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
 
         let r = await kernel.send(AgentId("kernel"), .object(["type": .string("reflect")]))
         let sv = r["system_verbs"]

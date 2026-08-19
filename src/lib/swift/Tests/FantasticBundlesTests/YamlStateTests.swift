@@ -35,6 +35,9 @@ struct YamlStateTests {
             [
                 "type": "create_agent", "handler_module": "yaml_state.tools",
                 "mode": .string(mode), "file_bridge_id": "store",
+                // Deny-all: yaml_state persists read/write/delete to its store
+                // directly → an explicit grant (wiring pairs with granting).
+                "can_call": ["store": "*"],
             ])
         return AgentId(rec["id"].asString ?? "")
     }

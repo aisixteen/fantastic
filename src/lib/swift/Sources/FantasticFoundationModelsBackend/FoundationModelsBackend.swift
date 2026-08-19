@@ -185,7 +185,12 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 "handler_module": .string("yaml_state.tools"),
                 "mode": .string(mode),
             ])
-            if let storeId { rec["file_bridge_id"] = .string(storeId) }
+            if let storeId {
+                rec["file_bridge_id"] = .string(storeId)
+                // Deny-all: the mounted memory persists read/write/delete to the
+                // store directly, so wiring `file_bridge_id` also grants that edge.
+                rec["can_call"] = .object([storeId: .string("*")])
+            }
             _ = await kernel.send(agentId, rec)
         }
     }

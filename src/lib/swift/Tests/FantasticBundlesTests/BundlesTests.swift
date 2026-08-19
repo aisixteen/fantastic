@@ -230,7 +230,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "scheduler.tools", "id": "sched",
-                "file_bridge_id": "store",
+                "file_bridge_id": "store", "can_call": ["store": "*"],
             ])
         let r = await kernel.send(
             "sched",
@@ -281,7 +281,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "scheduler.tools", "id": "sched",
-                "file_bridge_id": "store",
+                "file_bridge_id": "store", "can_call": ["store": "*"],
             ])
         let r = await kernel.send(
             "sched",

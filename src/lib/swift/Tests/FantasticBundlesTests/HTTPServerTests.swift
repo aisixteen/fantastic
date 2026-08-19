@@ -158,6 +158,10 @@ struct HTTPServerTests {
                 "id": .string("rest"),
                 // The web_rest leg SEALS by default — open it for the POST.
                 "ingress_rule": .string("allow_all"),
+                // Deny-all: an inbound relay dispatches browser calls into the
+                // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
+                // says WHERE into the kernel it lands. This test POSTs to `core`.
+                "can_call": .object(["core": .string("*")]),
             ]))
         let restId = rec["id"].asString ?? "rest"
         _ = await kernel.send(

@@ -125,10 +125,12 @@ struct SendJsonTests {
         }
         let cap = Capture()
         _ = kernel.subscribe(listener: cap)
+        // `reflect` (ungated) isolates this to sender ATTRIBUTION — a synthetic
+        // "weather_ui" sender is not a real agent, so a gated verb would deny-all.
         _ = await kernel.sendJsonAs(
             senderId: "weather_ui",
             targetId: "core",
-            payloadJson: #"{"type":"list_agents"}"#
+            payloadJson: #"{"type":"reflect"}"#
         )
         let sendEvents = cap.snapshot().compactMap { try? JSON.parse($0) }.filter {
             $0["type"].asString == "send"

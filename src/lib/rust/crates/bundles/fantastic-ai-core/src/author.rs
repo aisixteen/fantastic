@@ -855,10 +855,18 @@ pub async fn author(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         )
         .await;
 
-        let result = run
-            .kernel
-            .send(&AgentId::from(target.as_str()), act_payload.clone())
-            .await;
+        // The tools an author builds are ITS OWN subtree. Route every structural
+        // mutation through this agent's own id, so `create_agent` lands the tool as
+        // a child of the author and later `delete_agent`/`update_agent` edit it —
+        // all baseline authority (fork + $children), zero grants, and the tools are
+        // owned + cleaned up with the author. Under deny-all an agent could not
+        // reach a tool parented elsewhere anyway.
+        let dispatch_target = if fantastic_kernel::PRIVILEGED_VERBS.contains(&verb) {
+            agent_id.clone()
+        } else {
+            AgentId::from(target.as_str())
+        };
+        let result = run.kernel.send(&dispatch_target, act_payload.clone()).await;
 
         // A fresh script agent? That is the candidate tool — put the ear on it.
         let hm = act_payload

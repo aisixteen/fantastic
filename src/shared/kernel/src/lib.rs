@@ -27,6 +27,10 @@ pub fn register_host_bundles() -> BundleRegistry {
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
     reg.register(
+        fantastic_static_loader::HANDLER_MODULE,
+        fantastic_static_loader::StaticLoaderBundle,
+    );
+    reg.register(
         "ollama_backend.tools",
         fantastic_ollama_backend::OllamaBackendBundle,
     );
@@ -51,38 +55,16 @@ pub fn register_host_bundles() -> BundleRegistry {
         fantastic_tools::HANDLER_MODULE,
         fantastic_tools::ToolsBundle::new(),
     );
-    // Baked script executors — IN-PROCESS engines (no subprocess, no system
-    // deps), the bodies authored control harnesses run on.
-    reg.register(
-        fantastic_lua_runtime::HANDLER_MODULE,
-        fantastic_lua_runtime::LuaRuntimeBundle,
-    );
-    reg.register(
-        fantastic_js_runtime::HANDLER_MODULE,
-        fantastic_js_runtime::JsRuntimeBundle,
-    );
-    // The authoring mind: drives a brain to CREATE a durable tool and refuses its
-    // `final` until the tool has been observed answering (verify-and-repair).
-    reg.register(
-        fantastic_author::HANDLER_MODULE,
-        fantastic_author::AuthorBundle,
-    );
+    // (The former in-process lua/js script-executor bundles and the standalone
+    // author bundle were removed in the de-loop refactor: execution now runs
+    // through `exec_bridge` and the authoring loop is emergent — no registration.)
     reg.register(
         "terminal_backend.tools",
         fantastic_terminal_backend::TerminalBackendBundle,
     );
-    // Named from the crate's own const, not a literal: the root reflect DERIVES its
-    // advertised executor list from what is registered here, so a literal that drifts
-    // from the bundle's `HANDLER_MODULE` would advertise a module nothing answers.
-    reg.register(
-        fantastic_python_runtime::HANDLER_MODULE,
-        fantastic_python_runtime::PythonRuntimeBundle,
-    );
-    reg.register(
-        "local_runner.tools",
-        fantastic_local_runner::LocalRunnerBundle,
-    );
-    reg.register("ssh_runner.tools", fantastic_ssh_runner::SshRunnerBundle);
+    // (The former python_runtime executor and the local/ssh runner bundles were
+    // removed in the de-loop refactor: execution is now `exec_bridge`, and
+    // sub-kernel reach is the ssh connector + exec_bridge — no registration.)
     reg
 }
 

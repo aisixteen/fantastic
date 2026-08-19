@@ -79,6 +79,8 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
                 "file_bridge_id": file_id,
                 "endpoint": endpoint,
                 "model": "test-model",
+                // Deny-all: persists to its store directly + streams to `cli`.
+                "can_call": { file_id: "*", "cli": "*" },
             }),
         )
         .await;

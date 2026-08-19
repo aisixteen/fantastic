@@ -66,6 +66,9 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
                 "id": sch_id,
                 "file_bridge_id": file_id,
                 "tick_sec": 0.1,
+                // Deny-all: the scheduler persists schedules.json to its store
+                // directly → an explicit grant (fires against `core` = its $parent).
+                "can_call": { file_id: "*" },
             }),
         )
         .await;

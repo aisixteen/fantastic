@@ -25,36 +25,53 @@
 //! `"type":"emit"`. Errors emit `{"type":"error", ...}`.
 
 use crate::agent::{Agent, AgentId};
+use crate::authz::Decision;
 use crate::kernel::Kernel;
 use crate::tasks::{
     current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
 };
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::task_local;
 
 task_local! {
-    /// The agent id currently dispatching. Set by [`Kernel::send`]
-    /// (and [`Kernel::emit`]) around the underlying dispatch so
-    /// nested calls correctly attribute telemetry events. The
-    /// WebSocket proxy seeds it to the webapp's own id for external
-    /// traffic.
-    pub static CURRENT_SENDER: AgentId;
+    /// The originator of the send currently dispatching. `Some(id)` inside an
+    /// agent's handler (a nested send is attributed to that agent — the CALL
+    /// GATE's sender). `None` = OPERATOR: outside any dispatch (CLI/bootstrap/
+    /// test), or explicitly under [`with_operator`] (a verb completing its own
+    /// side effect). Also tags telemetry state events with the originator.
+    pub static CURRENT_SENDER: Option<AgentId>;
 }
 
-/// Get the current sender if a task is mid-dispatch, else `None`.
+/// Get the current sender — `Some(id)` for an agent-originated send, `None` for
+/// an operator send (outside any dispatch, or under [`with_operator`]).
 pub fn current_sender() -> Option<AgentId> {
-    CURRENT_SENDER.try_with(|s| s.clone()).ok()
+    CURRENT_SENDER.try_with(|s| s.clone()).ok().flatten()
 }
 
 /// Run `fut` with `sender` set as `CURRENT_SENDER` for its duration.
 /// External transports (web_ws, web_rest) call this with the webapp's
-/// own id so telemetry events attribute correctly.
+/// own id so telemetry events attribute correctly AND so inbound calls are
+/// GATED as that surface agent.
 pub async fn with_sender<F, T>(sender: AgentId, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    CURRENT_SENDER.scope(sender, fut).await
+    CURRENT_SENDER.scope(Some(sender), fut).await
+}
+
+/// Run `fut` with OPERATOR authority (`CURRENT_SENDER = None` → the call gate
+/// skips it). NOT a privilege escalation for agent code: the substrate uses it
+/// only to complete the side effects of an already-authorized verb — e.g.
+/// `create_agent` booting the child it just made, or the persistence layer
+/// writing a record to its own store. The kernel doing its bookkeeping acts as
+/// the operator, not as the agent that asked.
+pub async fn with_operator<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_SENDER.scope(None, fut).await
 }
 
 /// One-line, bytes-stripped, max-160-char summary for telemetry.
@@ -96,6 +113,23 @@ impl Kernel {
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let verb = verb_of(&payload).to_string();
 
+        // ── CALL GATE — deny-all for agent-originated sends ──────────────
+        // Trust boundary = who ORIGINATED the send. An operator send
+        // (`current_sender()` is None: CLI/bootstrap/loader-at-boot/test, or a
+        // verb completing its own side effect under `with_operator`) is the root
+        // of trust → ungated. An agent send is DENY-ALL: permitted only by a
+        // grant on the sender's record. `reflect` is never gated.
+        if verb != "reflect" {
+            if let Some(orig) = current_sender() {
+                let d = self.gate(&orig, &verb, &target);
+                if !d.allowed {
+                    return json!({
+                        "error": d.reason, "reason": "unauthorized", "hint": d.hint,
+                    });
+                }
+            }
+        }
+
         // Run the dispatch as a REGISTERED, killable task (one row in the
         // kernel's task table) and await it — that is what makes ANY send
         // cancelable, on any bundle. A cancelled dispatch does NOT raise out of
@@ -127,6 +161,39 @@ impl Kernel {
         self.fanout_to_watchers(&target, &payload).await;
 
         reply
+    }
+
+    /// The call gate's authorization decision for an agent-originated send.
+    /// Reads the SENDER's `can_call` + tree facts (parent, children, root) and
+    /// delegates to [`crate::authz::authorize_call`]. A sender with no record
+    /// cannot be vouched for → empty grant → deny-all (never a hole).
+    fn gate(self: &Arc<Self>, sender_id: &AgentId, verb: &str, target: &Arc<Agent>) -> Decision {
+        let loader_id = self.root().map(|r| r.id.0.clone());
+        let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
+        let (can_call, parent_id, child_ids) = match &sender {
+            Some(a) => {
+                let can_call = a
+                    .meta
+                    .read()
+                    .expect("meta lock poisoned")
+                    .get("can_call")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let parent = a.parent_id.as_ref().map(|p| p.0.clone());
+                let kids: HashSet<String> = a.child_ids().into_iter().map(|c| c.0).collect();
+                (can_call, parent, kids)
+            }
+            None => (Value::Null, None, HashSet::new()),
+        };
+        crate::authz::authorize_call(
+            &can_call,
+            verb,
+            target.id.as_str(),
+            sender_id.as_str(),
+            parent_id.as_deref(),
+            &child_ids,
+            loader_id.as_deref(),
+        )
     }
 
     /// Run ONE dispatch as a registered, killable task and await it — the unit
@@ -184,7 +251,7 @@ impl Kernel {
             tokio::spawn(async move {
                 CURRENT_SENDER
                     .scope(
-                        sender,
+                        Some(sender),
                         CURRENT_TASK.scope(
                             tid,
                             CURRENT_KILLED.scope(killed, async move {
@@ -264,6 +331,20 @@ impl Kernel {
         let verb = verb_of(&header).to_string();
         let blob_len = blob.len();
         let summary = summarize_payload(&header);
+
+        // Call gate (see `Kernel::send`) — the binary path carries the same
+        // agent-originated write_stream/read_stream sends. Operator + reflect skip.
+        if verb != "reflect" {
+            if let Some(orig) = current_sender() {
+                let d = self.gate(&orig, &verb, &target);
+                if !d.allowed {
+                    return (
+                        json!({ "error": d.reason, "reason": "unauthorized", "hint": d.hint }),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
 
         // Run dispatch under a fresh CURRENT_SENDER scope so nested
         // sends attribute to this target (matches Python contextvars).
