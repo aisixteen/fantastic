@@ -23,14 +23,9 @@ members = [
     "crates/bundles/fantastic-nvidia-nim-backend",
     "crates/bundles/fantastic-anthropic-backend",
     "crates/bundles/fantastic-terminal-backend",
-    "crates/bundles/fantastic-python-runtime",
-    "crates/bundles/fantastic-runner-core",
-    "crates/bundles/fantastic-local-runner",
-    "crates/bundles/fantastic-ssh-runner",
+    "crates/bundles/fantastic-exec-bridge",
     "crates/bundles/fantastic-proxy-agent",
     "crates/bundles/fantastic-tools",
-    "crates/bundles/fantastic-lua-runtime",
-    "crates/bundles/fantastic-js-runtime",
 ]
 
 [workspace.package]
@@ -73,9 +68,3 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
-# Baked script executors (the authored-agent bodies). Both are IN-PROCESS
-# engines vendored into the binary — no system deps: Lua ~300KB (mlua,
-# static lua5.4), JS ~1-2MB (rquickjs, bundled QuickJS). `async` bridges
-# script calls into tokio so a script's kernel.send awaits real replies.
-mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send", "serialize"] }
-rquickjs = { version = "0.9", features = ["futures", "loader", "parallel"] }

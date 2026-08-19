@@ -100,6 +100,16 @@ pub(crate) async fn create_from_payload(
         }
     }
 
+    // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical: create
+    // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
+    // and REFUSED one update later — two answers for one field). Record is empty
+    // at create: the merged view IS the patch.
+    if let Some(bundle) = kernel.bundles.get(hm) {
+        if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
+            return json!({ "error": why, "created": false });
+        }
+    }
+
     // In Disk mode the agent's `root_path` is also where bundles can
     // write sidecar files (chat history, schedules, etc.). In
     // InMemory mode the path is composed but never read — bundles

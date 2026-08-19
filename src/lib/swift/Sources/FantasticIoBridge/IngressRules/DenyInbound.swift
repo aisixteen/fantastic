@@ -3,12 +3,24 @@
 extension IngressRules {
     /// Refuse every inbound `call` (the peer can't `call`/`reflect` us). Inbound
     /// `watch`/`unwatch` are already ignored by the dispatcher ⇒ denied-by-omission.
+    /// `unknown` carries a rule name that could not be resolved. An edge configured
+    /// with a rule nobody implements is NOT authorized — it seals, and every denial
+    /// says which name was wrong. Mirrors py `DenyInbound(unknown:)` / rust
+    /// `DenyInbound::unknown`.
     public struct DenyInbound: IngressRule {
-        public init() {}
+        public let unknown: String?
+        public init(unknown: String? = nil) { self.unknown = unknown }
         public func authorize(_ action: AuthAction) -> AuthDecision {
-            action.kind == "call"
-                ? .deny("inbound calls denied by policy")
-                : .allow
+            // EVERY inbound kind — py-canonical. Call-only sealing made the seal
+            // partial (watch/state_subscribe leaked, and a new kind like `spawn`
+            // sailed through); measured on rust 2026-08-07, fixed in all runtimes.
+            _ = action
+            if let name = unknown {
+                return .deny(
+                    "edge sealed — unknown ingress rule \"\(name)\"; "
+                        + "legal values: allow_all, deny_inbound, password")
+            }
+            return .deny("inbound calls denied by policy")
         }
     }
 }

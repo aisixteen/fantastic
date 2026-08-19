@@ -1,7 +1,7 @@
 # fantastic-ollama-backend selftest
 
 > scopes: ai, kernel, persistence, http
-> requires: `cargo build --release --bin fantastic`; live ollama at a
+> requires: `cargo build --release --bin fantastic_kernel`; live ollama at a
 > reachable endpoint with a tool-calling model (qwen2.5+, llama3.1+);
 > a LIVE daemon + WS — this bundle caches the HTTP client + in-flight
 > tasks in process-memory, so multi-step state would be lost between
@@ -30,7 +30,7 @@ curl -s http://localhost:11434/api/tags | jq -e '.models | length >= 1'
 rm -rf /tmp/ob_test
 mkdir -p /tmp/ob_test/root
 cd /tmp/ob_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18911
 MODEL=qwen2.5:3b
 
@@ -68,9 +68,13 @@ PY
 ```bash
 call ob '{"type":"reflect"}' | jq -e '
   .file_agent_id == "fa"
-  and (.verbs | has("send") and has("history") and has("interrupt") and has("status"))'
+  and (.verbs | has("send") and has("history") and has("status"))
+  and (.verbs | has("interrupt") | not)
+  and (.cancel | test("cancel"))'
 ```
-Expect: `file_agent_id` is set; `verbs` covers the LLM-backend surface.
+Expect: `file_agent_id` is set; `verbs` covers the LLM-backend surface. There is
+NO `interrupt` verb — an in-flight `send` is a KERNEL TASK, killed with the
+substrate's universal `ps` + `cancel` (the `cancel` key teaches how).
 
 ### Test 2: send streams + persists chat_cli.json
 

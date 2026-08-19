@@ -1,7 +1,7 @@
 # fantastic-kernel selftest
 
 > scopes: substrate, persistence, save/load, storage, lock
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: HTTP, WS, bundles other than core/file
 
 Substrate-level — Agent + Kernel + send/emit/watch + persistence +
@@ -14,7 +14,7 @@ WS. The contract that every bundle test depends on.
 rm -rf /tmp/fk_test
 mkdir -p /tmp/fk_test
 cd /tmp/fk_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 ```
 
 ## Tests

@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::task::JoinHandle;
 
 /// One queued entry awaiting the FIFO lock.
 #[derive(Clone, Debug)]
@@ -41,14 +40,17 @@ pub struct CurrentEntry {
     pub text_so_far: String,
     /// Last tool entry (entry/exit), for status snapshots.
     pub last_tool: Option<Value>,
+    /// The KERNEL TASK this generation runs as (`"<agent>:<n>"`) — the pid of
+    /// the `send` dispatch. `cancel <task_id>` kills the turn; the bundle's
+    /// `on_cancel` matches on this to know the killed task is ITS generation
+    /// (not some other dispatch on the same agent) and to close the turn out.
+    pub task_id: Option<String>,
 }
 
 /// Per-agent coordination state. Cloning the `Arc` is cheap.
 pub struct BackendState {
     /// FIFO serializer — only one `send` runs at a time per agent.
     pub lock: Arc<AsyncMutex<()>>,
-    /// In-flight task handle. `interrupt` aborts via this.
-    pub current_task: Mutex<Option<JoinHandle<()>>>,
     /// Snapshot for the `status` verb. `Some` iff a `send` holds the lock.
     pub current_meta: Mutex<Option<CurrentEntry>>,
     /// Entries waiting on `lock`. Front = next to acquire.
@@ -67,7 +69,6 @@ impl BackendState {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             lock: Arc::new(AsyncMutex::new(())),
-            current_task: Mutex::new(None),
             current_meta: Mutex::new(None),
             queue: Mutex::new(VecDeque::new()),
             projection: Mutex::new(None),
@@ -100,47 +101,37 @@ pub fn state_for(agent_id: &AgentId) -> Arc<BackendState> {
     )
 }
 
-/// `true` iff a `send` task is registered and not finished.
+/// `true` iff a `send` holds the FIFO lock right now (a generation is in
+/// flight). Read off `current_meta` — the backend keeps no task handle of its
+/// own: a generation IS its kernel dispatch task (see the `ps`/`cancel` system
+/// verbs), and the kernel owns the abort.
 pub fn is_generating(agent_id: &AgentId) -> bool {
     BACKENDS
         .lock()
         .get(agent_id)
-        .map(|s| {
-            s.current_task
-                .lock()
-                .expect("task poisoned")
-                .as_ref()
-                .map(|t| !t.is_finished())
-                .unwrap_or(false)
-        })
+        .map(|s| s.current_meta.lock().expect("current poisoned").is_some())
         .unwrap_or(false)
 }
 
-/// Abort any in-flight task and drop the agent's state slot.
+/// Drop the agent's state slot (delete / shutdown). An in-flight `send` is a
+/// KERNEL task — it dies with the agent's dispatches, not through a bundle-held
+/// handle.
 pub fn drop_state(agent_id: &AgentId) {
-    let state = BACKENDS.lock().remove(agent_id);
-    if let Some(s) = state {
-        if let Some(task) = s.current_task.lock().expect("task poisoned").take() {
-            task.abort();
-        }
-    }
+    BACKENDS.lock().remove(agent_id);
 }
 
-/// Abort any in-flight task (does NOT drop the state slot). Returns
-/// `true` iff a live task was aborted.
-pub fn interrupt(agent_id: &AgentId) -> bool {
-    let task_opt = {
-        let map = BACKENDS.lock();
-        map.get(agent_id)
-            .and_then(|s| s.current_task.lock().expect("task poisoned").take())
-    };
-    if let Some(task) = task_opt {
-        if !task.is_finished() {
-            task.abort();
-            return true;
-        }
+/// Close out a generation the kernel is cancelling: if `task_id` names the turn
+/// currently holding the lock, clear the in-flight entry and hand back the
+/// client id so the backend can emit its final `done` (the `on_cancel` half of
+/// the task table's two-phase kill). `None` if the cancelled task isn't this
+/// agent's generation (a `history` / `reflect` dispatch on the same agent).
+pub fn take_current_for_cancel(agent_id: &AgentId, task_id: &str) -> Option<CurrentEntry> {
+    let state = BACKENDS.lock().get(agent_id).map(Arc::clone)?;
+    let mut cur = state.current_meta.lock().expect("current poisoned");
+    if cur.as_ref()?.task_id.as_deref() != Some(task_id) {
+        return None;
     }
-    false
+    cur.take()
 }
 
 // ── status snapshot ─────────────────────────────────────────────────

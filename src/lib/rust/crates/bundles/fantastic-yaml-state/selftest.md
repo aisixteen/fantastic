@@ -1,7 +1,7 @@
 # fantastic-yaml-state selftest
 
 > scopes: persistence, kernel
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: the FM auto-inject hook (Swift-only)
 
 Durable YAML key-value memory agent. CRUD (`read`/`keys`/`set`/`delete`/
@@ -14,7 +14,7 @@ All test state lives under `/tmp/ys_test/`.
 
 ```bash
 rm -rf /tmp/ys_test && mkdir -p /tmp/ys_test && cd /tmp/ys_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 YS=$($FANTASTIC core create_agent handler_module=yaml_state.tools mode=mem | jq -r .id)
 ```
 

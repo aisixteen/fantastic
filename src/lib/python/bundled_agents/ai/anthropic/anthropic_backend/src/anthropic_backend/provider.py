@@ -82,6 +82,7 @@ class AnthropicProvider:
                 if resp.status_code >= 400:
                     detail = (await resp.aread()).decode("utf-8", "replace")
                     raise RuntimeError(f"anthropic {resp.status_code}: {detail[:300]}")
+                stop_reason = None
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -99,10 +100,31 @@ class AnthropicProvider:
                             txt = delta.get("text") or ""
                             if txt:
                                 yield txt
+                    elif etype == "message_delta":
+                        stop_reason = (evt.get("delta") or {}).get("stop_reason")
                     elif etype == "error":
                         err = evt.get("error") or {}
                         raise RuntimeError(f"anthropic stream error: {err}")
                     # message_start / content_block_start/stop / ping: ignored
+                # A stream that did not END TURN did not finish — say so, loudly.
+                # This loop used to ignore `message_delta`, so a completion cut by
+                # `max_tokens`, a refusal, or a dropped connection was returned as
+                # if the model had finished. Measured 2026-08-07 (combined probe,
+                # run 6): a `create_agent` turn stopped at 1,085 chars mid-`code`,
+                # the partial parsed as an unterminated envelope, the next
+                # completion arrived EMPTY, and the chain died — three symptoms,
+                # one silent cause. A cut turn is an error the caller can see and
+                # retry; a fake-complete one is invisible.
+                if stop_reason not in ("end_turn", "stop_sequence"):
+                    raise RuntimeError(
+                        "anthropic stream ended without end_turn: "
+                        f"stop_reason={stop_reason!r}"
+                        + (
+                            " (none seen — connection cut mid-stream)"
+                            if stop_reason is None
+                            else ""
+                        )
+                    )
 
     @property
     def model(self) -> str:

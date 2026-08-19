@@ -18,6 +18,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields, is_dataclass
 
+# The authorization verdict is a SUBSTRATE concept — defined once in the kernel
+# and imported UP here (bundle → kernel, the legal direction). The call gate and
+# every io edge rule return the SAME `Decision`; there is no second dataclass.
+from kernel._authz import ALLOW, Decision  # noqa: F401  (ALLOW re-exported here)
+
 
 @dataclass(frozen=True)
 class Action:
@@ -28,20 +33,6 @@ class Action:
     verb: str  # payload["type"] — the verb requested (e.g. "reflect", "create_agent")
     payload: dict  # the inbound payload (dispatched verbatim — NO credential in it)
     token: str | None = None  # the frame-envelope credential, if the peer presented one
-
-
-@dataclass(frozen=True)
-class Decision:
-    allowed: bool
-    reason: str = ""
-    # An optional teaching pointer: when a rule denies, it may name the readme that
-    # explains how to OPEN this edge, so discovery-through-denial is a guided hop
-    # rather than a guessing game. Surfaced on the wire as `{reason, hint, see}`.
-    hint: str = ""
-    see: str = ""
-
-
-ALLOW = Decision(True)
 
 
 class IngressRule(ABC):
@@ -63,20 +54,18 @@ def parse_spec(spec) -> tuple[str | None, dict]:
     """Normalize a rule spec to `(type_name, config)`.
 
     Falsy ⇒ `(None, {})`. A bare string ⇒ `(name, {})`. An object ⇒
-    `(type|policy, {…config})` — the type comes from `type` (preferred) or the legacy
-    `policy`; `env` is the canonical secret-env key (legacy `token_env` is accepted
-    and folded to it). Unknown keys pass through and are tolerantly filtered to the
-    rule's own fields by `construct`."""
+    `(type, {…config})`. `env` is the secret-env key. Unknown keys pass through and
+    are tolerantly filtered to the rule's own fields by `construct`."""
     if not spec:
         return None, {}
     if isinstance(spec, str):
         return spec, {}
-    name = spec.get("type") or spec.get("policy")
+    name = spec.get("type")
     cfg: dict = {}
     for k, v in spec.items():
-        if k in ("type", "policy"):
+        if k == "type":
             continue
-        cfg["token_env" if k == "env" else k] = v  # `env` (new) → token_env field
+        cfg[k] = v
     return name, cfg
 
 

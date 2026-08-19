@@ -4,7 +4,6 @@ Each egress rule is its own module here; this package registers them BY NAME in
 `REGISTRY`. `forward` resolves a leg's rule via `resolve_egress(record)` and stamps
 its `credential()` onto the outbound frame envelope. Inbound-only policy names
 (`allow_all` / `deny_inbound`) map to `Silent` — they present nothing — so the legacy
-`auth` shorthand stays consistent.
 """
 
 from __future__ import annotations
@@ -24,8 +23,12 @@ REGISTRY: dict[str, type[EgressRule]] = {
 
 def resolve_egress(record: dict) -> EgressRule:
     """Resolve the leg's EGRESS rule: `egress_rule` if the record carries it, else the
-    legacy `auth` shorthand (so `auth:"password"` presents the group token). Absent ⇒
-    `Silent` (present nothing). Unknown type ⇒ `ValueError`."""
+    `auth` both-directions shorthand, else `Silent` (present nothing). Unknown type ⇒
+    `ValueError`.
+
+    The `auth` leg of that precedence matches `describe()`, `resolve_ingress` and both
+    other host runtimes; without it `auth:"password"` reflected as `egress_rule:password`
+    and then stamped no credential, so a leg that read as authenticated dialled bare."""
     spec = record["egress_rule"] if "egress_rule" in record else record.get("auth")
     name, cfg = parse_spec(spec)
     if name is None:

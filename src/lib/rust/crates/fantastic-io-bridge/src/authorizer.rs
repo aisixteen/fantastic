@@ -57,8 +57,12 @@ pub trait EgressRule: Send + Sync {
 /// Default env var for the `password` rule when the record names none.
 pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 
-/// Normalize a rule spec `Value` to `(type_name, token_env)`. Absent/null/empty ⇒
-/// `(None, None)`. String ⇒ `(name, None)`. Object ⇒ `(type|policy, env|token_env)`.
+/// Normalize a rule spec `Value` to `(type_name, secret_env_key)`. Absent/null/empty ⇒
+/// `(None, None)`. String ⇒ `(name, None)`. Object ⇒ `(type, env)`.
+///
+/// `type` and `env` are the only spellings. This used to also accept `policy` and
+/// `token_env`; python's `parse_spec` never did, so those were rust-only legacy aliases
+/// giving one wire key two names.
 pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option<String>), String> {
     let Some(spec) = spec else {
         return Ok((None, None));
@@ -70,14 +74,9 @@ pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option
         Value::Object(o) => {
             let name = o
                 .get("type")
-                .or_else(|| o.get("policy"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| "rule object missing 'type'".to_string())?;
-            let env = o
-                .get("env")
-                .or_else(|| o.get("token_env"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let env = o.get("env").and_then(Value::as_str).map(str::to_string);
             Ok((Some(name.to_string()), env))
         }
         other => Err(format!("unsupported rule spec {other:?}")),
@@ -85,13 +84,14 @@ pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option
 }
 
 /// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒
-/// `default` (`allow_all` for ingress, `silent` for egress).
+/// `default`, which the CALLER supplies: `deny_inbound` for ingress (IO legs seal by
+/// default) and `silent` for egress. The doc here used to say `allow_all` for ingress,
+/// which is the opposite of what every caller passes and of the sealed-by-default rule.
 pub fn rule_name(spec: Option<&Value>, default: &str) -> String {
     match spec {
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
         Some(Value::Object(o)) => o
             .get("type")
-            .or_else(|| o.get("policy"))
             .and_then(Value::as_str)
             .unwrap_or(default)
             .to_string(),

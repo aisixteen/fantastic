@@ -63,17 +63,6 @@ fn register_default_bundles() -> BundleRegistry {
         fantastic_tools::HANDLER_MODULE,
         fantastic_tools::ToolsBundle::new(),
     );
-    // Baked script executors — IN-PROCESS engines (no subprocess, no system
-    // deps), the bodies authored control harnesses run on. Always-on.
-    reg.register(
-        fantastic_lua_runtime::HANDLER_MODULE,
-        fantastic_lua_runtime::LuaRuntimeBundle,
-    );
-    reg.register(
-        fantastic_js_runtime::HANDLER_MODULE,
-        fantastic_js_runtime::JsRuntimeBundle,
-    );
-
     // ── Full-tier-only bundles (subprocess / dynamic-loading / etc.).
     //
     // These spawn child processes (`std::process::Command` /
@@ -87,15 +76,14 @@ fn register_default_bundles() -> BundleRegistry {
             "terminal_backend.tools",
             fantastic_terminal_backend::TerminalBackendBundle,
         );
+        // Via the exported const: the root reflect's `self_extension`
+        // advertises executors by intersecting its table with THIS registry,
+        // so a typo'd literal here would silently drop the one executor from
+        // what a model is told it has.
         reg.register(
-            "python_runtime.tools",
-            fantastic_python_runtime::PythonRuntimeBundle,
+            fantastic_exec_bridge::HANDLER_MODULE,
+            fantastic_exec_bridge::ExecBridgeBundle,
         );
-        reg.register(
-            "local_runner.tools",
-            fantastic_local_runner::LocalRunnerBundle,
-        );
-        reg.register("ssh_runner.tools", fantastic_ssh_runner::SshRunnerBundle);
     }
 
     reg

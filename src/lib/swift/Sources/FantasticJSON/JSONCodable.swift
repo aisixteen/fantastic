@@ -133,6 +133,28 @@ extension JSON {
         return value
     }
 
+    /// Decode the JSON value at the START of `data`, ignoring whatever
+    /// follows it, and report how far it read: `consumed` is the byte
+    /// offset IMMEDIATELY AFTER the value.
+    ///
+    /// The counterpart of Python's `json.JSONDecoder().raw_decode`, and
+    /// it exists for the same caller: a model that emits a complete
+    /// object followed by trailing junk (gpt-oss:120b closes an object
+    /// early, then writes one brace too many). The tail is the model's
+    /// real intent often enough that it must be recoverable, and
+    /// `parse(_:)` refuses the whole input instead of yielding the value
+    /// it already read.
+    ///
+    /// Leading whitespace is skipped; TRAILING whitespace is not — the
+    /// offset points at the first byte the value did not claim, so the
+    /// caller sees the tail exactly as written.
+    public static func parsePrefix(_ data: Data) throws -> (value: JSON, consumed: Int) {
+        var scanner = JSONScanner(data: data)
+        scanner.skipWhitespace()
+        let value = try scanner.parseValue()
+        return (value, scanner.offset)
+    }
+
     /// Serialize this `JSON` tree to a compact UTF-8 string,
     /// preserving object key insertion order. Output matches
     /// `serde_json::to_string` byte-for-byte for the values we

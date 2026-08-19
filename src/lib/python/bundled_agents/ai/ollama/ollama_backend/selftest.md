@@ -287,7 +287,11 @@ wait
 Expected: `PASS`. Privacy filter strips `text`/`text_so_far` for any
 client that is not the current entry's owner.
 
-### Test 11: interrupt → status(done, reason=interrupted)
+### Test 11: kernel `ps` → `cancel` → status(done, reason=cancelled)
+
+There is no `interrupt` verb. An in-flight `send` IS a kernel task, so it is
+killed with the universal system verbs — `ps` to find it, `cancel` to kill it.
+The bundle's `on_cancel` hook closes the turn out for the client.
 
 ```bash
 ( call $OB '{"type":"send","text":"count slowly to 200","client_id":"alice"}' >/dev/null ) &
@@ -298,20 +302,34 @@ import asyncio, json, websockets
 async def main():
     async with websockets.connect('ws://localhost:$PORT/$OB/ws') as ws:
         await ws.send(json.dumps({'type':'watch','src':'$OB'}))
-        # Trigger interrupt
-        await ws.send(json.dumps({'type':'call','target':'$OB','payload':{'type':'interrupt'},'id':'X'}))
+        # Find the in-flight generation in the live task table…
+        await ws.send(json.dumps({'type':'call','target':'kernel','payload':{'type':'ps'},'id':'P'}))
+        task_id = None
+        async for msg in ws:
+            ev = json.loads(msg)
+            if ev.get('id') == 'P':
+                rows = [t for t in ev['result']['tasks']
+                        if t['agent'] == '$OB' and t['verb'] == 'send']
+                task_id = rows[0]['id'] if rows else None
+                break
+        if not task_id:
+            print('FAIL no in-flight send in ps'); return
+        # …and kill it with the universal system verb.
+        await ws.send(json.dumps({'type':'call','target':'kernel','payload':{'type':'cancel','task_id':task_id},'id':'X'}))
         async for msg in ws:
             ev = json.loads(msg)
             p = ev.get('payload') or {}
             if p.get('type') == 'status' and p.get('phase') == 'done':
-                ok = p.get('detail', {}).get('reason') == 'interrupted'
+                ok = p.get('detail', {}).get('reason') == 'cancelled'
                 print('PASS' if ok else f'FAIL detail={p.get(\"detail\")}')
                 return
 asyncio.run(main())
 "
 wait
 ```
-Expected: `PASS`. The terminal `status` carries `detail.reason='interrupted'`.
+Expected: `PASS`. The terminal `status` carries `detail.reason='cancelled'`, the
+blocked caller's `send` resolves to `{cancelled:true}`, and `$OB` reports
+`generating:false` afterwards (no phantom turn).
 
 ## Summary
 
@@ -327,7 +345,7 @@ Expected: `PASS`. The terminal `status` carries `detail.reason='interrupted'`.
 | 8 | status events fire at every phase transition | |
 | 9 | contended send emits queued + status(queued) | |
 | 10 | status verb privacy filter (cross-client) | |
-| 11 | interrupt → status(done, reason='interrupted') | |
+| 11 | kernel `ps` → `cancel` → status(done, reason='cancelled') | |
 
 Also report:
 - provider + model used.

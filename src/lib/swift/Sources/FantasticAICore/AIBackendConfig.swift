@@ -44,14 +44,6 @@ public struct AIBackendConfig: Sendable {
     /// Ollama / FM omit `accumulated` from error-path `done` events.
     public var includeAccumulatedOnError: Bool
 
-    /// FM-only: when an `interrupt` cancels an in-flight stream, emit a
-    /// terminal `done` event with `error:"interrupted"` and do NOT
-    /// persist the partial assistant turn (FM's old `runLiveStream`
-    /// behaviour). When `false` (ollama / NIM), a cancelled stream
-    /// simply stops reading and emits the normal success-shaped `done`
-    /// with whatever it accumulated, persisting that partial turn.
-    public var emitInterruptedError: Bool
-
     /// Extra system-prompt text appended AFTER the shared assembly
     /// (primer + self-reflect + context how-to). The Apple-FM
     /// backend uses this for its always-inject durable memory (each
@@ -84,7 +76,6 @@ public struct AIBackendConfig: Sendable {
         verbs: JSON,
         stateless: Bool = false,
         includeAccumulatedOnError: Bool = false,
-        emitInterruptedError: Bool = false,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         systemPromptExtra: @escaping @Sendable (Agent, Kernel) async -> String = { _, _ in "" },
@@ -97,7 +88,6 @@ public struct AIBackendConfig: Sendable {
         self.verbs = verbs
         self.stateless = stateless
         self.includeAccumulatedOnError = includeAccumulatedOnError
-        self.emitInterruptedError = emitInterruptedError
         self.reflectExtra = reflectExtra
         self.backendStateExtra = backendStateExtra
         self.systemPromptExtra = systemPromptExtra

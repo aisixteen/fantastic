@@ -1,7 +1,7 @@
 # fantastic-web-ws selftest
 
 > scopes: WS, transport
-> requires: free port (suggest 18181), `cargo build --release --bin fantastic`, parent web agent
+> requires: free port (suggest 18181), `cargo build --release --bin fantastic_kernel`, parent web agent
 > out-of-scope: HTTP routes (covered by fantastic-web selftest)
 
 WebSocket verb channel. Mounts `ws://host/<agent_id>/ws` on the
@@ -15,7 +15,7 @@ frames inbound; `reply` / `error` / `event` outbound. Binary frames:
 rm -rf /tmp/fws_test
 mkdir -p /tmp/fws_test
 cd /tmp/fws_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
 $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws

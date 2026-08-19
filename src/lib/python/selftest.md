@@ -140,7 +140,8 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
 | `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
 | `bundled_agents/ssh_runner/selftest.md` | kernel, ssh | remote `fantastic` lifecycle; SSH tunnel for canvas iframing |
-| `bundled_agents/python_runtime/selftest.md` | kernel | async Python JOB spawner — start/status/stop/interrupt/clear; progress/job_done events |
+| `bundled_agents/io/exec_bridge/selftest.md` | kernel | sealed-by-default process edge — interpreter allowlist (refusal names the legal set), start/status/stop/interrupt/clear/boot, wire + optional shim, mail to a live program, task-table row + cancel |
+| `bundled_agents/python_runtime/selftest.md` | kernel | async Python JOB spawner — start/status/stop/interrupt/clear; progress/job_done events (still ships; unadvertised — see exec_bridge) |
 
 The root selftest is the `kernel_state` one (id `"kernel_state"`) — the
 persistence/hydration root that owns `.fantastic/`; there's no `core`

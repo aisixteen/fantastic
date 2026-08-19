@@ -3,11 +3,17 @@
 //! A provider is a PURE RAW-TEXT streamer: it takes plain chat messages
 //! (role system/user/assistant/…, text content) and yields content tokens
 //! ([`ProviderEvent::Token`]) only. It does NOT do tool-calling — Fantastic
-//! NEVER uses a provider's native tool API. The backend does ONE bare pass per
-//! `send` and streams the text through; any tool convention is the CALLER's
-//! (an authored agent reads the completion + drives its own loop). The
-//! provider holds no agent state — the queue / lock / history / context
-//! management all live in the shared machinery.
+//! NEVER uses a provider's native tool API. The tool contract belongs to this
+//! crate: the model writes the envelope as TEXT, the provider streams that text
+//! through knowing nothing about it, and [`crate::tool_parse`] +
+//! [`crate::route`] read and dispatch it. One convention for every provider, and
+//! adding a provider teaches it nothing.
+//!
+//! The provider holds no agent state either — the queue / lock / history /
+//! context management all live in the shared machinery. Its ONE protocol duty is
+//! the reasoning channel: read it and wrap it in
+//! [`crate::think::THINK_OPEN`]/[`crate::think::THINK_CLOSE`] once per turn, or a
+//! reasoning model's whole turn reads as an empty completion.
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;

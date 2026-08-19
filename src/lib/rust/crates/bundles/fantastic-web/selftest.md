@@ -1,7 +1,7 @@
 # fantastic-web selftest
 
 > scopes: HTTP, rendering
-> requires: free port (suggest 18181), `cargo build --release --bin fantastic`
+> requires: free port (suggest 18181), `cargo build --release --bin fantastic_kernel`
 > out-of-scope: WS frames (web_ws selftest), REST verb dispatch (web_rest selftest)
 
 axum HTTP host. Serves `/`, `/<id>/`, `/<id>/file/<path>`,
@@ -14,7 +14,7 @@ web_rest) mount sibling routes via `get_routes`.
 rm -rf /tmp/fw_test
 mkdir -p /tmp/fw_test
 cd /tmp/fw_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18181
 $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC &

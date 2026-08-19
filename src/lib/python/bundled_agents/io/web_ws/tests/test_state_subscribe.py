@@ -22,7 +22,14 @@ def client(seeded_kernel):
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe/call frames dispatch
     # (a sealed leg would deny them, and the snapshot/event frames would never flow).
-    seeded_kernel.create("web_ws.tools", id="test_web_ws", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_ws.tools",
+        id="test_web_ws",
+        ingress_rule="allow_all",
+        # Deny-all: the surface relays browser create/delete to kernel_state —
+        # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
+        can_call={"kernel_state": ["create_agent", "delete_agent"]},
+    )
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )
@@ -186,7 +193,14 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
     state subscriber tied to that connection."""
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe dispatches.
-    seeded_kernel.create("web_ws.tools", id="test_web_ws", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_ws.tools",
+        id="test_web_ws",
+        ingress_rule="allow_all",
+        # Deny-all: the surface relays browser create/delete to kernel_state —
+        # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
+        can_call={"kernel_state": ["create_agent", "delete_agent"]},
+    )
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_web_ws", seeded_kernel)
     )

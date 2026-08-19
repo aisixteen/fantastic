@@ -1,5 +1,10 @@
 //! Shared low-level helpers: meta access, client sanitisation, chat
 //! path, file-agent-routed I/O, time + id minting.
+//!
+//! The tool-call id minter that used to live here (`mint_tool_call_id`, no
+//! callers) moved to [`crate::tool_parse::mint_call_id`]: the parser is the only
+//! thing that mints one, and python keeps `_mint_id` inside `tool_parse.py` for
+//! the same reason.
 
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
@@ -142,16 +147,4 @@ pub fn mint_send_id() -> String {
     let stack_ptr = &mut stack as *mut u64 as u64;
     let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
     format!("snd_{:08x}", mix as u32)
-}
-
-/// Opaque id for a synthesised tool-call (ollama chunks that omit one).
-pub fn mint_tool_call_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    let mut stack: u64 = 0;
-    let stack_ptr = &mut stack as *mut u64 as u64;
-    let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
-    format!("tc_{:06x}", (mix as u32) & 0xff_ffff)
 }

@@ -24,6 +24,7 @@ pub const README: &str = include_str!("readme.md");
 /// self-authoring model reaches `self-extension` first, not a system-manual dump.
 pub const DOCS: &[(&str, &str)] = &[
     ("self-extension", include_str!("docs/self-extension.md")),
+    ("minds", include_str!("docs/minds.md")),
     ("reflect", include_str!("docs/reflect.md")),
     ("agents", include_str!("docs/agents.md")),
     ("memory", include_str!("docs/memory.md")),

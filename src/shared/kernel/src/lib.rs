@@ -61,12 +61,21 @@ pub fn register_host_bundles() -> BundleRegistry {
         fantastic_js_runtime::HANDLER_MODULE,
         fantastic_js_runtime::JsRuntimeBundle,
     );
+    // The authoring mind: drives a brain to CREATE a durable tool and refuses its
+    // `final` until the tool has been observed answering (verify-and-repair).
+    reg.register(
+        fantastic_author::HANDLER_MODULE,
+        fantastic_author::AuthorBundle,
+    );
     reg.register(
         "terminal_backend.tools",
         fantastic_terminal_backend::TerminalBackendBundle,
     );
+    // Named from the crate's own const, not a literal: the root reflect DERIVES its
+    // advertised executor list from what is registered here, so a literal that drifts
+    // from the bundle's `HANDLER_MODULE` would advertise a module nothing answers.
     reg.register(
-        "python_runtime.tools",
+        fantastic_python_runtime::HANDLER_MODULE,
         fantastic_python_runtime::PythonRuntimeBundle,
     );
     reg.register(
@@ -206,6 +215,9 @@ pub fn hydrate_ai_env() {
     let backend = str_at("backend");
     set("FANTASTIC_AI_BACKEND", backend);
     set("FANTASTIC_AI_MODEL", str_at("model"));
+    // The ollama endpoint override flows settings → env so the brain provisioner's
+    // `endpoint_from_env` fallback picks it up (only when the var is unset).
+    set("FANTASTIC_OLLAMA_ENDPOINT", str_at("endpoint"));
     if std::env::var_os("FANTASTIC_NUM_CTX").is_none() {
         if let Some(n) = ai.and_then(|a| a.get("num_ctx")).and_then(Value::as_u64) {
             std::env::set_var("FANTASTIC_NUM_CTX", n.to_string());
@@ -229,6 +241,9 @@ pub fn hydrate_ai_env() {
 pub struct AiConfig {
     pub backend: Option<String>,
     pub model: Option<String>,
+    /// The ollama endpoint override (`ai.endpoint`), if configured. Not secret —
+    /// stored in `settings.json` alongside backend/model, never the keychain.
+    pub endpoint: Option<String>,
     pub key_present: bool,
 }
 
@@ -246,27 +261,44 @@ pub fn ai_config() -> AiConfig {
     let key_present = backend.as_deref().map(secret::has_key).unwrap_or(false);
     AiConfig {
         model: str_at("model"),
+        endpoint: str_at("endpoint"),
         backend,
         key_present,
     }
 }
 
-/// Set/replace the AI connector (CRUD: create/update): persist backend+model to
-/// settings, and the key (if given) to the OS keychain. Fails loud if a key is
-/// given but no keychain is available — nothing half-written.
-pub fn set_ai_connector(backend: &str, model: &str, key: Option<&str>) -> Result<(), String> {
+/// Set/replace the AI connector (CRUD: create/update): persist backend+model
+/// (+ an optional `endpoint`) to settings, and the key (if given) to the OS
+/// keychain. The `endpoint` is NOT secret — it lives in `settings.json` next to
+/// backend/model; `Some(non-blank)` sets `ai.endpoint`, `None`/blank CLEARS any
+/// stale value (so switching backends doesn't leak an old endpoint). Fails loud
+/// if a key is given but no keychain is available — nothing half-written.
+pub fn set_ai_connector(
+    backend: &str,
+    model: &str,
+    endpoint: Option<&str>,
+    key: Option<&str>,
+) -> Result<(), String> {
     if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
         secret::set_key(backend, k)?; // keychain first — fail loud before persisting
     }
     let mut s = load_settings();
     settings_set(&mut s, "ai.backend", json!(backend));
     settings_set(&mut s, "ai.model", json!(model));
+    match endpoint.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => settings_set(&mut s, "ai.endpoint", json!(e)),
+        None => {
+            if let Some(ai) = s.get_mut("ai").and_then(Value::as_object_mut) {
+                ai.remove("endpoint");
+            }
+        }
+    }
     save_settings(&s).map_err(|e| format!("settings: {e}"))?;
     Ok(())
 }
 
-/// Delete the AI connector (CRUD: delete): drop `ai.*` from settings + the key
-/// from the keychain.
+/// Delete the AI connector (CRUD: delete): drop the whole `ai.*` block from
+/// settings (backend + model + `ai.endpoint`) + the key from the keychain.
 pub fn clear_ai_connector() -> Result<(), String> {
     let s = load_settings();
     if let Some(b) = s

@@ -10,7 +10,7 @@
 // Each rule is typed in the record (`{"type": <name>, "env": <var>}`) and resolved
 // BY NAME from a registry — the `IngressRules` / `EgressRules` namespaces (a folder
 // of one-rule-per-file, the `resolve` switch is the importer). The record carries
-// `ingress_rule`/`egress_rule` (symmetric) or the legacy `auth` shorthand (both).
+// `ingress_rule`/`egress_rule` (symmetric) or the `auth` shorthand (both directions).
 //
 // SWIFT SPECIFIC: there is no shared read loop. The ONLY inbound-`call` dispatcher is
 // `RelayTransport.dispatch`, so an ingress rule is enforced on the relay_connector
@@ -72,7 +72,7 @@ public struct AuthPolicyError: Error, CustomStringConvertible {
 }
 
 /// Normalize a rule spec to `(type name, env var)`. Absent/null/empty ⇒ `(nil, nil)`.
-/// String ⇒ `(name, nil)`. Object ⇒ `(type|policy, env|token_env)`.
+/// String ⇒ `(name, nil)`. Object ⇒ `(type, env)`.
 func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
     guard let spec else { return (nil, nil) }
     switch spec {
@@ -81,21 +81,26 @@ func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
     case .string(let s):
         return s.isEmpty ? (nil, nil) : (s, nil)
     case .object(let o):
-        guard let name = o["type"]?.asString ?? o["policy"]?.asString else {
+        // `type` and `env` are the only spellings. The `policy` / `token_env` aliases
+        // were swift+rust only — python's parse_spec never accepted them — so they gave
+        // one wire key two names and are deleted.
+        guard let name = o["type"]?.asString else {
             throw AuthPolicyError("rule object missing 'type'")
         }
-        return (name, o["env"]?.asString ?? o["token_env"]?.asString)
+        return (name, o["env"]?.asString)
     default:
         throw AuthPolicyError("unsupported rule spec")
     }
 }
 
-/// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒
-/// `def` (`allow_all` for ingress, `silent` for egress).
+/// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒ `def`,
+/// which the CALLER supplies: `deny_inbound` for ingress (IO legs seal by default) and
+/// `silent` for egress. This doc used to say `allow_all` for ingress, the opposite of
+/// what callers pass and of sealed-by-default.
 public func ruleName(_ spec: JSON?, default def: String) -> String {
     switch spec {
     case .some(.string(let s)) where !s.isEmpty: return s
-    case .some(.object(let o)): return o["type"]?.asString ?? o["policy"]?.asString ?? def
+    case .some(.object(let o)): return o["type"]?.asString ?? def
     default: return def
     }
 }
@@ -111,14 +116,21 @@ func constantTimeEquals(_ a: String, _ b: String) -> Bool {
     return diff == 0
 }
 
-/// Resolve the leg's INGRESS rule: `ingress_rule` if present, else the legacy `auth`
-/// shorthand. Absent ⇒ AllowAll (back-compat).
+/// Resolve the leg's INGRESS rule: `ingress_rule` if present, else the `auth`
+/// both-directions shorthand. Absent ⇒ **DenyInbound — IO legs seal by default**
+/// (`IngressRules.resolve` maps `nil` to it).
+///
+/// This doc used to read "Absent ⇒ AllowAll (back-compat)", which is the pre-seal-flip
+/// behaviour and the opposite of what the code does. The code was right; the comment
+/// was wrong in the dangerous direction — an operator reading it would believe a fresh
+/// leg admits traffic.
 public func resolveIngress(ingressRule: JSON?, auth: JSON?) throws -> IngressRule {
     try IngressRules.resolve(ingressRule ?? auth)
 }
 
-/// Resolve the leg's EGRESS rule: `egress_rule` if present, else the legacy `auth`
-/// shorthand (so `auth:"password"` presents the group token). Absent ⇒ Silent.
+/// Resolve the leg's EGRESS rule: `egress_rule` if present, else the `auth`
+/// both-directions shorthand (so `auth:"password"` presents the group token).
+/// Absent ⇒ Silent.
 public func resolveEgress(egressRule: JSON?, auth: JSON?) throws -> EgressRule {
     try EgressRules.resolve(egressRule ?? auth)
 }

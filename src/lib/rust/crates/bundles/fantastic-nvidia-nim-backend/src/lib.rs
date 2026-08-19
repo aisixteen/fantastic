@@ -1,9 +1,15 @@
 //! nvidia_nim_backend — NVIDIA NIM (OpenAI-compatible) LLM bundle.
 //! Thin shell over `fantastic-ai-core`: this crate supplies only the NIM
-//! `Provider` (HTTPS + Bearer + SSE + per-index tool-call argument
-//! aggregation + 429 retry) + a `Bundle` that dispatches every verb
-//! through ai-core. The FIFO lock, menu cache, prompt assembly, agentic
-//! loop, status phase machine, and history persistence live in ai-core.
+//! `Provider` (HTTPS + Bearer + SSE + BOTH text channels + 429 retry) + a
+//! `Bundle` that dispatches every verb through ai-core. The FIFO lock, menu
+//! cache, prompt assembly, agentic loop (incl. RAW tool-call parsing + reply
+//! routing), status phase machine, and history persistence live in ai-core. NO
+//! native tools — Fantastic NEVER sends OpenAI `tools`/`tool_choice` nor reads
+//! `delta.tool_calls`; the model emits a `<tool_call>` envelope in the text.
+//!
+//! A reasoning model streams its deliberation as `delta.reasoning_content` and
+//! only its conclusion as `delta.content`; both are read and the deliberation is
+//! wrapped in `<think>…</think>` once per turn (see `fantastic_ai_core::think`).
 //!
 //! See `fantastic_ai_core`'s module header for the canonical LLM backend
 //! contract. NIM-local extras:
@@ -18,10 +24,11 @@
 use async_trait::async_trait;
 use fantastic_ai_core::events::{emit_status, to_caller, CallerRoute};
 use fantastic_ai_core::provider::{Provider, ProviderEvent, ProviderStream};
+use fantastic_ai_core::think::ThinkWrap;
 use fantastic_ai_core::{agent_loop::BackendConfig, helpers, state, verbs};
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -273,6 +280,8 @@ async fn consume_sse(
     let mut buf: Vec<u8> = Vec::new();
     let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
     let mut done_marker_seen = false;
+    // ONE wrapper for the whole pass — the reasoning span is per TURN.
+    let mut wrap = ThinkWrap::new();
 
     while let Some(chunk_res) = stream.next().await {
         let bytes = match chunk_res {
@@ -308,18 +317,57 @@ async fn consume_sse(
                 continue;
             };
             let delta = first.get("delta").cloned().unwrap_or(Value::Null);
-            if let Some(content) = delta.get("content").and_then(Value::as_str) {
-                if !content.is_empty() {
-                    out.push(Ok(ProviderEvent::Token(content.to_string())));
-                }
-            }
+            decode_delta_into(&delta, &mut wrap, &mut out);
         }
         if done_marker_seen {
             break;
         }
     }
 
+    // The turn ended while still reasoning (content never started) — close the
+    // span exactly once so the deliberation is strippable.
+    if let Some(m) = wrap.close_marker() {
+        out.push(Ok(ProviderEvent::Token(m.to_string())));
+    }
+
     Ok(out)
+}
+
+/// Decode ONE OpenAI-style streaming `delta` into content tokens, reading BOTH
+/// text channels. `wrap` carries the per-TURN reasoning span across deltas.
+///
+/// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style NIM models stream
+/// most tokens as `reasoning_content` and only the conclusion as `content` —
+/// measured 740 chars of reasoning to 129 of content on one turn. Reading
+/// `content` alone silently drops whole turns: observed live (2026-08-02), the
+/// model spent an entire pass reasoning, we saw an EMPTY completion, and the
+/// chain died with no error anywhere. A raw text protocol reads the text the
+/// model produced; it does not let the provider decide which field counts as
+/// output. WRAPPED once (same as the ollama backend, see
+/// `fantastic_ai_core::think`): parsed for tool calls, stripped before the turn
+/// is persisted.
+fn decode_delta_into(
+    delta: &Value,
+    wrap: &mut ThinkWrap,
+    out: &mut Vec<Result<ProviderEvent, String>>,
+) {
+    let think = delta
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !think.is_empty() {
+        if let Some(m) = wrap.open_marker() {
+            out.push(Ok(ProviderEvent::Token(m.to_string())));
+        }
+        out.push(Ok(ProviderEvent::Token(think.to_string())));
+    }
+    let content = delta.get("content").and_then(Value::as_str).unwrap_or("");
+    if !content.is_empty() {
+        if let Some(m) = wrap.close_marker() {
+            out.push(Ok(ProviderEvent::Token(m.to_string())));
+        }
+        out.push(Ok(ProviderEvent::Token(content.to_string())));
+    }
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────
@@ -350,8 +398,9 @@ impl Bundle for NvidiaNimBundle {
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "nvidia_nim_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
+            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
+            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
-            "interrupt" => verbs::interrupt(agent_id),
             "set_api_key" => set_api_key_reply(agent_id, payload, kernel).await,
             "clear_api_key" => clear_api_key_reply(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
@@ -367,6 +416,19 @@ impl Bundle for NvidiaNimBundle {
     ) -> Result<(), BundleError> {
         drop_cached_client(agent_id);
         state::drop_state(agent_id);
+        Ok(())
+    }
+
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate drops
+    /// the future (which frees the SSE stream + the FIFO guard by itself).
+    async fn on_cancel(
+        &self,
+        agent_id: &AgentId,
+        task_id: &TaskId,
+        kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
         Ok(())
     }
 }
@@ -420,15 +482,15 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "verbs": {
             "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
             "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller. Failfast if file_bridge_id unset OR api_key not set.",
+            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR api_key not set.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "interrupt": "No args. Cancels any in-flight `send`. Returns {interrupted:bool}.",
             "set_api_key": "args: api_key:str (req). Persists to .fantastic/agents/<id>/api_key via file agent. Drops cached client.",
             "clear_api_key": "No args. Deletes the api_key sidecar. Returns {ok:true, deleted:bool}.",
             "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
         },
+        "cancel": fantastic_ai_core::CANCEL_DOC,
         "emits": {
             "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
             "token": "{type:'token', text, source, client_id} — streaming chunk.",
@@ -437,7 +499,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "done": "{type:'done', source, client_id} — back-compat end marker.",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called). Pull counterpart: the context_status verb.",
         },
-        "concurrency": "Per-backend FIFO lock around `send`. reflect/history/interrupt/set_api_key/clear_api_key skip the lock.",
+        "concurrency": "Per-backend FIFO lock around `send`. reflect/history/set_api_key/clear_api_key skip the lock.",
     })
 }
 

@@ -287,7 +287,14 @@ impl QuestionCard {
             .bg(mag)
             .add_modifier(Modifier::BOLD);
 
-        let w = within.width.saturating_sub(4).clamp(30, 64);
+        // The card wants 30..64 columns — but never MORE than the frame has (a 30-col
+        // minimum in a 10-col terminal would index outside the buffer: the same lesson
+        // the help overlay learned).
+        let w = within
+            .width
+            .saturating_sub(4)
+            .clamp(30, 64)
+            .min(within.width);
         let inner = (w as usize).saturating_sub(3);
 
         let mut lines: Vec<Line> = vec![Line::from("")];

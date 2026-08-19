@@ -29,9 +29,13 @@ class _FakeProvider:
 
 
 async def _make_ollama(kernel, file_bridge_id=None):
-    meta = {"handler_module": "ollama_backend.tools"}
+    # Deny-all: the backend streams its turn to `cli` via send (default client),
+    # and persists to its store directly when wired — both explicit grants.
+    can_call = {"cli": "*"}
+    meta = {"handler_module": "ollama_backend.tools", "can_call": can_call}
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
+        can_call[file_bridge_id] = "*"
     rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
     return rec["id"]
 
@@ -258,14 +262,20 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
 
         # cli received tokens via kernel.send (so its handler ran).
         cli_tokens = [p for t, p in sends if t == "cli" and p.get("type") == "token"]
-        cli_done = [p for t, p in sends if t == "cli" and p.get("type") == "done"]
+        cli_done = [
+            p
+            for t, p in sends
+            if t == "cli" and (p.get("type") == "status" and p.get("phase") == "done")
+        ]
         assert len(cli_tokens) == 2
         assert len(cli_done) == 1
         # Backend's own inbox got NO stream events (cli routing only).
         own_stream = [
             p
             for t, p in emits
-            if t == oid and p.get("type") in ("token", "say", "done")
+            if t == oid
+            and p.get("type") in ("token", "say")
+            or (p.get("type") == "status" and p.get("phase") == "done")
         ]
         assert own_stream == [], f"unexpected leak to own inbox: {own_stream}"
         # Stream events carry client_id="cli".
@@ -297,7 +307,11 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
 
         # Backend's own inbox got the stream, tagged with the web client_id.
         own_tokens = [p for t, p in emits if t == oid and p.get("type") == "token"]
-        own_done = [p for t, p in emits if t == oid and p.get("type") == "done"]
+        own_done = [
+            p
+            for t, p in emits
+            if t == oid and (p.get("type") == "status" and p.get("phase") == "done")
+        ]
         assert len(own_tokens) == 2
         assert len(own_done) == 1
         assert all(p["client_id"] == "web_xyz" for p in own_tokens + own_done)
@@ -305,7 +319,9 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
         cli_stream = [
             p
             for t, p in sends
-            if t == "cli" and p.get("type") in ("token", "say", "done")
+            if t == "cli"
+            and p.get("type") in ("token", "say")
+            or (p.get("type") == "status" and p.get("phase") == "done")
         ]
         assert cli_stream == [], f"cli leak: {cli_stream}"
     finally:
@@ -363,7 +379,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
             for kind, t, p in captured
             if kind == "emit"
             and t == oid
-            and p.get("type") == "queued"
+            and (p.get("type") == "status" and p.get("phase") == "queued")
             and p.get("client_id") == "bob"
         ]
         assert len(bob_queued) == 1, (
@@ -374,7 +390,8 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         alice_queued = [
             p
             for kind, t, p in captured
-            if p.get("type") == "queued" and p.get("client_id") == "alice"
+            if (p.get("type") == "status" and p.get("phase") == "queued")
+            and p.get("client_id") == "alice"
         ]
         assert alice_queued == []
 
@@ -662,13 +679,18 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
     assert snap["others_pending"] >= 0
 
 
-async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agent):
-    """Interrupt mid-stream → final status carries reason='interrupted'."""
+async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent):
+    """The backend's bespoke `interrupt` is GONE — an in-flight `send` is a KERNEL
+    TASK, so it is cancelled the way any dispatch is: find it in `ps`, kill it with
+    `cancel`. The bundle's `on_cancel` hook closes the turn out (status(done,
+    reason='cancelled') + `done` reach the caller), the blocked `send` resolves to
+    {'cancelled': True} — the substrate's contract, not this bundle's — and the
+    backend reports no phantom generation afterwards."""
     oid = await _make_ollama(seeded_kernel, store_agent)
 
     class _SlowProvider:
         async def chat(self, messages):
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(5.0)
             yield "never"
 
     ot._providers[oid] = _SlowProvider()
@@ -681,17 +703,75 @@ async def test_status_done_emits_with_reason_interrupt(seeded_kernel, store_agen
                 )
             )
             await asyncio.sleep(0.10)
-            await seeded_kernel.send(oid, {"type": "interrupt"})
-            await send_task
+
+            # Discover the generation in the live task table…
+            table = await seeded_kernel.send("kernel", {"type": "ps"})
+            rows = [
+                t for t in table["tasks"] if t["agent"] == oid and t["verb"] == "send"
+            ]
+            assert len(rows) == 1, table["tasks"]
+            task_id = rows[0]["id"]
+
+            # …and kill it with the universal system verb.
+            r = await seeded_kernel.send(
+                "kernel", {"type": "cancel", "task_id": task_id}
+            )
+            assert r == {"cancelled": True, "killed": [task_id]}
+
+            # The blocked caller's send resolves — cancellation never raises out.
+            assert await send_task == {"cancelled": True}
+
+        # The `on_cancel` hook closed the turn out: status(done, cancelled) + done.
         done_status = [
             p
             for _, p in emits
             if p.get("type") == "status" and p.get("phase") == "done"
         ]
         assert len(done_status) == 1
-        assert done_status[0]["detail"]["reason"] == "interrupted"
+        assert done_status[0]["detail"]["reason"] == "cancelled"
+        assert any(
+            (p.get("type") == "status" and p.get("phase") == "done") for _, p in emits
+        )
+
+        # …and the backend no longer reports a phantom generation.
+        snap = await seeded_kernel.send(oid, {"type": "status"})
+        assert snap["generating"] is False
+        assert snap["current"] is None
+        rr = await seeded_kernel.send(oid, {"type": "reflect"})
+        assert rr["generating"] is False
+        assert "interrupt" not in rr["verbs"]
+        # The FIFO lock was released with the aborted dispatch — the next send runs.
+        ot._providers[oid] = _FakeProvider([["after"]])
+        assert (await seeded_kernel.send(oid, {"type": "send", "text": "again"}))[
+            "final"
+        ] == "after"
     finally:
         ot._providers.pop(oid, None)
+
+
+async def test_on_cancel_ignores_a_non_generation_task(seeded_kernel, store_agent):
+    """`on_cancel` is keyed on the TASK id the generation stamped on `_current` —
+    cancelling some OTHER dispatch on the same agent must not close out the turn
+    (no phantom `done`, no lost in-flight entry)."""
+    oid = await _make_ollama(seeded_kernel, store_agent)
+    agent = seeded_kernel.ctx.agents[oid]
+    try:
+        # No generation in flight: a stray task id for this agent is a no-op.
+        await ot.on_cancel(oid, f"{oid}:999", agent)
+        assert oid not in ot._current
+        # A generation in flight, but a DIFFERENT task id → entry survives.
+        ot._current[oid] = {
+            "client_id": "alice",
+            "send_id": "s1",
+            "started_at": 0.0,
+            "phase": "thinking",
+            "text_so_far": "",
+            "task_id": f"{oid}:1",
+        }
+        await ot.on_cancel(oid, f"{oid}:2", agent)
+        assert ot._current[oid]["send_id"] == "s1"
+    finally:
+        ot._current.pop(oid, None)
 
 
 async def test_status_done_emits_with_reason_timeout(

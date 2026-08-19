@@ -58,14 +58,13 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                         "args: text, client_id?. Atomic stateless call: (system + tools + text) → streaming reply.",
                     "history":
                         "args: client_id?. Returns UI bubble log (not fed back to the model).",
-                    "interrupt": "args: client_id?. Cancels in-flight stream.",
+                    "cancel": .string(CANCEL_DOC),
                     "status":
                         "args: client_id?. In-flight phase + this client's pending queue (others' text redacted).",
                     "backend_state": "Reports availability + in-flight count.",
                 ] as JSON,
-                // FM: stateless context, error-shaped interrupt done.
+                // FM: stateless context (the on-device session owns it).
                 stateless: true,
-                emitInterruptedError: true,
                 reflectExtra: { _ in
                     [
                         "available": .bool(Self.isAvailable()),
@@ -138,6 +137,14 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             await mountMemoryAgents(agentId: agentId, kernel: kernel)
         }
         return await core.handle(agentId: agentId, payload: payload, kernel: kernel)
+    }
+
+    /// The kernel is killing a task of this agent. If it is the in-flight
+    /// generation, close the turn out for the caller before the substrate cancels
+    /// it (which tears down the on-device session stream on its own). There is no
+    /// `interrupt` verb any more: cancellation is the kernel's.
+    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
+        await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
 
     // MARK: - Durable memory (self-mount + always-inject)

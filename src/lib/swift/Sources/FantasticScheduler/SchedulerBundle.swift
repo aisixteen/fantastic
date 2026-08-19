@@ -12,8 +12,8 @@
 //   - `history.jsonl`  — append-only, one event per fire, ring-trimmed to HISTORY_MAX.
 //
 // `boot` / `schedule` FAILFAST until `file_bridge_id` is set. After every fire
-// the scheduler emits `{type:"schedule_fired", …}` to its OWN inbox AND the
-// target's inbox.
+// the scheduler emits `{type:"schedule_fired", …}` to its OWN inbox only —
+// the target receives the payload, which is the tick.
 
 import FantasticJSON
 import FantasticKernel
@@ -45,7 +45,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         Verbs: reflect · boot · shutdown · schedule {target, payload, interval_seconds} ·
         unschedule {schedule_id} · list · pause/resume {schedule_id?} · tick_now {schedule_id} ·
         history {limit?, schedule_id?}. Each schedule fires `kernel.send(target, payload)` on its
-        interval and emits `schedule_fired` to the scheduler's inbox AND the target's.
+        interval and emits `schedule_fired` to the scheduler's OWN inbox (the target gets the payload).
         """
     }
 
@@ -202,10 +202,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "duration_ms": .integer(Int64((nowSecs() - ts) * 1000)),
         ])
         await appendHistory(agentId, kernel, event)
+        // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
+        // `schedule_fired` doubled every delivery to a live program's on_message —
+        // the payload send IS the tick; telemetry rides the scheduler's own inbox
+        // and history.jsonl.
         await kernel.emit(agentId, event)
-        if !target.isEmpty && target != agentId.value {
-            await kernel.emit(AgentId(target), event)
-        }
     }
 
     private func nowSecs() -> Double { Date().timeIntervalSince1970 }

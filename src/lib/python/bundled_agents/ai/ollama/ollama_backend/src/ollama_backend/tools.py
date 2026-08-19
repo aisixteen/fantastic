@@ -7,19 +7,25 @@ lock, prompt assembly, the ONE-PASS `_run`, context management, the verb
 bodies) lives in `ai_core.core`. There is NO agentic loop — tool dispatch
 is the caller's job (an authored agent); this backend does one provider pass per send.
 
-The state dicts (`_providers`, `_queue`, `_current`, `_tasks`, `_locks`)
-and the patchable `SEND_TIMEOUT` / `MAX_CALL_DEPTH` constants are
-RE-EXPORTED from `ai_core.core` here so the existing tests' monkeypatch
-seams (`ollama_backend.tools._providers[id] = fake`,
+The state dicts (`_providers`, `_queue`, `_current`, `_locks`) and the
+patchable `SEND_TIMEOUT` / `MAX_CALL_DEPTH` constants are RE-EXPORTED from
+`ai_core.core` here so the existing tests' monkeypatch seams
+(`ollama_backend.tools._providers[id] = fake`,
 `monkeypatch.setattr(..., "SEND_TIMEOUT", 0.05)`, calls to `_assemble`)
 keep working unchanged on the shared core path. The re-exported dicts are
 the SAME objects `ai_core.core` mutates.
+
+`on_cancel` is re-exported the same way — that module-level name IS the
+bundle's cancel hook (the substrate discovers it here, exactly like
+`on_delete`), so this backend inherits ai_core's shared implementation
+without restating it. There is no `interrupt` verb: an in-flight `send` is
+a kernel TASK, killed with the universal `ps` → `cancel` system verbs.
 """
 
 from __future__ import annotations
 
 from ai_core import build
-from ai_core.core import (  # noqa: F401 — re-exported test seams
+from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
@@ -28,7 +34,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     _locks,
     _providers,
     _queue,
-    _tasks,
+    on_cancel,
 )
 
 

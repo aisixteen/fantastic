@@ -19,16 +19,15 @@ dependencies = [
   "fantastic-kernel-state",
   "fantastic-terminal-backend",
   "fantastic-ollama-backend",
+  "fantastic-llamacpp-backend",
   "fantastic-nvidia-nim-backend",
   "fantastic-anthropic-backend",
-  "fantastic-python-runtime",
   "fantastic-io-bridge",
   "fantastic-ws-bridge",
   "fantastic-relay-connector",
-  "fantastic-ssh-runner",
-  "fantastic-local-runner",
-  "fantastic-runner-core",
+  "fantastic-exec-bridge",
   "fantastic-ai-core",
+  "fantastic-static-loader",
 ]
 
 [project.scripts]
@@ -46,6 +45,15 @@ dev = [
   "httpx>=0.28",
 ]
 
+# Pin the lint gate. With no [tool.ruff] section, `uvx ruff check` applied whatever
+# the freshly-fetched ruff version defaults to — measured 2026-08-07: ruff 0.16.1's
+# widened defaults reported 212 findings on a tree that is clean under the set it was
+# written against. The gate CLAUDE.md documents must mean one thing across machines
+# and ruff releases.
+[tool.ruff]
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = [
@@ -59,14 +67,14 @@ testpaths = [
   "bundled_agents/yaml_state/tests",
   "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/terminal/tests",
+  "bundled_agents/ai/ai_core/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
+  "bundled_agents/ai/llamacpp/llamacpp_backend/tests",
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
   "bundled_agents/io/io_bridge/tests",
   "bundled_agents/io/ws_bridge/tests",
   "bundled_agents/io/relay_connector/tests",
-  "bundled_agents/runner/ssh_runner/tests",
-  "bundled_agents/runner/local_runner/tests",
-  "bundled_agents/python_runtime/tests",
+  "bundled_agents/io/exec_bridge/tests",
 ]
 addopts = "-q"
 
@@ -81,17 +89,16 @@ members = [
   "bundled_agents/terminal",
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/ollama/ollama_backend",
+  "bundled_agents/ai/llamacpp/llamacpp_backend",
   "bundled_agents/ai/nvidia/nvidia_nim_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
   "bundled_agents/io/io_bridge",
   "bundled_agents/io/ws_bridge",
   "bundled_agents/io/relay_connector",
-  "bundled_agents/runner/ssh_runner",
-  "bundled_agents/runner/local_runner",
-  "bundled_agents/runner/runner_core",
-  "bundled_agents/python_runtime",
+  "bundled_agents/io/exec_bridge",
   "bundled_agents/yaml_state",
   "bundled_agents/loader/kernel_state",
+  "bundled_agents/loader/static_loader",
   "installed_agents/*",
 ]
 
@@ -105,14 +112,13 @@ fantastic-file-bridge = { workspace = true }
 fantastic-yaml-state = { workspace = true }
 fantastic-terminal-backend = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
+fantastic-llamacpp-backend = { workspace = true }
 fantastic-nvidia-nim-backend = { workspace = true }
 fantastic-anthropic-backend = { workspace = true }
 fantastic-io-bridge = { workspace = true }
 fantastic-ws-bridge = { workspace = true }
 fantastic-relay-connector = { workspace = true }
-fantastic-ssh-runner = { workspace = true }
-fantastic-local-runner = { workspace = true }
-fantastic-runner-core = { workspace = true }
+fantastic-exec-bridge = { workspace = true }
 fantastic-ai-core = { workspace = true }
-fantastic-python-runtime = { workspace = true }
 fantastic-kernel-state = { workspace = true }
+fantastic-static-loader = { workspace = true }

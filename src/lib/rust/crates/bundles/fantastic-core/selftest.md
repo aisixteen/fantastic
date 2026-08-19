@@ -1,7 +1,7 @@
 # fantastic-core selftest
 
 > scopes: substrate
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: HTTP, WS, bundles other than core itself
 
 Root orchestrator. System verbs (create_agent / delete_agent /
@@ -14,7 +14,7 @@ handler_module — dispatch is native to the Agent class.
 rm -rf /tmp/fc_test
 mkdir -p /tmp/fc_test
 cd /tmp/fc_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 ```
 
 ## Tests

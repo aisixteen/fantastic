@@ -25,6 +25,8 @@ async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
                 "type": "create_agent",
                 "handler_module": "ollama_backend.tools",
                 "file_bridge_id": store_agent,
+                # No explicit grant needed: the chat persists THROUGH the loader
+                # ($loader baseline) into a `chat` child ($children baseline).
             },
         )
     )["id"]
@@ -52,6 +54,9 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
             {
                 "type": "create_agent",
                 "handler_module": "scheduler.tools",
+                # Deny-all: firing at a target is lateral egress, so the wiring is
+                # an EXPLICIT grant — the scheduler may `say` to `cli`, nothing more.
+                "can_call": {"cli": ["say"]},
             },
         )
     )["id"]
@@ -68,14 +73,16 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
         sid, {"type": "tick_now", "schedule_id": sch["schedule_id"]}
     )
 
-    # cli's inbox got the say payload + schedule_fired event
-    q = seeded_kernel._ensure_inbox("cli")
+    # cli's inbox got the say payload ONLY — one delivery per tick. The
+    # `schedule_fired` telemetry rides the scheduler's own inbox, not the target's
+    # (the target-echo doubled every delivery to a live program's on_message).
+    q = seeded_kernel.ctx.ensure_inbox("cli")
     msgs = []
     while not q.empty():
         msgs.append(q.get_nowait())
     types = [m["type"] for m in msgs]
     assert "say" in types
-    assert "schedule_fired" in types
+    assert "schedule_fired" not in types
 
 
 async def test_records_carry_handler_module(seeded_kernel):

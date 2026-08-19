@@ -91,12 +91,27 @@ extension Kernel {
         existing["handler_module"] = agent.handlerModule.map { .string($0) }
         existing["parent_id"] = agent.parentId.map { .string($0.value) }
         for (k, v) in agent.meta { existing[k] = v }
+        // The program is a FILE beside the record — see `Persistence.codeFile`.
+        var code: String?
+        if case .string(let c)? = existing[Persistence.codeField], !c.isEmpty {
+            code = c
+            existing[Persistence.codeField] = nil
+        }
         let serialized = JSON.object(existing).serializePretty(indent: 2)
         _ = await send(
             storeId,
             .object([
                 "type": .string("write"), "path": .string(af), "content": .string(serialized),
             ]))
+        if let code {
+            let cf = reldir.isEmpty
+                ? Persistence.codeFile : "\(reldir)/\(Persistence.codeFile)"
+            _ = await send(
+                storeId,
+                .object([
+                    "type": .string("write"), "path": .string(cf), "content": .string(code),
+                ]))
+        }
     }
 
     /// Seed a `readme.md` (copy-if-missing) into the agent's dir THROUGH the

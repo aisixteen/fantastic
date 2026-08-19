@@ -7,9 +7,20 @@
 // shared layer owns: per-(agent, client_id) chat history, the
 // epoch-bump cancellation state, the verb bodies (reflect / boot /
 // shutdown / send / history / interrupt / backend_state), the spawned
-// streaming task, and the token / done event emission. The providers
-// own only the upstream wire (NDJSON, SSE+429+Bearer, on-device
-// session).
+// streaming task, the token / done event emission, and — since the
+// dispatch phase — READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
+// AND DISPATCHING THEM (`ToolParse` + `Routing`). The providers own
+// only the upstream wire (NDJSON, SSE+429+Bearer, on-device session).
+//
+// ONE pass per `send`, and the chain is the MODEL's: after the pass, its
+// completion is parsed and every call it wrote is dispatched, with each reply
+// delivered to that call's own `reply_to` as a fresh turn. `reply_to:'self'`
+// (the default when the key is absent) is what continues a chain — one turn at
+// a time, and only because the model asked again. Emitting NO call ends the
+// turn, so stop stays free. This is NOT a hard-coded loop: nothing here decides
+// how many turns a task deserves, and there is no strategy in the prompt.
+// Tool-calling is RAW prompt-and-parse throughout — no provider's native tool
+// API is ever used (see `AIProvider`).
 //
 // Wire contract (byte-identical to the Python reference, enforced by
 // FantasticParityTests):
@@ -21,6 +32,12 @@
 //                  client_id, error?}
 //   history → {messages, client_id}
 //   interrupt → {interrupted:true}
+//
+// `accumulated` on both the token and done events is the RAW completion — the
+// exact concatenation of the deltas already streamed, `<think>…</think>` markers
+// included. The DURABLE assistant turn is the STRIPPED text (see
+// `Thinking.swift`): one stream, two uses, and the event field stays equal to
+// what the client received.
 //
 // This module MUST NOT import FoundationModels (or any provider SDK).
 
@@ -35,6 +52,19 @@ import OrderedCollections
 public func buildAIBackend(_ config: AIBackendConfig) -> AIBackend {
     AIBackend(config: config)
 }
+
+/// What every backend advertises INSTEAD of an `interrupt` verb — the reflect
+/// surface that teaches a caller how to kill a turn. Byte-identical to Rust's
+/// `fantastic_ai_core::CANCEL_DOC`.
+public let CANCEL_DOC: String = """
+    No `interrupt` verb — an in-flight `send` IS a kernel task. \
+    Kill it with the substrate's universal system verbs: send 'kernel' {type:'ps'} for the live \
+    task table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' \
+    {type:'cancel', task_id:'<agent>:<n>'}. The turn closes with status(phase='done', \
+    reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the blocked \
+    caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole SUBTREE, so any \
+    work the turn spawned dies with it.
+    """
 
 public final class AIBackend: @unchecked Sendable {
     public let config: AIBackendConfig
@@ -53,18 +83,6 @@ public final class AIBackend: @unchecked Sendable {
         }
         return AIBackend.defaultSendTimeoutSeconds
     }()
-
-    /// Cancellation state — epoch-bump pattern (lifted verbatim from
-    /// the FM backend, which had the most robust version). `interrupt`
-    /// bumps `interruptEpoch`; every stream records the epoch it
-    /// started under and polls `isStreamCancelled` each tick. A stream
-    /// is cancelled iff its `startedAt` epoch is older than the current
-    /// epoch OR its id is explicitly in `cancelledStreams`. Epoch
-    /// counters are race-free against staggered stream-death and don't
-    /// bleed into post-interrupt sends.
-    private let cancelLock = NSLock()
-    private var interruptEpoch: UInt64 = 0
-    private var cancelledStreams: Set<String> = []
 
     /// In-flight stream count for `backend_state` reporting.
     private let stateLock = NSLock()
@@ -87,8 +105,10 @@ public final class AIBackend: @unchecked Sendable {
         self.config = config
     }
 
-    /// Get (or lazily create) the coordination state for an agent.
-    private func runState(_ id: String) -> AIAgentRunState {
+    /// Get (or lazily create) the coordination state for an agent. Internal, not
+    /// private: `recallVerb` (ContextProjection.swift, same type, different file)
+    /// reads the in-flight entry's client to resolve a bare `recall`.
+    func runState(_ id: String) -> AIAgentRunState {
         runStatesLock.lock()
         defer { runStatesLock.unlock() }
         if let s = runStates[id] { return s }
@@ -128,17 +148,49 @@ public final class AIBackend: @unchecked Sendable {
             return await historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
             return await recallVerb(agent: agent, payload: payload, kernel: kernel)
+        case "author":
+            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
+            return await authorVerb(agent: agent, payload: payload, kernel: kernel)
         case "context_status":
             return await contextStatusVerb(agent: agent, kernel: kernel)
         case "status":
             return statusVerb(agentId: agentId, payload: payload)
-        case "interrupt":
-            return interruptVerb(payload: payload)
         case "backend_state":
             return backendStateReply(agent: agent)
         default:
             return .object(["error": .string("unknown verb \(verb)")])
         }
+    }
+
+    /// The `onCancel` bundle hook, shared by every backend: the kernel is killing
+    /// `taskId` and will cancel this generation's Swift task the moment we
+    /// return.
+    ///
+    /// The cancellation itself tears the provider stream down (the `AsyncStream`
+    /// finishes, its `onTermination` cancels the upstream HTTP task) and the
+    /// generation releases its FIFO guard as it unwinds. What NEITHER does is
+    /// close the turn out for the caller. So that is exactly what happens here,
+    /// while the task is still alive: clear the in-flight entry (`status` would
+    /// otherwise report a phantom generation forever) and emit the final
+    /// `status(done, reason:"cancelled")` + `done` the client is waiting on.
+    ///
+    /// No-op when the cancelled task is some OTHER dispatch on this agent (a
+    /// `history`, a `reflect`) — the entry is matched on its task id.
+    public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async {
+        let st = runState(agentId.value)
+        guard let entry = st.takeCurrentForCancel(taskId: taskId.value) else { return }
+        await emitStatus(
+            agentId: agentId, clientId: entry.clientId, phase: "done", st: st,
+            extraDetail: [
+                "reason": .string("cancelled"),
+                "send_id": .string(entry.sendId),
+            ],
+            kernel: kernel)
+        await emitDone(
+            kernel: kernel, agentId: agentId,
+            streamId: entry.streamId, messageId: entry.messageId,
+            clientId: entry.clientId, accumulated: entry.textSoFar,
+            error: "cancelled")
     }
 
     // MARK: - reflect / backend_state
@@ -186,8 +238,17 @@ public final class AIBackend: @unchecked Sendable {
         }
         let clientId = payload["client_id"].asString ?? "cli"
         // A caller-supplied `system_prompt` REPLACES the default system block
-        // (the caller teaches its own tool convention there). Mirrors py/rust.
+        // (the caller teaches its own role/context there). Mirrors py/rust.
         let systemPrompt = payload["system_prompt"].asString
+        // Where this pass's TEXT goes when the model issues no call of its own.
+        // A one-shot handoff for the CALLER; the MODEL routes its own work with
+        // `reply_to` inside its `<tool_call>`s. Mirrors python's `send_to`.
+        let sendTo: String? = {
+            guard let s = payload["send_to"].asString,
+                !s.trimmingCharacters(in: .whitespaces).isEmpty
+            else { return nil }
+            return s
+        }()
 
         // Build the provider FIRST — backends that must refuse before
         // touching history (NIM no-api_key, FM unavailable) return their
@@ -233,14 +294,33 @@ public final class AIBackend: @unchecked Sendable {
         }
 
         bumpInFlight(+1)
-        Task { [weak self, weak kernel] in
-            guard let self = self, let kernel = kernel else { return }
+        let agentId = agent.id
+        // The generation OUTLIVES this dispatch (`send` acks `{queued:true}` and
+        // returns), so it is registered with the kernel as its own TASK: `ps`
+        // sees it, `cancel <task_id>` kills it, and it stays inside the caller's
+        // process group (the substrate re-parents it to this dispatch's parent
+        // when this dispatch retires — init-adoption). Cancellation is the
+        // KERNEL's now; the backend holds no interrupt machinery of its own.
+        kernel.spawnTask(agent: agent.id, verb: "send") { [weak self] in
+            guard let self = self else { return }
             await st.fifo.acquire()
-            st.popToCurrent(sendId: sendId, startedAt: self.nowSecs(), phase: "thinking")
+            // Killed while queued: never became the current turn (so `onCancel`
+            // has nothing to close out) — drop the queue row and hand the lock on.
+            if Task.isCancelled {
+                st.dropQueued(sendId: sendId)
+                self.bumpInFlight(-1)
+                await st.fifo.release()
+                return
+            }
+            st.popToCurrent(
+                sendId: sendId, startedAt: self.nowSecs(), phase: "thinking",
+                streamId: streamId, messageId: messageId,
+                // The task we are running AS — how `onCancel` recognises its own turn.
+                taskId: KernelTaskLocals.currentTask?.value)
             await self.emitStatus(
                 agentId: agent.id, clientId: clientId, phase: "thinking", st: st,
                 kernel: kernel)
-            await self.runStream(
+            let produced = await self.runStream(
                 provider: provider,
                 streamId: streamId,
                 messageId: messageId,
@@ -252,8 +332,35 @@ public final class AIBackend: @unchecked Sendable {
                 systemPrompt: systemPrompt,
                 kernel: kernel
             )
+            // `onCancel` already cleared the entry on the killed path; clearing
+            // again is a no-op. The FIFO lock is released either way — a killed
+            // generation unwinds through here, it does not strand the agent.
             st.clearCurrent()
             await st.fifo.release()
+
+            // ROUTE the completion. `produced` is nil on EVERY non-ok exit
+            // (cancel, timeout, provider error, context failsafe) — python's
+            // `if not reply.get("error")` gate, expressed in the type: a failed
+            // pass is terminal, and a broken chain must not keep spending turns.
+            //
+            // The ORDER above this line is the invariant, not an accident:
+            // `runStream` persisted the assistant turn, `clearCurrent` retired
+            // the in-flight entry, `release()` freed the FIFO — so a
+            // self-addressed follow-up can take the lock immediately and reads a
+            // history that already contains the turn it is answering.
+            //
+            // Its OWN task row (`verb:"route_reply"`), not this one: `ps` must not
+            // label routing as `"send"`, and the row makes each hop of a chain
+            // individually visible and killable. Task-locals are already correct
+            // here — we are inside the generation's task — so the row nests under
+            // it with no re-stamping. NEVER `Task.detached`: that loses the
+            // locals and the row would land parentless, outside `cancel`'s reach.
+            guard let produced = produced else { return }
+            kernel.spawnTask(agent: agentId, verb: "route_reply") {
+                await routeReply(
+                    selfId: agentId, kernel: kernel, text: produced,
+                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt)
+            }
         }
 
         return .object([
@@ -264,6 +371,10 @@ public final class AIBackend: @unchecked Sendable {
         ])
     }
 
+    /// Run ONE provider pass. Returns the RAW completion when the pass finished
+    /// OK — that text is what routing parses — and `nil` at every other exit
+    /// (cancelled, timed out, provider error, context failsafe), which is how the
+    /// caller knows a failed pass is terminal and must not be routed.
     private func runStream(
         provider: any AIProvider,
         streamId: String,
@@ -275,16 +386,10 @@ public final class AIBackend: @unchecked Sendable {
         userText: String,
         systemPrompt: String?,
         kernel: Kernel
-    ) async {
+    ) async -> String? {
         let agentId = agent.id
-        defer {
-            clearStreamCancel(streamId)
-            bumpInFlight(-1)
-        }
+        defer { bumpInFlight(-1) }
 
-        // Snapshot the cancel epoch before the first token so interrupts
-        // that fire mid-stream are detected via `startedAt < epoch`.
-        let startedAtEpoch = currentEpoch()
         let deadline = Date().addingTimeInterval(sendTimeoutSeconds)
 
         // Load + persist the user turn UNDER the FIFO lock (we hold it
@@ -297,9 +402,9 @@ public final class AIBackend: @unchecked Sendable {
         let modelHistory = config.stateless ? [] : prior
 
         // Rebuild the system block every turn from the live substrate (a lean
-        // primer + self-reflect + the context how-to), OR use the caller's
-        // `system_prompt` override verbatim. NO agent menu, NO tool how-to —
-        // this backend runs ONE pass, no tool loop. Not persisted.
+        // primer + self-reflect + the envelope how-to + the context how-to), OR
+        // use the caller's `system_prompt` override verbatim. NO agent menu — the
+        // primer's id-index plus `reflect` is how an agent is found. Not persisted.
         let systemContent = await assembleSystemPrompt(
             agent: agent, systemPrompt: systemPrompt, kernel: kernel)
         var messages: [JSON] = [
@@ -333,23 +438,30 @@ public final class AIBackend: @unchecked Sendable {
                     kernel: kernel, agentId: agentId, streamId: streamId, messageId: messageId,
                     clientId: clientId, accumulated: "",
                     error: err["error"].asString ?? "context projection error")
-                return
+                return nil
             }
         }
 
-        // ONE provider pass — stream tokens straight to the caller. The tool
-        // LOOP is emergent (a caller drives it by reading the completion and
-        // sending the next turn); this backend is a context-managed
-        // conversational completion. `renderForModel` projects stored turns to
-        // plain text every chat template renders. Mirrors Rust `run_generation`
-        // / Python `_run`.
+        // ONE provider pass — stream tokens straight to the caller. What happens
+        // NEXT is the model's: this text is handed to `routeReply`, which
+        // dispatches whatever calls it contains. The loop is emergent because
+        // nothing here schedules another pass; the model does, by writing a call
+        // with a `reply_to`. `renderForModel` projects stored turns to plain text
+        // every chat template renders. Mirrors Rust `run_generation` / Python
+        // `_run`.
         var accumulated = ""
         var firstToken = true
         do {
             let stream = provider.chat(messages: renderForModel(messages))
             for try await chunk in stream {
+                // The KERNEL killed this task (`cancel <task_id>`). `onCancel`
+                // already closed the turn out for the client — status(done,
+                // reason:"cancelled") + done — while we were still alive. Bail
+                // WITHOUT emitting anything more and WITHOUT persisting the
+                // partial turn; returning drops the provider stream, whose
+                // `onTermination` cancels the upstream HTTP task.
+                if Task.isCancelled { return nil }
                 if Date() > deadline {
-                    await provider.stop()
                     await emitStatus(
                         agentId: agentId, clientId: clientId, phase: "done", st: st,
                         extraDetail: ["reason": .string("timeout")], kernel: kernel)
@@ -358,25 +470,7 @@ public final class AIBackend: @unchecked Sendable {
                         streamId: streamId, messageId: messageId,
                         clientId: clientId, accumulated: accumulated,
                         error: "send: timeout after \(Int(sendTimeoutSeconds))s")
-                    return
-                }
-                if isStreamCancelled(streamId: streamId, startedAt: startedAtEpoch) {
-                    await provider.stop()
-                    if config.emitInterruptedError {
-                        // FM shape: terminal `done{error:"interrupted"}`,
-                        // partial turn NOT persisted.
-                        await emitStatus(
-                            agentId: agentId, clientId: clientId, phase: "done", st: st,
-                            extraDetail: ["reason": .string("interrupted")], kernel: kernel)
-                        await emitDone(
-                            kernel: kernel, agentId: agentId,
-                            streamId: streamId, messageId: messageId,
-                            clientId: clientId, accumulated: accumulated,
-                            error: "interrupted")
-                        return
-                    }
-                    // ollama / NIM shape: stop reading, persist what streamed.
-                    break
+                    return nil
                 }
                 switch chunk {
                 case .token(let delta):
@@ -401,6 +495,10 @@ public final class AIBackend: @unchecked Sendable {
                 }
             }
         } catch {
+            // A cancelled task's stream throws as it is torn down — that is our
+            // OWN kill, not a provider failure. `onCancel` already emitted the
+            // terminal events; stay silent.
+            if Task.isCancelled { return nil }
             await emitStatus(
                 agentId: agentId, clientId: clientId, phase: "done", st: st,
                 extraDetail: ["reason": .string("error")], kernel: kernel)
@@ -409,14 +507,26 @@ public final class AIBackend: @unchecked Sendable {
                 streamId: streamId, messageId: messageId,
                 clientId: clientId, accumulated: accumulated,
                 error: "\(error)")
-            return
+            return nil
         }
+        // The stream can also FINISH (rather than throw) when the task is
+        // cancelled — same contract: the turn is already closed out, persist
+        // nothing.
+        if Task.isCancelled { return nil }
 
         // Persist the full chat: base (prior + user turn) + the assistant turn.
         // One write of the whole conversation (matches Rust/Python
         // `save_history`). The error / FM-interrupt / timeout paths return
         // earlier and leave the base (just the user turn) as the record.
-        let finalRows = persistBase + [assistantTurn(id: messageId, content: accumulated)]
+        //
+        // PARSE THE RAW TEXT, PERSIST THE STRIPPED TEXT (Python core.py:1016-1018).
+        // The deliberation is not part of the conversation: re-feeding a reasoning
+        // model its own prior thought is against every vendor's guidance and it
+        // compounds turn over turn. The RAW text (markers in) is what a reader
+        // parses for tool calls — a call the model wrote mid-thought still counts —
+        // and it is what the `token`/`done` events already carried.
+        let finalRows =
+            persistBase + [assistantTurn(id: messageId, content: withoutThinking(accumulated))]
         await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: finalRows)
 
         await emitStatus(
@@ -426,6 +536,11 @@ public final class AIBackend: @unchecked Sendable {
             kernel: kernel, agentId: agentId,
             streamId: streamId, messageId: messageId,
             clientId: clientId, accumulated: accumulated, error: nil)
+
+        // The RAW completion — markers in — is what routing parses: a call the
+        // model wrote mid-thought still dispatches. Only the DURABLE turn above
+        // is stripped.
+        return accumulated
     }
 
     // MARK: - status (verb + phase events)
@@ -527,12 +642,14 @@ public final class AIBackend: @unchecked Sendable {
     // MARK: - prompt assembly
 
     /// Build the DEFAULT system prompt from the live substrate: a lean primer
-    /// (id-index of the tree + bundle catalog), the agent's own self-reflect,
-    /// the context how-to, and any per-backend extra (FM's always-inject
-    /// memory). A caller-supplied `systemPrompt` REPLACES the default (the
-    /// caller teaches its own tool convention there); the per-backend extra is
-    /// still appended. NO agent menu, NO tool how-to. Mirrors Rust
-    /// `assemble_messages` / Python `_assemble`.
+    /// (id-index of the tree + bundle catalog), the agent's own self-reflect, the
+    /// envelope how-to (`SEND_TO_HOWTO` — how to reach another agent, and where
+    /// its answer goes), the context how-to, and any per-backend extra (FM's
+    /// always-inject memory). A caller-supplied `systemPrompt` REPLACES the
+    /// default (the caller supplies its own role/context); the per-backend extra
+    /// is still appended. NO agent menu, and no STRATEGY — the two how-tos state
+    /// mechanisms only, which `promptStatesTheMechanismNotAStrategy` pins.
+    /// Mirrors Rust `assemble_messages` / Python `_assemble`.
     func assembleSystemPrompt(agent: Agent, systemPrompt: String?, kernel: Kernel) async -> String {
         var blocks: [String]
         if let override = systemPrompt,
@@ -553,6 +670,7 @@ public final class AIBackend: @unchecked Sendable {
             blocks = [
                 renderReflect(primer),
                 "You are `\(selfId.value)`. " + renderReflect(me),
+                SEND_TO_HOWTO,
                 CONTEXT_HOWTO,
             ]
         }
@@ -599,7 +717,7 @@ public final class AIBackend: @unchecked Sendable {
         await kernel.emit(agentId, .object(event))
     }
 
-    // MARK: - history / interrupt
+    // MARK: - history
 
     private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
         let clientId = payload["client_id"].asString ?? "cli"
@@ -608,14 +726,6 @@ public final class AIBackend: @unchecked Sendable {
             "messages": .array(messages),
             "client_id": .string(clientId),
         ])
-    }
-
-    private func interruptVerb(payload: JSON) -> JSON {
-        cancelLock.lock()
-        interruptEpoch &+= 1
-        cancelLock.unlock()
-        _ = payload  // client_id reserved for per-stream cancel later
-        return .object(["interrupted": .bool(true)])
     }
 
     // MARK: - history row shapes
@@ -694,29 +804,7 @@ public final class AIBackend: @unchecked Sendable {
             ]))
     }
 
-    // MARK: - cancellation (epoch-bump) + in-flight
-
-    /// Snapshot the current epoch — call at the top of a stream so the
-    /// stream's birth epoch is fixed before the first cancel poll.
-    public func currentEpoch() -> UInt64 {
-        cancelLock.lock()
-        defer { cancelLock.unlock() }
-        return interruptEpoch
-    }
-
-    /// True iff the stream should bail: its id was explicitly cancelled,
-    /// or an interrupt fired after it started (epoch advanced).
-    public func isStreamCancelled(streamId: String, startedAt: UInt64) -> Bool {
-        cancelLock.lock()
-        defer { cancelLock.unlock() }
-        return cancelledStreams.contains(streamId) || startedAt < interruptEpoch
-    }
-
-    private func clearStreamCancel(_ id: String) {
-        cancelLock.lock()
-        defer { cancelLock.unlock() }
-        cancelledStreams.remove(id)
-    }
+    // MARK: - in-flight
 
     private func bumpInFlight(_ delta: Int) {
         stateLock.lock()

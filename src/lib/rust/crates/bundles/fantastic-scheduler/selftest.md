@@ -1,7 +1,7 @@
 # fantastic-scheduler selftest
 
 > scopes: persistence, kernel, time
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: the autonomous tick loop (`boot`/`shutdown`) — that needs
 > a live daemon + WS to observe `schedule_fired` over time; one-shot CLI
 > exercises the synchronous surface via `tick_now`
@@ -17,7 +17,7 @@ All test state lives under `/tmp/sc_test/`.
 
 ```bash
 rm -rf /tmp/sc_test && mkdir -p /tmp/sc_test && cd /tmp/sc_test
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 SC=$($FANTASTIC core create_agent handler_module=scheduler.tools | jq -r .id)
 FA=$($FANTASTIC core create_agent handler_module=file_bridge.tools root=/tmp/sc_test | jq -r .id)
 ```

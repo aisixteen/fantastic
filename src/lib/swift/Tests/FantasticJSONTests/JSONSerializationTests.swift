@@ -68,6 +68,34 @@ struct JSONSerializationTests {
         }
     }
 
+    @Test func parsePrefixTakesTheValueAndReportsWhereItStopped() throws {
+        // The counterpart of python's `raw_decode`, and its caller is the tool-call
+        // parser: a model emits a complete object and then trailing junk (gpt-oss
+        // closes an object early and writes one brace too many). `parse` refuses the
+        // whole input; `parsePrefix` yields the value that IS there plus the offset
+        // just past it, so the tail can be read rather than thrown away.
+        let text = #"{"a":1},"reply_to":"self"}"#
+        let (value, consumed) = try JSON.parsePrefix(Data(text.utf8))
+        #expect(value.serialize() == #"{"a":1}"#)
+        #expect(consumed == 7)
+        let tail = String(decoding: Data(text.utf8).dropFirst(consumed), as: UTF8.self)
+        #expect(tail == #","reply_to":"self"}"#)
+    }
+
+    @Test func parsePrefixSkipsLeadingButNotTrailingWhitespace() throws {
+        // The offset must point at the first byte the VALUE did not claim, so the
+        // caller sees the tail exactly as the model wrote it.
+        let (value, consumed) = try JSON.parsePrefix(Data("  42  x".utf8))
+        #expect(value.asInt == 42)
+        #expect(consumed == 4)
+    }
+
+    @Test func parsePrefixStillThrowsWhenThePrefixItselfIsBroken() {
+        #expect(throws: JSON.SerializationError.self) {
+            _ = try JSON.parsePrefix(Data(#"{"a":"unclosed"#.utf8))
+        }
+    }
+
     @Test func parseRejectsTruncatedString() {
         #expect(throws: JSON.SerializationError.self) {
             _ = try JSON.parse("\"unterminated")

@@ -22,9 +22,47 @@ extension Kernel {
             return await updateFromPayload(caller: target, payload: payload)
         case "get":
             return getAgentReply(payload: payload)
+        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
+        // one row per in-flight dispatch, `parent` chaining them into the send
+        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
+        case "ps":
+            return .object(["tasks": .array(tasks.rows())])
+        // Kill a task AND ITS SUBTREE (children first, like killing a process
+        // group). Each bundle's `onCancel` hook runs BEFORE the abort so real
+        // resources (OS subprocesses, PTYs, HTTP streams) die with it. An unknown
+        // or already-finished id returns {cancelled:false} — it does not pretend.
+        case "cancel":
+            guard let t = payload["task_id"].asString, !t.isEmpty else {
+                return .object(["error": .string("cancel: task_id (str) required")])
+            }
+            return await cancelTask(TaskId(t))
         default:
             return .object(["error": .string("unhandled system verb \(verb)")])
         }
+    }
+
+    /// One line per system verb — the honest reflect surface. Bundle verbs are
+    /// derived from each bundle's own reflect; these are the SUBSTRATE's own, so
+    /// they appear in no bundle's map and are advertised on the ROOT reflect (see
+    /// `applyReflectFlags`). Mirrors Python's `_SYSTEM_VERB_DOCS` / Rust's
+    /// `system_verb_docs`.
+    static func systemVerbDocs() -> JSON {
+        .object([
+            "create_agent": .string(
+                "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it."),
+            "update_agent": .string("args: id:str, **meta — patch a record's meta."),
+            "delete_agent": .string(
+                "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses)."),
+            "list_agents": .string("No args. Every agent's record, flat."),
+            "get": .string("args: id:str — one agent's record (null if unknown)."),
+            "ps": .string(
+                "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}. "
+                    + "One row per in-flight dispatch; `parent` chains them into the send tree."),
+            "cancel": .string(
+                "args: task_id:str — kill that task AND ITS SUBTREE (children first). "
+                    + "Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` "
+                    + "resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}."),
+        ])
     }
 
     // ── list_agents ─────────────────────────────────────────────
@@ -42,7 +80,21 @@ extension Kernel {
         rows.sort {
             ($0["id"].asString ?? "") < ($1["id"].asString ?? "")
         }
-        return .object(["agents": .array(rows)])
+        // `more` is not decoration (py-canonical, measured 2026-08-07): a model that
+        // opened with `list_agents` got bare records and never learned authoring was
+        // the mechanism; the arm that opened with `reflect` got `self_extension` and
+        // built. This verb rides every reflect's `system_verbs` — it needs a
+        // signpost back to the briefing.
+        return .object([
+            "agents": .array(rows),
+            "more": .string(
+                "Raw records — how agents are WIRED, not what they are FOR, and no "
+                    + "manual. {type:'reflect'} on the root is the briefing: each agent's "
+                    + "purpose, plus `self_extension` (how to author your own durable tools "
+                    + "in THIS kernel — which executor, and the fields without which the "
+                    + "agent is created and never runs) and `readmes` (the manual index). "
+                    + "Reflect the root before building anything."),
+        ])
     }
 
     // ── get ─────────────────────────────────────────────────────
@@ -90,6 +142,13 @@ extension Kernel {
                 }
                 meta[k] = v
             }
+        }
+
+        // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
+        // used to bypass it, so a record could be born with meta its own bundle
+        // refuses). Record is empty at create: the merged view IS the patch.
+        if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
+            return .object(["error": .string(why), "created": .bool(false)])
         }
 
         let rootPath = parent.childrenDir.appendingPathComponent(id)
@@ -236,6 +295,16 @@ extension Kernel {
                 changed.append(k)
             }
         }
+        // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
+        // patch before anything changes — a refusal names the bad field at the point
+        // of the mistake instead of surfacing calls later. Mirrors py/rust.
+        if let hm = target.handlerModule, let bundle = bundles.get(hm),
+            let why = bundle.validateMeta(patch, record: target.meta)
+        {
+            return .object([
+                "error": .string(why), "id": .string(idStr), "updated": .bool(false),
+            ])
+        }
         let rec = target.updateMeta(patch)
         await persistRecord(target)
         let recJson = recordToJSON(rec)
@@ -361,5 +430,42 @@ extension Kernel {
         bundles.snapshot()
             .map { (handlerModule, bundle) in (bundle.name, handlerModule) }
             .sorted { $0.name < $1.name }
+    }
+
+    /// Every script executor this kernel COULD advertise, paired with the
+    /// receive shape its connector really implements. The ONE table the
+    /// root `self_extension` reads — a hard-coded module name there went
+    /// wrong in both directions: on macOS the process-edge executor (registered
+    /// in Startup under `#if os(macOS)`) was never named, and on a non-Apple
+    /// build the string named an in-proc executor, which needed
+    /// JavaScriptCore and is not registered there at all. Swift ships no lua
+    /// executor, so none is listed.
+    static let scriptExecutors: [(handlerModule: String, receiveShape: String)] = [
+        (
+            "exec_bridge.tools",
+            "its script receives turns via kernel.on_message(callback) and must keep running; the leg's reflect advertises its interpreter allowlist and shims"
+        )
+    ]
+
+    /// The script executors actually REGISTERED in this kernel — the table
+    /// above intersected with `availableBundles()`, in table order.
+    func scriptExecutorsHere() -> [(handlerModule: String, receiveShape: String)] {
+        let registered = Set(availableBundles().map(\.handlerModule))
+        return Kernel.scriptExecutors.filter { registered.contains($0.handlerModule) }
+    }
+
+    /// The `self_extension` tail naming this build's executor(s). Empty
+    /// intersection is stated, not papered over: with no executor registered
+    /// there is no handler_module that runs authored `code`, and a caller
+    /// must learn that from the same round-trip.
+    func executorClause() -> String {
+        let live = scriptExecutorsHere()
+        if live.isEmpty {
+            return
+                "This build ships NO script executor - no registered handler_module runs authored `code`, so create_agent cannot make a tool here until one is registered."
+        }
+        let named = live.map { "\($0.handlerModule) (\($0.receiveShape))" }
+            .joined(separator: ", ")
+        return live.count == 1 ? "Executor here: \(named)." : "Executors here: \(named)."
     }
 }

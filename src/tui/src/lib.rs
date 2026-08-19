@@ -41,16 +41,20 @@ use tokio::sync::mpsc;
 mod bg;
 mod browser;
 mod chat;
+mod editor;
 mod hub;
 mod input;
 mod kernels;
 mod movie;
+mod onboard;
+mod plan;
 mod question_card;
 mod subkernel;
 use chat::{Body, Composer, Route, State, Tabs, WsCmd};
 use fantastic_brain as ai;
 use fantastic_host::gateway::{self, KernelHandle};
 use fantastic_term::{used_rows, TerminalSession};
+use onboard::OnboardEvent;
 use subkernel::{Role, SubKernel};
 
 /// The client_id the brain emits its streaming events to (our inbox key).
@@ -60,6 +64,45 @@ const BRAIN_ID: &str = "brain";
 /// The base "characters" present at boot, in tab order: the brain, the shell, the
 /// workspace kernel. Any agent you address opens its own agent after these.
 const BASE_TABS: [&str; 3] = ["ai", "sh", "ws"];
+
+/// The handler modules whose agents run AUTHORED CODE and serve an `on_message()`
+/// inbox — the agents you can TALK to in prose (design 28: a custom connector, a
+/// plan/execute mind). Matched on the reflect tree's `handler_module`, so the rule is
+/// the agent's KIND, never its id.
+const SCRIPT_HANDLERS: [&str; 2] = ["js_runtime", "lua_runtime"];
+
+/// Collect the ids of script agents (see [`SCRIPT_HANDLERS`]) from a reflect tree.
+fn collect_scripts(v: &Value, out: &mut Vec<String>) {
+    let handler = v
+        .get("handler_module")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if SCRIPT_HANDLERS.iter().any(|h| handler.starts_with(h)) {
+        if let Some(id) = v.get("id").and_then(Value::as_str) {
+            if !out.iter().any(|s| s == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    for key in ["children", "agents", "tree"] {
+        match v.get(key) {
+            Some(Value::Array(arr)) => {
+                for c in arr {
+                    collect_scripts(c, out);
+                }
+            }
+            Some(node @ Value::Object(_)) => collect_scripts(node, out),
+            _ => {}
+        }
+    }
+}
+
+/// The script agents of a reflect tree — [`collect_scripts`] as a value.
+fn script_ids(tree: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_scripts(tree, &mut out);
+    out
+}
 
 /// Collect agent ids from a reflect tree (handles `id` + `children`/`agents`).
 fn collect_ids(v: &Value, out: &mut Vec<String>) {
@@ -161,13 +204,41 @@ struct App {
     scroll_max: std::cell::Cell<usize>,
     /// The running connector-setup wizard, if any.
     flow: Option<input::SetupFlow>,
+    /// True while the **add-agent type picker** (`AI agent` · `Custom connector`)
+    /// owns `app.control` — distinguishes it from a running `SetupFlow` on the same
+    /// Select gate. Opened from the Hub's `+ agent` node (design 28).
+    add_agent_picker: bool,
+    /// The live in-frame code editor (a custom JS connector being authored, or one
+    /// reopened with `/edit`), if any. Modal: while `Some`, it owns the keys + frames
+    /// the chat inset; `^S` saves via a `send`, `Esc` closes.
+    editor: Option<editor::CodeEditor>,
+    /// Async onboarding results flow back here (the ollama `list_models` probe from the
+    /// Port step; the `/edit` agent-record read) — drained by the `select!` loop, the
+    /// only place they mutate UI state. See [`onboard`].
+    onboard_tx: mpsc::UnboundedSender<OnboardEvent>,
+    /// The current probe generation — bumped per probe so a stale result (after Esc
+    /// / a restarted flow) is dropped instead of advancing the wrong flow.
+    probe_gen: u64,
     /// The LIVE question card, if a watched agent raised one (`{type:"question"}`).
     /// A modal: while `Some`, it owns the keys + floats over the chat; the answer
     /// `send`s back to the asking agent. One at a time (extra questions are ignored).
     question: Option<question_card::QuestionCard>,
+    /// The LIVE plan panel, if a watched agent narrated a loop (`{type:"plan"}` +
+    /// `{type:"step"}`). NOT a modal: it docks under the header while the loop runs, so
+    /// a question card floats OVER it (the question is read in the context of the plan).
+    /// Esc cancels it (`ps` → `cancel`); its source's `done` closes it. See [`plan`].
+    plan: Option<plan::PlanPanel>,
     /// Kernel agent ids (cached at boot) — the extra "characters" you can address
     /// + Tab-complete beyond the base agents.
     known_agents: Vec<String>,
+    /// The agents that run AUTHORED CODE (`js_runtime`/`lua_runtime` handlers: a
+    /// custom connector, a plan/execute mind), read off the kernel's reflect tree —
+    /// `handler_module` is the discriminator, not a name prefix. They own an
+    /// `on_message()` inbox, so they take PROSE: a line addressed to one becomes a
+    /// `send` turn ([`chat::Route::Say`]) instead of the `@<id> <verb> k=v` sugar
+    /// every other agent gets (design 12 · 14 · 28). Refreshed with the tree (boot ·
+    /// hub rebuild · kernel switch) and the moment the TUI seeds one itself.
+    scripts: Vec<String>,
     /// AI turns typed while a turn is in flight queue here and fire in order.
     /// Each entry carries the transcript seq of its rendered line (shown dim
     /// + `⏳` while queued) so the drain can flip it to `Done`.
@@ -350,6 +421,9 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<WsEvent>();
     // Kernel attach/spawn task results (the Kernels screen: `+ new` / select folder).
     let (kernel_task_tx, mut kernel_task_rx) = mpsc::unbounded_channel::<KernelTaskResult>();
+    // Async onboarding results (the ollama endpoint probe · the `/edit` record read),
+    // back into the flow.
+    let (onboard_tx, mut onboard_rx) = mpsc::unbounded_channel::<OnboardEvent>();
     // PTY output → repaint pings.
     let (redraw_tx, mut redraw_rx) = mpsc::unbounded_channel::<()>();
 
@@ -391,8 +465,11 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
     let active = kernels::ActiveKernel::InProc(Arc::clone(&kernel));
     // Cache the active kernel's agent ids as addressable "characters".
     let known_agents = active.agent_ids().await;
-    // The lobby tree — the active kernel's live agent hierarchy.
-    let hub = hub::Hub::from_reflect(&active.reflect_tree().await);
+    // The lobby tree — the active kernel's live agent hierarchy. The same tree names
+    // the SCRIPT agents (the ones you talk to in prose).
+    let tree = active.reflect_tree().await;
+    let scripts = script_ids(&tree);
+    let hub = hub::Hub::from_reflect(&tree);
     // `.fantastic`-driven discovery: the optional `web` (passive, dormant) + cwd
     // folder-host (seeded dormant — reflect-pinged on entering the Kernels screen).
     // `self` + `cli` are synthetic and always present; foreigners are added at
@@ -421,8 +498,14 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
         scroll: 0,
         scroll_max: std::cell::Cell::new(0),
         flow: None,
+        add_agent_picker: false,
+        editor: None,
+        onboard_tx,
+        probe_gen: 0,
         question: None,
+        plan: None,
         known_agents,
+        scripts,
         pending: VecDeque::new(),
         ai_tx,
         ai_phase: None,
@@ -481,48 +564,7 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                 // A kernel reply lands in that agent's chat (unread if you're away).
                 app.tabs.deliver(&from).push(&from, "you", Body::Text(text), State::Done);
             }
-            Some(ev) = brain_rx.recv() => {
-                // LIVE EVENT STREAM, shared by `@ai` AND `@<id>` commands. Any agent
-                // we `watch` mirrors its self-emitted events here; each carries a
-                // `source` naming the emitter. We render it live into THAT source's
-                // agent via the same `on_event` (token append · say/activity note ·
-                // done seal). The brain (`source == BRAIN_ID`) additionally drives the
-                // AI turn lifecycle (phase indicator + queue drain on the ordered
-                // `done`); command targets just render — their final reply arrives via
-                // `cmd_rx` and there is no turn queue to drain.
-                let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
-                let source = ev
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or(BRAIN_ID)
-                    .to_string();
-                let is_ai = source == BRAIN_ID;
-                // Routing: the brain renders in the `ai` chat; every other agent
-                // renders in the chat named by its id (the `@<id>` chat).
-                let agent = if is_ai { "ai" } else { source.as_str() };
-                if is_ai && ty == "status" {
-                    if let Some(p) = ev.get("phase").and_then(Value::as_str) {
-                        app.ai_phase = Some(p.to_string());
-                    }
-                }
-                if ty == "question" {
-                    // A watched agent raised a LIVE question. Open the modal card
-                    // (one at a time) instead of letting it fall through to the dim
-                    // `[question] …` catch-all note. A second question while one is
-                    // open is dropped; one that fails to parse falls through.
-                    if app.question.is_none() {
-                        match question_card::QuestionCard::from_event(&ev) {
-                            Some(card) => app.question = Some(card),
-                            None => app.tabs.deliver(agent).on_event(&ev),
-                        }
-                    }
-                } else {
-                    app.tabs.deliver(agent).on_event(&ev);
-                    if is_ai && ty == "done" {
-                        finish_ai_turn(&mut app);
-                    }
-                }
-            }
+            Some(ev) = brain_rx.recv() => on_brain_event(&mut app, ev),
             Some(out) = ai_rx.recv() => {
                 // ERROR path only: a turn that failed produced no `done` event (the
                 // send returned an error), so the spawned task sends the error/dry
@@ -533,6 +575,9 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                 finish_ai_turn(&mut app);
             }
             Some(ev) = ws_rx.recv() => handle_ws_event(&mut app, ev),
+            // An onboarding task reported back (endpoint probe · `/edit` record read):
+            // the feature module folds it into the UI. Here, and nowhere else.
+            Some(ev) = onboard_rx.recv() => onboard::on_event(&mut app, ev),
             Some(res) = kernel_task_rx.recv() => {
                 app.kernels_busy = false;
                 match res {
@@ -565,6 +610,7 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                         app.active =
                             kernels::ActiveKernel::Remote(kernels::RemoteKernel { handle, sub });
                         app.known_agents = app.active.agent_ids().await;
+                        app.scripts = script_ids(&app.active.reflect_tree().await);
                         app.kernels_msg = None;
                         app.brain_ready = false; // a fresh kernel — re-provision on first @ai
                         app.hub_dirty = true;
@@ -624,7 +670,11 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                 if app.hub_dirty && app.phase == Phase::Hub {
                     app.hub_dirty = false;
                     let sel = app.hub.sel;
-                    app.hub = hub::Hub::from_reflect(&app.active.reflect_tree().await);
+                    // One tree, two readings: the lobby's nodes AND the script agents
+                    // (an agent the BRAIN authored becomes speakable here too).
+                    let tree = app.active.reflect_tree().await;
+                    app.scripts = script_ids(&tree);
+                    app.hub = hub::Hub::from_reflect(&tree);
                     app.hub.sel = sel.min(app.hub.nodes().len().saturating_sub(1));
                 }
                 // Rebuild the sub-kernel plane (self · cli · attached) with fresh
@@ -767,6 +817,16 @@ fn term_visible(app: &App) -> bool {
     term_live(app) && app.tabs.active_id() == "sh"
 }
 
+/// The agent whose loop is LIVE on the plan panel (the `ps`/`cancel` driver), if the
+/// panel is up and still running. `None` once it has settled — a finished plan has
+/// nothing to cancel, so Esc / Ctrl+C go back to their normal meaning.
+fn plan_driver(app: &App) -> Option<String> {
+    app.plan
+        .as_ref()
+        .filter(|p| p.is_live())
+        .map(|p| p.source.clone())
+}
+
 fn handle_input(app: &mut App, ev: Event) {
     // Bracketed paste arrives as ONE event — insert it whole (embedded newlines
     // preserved as literal breaks in the message) instead of replaying it as
@@ -852,6 +912,13 @@ fn handle_input(app: &mut App, ev: Event) {
         app.quit = true;
         return;
     }
+    // The in-frame CODE EDITOR is modal: while it's up it owns every key but the
+    // global Ctrl+Q above (so Ctrl+F/Ctrl+C never steal `^S`/`Esc` or a typed char).
+    // `^S` saves via a `send`; `Esc` closes without saving.
+    if app.editor.is_some() {
+        onboard::handle_editor_key(app, code, modifiers);
+        return;
+    }
     // Ctrl+F toggles PTY focus (only when the terminal viewport is on-screen — in
     // the `@sh` agent). Elsewhere it says why nothing happened.
     if ctrl && code == KeyCode::Char('f') {
@@ -871,7 +938,9 @@ fn handle_input(app: &mut App, ev: Event) {
     }
     // Ctrl+C: a SECOND press within the window exits the app. A single press
     // still does its normal job: with a live terminal it's forwarded to the
-    // shell as SIGINT (0x03); otherwise it interrupts an in-flight AI stream.
+    // shell as SIGINT (0x03); otherwise it KILLS the in-flight work — `ps` then
+    // `cancel`, exactly like a shell (see [`plan`]). It is a real interrupt: the
+    // blocked caller's `send` resolves `{"cancelled":true}`.
     if ctrl && code == KeyCode::Char('c') {
         let now = Instant::now();
         if ctrl_c_exits(app.last_ctrl_c, now) {
@@ -880,14 +949,25 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         app.last_ctrl_c = Some(now);
         let ai_live = app.tabs.chat("ai").is_some_and(|c| c.has_live());
+        // The agent whose loop Ctrl+C stops here, if any: a live plan panel's mind, or
+        // the SCRIPT agent whose chat you're standing in (a mind that never planned).
+        let driver = plan_driver(app).or_else(|| {
+            let id = app.tabs.active_id().to_string();
+            app.scripts.contains(&id).then_some(id)
+        });
         // SIGINT goes to the shell only when its viewport is the one in front
-        // (the `@sh` agent / focused); elsewhere Ctrl+C interrupts the AI stream.
+        // (the `@sh` agent / focused); elsewhere Ctrl+C cancels the live turn.
         // The note says what THIS press did, so the action is never a mystery.
         let note = if app.term_focused || term_visible(app) {
             if let Some(ts) = app.term.as_mut() {
                 ts.write(&[0x03]);
             }
             "^C sent to shell · Ctrl+C again to exit".to_string()
+        } else if let Some(driver) = driver {
+            // A script agent's turn: kill the brain call it is BLOCKED IN (never its own
+            // job — that would kill the script). It stops its loop and stays alive.
+            plan::request_cancel(app, driver.clone());
+            format!("⊘ cancelling {driver} · Ctrl+C again to exit")
         } else if ai_live {
             app.tabs.deliver("ai").interrupt_live();
             // Queued lines will never fire now — mark them interrupted too.
@@ -895,12 +975,9 @@ fn handle_input(app: &mut App, ev: Event) {
                 app.tabs.deliver("ai").set_state(seq, State::Interrupted);
             }
             app.chat_busy = false;
-            let kernel = Arc::clone(&app.kernel);
-            tokio::spawn(async move {
-                kernel
-                    .send(&AgentId::from(BRAIN_ID), json!({"type":"interrupt"}))
-                    .await;
-            });
+            // No driver AGENT here — the blocked caller is the TUI itself, so the target
+            // is the brain's own in-flight dispatch (our `send` then resolves cancelled).
+            plan::request_cancel(app, String::new());
             "⊘ interrupted @ai · Ctrl+C again to exit".to_string()
         } else {
             "press Ctrl+C again to exit".to_string()
@@ -920,8 +997,13 @@ fn handle_input(app: &mut App, ev: Event) {
             KeyCode::Left => app.hub.move_left(),
             KeyCode::Right => app.hub.move_right(),
             KeyCode::Enter => {
-                let agent = app.hub.selected_agent();
-                open_agent(app, &agent);
+                // `+ agent` is not an agent — it opens the add-agent type picker.
+                if app.hub.selected_is_adder() {
+                    onboard::open_add_agent_picker(app);
+                } else {
+                    let agent = app.hub.selected_agent();
+                    open_agent(app, &agent);
+                }
             }
             // Esc climbs one more rung: Hub → Kernels (the list of all kernels).
             KeyCode::Esc => {
@@ -1051,10 +1133,22 @@ fn handle_input(app: &mut App, ev: Event) {
         handle_question_key(app, code);
         return;
     }
-    // A setup flow (`/setup` · `/model`) owns the input while active — its dynamic
-    // control (Select / Field) handles the keys instead of the composer.
+    // A setup flow (`/setup` · `/model` · the add-agent picker) owns the input while
+    // active — its dynamic control (Select / Field) handles the keys, not the composer.
     if !matches!(app.control, input::Control::Chat) {
-        handle_flow_key(app, code);
+        onboard::handle_flow_key(app, code);
+        return;
+    }
+    // **Esc CANCELS a live loop.** While a plan panel is running, Esc means "stop this"
+    // (`ps` → `cancel` — the mind's brain call dies, its `send` resolves cancelled, its
+    // script lives on), not "minimize to the lobby". A panel that is no longer running
+    // (cancelled / settled) is a record, not a loop: Esc DISMISSES it. Only then does
+    // Esc go back to meaning "minimize" — one rung of the ladder per press.
+    if code == KeyCode::Esc && !app.composer.editing_sender && app.plan.is_some() {
+        match plan_driver(app) {
+            Some(driver) => plan::request_cancel(app, driver),
+            None => app.plan = None,
+        }
         return;
     }
     // While the `@sender` is being edited, the palette owns the navigation keys:
@@ -1299,25 +1393,20 @@ fn submit_chat(app: &mut App) {
         }
         "/setup" => {
             app.composer.take_message();
-            let (flow, ctrl) = input::SetupFlow::start_setup();
-            app.flow = Some(flow);
-            app.control = ctrl;
+            onboard::start_connect_flow(app);
             return;
         }
         "/model" => {
             app.composer.take_message();
-            // Pre-fill from the existing connector (or fall back to a full setup).
-            let cfg = fantastic_host::ai_config();
-            let (flow, ctrl) = match cfg.backend {
-                Some(b) => input::SetupFlow::start_model(
-                    &b,
-                    cfg.model.as_deref().unwrap_or(""),
-                    cfg.key_present,
-                ),
-                None => input::SetupFlow::start_setup(),
-            };
-            app.flow = Some(flow);
-            app.control = ctrl;
+            onboard::start_model_flow(app);
+            return;
+        }
+        // `/edit` — reopen the ACTIVE agent's program in the in-frame editor (read +
+        // edit a connector in place). Async: the record read lands in the `select!`
+        // loop, which opens the editor (or notes that this agent carries no code).
+        "/edit" => {
+            app.composer.take_message();
+            onboard::start_edit(app);
             return;
         }
         "/help" => {
@@ -1334,7 +1423,7 @@ fn submit_chat(app: &mut App) {
                 "system",
                 "you",
                 Body::Note(format!(
-                    "unknown command {cmd} — /help · /intro · /setup · /model"
+                    "unknown command {cmd} — /help · /intro · /setup · /model · /edit"
                 )),
                 State::Done,
             );
@@ -1352,7 +1441,7 @@ fn submit_chat(app: &mut App) {
     let message = app.composer.take_message();
     // Reconstruct the routable line `@sender body` and resolve it.
     let line = format!("@{sender} {message}");
-    let (target, route) = chat::route(&line, &sender);
+    let (target, route) = chat::route(&line, &sender, &app.scripts);
     // Entering the addressed agent (creates its tab if new) + keep the composer
     // pointed there.
     app.tabs.focus(&target);
@@ -1387,6 +1476,7 @@ fn submit_chat(app: &mut App) {
                 fire_ai_turn(app, text);
             }
         }
+        Route::Say(target, text) => say_to_script(app, target, text),
         Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
         Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
         Route::Shell(cmd) => run_shell(app, cmd),
@@ -1394,32 +1484,34 @@ fn submit_chat(app: &mut App) {
     }
 }
 
-/// Drive the active setup flow with a key. Esc cancels back to chat; Select uses
-/// ↑/↓ + Enter; Field uses chars/Backspace + Enter. Enter submits the control,
-/// advancing the wizard or finishing it.
-fn handle_flow_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
-            app.control = input::Control::Chat;
-            app.flow = None;
-        }
-        KeyCode::Up => app.control.select_up(),
-        KeyCode::Down => app.control.select_down(),
-        KeyCode::Char(c) => app.control.type_char(c),
-        KeyCode::Backspace => app.control.backspace(),
-        KeyCode::Enter => {
-            let value = app.control.submitted_value();
-            let Some(flow) = app.flow.as_mut() else {
-                app.control = input::Control::Chat;
-                return;
-            };
-            match flow.submit(value) {
-                input::Advance::Next(ctrl) => app.control = ctrl,
-                input::Advance::Done(draft) => finish_setup(app, draft),
-            }
-        }
-        _ => {}
+/// **Talk to a script agent** — prose to a `js_runtime`/`lua_runtime` agent (a custom
+/// connector, a plan/execute mind) is a `send` TURN, exactly like `@ai`'s: the whole
+/// line rides in as `text` and lands in the agent's `on_message()` inbox (design 12 ·
+/// 14 · 28). Rendered as a normal `you →` line in THAT agent's chat; whatever the
+/// script emits back (its `say`/`question`/`done`) streams into the same chat, because
+/// [`kernels::ActiveKernel::dispatch`] subscribes our client inbox to the target — the
+/// same door a user's `@<id> <verb>` takes, since this IS the user's command.
+fn say_to_script(app: &mut App, target: AgentId, text: String) {
+    app.tabs.deliver(target.as_str()).push(
+        "you",
+        target.as_str(),
+        Body::Text(text.clone()),
+        State::Done,
+    );
+    // A remote kernel streams the agent's emits over the WS mirror (parity with the
+    // in-proc `watch` inside `dispatch`).
+    if let Some(ws) = &app.ws_stream {
+        ws.watch(target.as_str());
     }
+    let active = app.active.clone();
+    tokio::spawn(async move {
+        active
+            .dispatch(
+                &target,
+                json!({"type":"send","text":text,"client_id":CLIENT_ID}),
+            )
+            .await;
+    });
 }
 
 /// Drive the LIVE question card from a key. The card owns the modal logic
@@ -1444,50 +1536,55 @@ fn handle_question_key(app: &mut App, code: KeyCode) {
     });
 }
 
-/// Persist a completed connector draft (settings + OS keychain), update the live
-/// env, re-provision the brain (drop the old one), and confirm in the `@ai` agent.
-fn finish_setup(app: &mut App, draft: input::Draft) {
-    app.control = input::Control::Chat;
-    app.flow = None;
-    let key = (!draft.key.trim().is_empty()).then_some(draft.key.as_str());
-    let mut seal = State::Done;
-    let note = match fantastic_host::set_ai_connector(&draft.backend, &draft.model, key) {
-        Ok(()) => {
-            // Update the live env so the re-provisioned brain reads the new config.
-            std::env::set_var("FANTASTIC_AI_BACKEND", &draft.backend);
-            std::env::set_var("FANTASTIC_AI_MODEL", &draft.model);
-            if let Some(k) = key {
-                std::env::set_var("FANTASTIC_AI_KEY", k);
+/// Route one event off the LIVE EVENT STREAM (`brain_rx`) into the UI — shared by
+/// `@ai` AND `@<id>` commands. Only agents we `watch` reach this channel (the kernel's
+/// watcher fanout), and we watch exactly what the user addressed: an agent's traffic is
+/// mirrored here BECAUSE the user asked to see it. Each event carries a `source` naming
+/// the emitter; we render it live into THAT source's agent via `on_event` (token append
+/// · say/activity note · done seal). The brain (`source == BRAIN_ID`) additionally
+/// drives the AI turn lifecycle (phase indicator + queue drain on the ordered `done`);
+/// command targets just render — their final reply arrives via `cmd_rx` and there is no
+/// turn queue to drain.
+///
+/// The app's own plumbing never appears here: it dispatches through the quiet
+/// [`kernels::ActiveKernel::send`], which registers no watcher (see `onboard`).
+fn on_brain_event(app: &mut App, ev: Value) {
+    let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+    let source = ev
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or(BRAIN_ID)
+        .to_string();
+    let is_ai = source == BRAIN_ID;
+    // Routing: the brain renders in the `ai` chat; every other agent renders in the
+    // chat named by its id (the `@<id>` chat).
+    let agent = if is_ai { "ai" } else { source.as_str() };
+    if is_ai && ty == "status" {
+        if let Some(p) = ev.get("phase").and_then(Value::as_str) {
+            app.ai_phase = Some(p.to_string());
+        }
+    }
+    if ty == "question" {
+        // A watched agent raised a LIVE question. Open the modal card (one at a time)
+        // instead of letting it fall through to the dim `[question] …` catch-all note.
+        // A second question while one is open is dropped; one that fails to parse falls
+        // through.
+        if app.question.is_none() {
+            match question_card::QuestionCard::from_event(&ev) {
+                Some(card) => app.question = Some(card),
+                None => app.tabs.deliver(agent).on_event(&ev),
             }
-            // Re-provision: drop the old brain + history so the next `@ai`
-            // re-ensures with the new model/key (a stale brain keeps the old one).
-            app.brain_ready = false;
-            let kernel = Arc::clone(&app.kernel);
-            tokio::spawn(async move {
-                for id in [BRAIN_ID, "ai_fs"] {
-                    let _ = kernel
-                        .send(
-                            &AgentId::from("kernel"),
-                            json!({"type":"delete_agent","id":id}),
-                        )
-                        .await;
-                }
-            });
-            format!(
-                "connector set: {} · {} — @ai is ready.",
-                draft.backend, draft.model
-            )
         }
-        Err(e) => {
-            seal = State::Error;
-            format!("✗ {e}")
+    } else if plan::on_event(app, &ev) {
+        // A watched agent NARRATED its loop (`plan` / `step`): the live panel took it.
+        // Anything the panel refuses (a malformed plan, a step with no panel) returns
+        // `false` and falls through to the transcript below — never swallowed.
+    } else {
+        app.tabs.deliver(agent).on_event(&ev);
+        if is_ai && ty == "done" {
+            finish_ai_turn(app);
         }
-    };
-    app.tabs
-        .deliver("ai")
-        .push("brain", "you", Body::Text(note), seal);
-    app.tabs.focus("ai");
-    app.composer.set_sender("ai");
+    }
 }
 
 /// End the current AI turn: clear the phase, then — Claude-Code style, AI-only —
@@ -1985,8 +2082,12 @@ fn str_at(buf: &mut Buffer, clip: Rect, x: i32, y: i32, s: &str, style: Style) {
     }
 }
 
-/// The rendered label for a tree node (`★@ai`, `@fs`, …).
+/// The rendered label for a tree node (`★@ai`, `@fs`, …). The `+ agent` adder is an
+/// ACTION, not an addressee — it carries no `@`.
 fn hub_label(n: &hub::HubNode) -> String {
+    if n.is_adder {
+        return n.label.clone();
+    }
     format!("{}@{}", if n.is_home { "★" } else { "" }, n.label)
 }
 
@@ -2430,13 +2531,10 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     };
     // header (3) · transcript (min) · bottom region (dynamic). The bottom is the
     // chat input normally; it grows into a setup-flow panel when a `/setup` or
-    // `/model` flow is active (a select list needs agent for its options).
-    let bottom_h: u16 = match &app.control {
-        input::Control::Select { options, .. } => {
-            (options.len() as u16 + 4).clamp(5, inset.height.saturating_sub(6).max(5))
-        }
-        _ => 4, // Chat: 1 star-gap + 3-row input. Field: title + field + hint.
-    };
+    // `/model` flow is active (a select list needs agent for its options) — the
+    // onboarding feature owns that height rule.
+    let cap = inset.height.saturating_sub(6).max(5);
+    let bottom_h = onboard::flow_height(&app.control, cap);
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2551,29 +2649,40 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         );
     }
 
-    // Bottom region: the chat composer, or the active setup-flow control.
-    match &app.control {
-        input::Control::Chat => {
-            // 1 star-gap row (stars peek through) + the 3-row opaque input box.
-            let b = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(bottom);
-            let input_area = b[1];
-            fill_black(f.buffer_mut(), input_area);
-            render_composer(f, input_area, app);
-            // The `@`-palette floats over the transcript bottom while the
-            // sender is being edited — navigate + discover in one gesture.
-            if app.composer.editing_sender {
-                render_palette(f, transcript_area, app);
+    // Bottom region: the chat composer, or the active setup-flow control. Skipped
+    // entirely while the code editor is up — it owns the frame, and not setting a
+    // cursor here keeps the hardware caret from bleeding through its panel (the
+    // textarea draws its own).
+    if app.editor.is_none() {
+        match &app.control {
+            input::Control::Chat => {
+                // 1 star-gap row (stars peek through) + the 3-row opaque input box.
+                let b = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Min(1)])
+                    .split(bottom);
+                let input_area = b[1];
+                fill_black(f.buffer_mut(), input_area);
+                render_composer(f, input_area, app);
+                // The `@`-palette floats over the transcript bottom while the
+                // sender is being edited — navigate + discover in one gesture.
+                if app.composer.editing_sender {
+                    render_palette(f, transcript_area, app);
+                }
             }
-        }
-        ctrl => {
-            fill_black(f.buffer_mut(), bottom);
-            render_flow(f, bottom, ctrl);
+            ctrl => {
+                fill_black(f.buffer_mut(), bottom);
+                onboard::render_flow(f, bottom, ctrl);
+            }
         }
     }
 
+    // A LIVE plan panel docks under the header while an agent narrates its loop —
+    // drawn BEFORE the help/card so both layer OVER it, and the question is read in
+    // the CONTEXT of the plan (the panel stays visible under the card).
+    if let Some(panel) = &app.plan {
+        panel.render(f, inset);
+    }
     // The /help overlay floats over everything; any key closes it.
     if app.help_open {
         render_help(f, inset);
@@ -2581,6 +2690,10 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     // A LIVE question card floats over the chat as a modal (over the help too).
     if let Some(card) = &app.question {
         card.render(f, inset);
+    }
+    // The in-frame code editor FRAMES the chat inset (not an alt-screen takeover).
+    if let Some(ed) = &app.editor {
+        ed.render(f, inset);
     }
 }
 
@@ -2592,7 +2705,7 @@ fn render_help(f: &mut Frame, within: Rect) {
         .fg(Color::LightMagenta)
         .add_modifier(Modifier::BOLD);
     let body = Style::default().fg(Color::White);
-    let rows: [(&str, &str); 12] = [
+    let rows: [(&str, &str); 19] = [
         ("@", "palette: ↑↓ pick · ⏎ open · ⇥ complete · esc"),
         (
             "@ai …",
@@ -2612,18 +2725,30 @@ fn render_help(f: &mut Frame, within: Rect) {
             "copy / paste",
             "select + copy in your terminal · Cmd/Ctrl+V pastes",
         ),
-        ("/commands", "/help · /intro · /setup · /model"),
+        // The self-emergence ladder, friendly → fully-DIY: connectors are AGENTS
+        // you author, never built-ins (design 28 · 22).
+        (
+            "+ agent",
+            "add an agent: AI · connector · plan/execute mind",
+        ),
+        ("connectors", "ollama (keyless: port + model)"),
+        ("", "· author your own JS connector in-frame"),
+        ("", "· @sh launch a coder to write one"),
+        // The third kind: an authored JS MIND that drives the brain and asks YOU
+        // through the live question card (design 28 · 27).
+        ("mind", "a JS agent that plans, drives the brain, ASKS you"),
+        // Its loop is VISIBLE (the plan panel) and CANCELABLE — `ps` → `cancel` kills
+        // the brain call it is blocked in; the mind itself lives on (design 27).
+        ("plan panel", "a mind's live loop · Esc cancels the step"),
+        // A script agent is not write-once: `/edit` reopens the agent you're standing
+        // in and pre-fills the editor with its code (design 28).
+        ("/edit", "reopen this agent's code — read + edit"),
+        ("/commands", "/help · /intro · /setup · /model · /edit"),
         ("exit", "Ctrl+Q · Ctrl+C twice · hold q"),
     ];
-    let w = (within.width.saturating_sub(4)).clamp(20, 60);
-    let h = (rows.len() as u16 + 4).min(within.height);
-    let area = Rect {
-        x: within.x + (within.width.saturating_sub(w)) / 2,
-        y: within.y + (within.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
-    fill_black(f.buffer_mut(), area);
+    // The card's left indent + the key column the rows line up on.
+    const INDENT: usize = 2;
+    const KEY_W: usize = 13;
     let mut lines = vec![
         Line::from(Span::styled(
             "FANTASTIC — how to play",
@@ -2635,13 +2760,34 @@ fn render_help(f: &mut Frame, within: Rect) {
     ];
     for (k, v) in rows {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<13}"), key),
+            Span::styled(format!("{:INDENT$}{k:<KEY_W$}", ""), key),
             Span::styled(v.to_string(), body),
         ]));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("  any key closes", dim)));
-    f.render_widget(Paragraph::new(lines), area);
+
+    // Size the card to its CONTENT — the widest row plus a right margin matching the
+    // indent — never a fixed cap (a 60-col one cut the longest rows mid-word: "…streams
+    // live · Ctrl+C inte"). Clamped to the frame: on a genuinely narrow terminal the card
+    // takes the full width and the Paragraph WRAPS at word boundaries (`Wrap`) instead of
+    // hard-cutting, so the text stays readable rather than lopped. The height is measured
+    // AFTER the width is known, so wrapped rows still get their rows.
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0);
+    let w = ((widest + INDENT) as u16).clamp(20.min(within.width), within.width);
+    let h = lines
+        .iter()
+        .map(|l| l.width().div_ceil(w.max(1) as usize).max(1) as u16)
+        .sum::<u16>()
+        .min(within.height);
+    let area = Rect {
+        x: within.x + (within.width.saturating_sub(w)) / 2,
+        y: within.y + (within.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    fill_black(f.buffer_mut(), area);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 /// The `@`-palette: a small panel anchored just above the input while the
@@ -2750,65 +2896,6 @@ fn render_composer(f: &mut Frame, input_area: Rect, app: &App) {
         cx.min(input_area.x + input_area.width.saturating_sub(1)),
         input_area.y,
     ));
-}
-
-/// Render the active setup-flow control: an arrow-key option list, or a (maskable)
-/// text field — a Claude-Code-style dynamic input.
-fn render_flow(f: &mut Frame, area: Rect, ctrl: &input::Control) {
-    let mag = Color::Indexed(165);
-    let dim = Style::default().fg(Color::DarkGray);
-    let title_st = Style::default()
-        .fg(Color::LightMagenta)
-        .add_modifier(Modifier::BOLD);
-    match ctrl {
-        input::Control::Select {
-            title,
-            options,
-            cursor,
-        } => {
-            let mut lines = vec![Line::from(Span::styled(format!("⚙ {title}"), title_st))];
-            for (i, opt) in options.iter().enumerate() {
-                let st = if i == *cursor {
-                    Style::default().fg(mag).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                let mark = if i == *cursor { "▸ " } else { "  " };
-                lines.push(Line::from(vec![
-                    Span::styled(mark, st),
-                    Span::styled(opt.clone(), st),
-                ]));
-            }
-            lines.push(Line::from(Span::styled(
-                "↑↓ select · enter · esc cancel",
-                dim,
-            )));
-            f.render_widget(Paragraph::new(lines), area);
-        }
-        input::Control::Field {
-            title,
-            value,
-            masked,
-        } => {
-            let shown = if *masked {
-                "•".repeat(value.chars().count())
-            } else {
-                value.clone()
-            };
-            let lines = vec![
-                Line::from(Span::styled(format!("⚙ {title}"), title_st)),
-                Line::from(vec![
-                    Span::styled(" ▸ ", dim),
-                    Span::styled(shown, Style::default().fg(Color::White)),
-                ]),
-                Line::from(Span::styled("enter · esc cancel", dim)),
-            ];
-            f.render_widget(Paragraph::new(lines), area);
-            let cx = area.x + 3 + value.chars().count() as u16;
-            f.set_cursor_position((cx.min(area.x + area.width.saturating_sub(1)), area.y + 1));
-        }
-        input::Control::Chat => {}
-    }
 }
 
 /// Render the breathing PTY viewport: a colored `│ sh` rail header (showing
@@ -2956,19 +3043,36 @@ mod e2e {
 
     /// Build an `App` wired to a real host kernel, with dummy channels and no
     /// PTY. The kernel is composed via a blocking runtime so the helper itself
-    /// is synchronous (the e2e tests need no async surface).
-    fn test_app() -> App {
+    /// is synchronous (most e2e tests need no async surface). Shared with the
+    /// feature modules' own e2e (see `onboard::tests`).
+    pub(crate) fn test_app() -> App {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let (kernel, _loaded) = rt
             .block_on(fantastic_host::compose_manager_in_memory())
             .expect("compose host kernel");
+        app_with(kernel)
+    }
+
+    /// The same `App`, composed from INSIDE a running runtime — for the tests that
+    /// drive paths which `tokio::spawn` (the endpoint probe, create_agent, the
+    /// editor's save-send). `test_app`'s nested `Runtime::new` would panic there.
+    pub(crate) async fn test_app_async() -> App {
+        let (kernel, _loaded) = fantastic_host::compose_manager_in_memory()
+            .await
+            .expect("compose host kernel");
+        app_with(kernel)
+    }
+
+    fn app_with(kernel: Arc<Kernel>) -> App {
         let active = kernels::ActiveKernel::InProc(Arc::clone(&kernel));
 
-        // Dummy channels: hold the receivers so the senders stay live (a dropped
-        // receiver would make `send` error, but the e2e paths never rely on it).
+        // Dummy channels: the results are folded in by calling the loop's handler
+        // directly (a test that needs to DRAIN one re-wires that sender to a channel
+        // it owns — see `onboard::tests::intercept`).
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<(String, String)>();
         let (ai_tx, _ai_rx) = mpsc::unbounded_channel::<String>();
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel::<WsEvent>();
+        let (onboard_tx, _onboard_rx) = mpsc::unbounded_channel::<OnboardEvent>();
         let (redraw_tx, _redraw_rx) = mpsc::unbounded_channel::<()>();
 
         App {
@@ -2982,8 +3086,16 @@ mod e2e {
             scroll: 0,
             scroll_max: std::cell::Cell::new(0),
             flow: None,
+            add_agent_picker: false,
+            editor: None,
+            onboard_tx,
+            probe_gen: 0,
             question: None,
+            plan: None,
             known_agents: vec!["kernel".into(), "core".into()],
+            // No authored agents at boot — a seeded connector/mind joins this list (and
+            // a tree refresh discovers ones the brain authored).
+            scripts: Vec::new(),
             pending: VecDeque::new(),
             ai_tx,
             ai_phase: None,
@@ -3029,7 +3141,7 @@ mod e2e {
         }
     }
 
-    fn ctrl(code: KeyCode) -> Event {
+    pub(crate) fn ctrl(code: KeyCode) -> Event {
         Event::Key(KeyEvent {
             code,
             modifiers: KeyModifiers::CONTROL,
@@ -3043,13 +3155,23 @@ mod e2e {
         buf.content().iter().map(|c| c.symbol()).collect()
     }
 
-    fn key(code: KeyCode) -> Event {
+    pub(crate) fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent {
             code,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: ratatui::crossterm::event::KeyEventState::NONE,
         })
+    }
+
+    /// Type a line into the composer and submit it — through the REAL key path, one
+    /// `Char` event per character then `Enter`, so a slash command is dispatched
+    /// exactly as a user's typing dispatches it.
+    pub(crate) fn type_line(app: &mut App, line: &str) {
+        for c in line.chars() {
+            handle_input(app, key(KeyCode::Char(c)));
+        }
+        handle_input(app, key(KeyCode::Enter));
     }
 
     #[test]
@@ -3281,6 +3403,258 @@ mod e2e {
         app.term_focused = true;
         handle_input(&mut app, key(KeyCode::Esc));
         assert!(!app.term_focused, "Esc releases focus back to chat");
+    }
+
+    #[test]
+    fn help_lists_the_self_emergence_ladder() {
+        // /help must teach the three ways to a brain: ollama · your own JS connector
+        // · @sh a coder (design 22 · 28).
+        let mut app = test_app();
+        app.help_open = true;
+        let backend = TestBackend::new(100, 30);
+        let mut term = Terminal::new(backend).expect("test terminal");
+        term.draw(|f| ui(f, &app)).expect("draw help");
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("+ agent"), "the adder is documented");
+        assert!(
+            text.contains("connectors"),
+            "the connector ladder is documented"
+        );
+        assert!(text.contains("ollama"), "the keyless on-ramp");
+        assert!(text.contains("JS connector"), "author your own");
+        assert!(text.contains("@sh"), "launch a coder");
+        // …and that a connector is not write-once: `/edit` reopens it (design 28).
+        assert!(
+            text.contains("/edit"),
+            "reopening a connector is documented"
+        );
+    }
+
+    /// The card must FIT its text (design 22). Its longest rows used to be hard-cut by a
+    /// fixed 60-col card — `talk to the brain (streams live · Ctrl+C inte` — so the manual
+    /// itself was unreadable. Sized from its widest row, every row renders WHOLE.
+    #[test]
+    fn help_card_renders_every_row_whole() {
+        let mut app = test_app();
+        app.help_open = true;
+        let mut term = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        term.draw(|f| ui(f, &app)).expect("draw help");
+        let text = buffer_text(term.backend().buffer());
+        for row in [
+            "palette: ↑↓ pick · ⏎ open · ⇥ complete · esc",
+            "talk to the brain (streams live · Ctrl+C interrupts)",
+            "run in the live shell (Ctrl+F focus · Esc release)",
+            "workspace kernel: up · down · <verb> [k=v…]",
+            "select + copy in your terminal · Cmd/Ctrl+V pastes",
+            "a JS agent that plans, drives the brain, ASKS you",
+            "reopen this agent's code — read + edit",
+            "Ctrl+Q · Ctrl+C twice · hold q",
+        ] {
+            assert!(
+                text.contains(row),
+                "the help card must render `{row}` whole, not cut it"
+            );
+        }
+    }
+
+    /// …and a frame too narrow for the card must not panic (the width clamp) — it takes
+    /// what it can get and wraps, rather than cutting or crashing.
+    #[test]
+    fn help_card_survives_a_narrow_frame() {
+        let mut app = test_app();
+        app.help_open = true;
+        for (w, h) in [(10u16, 10u16), (16, 6), (30, 20), (61, 24)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            term.draw(|f| ui(f, &app))
+                .unwrap_or_else(|e| panic!("draw help in a {w}x{h} frame: {e}"));
+        }
+    }
+
+    /// The same rule for the plan panel + the card ON TOP of it: a cramped frame must
+    /// clamp, never panic (the panel docks under the header and takes what is left).
+    #[test]
+    fn the_plan_panel_and_card_survive_a_tiny_frame() {
+        let mut app = test_app();
+        on_brain_event(
+            &mut app,
+            json!({"type":"plan","steps":["a","b","c","d","e","f"],"source":"m"}),
+        );
+        on_brain_event(
+            &mut app,
+            json!({"type":"question","request_id":"q","kind":"text","question":"?","source":"m"}),
+        );
+        for (w, h) in [(10u16, 6u16), (16, 8), (30, 12), (80, 24)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            term.draw(|f| ui(f, &app))
+                .unwrap_or_else(|e| panic!("draw the plan panel in a {w}x{h} frame: {e}"));
+        }
+    }
+
+    // ── the LIVE plan panel (design 27 · `plan.rs`) ──────────────────────────
+
+    /// A `{type:"plan"}` event off the live stream: the panel OPENS, `{type:"step"}`
+    /// advances it, and the source's `done` closes it. The shell hard-codes no loop —
+    /// it renders exactly what the agent emitted (the same duck-typing as the card).
+    #[test]
+    fn a_plan_event_opens_the_panel_steps_advance_it_and_done_closes_it() {
+        let mut app = test_app();
+        on_brain_event(
+            &mut app,
+            json!({"type":"plan","steps":["read the file","summarize it"],
+                   "source":"mind_ab12","client_id":CLIENT_ID}),
+        );
+        let p = app.plan.as_ref().expect("the plan event opens the panel");
+        assert_eq!(p.source, "mind_ab12");
+        assert_eq!(p.steps.len(), 2);
+        assert!(p.is_live(), "a fresh plan is a LIVE loop (Esc cancels it)");
+        // The plan is CONSUMED by the panel — it does not also land in the transcript.
+        assert!(
+            !transcript(&app, "mind_ab12").contains("read the file"),
+            "the plan renders in the PANEL, not as a dim note"
+        );
+
+        on_brain_event(
+            &mut app,
+            json!({"type":"step","index":0,"total":2,"text":"read the file",
+                   "status":"running","source":"mind_ab12"}),
+        );
+        assert_eq!(
+            app.plan.as_ref().map(|p| p.steps[0].status),
+            Some(plan::Status::Running)
+        );
+        on_brain_event(
+            &mut app,
+            json!({"type":"step","index":1,"total":2,"status":"running","source":"mind_ab12"}),
+        );
+        let p = app.plan.as_ref().expect("still live");
+        assert_eq!(p.steps[0].status, plan::Status::Done, "step 1 finished");
+        assert_eq!(p.steps[1].status, plan::Status::Running);
+
+        // The mind's FINAL say settles the panel; its `done` closes it — and BOTH still
+        // render in the transcript, where the answer belongs.
+        on_brain_event(
+            &mut app,
+            json!({"type":"say","text":"the file says hello","source":"mind_ab12"}),
+        );
+        on_brain_event(&mut app, json!({"type":"done","source":"mind_ab12"}));
+        assert!(app.plan.is_none(), "`done` closes the panel");
+        assert!(transcript(&app, "mind_ab12").contains("the file says hello"));
+    }
+
+    /// A MALFORMED plan (no steps) is not swallowed: no panel opens and the event still
+    /// shows up in the transcript as a dim note — the `None` fallback.
+    #[test]
+    fn a_malformed_plan_falls_through_to_the_transcript() {
+        let mut app = test_app();
+        on_brain_event(
+            &mut app,
+            json!({"type":"plan","steps":[],"source":"mind_ab12"}),
+        );
+        assert!(app.plan.is_none(), "a plan with no steps is not a plan");
+        assert!(
+            transcript(&app, "mind_ab12").contains("plan"),
+            "…and it is still SHOWN: {}",
+            transcript(&app, "mind_ab12")
+        );
+    }
+
+    /// **The card layers OVER the plan panel — and BOTH stay visible.** The question is
+    /// read in the CONTEXT of the plan: the panel docks under the header, the card
+    /// floats centered, and one frame carries both.
+    #[test]
+    fn a_question_card_renders_over_a_live_plan_panel() {
+        let mut app = test_app();
+        on_brain_event(
+            &mut app,
+            json!({"type":"plan","steps":["compare the candidates","recommend one"],
+                   "source":"mind_ab12","client_id":CLIENT_ID}),
+        );
+        on_brain_event(
+            &mut app,
+            json!({"type":"step","index":0,"total":2,"status":"running","source":"mind_ab12"}),
+        );
+        on_brain_event(
+            &mut app,
+            json!({"type":"question","request_id":"q_1","kind":"single",
+                   "question":"Which database?","source":"mind_ab12",
+                   "options":[{"value":"Postgres"},{"value":"SQLite"}]}),
+        );
+        assert!(app.question.is_some(), "the card is up");
+        assert!(
+            app.plan.is_some(),
+            "…and the plan panel is still live under it"
+        );
+
+        let mut term = Terminal::new(TestBackend::new(80, 40)).expect("test terminal");
+        term.draw(|f| ui(f, &app)).expect("draw the frame");
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("Which database?") && text.contains("Postgres"),
+            "the question card renders"
+        );
+        assert!(
+            text.contains("compare the candidates") && text.contains("recommend one"),
+            "…OVER a plan panel that stays visible: the question is read in context"
+        );
+        assert!(
+            text.contains("plan — mind_ab12"),
+            "…and the panel names whose loop it is"
+        );
+    }
+
+    /// Esc on a LIVE panel means "stop this loop" (`ps` → `cancel`), not "minimize" —
+    /// the phase must not change. Esc on a panel that is no longer running DISMISSES it,
+    /// and only then does Esc go back to minimizing. One rung per press.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn esc_cancels_a_live_panel_then_dismisses_it_then_minimizes() {
+        let mut app = test_app_async().await;
+        on_brain_event(
+            &mut app,
+            json!({"type":"plan","steps":["a","b"],"source":"mind_ab12"}),
+        );
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(
+            app.phase,
+            Phase::Chat,
+            "Esc cancelled the loop, it did not climb"
+        );
+        assert_eq!(
+            app.plan.as_ref().map(|p| p.state),
+            Some(plan::PanelState::Cancelling),
+            "the kill is in flight (the kernel answers on the onboard channel)"
+        );
+
+        // The cancel came back with nothing in flight → the panel settles as cancelled.
+        plan::on_cancelled(&mut app, "mind_ab12".to_string(), Vec::new());
+        assert_eq!(
+            app.plan.as_ref().map(|p| p.state),
+            Some(plan::PanelState::Cancelled)
+        );
+        // A cancelled panel is a RECORD, not a loop: the next Esc dismisses it…
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert!(app.plan.is_none(), "Esc dismisses a finished panel");
+        assert_eq!(app.phase, Phase::Chat);
+        // …and only then does Esc mean "minimize to the lobby" again.
+        handle_input(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.phase, Phase::Hub);
+    }
+
+    /// The transcript of one agent's chat, flattened (the panel's `None` fallback shows
+    /// up here — a malformed event is still SHOWN).
+    fn transcript(app: &App, id: &str) -> String {
+        app.tabs
+            .chat(id)
+            .map(|t| {
+                t.msgs()
+                    .iter()
+                    .map(|m| match &m.body {
+                        Body::Text(s) | Body::Note(s) => s.clone(),
+                        Body::Tool { verb, summary, .. } => format!("{verb} {summary}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
     }
 }
 

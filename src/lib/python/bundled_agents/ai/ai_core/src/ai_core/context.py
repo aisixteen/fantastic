@@ -10,8 +10,9 @@ and the projection seam in `core._run`.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 CHARS_PER_TOKEN = 4
 DEFAULT_CONTEXT_WINDOW = 4096

@@ -1,171 +1,17 @@
-// Shared AI-backend machinery tests — driven through a MOCK
-// `AIProvider` so the verb surface, the single-pass streaming, history
-// persistence, cancellation, context management, and the
-// stateless/error-shape config flags are all exercised WITHOUT any live
-// LLM. This backend runs ONE provider pass per `send` (the tool loop is
-// the caller's, tested in the plumbed-mind suites); provider-specific
-// wire tests stay with each backend target.
+// Shared AI-backend machinery tests — driven through a MOCK `AIProvider` so the
+// verb surface, the single-pass streaming, history persistence, cancellation,
+// context management, and the stateless/error-shape config flags are all
+// exercised WITHOUT any live LLM. The harness (scripted provider, mock bundle,
+// in-memory file_bridge, polling helpers) lives in `MockBackend.swift`; the
+// DISPATCH path each pass ends in lives in `RoutingTests.swift`;
+// provider-specific wire tests stay with each backend target.
 
-import FantasticAICore
 import FantasticJSON
 import FantasticKernel
 import Foundation
 import Testing
 
-// MARK: - Mock provider + bundle
-
-/// Deterministic provider: streams a fixed token sequence per `chat()`
-/// call (one call per `send` — this backend runs a single pass). `chat`
-/// can also be told to throw. Providers are pure raw-text streamers
-/// (`.token` only). Mirrors the Rust `MockProvider`.
-private final class MockProvider: AIProvider, @unchecked Sendable {
-    let model: String
-    private let tokens: [String]
-    let throwsError: Bool
-    /// Per-chunk delay (ns) so a generation can be observed in-flight.
-    let chunkDelayNanos: UInt64
-
-    init(
-        model: String = "mock-1", tokens: [String] = ["Hel", "lo"],
-        throwsError: Bool = false, chunkDelayNanos: UInt64 = 0
-    ) {
-        self.model = model
-        self.tokens = tokens
-        self.throwsError = throwsError
-        self.chunkDelayNanos = chunkDelayNanos
-    }
-
-    func chat(messages: [JSON]) -> AsyncThrowingStream<AIChunk, Error> {
-        let throwsError = throwsError
-        let chunkDelayNanos = chunkDelayNanos
-        let tokens = tokens
-        return AsyncThrowingStream { continuation in
-            Task {
-                if throwsError {
-                    continuation.finish(throwing: MockError.boom)
-                    return
-                }
-                for t in tokens {
-                    if chunkDelayNanos > 0 { try? await Task.sleep(nanoseconds: chunkDelayNanos) }
-                    continuation.yield(.token(t))
-                }
-                continuation.finish()
-            }
-        }
-    }
-}
-
-private enum MockError: Error, CustomStringConvertible {
-    case boom
-    var description: String { "boom" }
-}
-
-/// Test bundle wrapping `AIBackend` with a configurable mock provider.
-private final class MockBundle: AgentBundle, @unchecked Sendable {
-    let name = "mock_backend"
-    private let core: AIBackend
-
-    init(config: AIBackendConfig) {
-        self.core = buildAIBackend(config)
-    }
-
-    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
-        await core.handle(agentId: agentId, payload: payload, kernel: kernel)
-    }
-}
-
-/// In-memory file_bridge stand-in: dict-backed `read`/`write` so the AI
-/// backend's real `file_bridge_id` persistence path is exercised without
-/// touching disk (a real file_bridge is integration-tested elsewhere).
-private final class MockFileBridge: AgentBundle, @unchecked Sendable {
-    let name = "mock_file_bridge"
-    private let lock = NSLock()
-    private var files: [String: String] = [:]
-
-    private func get(_ path: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return files[path]
-    }
-    private func put(_ path: String, _ content: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        files[path] = content
-    }
-
-    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
-        switch payload["type"].asString ?? "" {
-        case "reflect":
-            return .object([
-                "id": .string(agentId.value), "sentence": .string("mock fs"),
-                "kind": .string("file_bridge"), "verbs": .object([:]),
-            ])
-        case "read":
-            let path = payload["path"].asString ?? ""
-            return get(path).map { .object(["content": .string($0)]) }
-                ?? .object(["error": .string("not found")])
-        case "write":
-            let path = payload["path"].asString ?? ""
-            let content = payload["content"].asString ?? ""
-            put(path, content)
-            return .object(["written": .integer(Int64(content.utf8.count))])
-        default:
-            return .object(["error": .string("unknown verb")])
-        }
-    }
-}
-
-private func baseConfig(
-    stateless: Bool = false,
-    includeAccumulatedOnError: Bool = false,
-    emitInterruptedError: Bool = false,
-    provider: @escaping @Sendable () -> ProviderResult
-) -> AIBackendConfig {
-    AIBackendConfig(
-        kind: "mock_backend",
-        provider: "mock",
-        sentence: "Mock LLM agent.",
-        verbs: [
-            "send": "s", "history": "h", "interrupt": "i", "backend_state": "b",
-        ] as JSON,
-        stateless: stateless,
-        includeAccumulatedOnError: includeAccumulatedOnError,
-        emitInterruptedError: emitInterruptedError,
-        reflectExtra: { _ in ["extra": .string("yes")] },
-        backendStateExtra: { _ in ["configured": .bool(true)] },
-        makeProvider: { _, _, _ in provider() }
-    )
-}
-
-/// Boot an in-memory kernel whose registry has the mock backend, then
-/// create an agent for it. Built directly (not via
-/// `startKernelInMemory`) so we can inject the mock bundle.
-private func freshMockKernel(config: AIBackendConfig) async throws -> (Kernel, AgentId) {
-    let registry = BundleRegistry()
-    registry.register("mock_backend.tools", MockBundle(config: config))
-    registry.register("mock_file_bridge.tools", MockFileBridge())
-    let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
-    kernel.register(root)
-    kernel.setRoot(root)
-    // A file_bridge store so chat history persists through file_bridge_id.
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
-            "type": .string("create_agent"),
-            "handler_module": .string("mock_file_bridge.tools"),
-            "id": .string("store"),
-        ]))
-    let r = await kernel.send(
-        AgentId("core"),
-        .object([
-            "type": .string("create_agent"),
-            "handler_module": .string("mock_backend.tools"),
-            "id": .string("mock"),
-            "file_bridge_id": .string("store"),
-        ]))
-    return (kernel, AgentId(r["id"].asString ?? "mock"))
-}
+@testable import FantasticAICore
 
 // MARK: - Tests
 
@@ -270,36 +116,139 @@ struct AIBackendTests {
         #expect(msgs[1]["id"].asString != nil)
     }
 
-    @Test func callerDrivenToolLoopViaSystemPromptOverride() async throws {
-        // The tool LOOP is the caller's, not the backend's: a caller supplies a
-        // `system_prompt` teaching its convention and reads the completion. This
-        // backend runs exactly ONE provider pass per `send` — the streamed text
-        // (which may itself be a `<tool_call>` envelope) is persisted verbatim as
-        // the assistant turn; no dispatch happens here.
+    @Test func aCallerSystemPromptIsKeptForEveryHopOfTheChain() async throws {
+        // INVERTED by the dispatch phase, and kept for what survived. This test
+        // used to assert that an envelope streamed through UNDISPATCHED — "the
+        // tool loop is the caller's, this backend runs one pass and parses
+        // nothing". That is no longer true: the substrate reads every completion
+        // and dispatches the calls in it, so the envelope below really runs and
+        // its reply arrives as turn 2.
+        //
+        // What a caller-supplied `system_prompt` still does is REPLACE the default
+        // block — and it has to keep doing so for every hop, or a chain the caller
+        // opened in its own convention silently reverts to the substrate's on turn
+        // 2 and the model is told a different set of rules mid-task. That is why
+        // `deliverTurn` carries the prompt along.
         let envelope =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect"}}}</tool_call>"#
-        let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: [envelope])) })
+            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect","tree":"none"}}}</tool_call>"#
+        let script = ProviderScript([[envelope], ["seen it"]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let id = ids["mock"]!
         _ = await kernel.send(
             id,
             .object([
                 "type": .string("send"), "text": .string("go"),
-                "system_prompt": .string("You drive tools via <tool_call> envelopes."),
+                "system_prompt": .string(
+                    "CALLER BLOCK: you drive tools via <tool_call> envelopes."),
                 "client_id": .string("c"),
             ]))
-        // Exactly two rows: user + the single assistant pass. NO tool turn.
+        #expect(await script.waitForCalls(2), "the dispatched call's reply never came back")
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+
+        // Pass 2's system message is the CALLER's, still — not the substrate's
+        // default block (whose `SEND_TO_HOWTO` heading would be in there).
+        let turn2 = script.requestText(1)
+        #expect(turn2.contains("CALLER BLOCK"))
+        #expect(!turn2.contains("Reaching other agents"))
+        #expect(turn2.contains("[reply to core "))
+
+        // Four rows: the envelope turn, then the reply turn it caused.
+        let msgs = await historyRows(kernel: kernel, id: id, client: "c")
+        #expect(msgs.count == 4)
+        #expect(msgs[1]["content"].asString == envelope)  // persisted verbatim
+        #expect(msgs[1]["tool_calls"].asArray == nil)  // and never as a native block
+        #expect(msgs[2]["content"].asString?.hasPrefix("[reply to core ") == true)
+    }
+
+    @Test func thinkingIsStreamedRawAndPersistedStripped() async throws {
+        // A reasoning model's turn arrives as ONE text stream with its
+        // deliberation wrapped in `<think>…</think>` (the providers do the
+        // wrapping; see `ThinkingWrap`). Two uses, two texts:
+        //   • the token/done events carry the RAW completion — `accumulated` is
+        //     contractually the concatenation of the deltas the client received;
+        //   • the DURABLE assistant turn is STRIPPED, because re-feeding a
+        //     reasoning model its own prior thought is against every vendor's
+        //     guidance and compounds turn over turn.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(
+                    MockProvider(tokens: ["<think>", "weigh ", "options", "</think>", "42"]))
+            })
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("what is it"),
+                "client_id": .string("c"),
+            ]))
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
+        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
+
+        // RAW on the wire — and equal to the deltas actually emitted.
+        let raw = "<think>weigh options</think>42"
+        #expect(sink.first(type: "done")?["accumulated"].asString == raw)
+        let deltas = sink.snapshot().filter { $0["type"].asString == "token" }
+            .compactMap { $0["delta"].asString }.joined()
+        #expect(deltas == raw)
+        let lastToken = sink.snapshot().last { $0["type"].asString == "token" }
+        #expect(lastToken?["accumulated"].asString == raw)
+
+        // STRIPPED in the durable store.
         let msgs =
             (await kernel.send(
                 id, .object(["type": .string("history"), "client_id": .string("c")])))[
                 "messages"
             ].asArray ?? []
         #expect(msgs.count == 2)
-        #expect(msgs[0]["role"].asString == "user")
         #expect(msgs[1]["role"].asString == "assistant")
-        // The envelope streamed straight through — persisted verbatim, undispatched.
-        #expect(msgs[1]["content"].asString == envelope)
-        #expect(msgs[1]["tool_calls"].asArray == nil)
+        #expect(msgs[1]["content"].asString == "42")
+    }
+
+    @Test func aThinkingOnlyTurnIsNotAnEmptyCompletion() async throws {
+        // The measured failure this whole mechanism exists for (gemma4:12b,
+        // 2026-08-02): the model spent its ENTIRE turn reasoning. Reading one
+        // channel made that an empty completion that silently ended the chain,
+        // indistinguishable from "the model said nothing". The reasoning text must
+        // reach the caller (and a reader's parser) even though it is never
+        // persisted as conversation.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(tokens: ["<think>", "all of my turn", "</think>"]))
+            })
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+
+        _ = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
+        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
+
+        let done = sink.first(type: "done")
+        #expect(done?["error"].asString == nil)
+        #expect(done?["accumulated"].asString == "<think>all of my turn</think>")
+        #expect(done?["accumulated"].asString?.isEmpty == false)
+
+        // The conversation keeps no deliberation — the turn persists empty
+        // content, and that is the honest record of an answer-free turn.
+        let msgs =
+            (await kernel.send(
+                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+                "messages"
+            ].asArray ?? []
+        #expect(msgs.count == 2)
+        #expect(msgs[1]["role"].asString == "assistant")
+        #expect(msgs[1]["content"].asString == "")
     }
 
     @Test func errorStreamDoesNotPersistAssistantTurn() async throws {
@@ -320,11 +269,91 @@ struct AIBackendTests {
         #expect(msgs[0]["role"].asString == "user")
     }
 
-    @Test func interruptReturnsInterrupted() async throws {
+    @Test func cancellingAnInFlightSendClosesTheTurnOut() async throws {
+        // There is NO `interrupt` verb: an in-flight `send` IS a kernel task. A
+        // caller kills a turn with the SUBSTRATE's universal verbs — `ps` to find
+        // the generation's row, `cancel` to kill it — and the backend's
+        // `on_cancel` hook closes the turn out (final `status` + `done`) so the
+        // client is never left hanging, with no phantom generation behind.
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(id, .object(["type": .string("interrupt")]))
-        #expect(r["interrupted"].asBool == true)
+            config: baseConfig {
+                .provider(
+                    MockProvider(
+                        tokens: Array(repeating: "x", count: 200),
+                        chunkDelayNanos: 10_000_000))
+            })
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+
+        let queued = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("hi"),
+                "client_id": .string("c"),
+            ]))
+        #expect(queued["queued"].asBool == true)
+
+        // The generation OUTLIVES the `send` dispatch (which has already acked
+        // and retired), so it stands in the table as its own row — that is what
+        // makes it killable at all.
+        let taskId = try await waitForTask(kernel: kernel, agent: id, verb: "send")
+        #expect(taskId.hasPrefix("\(id.value):"))  // a pid: "<agent_id>:<n>"
+        let before = await kernel.send(
+            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        #expect(before["generating"].asBool == true)
+
+        let c = await kernel.send(
+            AgentId("kernel"),
+            .object(["type": .string("cancel"), "task_id": .string(taskId)]))
+        #expect(c["cancelled"].asBool == true)
+        #expect((c["killed"].asArray ?? []).contains(.string(taskId)))
+
+        // The client's turn is CLOSED OUT — a terminal `done` lands even though
+        // the generation was killed mid-stream (aborting a task tells nobody).
+        try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
+        let done = sink.first(type: "done")
+        #expect(done?["client_id"].asString == "c")
+        #expect(done?["error"].asString == "cancelled")
+        let status = sink.snapshot().last { $0["type"].asString == "status" }
+        #expect(status?["phase"].asString == "done")
+        #expect(status?["detail"]["reason"].asString == "cancelled")
+
+        // No PHANTOM generation: the in-flight entry is gone, so `status` agrees
+        // the agent is idle and the row has left the table.
+        let after = await kernel.send(
+            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        #expect(after["generating"].asBool == false)
+        #expect(after["current"].isNull)
+        let stillListed = await psRows(kernel).contains(where: { $0["id"].asString == taskId })
+        #expect(!stillListed)
+
+        // The killed turn persisted no partial assistant row — only the user turn.
+        let h = await kernel.send(
+            id, .object(["type": .string("history"), "client_id": .string("c")]))
+        let msgs = h["messages"].asArray ?? []
+        #expect(msgs.count == 1)
+        #expect(msgs[0]["role"].asString == "user")
+
+        // The FIFO lock was released as the killed generation unwound: the agent
+        // still answers a fresh send (a stranded lock would hang here forever).
+        let next = await kernel.send(
+            id,
+            .object([
+                "type": .string("send"), "text": .string("again"),
+                "client_id": .string("c2"),
+            ]))
+        #expect(next["queued"].asBool == true)
+        try await waitUntil("the next generation to take the lock") {
+            let s = await kernel.send(
+                id, .object(["type": .string("status"), "client_id": .string("c2")]))
+            return s["generating"].asBool == true
+        }
+        let live = try await waitForTask(kernel: kernel, agent: id, verb: "send")
+        _ = await kernel.send(
+            AgentId("kernel"),
+            .object(["type": .string("cancel"), "task_id": .string(live)]))
     }
 
     @Test func historyIsPerClient() async throws {
@@ -578,16 +607,34 @@ struct AIBackendTests {
     }
 }
 
-/// Poll the `history` verb until it reaches `count` messages (the
-/// stream runs in a spawned Task, so persistence is async). Bounded so
-/// a hung stream fails the test instead of hanging the run.
-private func waitForHistory(
-    kernel: Kernel, id: AgentId, client: String, count: Int
-) async throws {
-    for _ in 0..<200 {
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string(client)]))
-        if (h["messages"].asArray ?? []).count >= count { return }
-        try await Task.sleep(nanoseconds: 5_000_000)
+// ─── the `author` verb — the SELF-CORRECT loop (py-canonical) ───
+
+@Suite("author self-correct loop")
+struct AuthorVerbTests {
+    @Test func authorRequiresAGoal() async throws {
+        let (kernel, backend) = try await freshMockKernel(
+            config: scriptedConfig(["mock": ProviderScript([])]))
+        let r = await kernel.send(backend, ["type": "author"])
+        #expect(r["error"].asString?.contains("goal") == true, "\(r.serialize())")
+    }
+
+    @Test func unparseableReplyEarnsANudgeAndTheLoopSurvives() async throws {
+        let (kernel, backend) = try await freshMockKernel(
+            config: scriptedConfig([
+                "mock": ProviderScript([
+                    ["Let me think about this first..."],  // no JSON
+                    [#"{"final": "nothing built"}"#],
+                ])
+            ]))
+        let r = await kernel.send(
+            backend, ["type": "author", "goal": "echo", "steps": .integer(2)])
+        #expect(r["error"].asString?.contains("gave up") == true, "\(r.serialize())")
+    }
+
+    @Test func firstJSONTakesFirstCompleteObjectAndNeverRepairs() {
+        #expect(authorFirstJSON(#"noise {"final": "done"} tail"#)?["final"].asString == "done")
+        #expect(authorFirstJSON(#"{"a": {"b": 1}} {"c": 2}"#)?["a"]["b"].asInt == 1)
+        #expect(authorFirstJSON(#"{"act": {"target": "x""#) == nil)
+        #expect(authorFirstJSON("no json") == nil)
     }
 }

@@ -56,6 +56,15 @@ struct AICurrentEntry: Sendable {
     var phase: String  // thinking | streaming | tool_calling | done
     var textSoFar: String
     var lastTool: JSON?
+    /// The `done` event's correlation ids — held here so `onCancel` can close
+    /// the turn out for the client after the generation is gone.
+    let streamId: String
+    let messageId: String
+    /// The KERNEL TASK this generation runs as (`"<agent>:<n>"`) — the pid `ps`
+    /// reports. `cancel <task_id>` kills the turn; the bundle's `onCancel`
+    /// matches on this to know the killed task is ITS generation (not some other
+    /// dispatch on the same agent) and to close the turn out.
+    let taskId: String?
 }
 
 /// Per-agent coordination state — the FIFO lock, the waiting queue, and
@@ -87,14 +96,40 @@ final class AIAgentRunState: @unchecked Sendable {
 
     /// Remove the entry with `sendId` from the queue and make it the
     /// current in-flight entry, started now at `phase`.
-    func popToCurrent(sendId: String, startedAt: Double, phase: String) {
+    func popToCurrent(
+        sendId: String, startedAt: Double, phase: String,
+        streamId: String, messageId: String, taskId: String?
+    ) {
         lock.lock()
         defer { lock.unlock() }
         guard let i = queue.firstIndex(where: { $0.sendId == sendId }) else { return }
         let e = queue.remove(at: i)
         current = AICurrentEntry(
             clientId: e.clientId, text: e.text, sendId: e.sendId,
-            startedAt: startedAt, phase: phase, textSoFar: "", lastTool: nil)
+            startedAt: startedAt, phase: phase, textSoFar: "", lastTool: nil,
+            streamId: streamId, messageId: messageId, taskId: taskId)
+    }
+
+    /// Drop a still-QUEUED submission (its generation was cancelled before it
+    /// ever acquired the FIFO lock, so it never became current).
+    func dropQueued(sendId: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        queue.removeAll { $0.sendId == sendId }
+    }
+
+    /// Close out a generation the kernel is cancelling: if `taskId` names the
+    /// turn currently holding the lock, clear the in-flight entry and hand it
+    /// back so the backend can emit its final `status` + `done` (the `onCancel`
+    /// half of the task table's two-phase kill). `nil` if the cancelled task
+    /// isn't this agent's generation (a `history` / `reflect` dispatch on the
+    /// same agent). Mirrors Rust's `take_current_for_cancel`.
+    func takeCurrentForCancel(taskId: String) -> AICurrentEntry? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let c = current, c.taskId == taskId else { return nil }
+        current = nil
+        return c
     }
 
     func updateCurrent(_ body: (inout AICurrentEntry) -> Void) {

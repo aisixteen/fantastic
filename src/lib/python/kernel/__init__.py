@@ -32,6 +32,8 @@ from kernel._kernel import (
     Kernel,
     _current_sender,
     _summarize_payload,
+    current_task,
+    operator_context,
     sender_context,
 )
 from kernel._state import CURRENT_VERSION
@@ -53,6 +55,8 @@ __all__ = [
     "BUNDLE_ENTRY_GROUP",
     "CURRENT_VERSION",
     "sender_context",
+    "operator_context",
+    "current_task",
     "_current_sender",
     "_summarize_payload",
     # Lock

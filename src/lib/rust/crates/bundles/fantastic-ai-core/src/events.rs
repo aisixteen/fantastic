@@ -92,14 +92,3 @@ pub async fn emit_status(
     });
     to_caller(kernel, self_id, client_id, route, ev).await;
 }
-
-/// Emit the back-compat `{type:"done"}` end marker.
-pub async fn emit_done(
-    kernel: &Arc<Kernel>,
-    self_id: &AgentId,
-    client_id: &str,
-    route: CallerRoute,
-) {
-    let ev = json!({"type": "done", "source": self_id.as_str()});
-    to_caller(kernel, self_id, client_id, route, ev).await;
-}

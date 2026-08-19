@@ -1,8 +1,8 @@
 """nvidia_nim_backend — reflect-driven LLM agent against NVIDIA NIM (OpenAI-compatible).
 
 A THIN binding over `ai_core` (see ollama_backend.tools for the base
-pattern). Same surface as ollama_backend (send/history/interrupt/
-refresh_menu/reflect) PLUS the NIM-specific bits, all wired through
+pattern). Same surface as ollama_backend (send/history/status/recall/
+context_status/reflect) PLUS the NIM-specific bits, all wired through
 `ai_core.build()`:
 
 - API key required, stored OUT-OF-BAND at the store-relative `agents/<id>/api_key`
@@ -22,7 +22,10 @@ refresh_menu/reflect) PLUS the NIM-specific bits, all wired through
 The shared state dicts + `SEND_TIMEOUT` / `MAX_CALL_DEPTH` are re-exported
 from `ai_core.core` so the existing monkeypatch seams keep working on the
 shared path; `_parse_retry_after` / `RATE_LIMIT_*` / `_key_path` are
-nvidia-local (the tests patch/read them here).
+nvidia-local (the tests patch/read them here). `on_cancel` — the shared
+bundle CANCEL hook — is re-exported too, so the substrate discovers it on
+this module (there is no `interrupt` verb: an in-flight `send` is a kernel
+TASK, killed with the universal `ps` → `cancel` system verbs).
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ import asyncio
 import httpx
 
 from ai_core import build
-from ai_core.core import (  # noqa: F401 — re-exported test seams
+from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel hook
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
     SEND_TIMEOUT,
@@ -43,7 +46,7 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams
     _locks,
     _providers,
     _queue,
-    _tasks,
+    on_cancel,
 )
 
 # Free tier of NIM rate-limits at ~40 RPM/model. On 429 we retry ONCE

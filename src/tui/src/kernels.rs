@@ -233,18 +233,37 @@ impl ActiveKernel {
         ids
     }
 
-    /// Dispatch a verb to `target` and return the reply. Runs inside a spawned task.
+    /// Dispatch a verb to `target` **and mirror it into the UI** — the door for a
+    /// USER-invoked command (`@<id> <verb>`). Runs inside a spawned task.
     ///
-    /// InProc **mirrors** the target's inbox first (`watch`) so any events it emits
-    /// while handling the verb render live via `brain_rx` — the same path `@ai`
-    /// uses. Remote is HTTP request→response (its live emits arrive over the Phase-2
-    /// WS mirror, not here).
+    /// InProc **subscribes** our client inbox to the target first ([`Kernel::watch`]),
+    /// so the kernel's watcher fanout mirrors the raw request payload — and anything
+    /// the target emits while handling it — into `brain_rx`, where it renders as the
+    /// command's live activity. That subscription IS the rendering. Remote is HTTP
+    /// request→response (its live emits arrive over the Phase-2 WS mirror, subscribed
+    /// by the same user-command path, not here).
+    ///
+    /// Internal plumbing must NOT take this door — see [`Self::send`].
     pub async fn dispatch(&self, target: &AgentId, payload: Value) -> Value {
+        if let ActiveKernel::InProc(k) = self {
+            k.watch(target, AgentId::from(crate::CLIENT_ID)).await;
+        }
+        self.send(target, payload).await
+    }
+
+    /// Dispatch a verb to `target` **without mirroring it into the UI** — the door for
+    /// INTERNAL plumbing (the onboarding endpoint probe, the `/edit` record read, an
+    /// editor save). The verb is sent, the reply comes back, and nothing about it ever
+    /// reaches a chat.
+    ///
+    /// The ONE difference from [`Self::dispatch`] is the `watch`: without it the kernel
+    /// has no watcher to fan the raw request payload out to, so the dispatch leaves no
+    /// trace on the client inbox. This is the discriminator between a user's command
+    /// (subscribed → rendered) and the app's own plumbing (unsubscribed → invisible) —
+    /// never the verb name, which a user is free to type too.
+    pub async fn send(&self, target: &AgentId, payload: Value) -> Value {
         match self {
-            ActiveKernel::InProc(k) => {
-                k.watch(target, AgentId::from(crate::CLIENT_ID)).await;
-                k.send(target, payload).await
-            }
+            ActiveKernel::InProc(k) => k.send(target, payload).await,
             ActiveKernel::Remote(r) => r
                 .handle
                 .send(target.as_str(), payload)

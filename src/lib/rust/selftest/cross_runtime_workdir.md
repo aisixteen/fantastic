@@ -16,10 +16,10 @@ to Python, verify the mutation persisted byte-for-byte.
 ```bash
 cd /path/to/fantastic_canvas
 PYWORKDIR=$(mktemp -d)
-RUSTBIN=$(pwd)/rust/target/release/fantastic
+RUSTBIN=$(pwd)/src/lib/rust/target/release/fantastic_kernel
 
 # Build both.
-cd rust && cargo build --release --bin fantastic --features full && cd ..
+cd src/lib/rust && cargo build --release --bin fantastic_kernel --features full && cd ..
 cd python && uv sync && cd ..
 ```
 
@@ -57,11 +57,13 @@ a Rust equivalent).
 ### Test 3: Rust uses Python's persisted meta.python
 
 ```bash
-"$RUSTBIN" py exec code='import sys; print(sys.executable)'
+JOB=$("$RUSTBIN" py start code='import sys; print(sys.executable)' | jq -r .job_id)
+"$RUSTBIN" py status job_id="$JOB" | jq -r '.jobs[0].stdout'
 ```
-Expected: stdout matches the path written in Test 1 BYTE-FOR-BYTE.
-Confirms Rust isn't falling back to `which python3` (which might
-pick a different interpreter); it reads the deterministic record.
+Expected: the job's `stdout` matches the path written in Test 1
+BYTE-FOR-BYTE. `meta.python` (tier 3) is the ONLY way Rust gets an
+interpreter here — it does not probe PATH, so the persisted record is
+what makes the same workdir deterministic across runtimes.
 
 ### Test 4: Rust mutates the workdir; Python rehydrates cleanly
 
@@ -110,8 +112,8 @@ JSON
 
 # Build an embedded-slice CLI (no full feature) and boot the workdir.
 cd /path/to/fantastic_canvas/rust
-cargo build --release --bin fantastic --no-default-features --features embedded
-EMBEDDED_BIN=$(pwd)/target/release/fantastic
+cargo build --release --bin fantastic_kernel --no-default-features --features embedded
+EMBEDDED_BIN=$(pwd)/target/release/fantastic_kernel
 cd "$PYWORKDIR"
 $EMBEDDED_BIN reflect 2>&1 | grep -E 'tb|skipping'
 ```

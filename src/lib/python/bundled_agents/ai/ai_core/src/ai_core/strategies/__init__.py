@@ -30,4 +30,4 @@ def strategy_names() -> list[str]:
     return list(_STRATEGIES)
 
 
-__all__ = ["DEFAULT_STRATEGY", "get_strategy", "strategy_names", "STRATEGY"]
+__all__ = ["DEFAULT_STRATEGY", "STRATEGY", "get_strategy", "strategy_names"]

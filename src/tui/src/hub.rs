@@ -19,6 +19,8 @@ struct Build {
     agent: String,
     ty: Option<String>,
     is_home: bool,
+    /// The synthetic `+ agent` adder (opens the add-agent type picker, not a chat).
+    is_adder: bool,
     children: Vec<Build>,
 }
 
@@ -32,6 +34,9 @@ pub struct HubNode {
     pub ty: Option<String>,
     /// The brain — pinned home, marked `★`.
     pub is_home: bool,
+    /// The synthetic `+ agent` adder — Enter opens the add-agent type picker (an
+    /// `AI agent` connect flow or a custom JS connector), not an agent chat.
+    pub is_adder: bool,
     /// Tree depth (0 = root) → the row it sits on.
     pub depth: usize,
     /// Horizontal slot in leaf units (internal nodes center over their children).
@@ -77,6 +82,7 @@ fn parse(v: &Value) -> Build {
         agent: if is_brain { "ai".into() } else { id.clone() },
         label: if is_brain { "ai".into() } else { dn },
         is_home: is_brain,
+        is_adder: false,
         id,
         ty,
         children,
@@ -101,6 +107,21 @@ fn synthetic(id: &str, ty: &str, home: bool) -> Build {
         agent: id.into(),
         ty: Some(ty.into()),
         is_home: home,
+        is_adder: false,
+        children: Vec::new(),
+    }
+}
+
+/// The `+ agent` adder node grafted onto the root — a sibling of the host
+/// pseudo-agents. Enter opens the add-agent type picker (design 28), not a chat.
+fn adder() -> Build {
+    Build {
+        id: "+agent".into(),
+        label: "+ agent".into(),
+        agent: "+agent".into(),
+        ty: Some("add".into()),
+        is_home: false,
+        is_adder: true,
         children: Vec::new(),
     }
 }
@@ -122,6 +143,8 @@ impl Hub {
         }
         root.children.push(synthetic("sh", "shell", false));
         root.children.push(synthetic("ws", "workspace", false));
+        // The add-agent affordance sits last on the root, after the host agents.
+        root.children.push(adder());
 
         let mut nodes: Vec<HubNode> = Vec::new();
         let mut next_leaf = 0.0_f32;
@@ -139,6 +162,12 @@ impl Hub {
     /// The agent the selected node opens (for Enter → `Tabs::focus`).
     pub fn selected_agent(&self) -> String {
         self.nodes[self.sel].agent.clone()
+    }
+
+    /// True when the selection is the synthetic `+ agent` adder (Enter opens the
+    /// add-agent type picker rather than an agent chat).
+    pub fn selected_is_adder(&self) -> bool {
+        self.nodes.get(self.sel).is_some_and(|n| n.is_adder)
     }
 
     /// ↑ : climb to the parent.
@@ -206,6 +235,7 @@ fn flatten(
         agent,
         ty,
         is_home,
+        is_adder,
         children,
     } = b;
     // Reserve this node's slot; fields patched once children (and `col`) are known.
@@ -214,6 +244,7 @@ fn flatten(
         agent,
         ty,
         is_home,
+        is_adder,
         depth,
         col: 0.0,
         parent,
@@ -329,5 +360,21 @@ mod tests {
     fn selected_agent_maps_brain_to_ai() {
         let hub = Hub::from_reflect(&reply_with_brain());
         assert_eq!(hub.selected_agent(), "ai");
+    }
+
+    #[test]
+    fn adder_node_is_grafted_last_on_the_root_and_flagged() {
+        let hub = Hub::from_reflect(&reply_with_brain());
+        // The `+ agent` adder hangs off the root (depth 1) and is flagged, so Enter
+        // opens the add-agent picker instead of a chat.
+        let add = node(&hub, "+agent");
+        assert_eq!(add.depth, 1);
+        assert!(add.is_adder);
+        assert_eq!(add.label, "+ agent");
+        // Not the home selection, and only the adder carries the flag.
+        assert!(!add.is_home);
+        assert_eq!(hub.nodes().iter().filter(|n| n.is_adder).count(), 1);
+        // The default selection (home = ai) is not the adder.
+        assert!(!hub.selected_is_adder());
     }
 }

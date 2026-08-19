@@ -1,7 +1,7 @@
 # tools selftest
 
 > scopes: verb wire shape, single-shot CLI surface
-> requires: `cargo build --release --bin fantastic`
+> requires: `cargo build --release --bin fantastic_kernel`
 > out-of-scope: multi-call state verification — the registry is
 > process-global in-memory; each CLI invocation is a fresh process
 > with an empty registry. Multi-step register / list / dispatch /
@@ -24,7 +24,7 @@ selftest for the precedent.
 
 ```bash
 rm -rf /tmp/fk_tools && mkdir -p /tmp/fk_tools && cd /tmp/fk_tools
-FANTASTIC=/path/to/rust/target/release/fantastic
+FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 ```
 
 ## Tests

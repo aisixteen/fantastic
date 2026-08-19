@@ -33,6 +33,8 @@ You act by replying with EXACTLY ONE JSON object and NOTHING else, in one of the
   {"final": "<short message>"}
 After an {"act"} I send it for you and reply with the result as your next message.
 
+YOUR REPLY MUST BE ONE COMPLETE, WELL-FORMED JSON OBJECT. It is parsed by a machine, not read by a human: nothing is repaired for you. Every "{" you open you MUST close with "}", and every "[" with "]" — an object that ends one brace short is DISCARDED and your act never happens. No prose, no markdown, no code fences, no trailing commas. When the payload carries source code, the code is ONE JSON string: escape every " as \" and every newline as \n, and close the string before you close the enclosing objects. Before you finish, re-read your reply from "{" to the final "}" and confirm it is balanced.
+
 To LEARN anything, reflect it: {"act":{"target":"<id>","payload":{"type":"reflect"}}}. Reflecting "kernel" returns the system overview, your OWN capabilities, the agent tree, and a MAP of keyed docs (`readmes`) you can fetch one at a time. DISCOVER what you need by reflecting BEFORE you act — do not assume verb or API shapes.
 
 You are ALONE and AUTONOMOUS — no human will reply between your turns. Never stop to ask, and never announce that you are "ready to proceed" or "understand now": that is NOT done. Reflecting and planning are not completing. Every reply must be a concrete {"act"} that moves the task forward. Only reply {"final":...} once the thing you were asked to build actually EXISTS and you have exercised it and seen it work. If you catch yourself about to declare readiness, instead emit the next {"act"} (a create_agent, or a send). Do NOT reflect the same target or doc twice — reading is not progress. The MOMENT a doc shows you how to build the tool (e.g. the self-extension doc's copy-pasteable example), your NEXT act MUST be a create_agent, not another reflect."#;
@@ -41,16 +43,13 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// First complete JSON object from `s` (models fence/preface); tolerant of a
-/// trailing brace and `\'` like the genesis extractor.
+/// First complete JSON object from `s` (models fence/preface); tolerant of the
+/// stray `\'` escape the genesis extractor also forgives.
 ///
-/// Also BALANCES a missing trailing `}`. Weak models routinely emit an otherwise
-/// perfect act and drop the final closing brace — observed repeatedly on
-/// gemma4:12b, whose `create_agent` payload (correct code and all) parsed as
-/// invalid JSON purely for one absent `}`, so the act never registered and the
-/// tool was never created. Repairing a truncated envelope is ordinary driver
-/// hygiene; it relays what the model plainly meant and changes nothing in the
-/// kernel.
+/// NO REPAIR. A driver that patches the model's malformed JSON is measuring its own
+/// patch, not the model: if the envelope does not parse, the act did not happen.
+/// Validity is forced UPSTREAM (ollama's `format:"json"` constrains decoding) — not
+/// reconstructed downstream.
 fn first_json(s: &str) -> Option<Value> {
     let start = s.find('{')?;
     let tail = &s[start..];
@@ -60,38 +59,7 @@ fn first_json(s: &str) -> Option<Value> {
             .next()?
             .ok()
     };
-    parse(tail)
-        .or_else(|| parse(&tail.replace("\\'", "'")))
-        .or_else(|| parse(&balance_braces(tail)?))
-}
-
-/// Append the closing braces a truncated JSON object is missing (string-aware, so
-/// `{`/`}` inside the `code` payload don't skew the count). Returns None when the
-/// text is already balanced (nothing to repair).
-fn balance_braces(tail: &str) -> Option<String> {
-    let end = tail.rfind('}')? + 1; // drop any trailing fence / prose
-    let body = &tail[..end];
-    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
-    for c in body.chars() {
-        if esc {
-            esc = false;
-            continue;
-        }
-        match c {
-            '\\' if in_str => esc = true,
-            '"' => in_str = !in_str,
-            '{' if !in_str => depth += 1,
-            '}' if !in_str => depth -= 1,
-            _ => {}
-        }
-    }
-    (depth > 0).then(|| {
-        let mut fixed = body.to_string();
-        for _ in 0..depth {
-            fixed.push('}');
-        }
-        fixed
-    })
+    parse(tail).or_else(|| parse(&tail.replace("\\'", "'")))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

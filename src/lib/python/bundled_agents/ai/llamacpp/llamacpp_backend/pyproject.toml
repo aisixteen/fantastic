@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-llamacpp-backend"
+version = "0.1.0"
+description = "Fantastic llama.cpp backend — reflect-driven local LLM agent over llama-server's OpenAI surface."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["httpx", "fantastic-ai-core"]
+
+[project.entry-points."fantastic.bundles"]
+llamacpp_backend = "llamacpp_backend.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llamacpp_backend"]

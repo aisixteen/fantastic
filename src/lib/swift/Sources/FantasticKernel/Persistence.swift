@@ -19,6 +19,20 @@ public enum Persistence {
 
     /// Write `agent`'s record to disk, merging into any existing
     /// agent.json. Ephemeral agents and InMemory mode skip silently.
+    /// A record field that is PROGRAM TEXT, not metadata. It round-trips through
+    /// its own file beside `agent.json` instead of being embedded as an escaped
+    /// JSON string:
+    ///
+    ///     agents/<id>/agent.json      the record
+    ///     agents/<id>/main.py         the program
+    ///
+    /// Nothing about the in-memory record changes — a bundle still sets `code` in
+    /// meta and still reads it back. This is purely how the loader lays it down,
+    /// so a storeless kernel behaves exactly as before. Mirrors python + rust.
+    public static let codeField = "code"
+    /// The program's filename inside the agent's own directory.
+    public static let codeFile = "main.py"
+
     public static func persist(agent: Agent, storage: StorageMode) throws {
         guard case .disk = storage else { return }
         if agent.ephemeral { return }
@@ -50,6 +64,19 @@ public enum Persistence {
         }
         for (k, v) in agent.meta {
             existing[k] = v
+        }
+
+        // The program is a FILE, not a JSON string. Take it out of the record
+        // before the record is written, and lay it down beside.
+        var code: String?
+        if case .string(let c)? = existing[codeField], !c.isEmpty {
+            code = c
+            existing[codeField] = nil
+        }
+        if let code {
+            try? code.write(
+                to: agent.rootPath.appendingPathComponent(codeFile),
+                atomically: true, encoding: .utf8)
         }
 
         let merged: JSON = .object(existing)
@@ -136,7 +163,15 @@ public enum Persistence {
                 let agentFile = entry.appendingPathComponent("agent.json")
                 if let data = try? Data(contentsOf: agentFile) {
                     do {
-                        let record = try decoder.decode(AgentRecord.self, from: data)
+                        var record = try decoder.decode(AgentRecord.self, from: data)
+                        // Fold `main.py` back onto the record. Absent file ⇒ the
+                        // field simply isn't there, as if never set.
+                        if let code = try? String(
+                            contentsOf: entry.appendingPathComponent(codeFile),
+                            encoding: .utf8)
+                        {
+                            record.meta[codeField] = .string(code)
+                        }
                         records.append(record)
                     } catch {
                         FileHandle.standardError.write(

@@ -1,4 +1,4 @@
-"""PLUMBED MIND (python) — a python-authored agent on `python_runtime` drives a
+"""PLUMBED MIND (python) — a python-authored agent on `exec_bridge` drives a
 context-managed backend (deterministic `_FakeProvider`, no network) through a
 tool-feedback cycle. The emergent-harness chain on the python substrate:
 
@@ -13,6 +13,7 @@ mind just sends text turns and teaches its tool convention via `system_prompt`.
 from __future__ import annotations
 
 import asyncio
+import sys
 import json
 import secrets
 import time
@@ -23,7 +24,7 @@ import ollama_backend.tools as ot
 class _FakeProvider:
     """Yields a scripted token stream per `chat()` call (one per pass). Records
     the `messages` of every pass in `requests`, so a test can prove a human
-    answer became the NEXT organ turn (mirrors the rust `_RecordProvider`)."""
+    answer became the NEXT AI-agent turn (mirrors the rust `_RecordProvider`)."""
 
     def __init__(self, scripts: list[list]):
         self._scripts = list(scripts)
@@ -122,8 +123,13 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
                 "kernel_state",
                 {
                     "type": "create_agent",
-                    "handler_module": "python_runtime.tools",
+                    "handler_module": "exec_bridge.tools",
                     "id": "the_mind",
+                    "interpreters": [sys.executable],
+                    "shim": "python",
+                    "ingress_rule": "allow_all",
+                    # Deny-all: the mind drives the AI — an explicit lateral grant.
+                    "can_call": {"the_ai": "*"},
                 },
             )
         )["id"]
@@ -266,7 +272,7 @@ async def _collect(q, until_type: str, timeout: float = 8.0):
 
 
 async def _spawn_plan_mind(k, store_agent, scripts):
-    """Create the `the_ai` organ (deterministic `_FakeProvider`) + the plan/execute
+    """Create the `the_ai` AI agent (deterministic `_FakeProvider`) + the plan/execute
     mind; return (mind_id, fake_provider). Caller pops `ot._providers` in a finally."""
     ai = (
         await k.send(
@@ -286,8 +292,13 @@ async def _spawn_plan_mind(k, store_agent, scripts):
             "kernel_state",
             {
                 "type": "create_agent",
-                "handler_module": "python_runtime.tools",
+                "handler_module": "exec_bridge.tools",
                 "id": "the_mind",
+                "interpreters": [sys.executable],
+                "shim": "python",
+                "ingress_rule": "allow_all",
+                # Deny-all: the mind drives the AI — an explicit lateral grant.
+                "can_call": {"the_ai": "*"},
             },
         )
     )["id"]
@@ -299,7 +310,7 @@ async def _spawn_plan_mind(k, store_agent, scripts):
 async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
     """The mind plans, executes a CALL step, then ASKs a SINGLE-choice question — it
     emits {type:question} and SUSPENDS (no done). Answering `accept` feeds the choice
-    back as the next organ turn, and only then does the turn seal."""
+    back as the next AI-agent turn, and only then does the turn seal."""
     k = seeded_kernel
     mind, fp = await _spawn_plan_mind(
         k,
@@ -341,9 +352,9 @@ async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
         assert done_ev is not None, f"turn never sealed; saw {rest}"
         say = next((e for e in rest if e.get("type") == "say"), None)
         assert say and "yes" in say.get("text", ""), f"final say: {say}"
-        # The full cycle ran: plan + call + ask + post-answer final = 4 organ passes,
-        assert fp.calls == 4, f"expected 4 organ passes, got {fp.calls}"
-        # and the human answer really became the NEXT organ turn.
+        # The full cycle ran: plan + call + ask + post-answer final = 4 AI passes,
+        assert fp.calls == 4, f"expected 4 AI passes, got {fp.calls}"
+        # and the human answer really became the NEXT AI-agent turn.
         assert "yes" in json.dumps(fp.requests[3], default=str), fp.requests[3]
     finally:
         ot._providers.pop("the_ai", None)
@@ -351,7 +362,7 @@ async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
 
 async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
     """MULTI-answer: the accepted `value` is an ARRAY; every chosen value must reach
-    the next organ turn."""
+    the next AI-agent turn."""
     k = seeded_kernel
     mind, fp = await _spawn_plan_mind(
         k,
@@ -392,8 +403,8 @@ async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
 
         done_ev, rest = await _collect(q, "done")
         assert done_ev is not None, f"turn never sealed; saw {rest}"
-        assert fp.calls == 3, f"expected 3 organ passes, got {fp.calls}"
-        # BOTH selected values became the next organ turn (the array survived).
+        assert fp.calls == 3, f"expected 3 AI passes, got {fp.calls}"
+        # BOTH selected values became the next AI-agent turn (the array survived).
         blob = json.dumps(fp.requests[2], default=str)
         assert "cache" in blob and "sso" in blob, fp.requests[2]
     finally:
@@ -402,7 +413,7 @@ async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
 
 async def test_mind_ask_declined(seeded_kernel, store_agent):
     """NO-FALLBACKS at the mind boundary: a `decline` (no value) makes the mind take a
-    distinct branch (here: abort) and it NEVER invents a value or runs another organ
+    distinct branch (here: abort) and it NEVER invents a value or runs another AI
     pass as if one were chosen."""
     k = seeded_kernel
     mind, fp = await _spawn_plan_mind(
@@ -411,7 +422,7 @@ async def test_mind_ask_declined(seeded_kernel, store_agent):
         [
             ["PLAN: confirm the destructive step"],
             ['STEP 1: ASK {"kind":"confirm","question":"Delete everything?"}'],
-            # No further script: a decline MUST NOT trigger another organ pass.
+            # No further script: a decline MUST NOT trigger another AI pass.
         ],
     )
     try:
@@ -435,11 +446,11 @@ async def test_mind_ask_declined(seeded_kernel, store_agent):
         assert "abort" in txt or "declin" in txt, (
             f"expected an abort/decline branch: {say}"
         )
-        # It did NOT run a post-answer organ pass (plan + ask only)…
+        # It did NOT run a post-answer AI pass (plan + ask only)…
         assert fp.calls == 2, (
             f"a declined ask must not run another pass, got {fp.calls}"
         )
-        # …and never injected a fabricated answer into any organ turn.
+        # …and never injected a fabricated answer into any AI turn.
         assert all(
             "ANSWER" not in json.dumps(req, default=str) for req in fp.requests
         ), fp.requests

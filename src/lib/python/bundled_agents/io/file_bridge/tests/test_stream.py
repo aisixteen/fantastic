@@ -73,7 +73,9 @@ async def test_pump_copies_between_bridges(seeded_kernel, tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     blob = bytes(range(256)) * 50  # 12800 bytes
     src = await _open(seeded_kernel, root="src")
-    dst = await _open(seeded_kernel, root="dst")
+    # The pump has dst PULL from src (read_stream) — a lateral edge, so deny-all
+    # needs an explicit grant on the sink for exactly that verb on the source.
+    dst = await _open(seeded_kernel, root="dst", can_call={src: ["read_stream"]})
     await seeded_kernel.send(
         src,
         {

@@ -5,12 +5,23 @@
 
 use super::*;
 use fantastic_ai_core::helpers::safe_client;
+use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
 use fantastic_kernel::Agent;
 use serde_json::Map;
 use std::time::Duration;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// A free TCP port that is then RELEASED — a subsequent connect refuses. Used to
+/// simulate an unreachable ollama endpoint deterministically.
+fn free_then_closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
 
 fn backend_id_for(tmp: &TempDir, tag: &str) -> String {
     format!(
@@ -102,10 +113,10 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<Value>) -> Vec<Value> {
             out.push(v);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
-        if out
-            .iter()
-            .any(|v| v.get("type").and_then(Value::as_str) == Some("done"))
-        {
+        if out.iter().any(|v| {
+            v.get("type").and_then(Value::as_str) == Some("status")
+                && v.get("phase").and_then(Value::as_str) == Some("done")
+        }) {
             while let Ok(v) = rx.try_recv() {
                 out.push(v);
             }
@@ -163,28 +174,44 @@ async fn send_streams_tokens_and_emits_done() {
     assert!(
         events
             .iter()
-            .any(|e| e.get("type").and_then(Value::as_str) == Some("done")),
+            .any(|e| e.get("type").and_then(Value::as_str) == Some("status")
+                && e.get("phase").and_then(Value::as_str) == Some("done")),
         "expected a done event, got: {events:#?}"
     );
 }
 
-#[tokio::test]
-async fn envelope_text_streams_verbatim_no_dispatch() {
-    // BARE: an envelope-looking `<tool_call>…` in the completion is just TEXT —
-    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
+/// An envelope in the completion DISPATCHES, over the real NDJSON transport.
+///
+/// This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
+/// — "just TEXT, nothing parsed, nothing dispatched"). That was never a principle,
+/// it was a gap: python's ai_core has parsed and dispatched this envelope since
+/// 2026-08-02, and this crate's own module header already said ai-core owns the
+/// parse. What the transport still owes is the OTHER half — the text reaches the
+/// caller verbatim, markers and all, so a mid-thought call survives the trip.
+///
+/// `reply_to:null` keeps it to exactly ONE HTTP pass: the wiremock stub answers
+/// with the same envelope every time, so a default `reply_to` would (correctly)
+/// chain forever against a mock that never says anything else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_envelope_dispatches_and_streams_verbatim() {
     let tmp = TempDir::new().unwrap();
     let server = MockServer::start().await;
-    let envelope = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
+    let (kernel, backend) = mk_kernel(&tmp, "tool", &server.uri()).await;
+    // Address the backend's OWN file agent: its write is observable on disk, which
+    // is proof the dispatch happened and not just that nothing crashed.
+    let envelope = format!(
+        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"ff_{backend}\",\
+         \"payload\":{{\"type\":\"write\",\"path\":\"routed.txt\",\"content\":\"ok\"}},\
+         \"reply_to\":null}}}}</tool_call>"
+    );
     let body = ndjson_body(&[json!({"message": {"content": envelope}, "done": true})]);
     Mock::given(method("POST"))
         .and(path("/api/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_string(body))
-        .expect(1) // exactly one pass — no loop
+        .expect(1) // one pass: the call discards its reply, so nothing follows
         .mount(&server)
         .await;
 
-    let (kernel, backend) = mk_kernel(&tmp, "tool", &server.uri()).await;
-    let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_tool";
     let reply = kernel
         .send(
@@ -194,14 +221,102 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
         .await;
     assert_eq!(reply["response"], envelope, "verbatim text: {reply:#?}");
 
-    let events = drain(&mut rx).await;
+    let routed = tmp.path().join(".fantastic").join("routed.txt");
+    for _ in 0..250 {
+        if routed.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(
-        !events.iter().any(|e| {
-            e.get("type").and_then(Value::as_str) == Some("say")
-                || e.get("detail").and_then(|d| d.get("tool")).is_some()
-        }),
-        "bare send must not dispatch anything: {events:#?}"
+        routed.exists(),
+        "the envelope never dispatched: {routed:?} missing"
     );
+    assert_eq!(std::fs::read_to_string(&routed).unwrap(), "ok");
+}
+
+/// Join a decoded pass into the text ai-core would see.
+fn decoded_text(chunks: &[Value]) -> String {
+    let mut wrap = ThinkWrap::new();
+    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
+    for c in chunks {
+        decode_chunk_into(c, &mut wrap, &mut out);
+    }
+    if let Some(m) = wrap.close_marker() {
+        out.push(Ok(ProviderEvent::Token(m.to_string())));
+    }
+    out.into_iter()
+        .map(|e| match e.expect("no decode errors") {
+            ProviderEvent::Token(t) => t,
+        })
+        .collect()
+}
+
+#[test]
+fn reasoning_channel_is_wrapped_once_per_turn() {
+    // ollama streams a reasoning model's tokens as `message.thinking` and only its
+    // conclusion as `message.content`. THREE thinking chunks + one content chunk
+    // must produce exactly ONE open and ONE close — per chunk it would be a
+    // confetti of tags, and ai-core's stripper would eat the answer with it.
+    let text = decoded_text(&[
+        json!({"message": {"thinking": "step one "}}),
+        json!({"message": {"thinking": "step two "}}),
+        json!({"message": {"thinking": "step three"}}),
+        json!({"message": {"content": "the answer"}, "done": true}),
+    ]);
+    assert_eq!(text.matches(THINK_OPEN).count(), 1, "one open: {text:?}");
+    assert_eq!(text.matches(THINK_CLOSE).count(), 1, "one close: {text:?}");
+    assert_eq!(
+        text,
+        format!("{THINK_OPEN}step one step two step three{THINK_CLOSE}the answer")
+    );
+}
+
+#[test]
+fn a_thinking_only_chunk_is_not_an_empty_completion() {
+    // Measured live on 2026-08-02: gemma spent all 578 generated tokens on
+    // `thinking`, we read only `content`, and the turn looked like the server had
+    // wedged. The span closes at end-of-stream even though content never started.
+    let text = decoded_text(&[json!({"message": {"thinking": "all of it"}, "done": true})]);
+    assert_eq!(text, format!("{THINK_OPEN}all of it{THINK_CLOSE}"));
+    // An explicit `null` on either channel is shape, not content.
+    let none = decoded_text(&[json!({"message": {"thinking": null, "content": null}})]);
+    assert_eq!(none, "");
+}
+
+#[tokio::test]
+async fn thinking_streams_wrapped_and_persists_stripped() {
+    // End-to-end over the real NDJSON transport: the caller gets the wrapped raw
+    // text, the durable turn keeps only the conclusion.
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    let body = ndjson_body(&[
+        json!({"message": {"thinking": "deliberating"}}),
+        json!({"message": {"content": "ack"}, "done": true}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let (kernel, backend) = mk_kernel(&tmp, "think", &server.uri()).await;
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let reply = kernel
+        .send(
+            &backend,
+            json!({"type": "send", "text": "hi", "client_id": "c_think"}),
+        )
+        .await;
+    assert_eq!(
+        reply["response"],
+        json!(format!("{THINK_OPEN}deliberating{THINK_CLOSE}ack"))
+    );
+    let h = kernel
+        .send(&backend, json!({"type": "history", "client_id": "c_think"}))
+        .await;
+    let messages = h["messages"].as_array().expect("messages array");
+    assert_eq!(messages.last().unwrap()["content"], "ack");
 }
 
 #[tokio::test]
@@ -248,6 +363,95 @@ async fn sends_temperature_default_and_override() {
     let reqs = server.received_requests().await.unwrap();
     let last: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
     assert_eq!(last["options"]["temperature"], json!(0.15));
+}
+
+#[test]
+fn list_models_parses_tag_names_in_order() {
+    // ollama's `/api/tags` shape → just the names, in order. Extra fields ignored,
+    // odd/nameless entries skipped (never a panic).
+    let body = json!({
+        "models": [
+            {"name": "gemma3:12b", "size": 8_000_000_000_u64},
+            {"name": "llama3:8b"},
+            {"no_name": true},
+            {"name": "qwen2.5:7b"}
+        ]
+    });
+    assert_eq!(
+        parse_tag_names(&body),
+        vec![
+            "gemma3:12b".to_string(),
+            "llama3:8b".to_string(),
+            "qwen2.5:7b".to_string()
+        ]
+    );
+    // Absent/empty `models` → an empty list, not an error.
+    assert!(parse_tag_names(&json!({})).is_empty());
+    assert!(parse_tag_names(&json!({"models": []})).is_empty());
+}
+
+#[tokio::test]
+async fn list_models_served_returns_names_in_order() {
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "gemma3:12b"}, {"name": "llama3:8b"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let (kernel, backend) = mk_kernel(&tmp, "lm", &server.uri()).await;
+    let reply = kernel.send(&backend, json!({"type": "list_models"})).await;
+    assert_eq!(reply["models"], json!(["gemma3:12b", "llama3:8b"]));
+    assert!(
+        reply.get("error").is_none(),
+        "no error on success: {reply:#?}"
+    );
+}
+
+#[tokio::test]
+async fn list_models_payload_endpoint_overrides_record() {
+    // The backend record points at a DEAD endpoint, but the payload override wins —
+    // proving a caller can probe an ARBITRARY endpoint with no configured record.
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"models": [{"name": "probe:1b"}]})),
+        )
+        .mount(&server)
+        .await;
+
+    let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
+    let (kernel, backend) = mk_kernel(&tmp, "lmo", &dead).await;
+    let reply = kernel
+        .send(
+            &backend,
+            json!({"type": "list_models", "endpoint": server.uri()}),
+        )
+        .await;
+    assert_eq!(reply["models"], json!(["probe:1b"]));
+}
+
+#[tokio::test]
+async fn list_models_unreachable_returns_error_naming_the_endpoint() {
+    let tmp = TempDir::new().unwrap();
+    let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
+    let (kernel, backend) = mk_kernel(&tmp, "lmx", &dead).await;
+    let reply = kernel.send(&backend, json!({"type": "list_models"})).await;
+    let err = reply
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected an error, got: {reply:#?}"));
+    assert!(err.contains("ollama:"), "human-readable prefix: {err}");
+    assert!(
+        err.contains(&dead) && err.contains("/api/tags"),
+        "the message must name the probed url: {err}"
+    );
+    assert!(reply.get("models").is_none());
 }
 
 #[tokio::test]

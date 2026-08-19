@@ -22,12 +22,16 @@
 //! - `on_shutdown` fires during graceful kernel shutdown. The default
 //!   delegates to `on_delete`. Override if "tearing down, will
 //!   restart" should behave differently from "gone forever".
+//! - `on_cancel` fires when a `cancel` kills a task of this agent, BEFORE the
+//!   task is aborted — release the REAL resources that task holds (an OS
+//!   subprocess, a PTY, a socket). Dropping a future frees none of them.
 
 use crate::agent::AgentId;
 use crate::kernel::Kernel;
+use crate::tasks::TaskId;
 use async_trait::async_trait;
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -63,6 +67,34 @@ pub trait Bundle: Send + Sync {
         payload: &Value,
         kernel: &Arc<Kernel>,
     ) -> Result<Reply, BundleError>;
+
+    /// Refuse an `update_agent` patch this bundle cannot honour. Called by the
+    /// substrate BEFORE the record changes; `Some(reason)` REFUSES the patch.
+    ///
+    /// A record carries meta only its bundle understands, so the substrate cannot
+    /// judge it — but the bundle can. Default: accept everything (most bundles have
+    /// nothing to check). Mirrors python's duck-typed `validate_meta(meta, record)`.
+    ///
+    /// Exists because `update_agent` used to accept anything: an agent set
+    /// `ingress_rule="password:kernel-internal-transcripts"`, got `{"updated":
+    /// true}` back, and believed a security control was in place that no resolver
+    /// implements. Accepting a value you cannot honour AND reporting success is the
+    /// worst of both.
+    ///
+    /// `record` is the agent's CURRENT meta (empty at create), so a bundle
+    /// validates the state the write WILL produce, not the patch in isolation —
+    /// py-canonical: a cross-field rule (exec_bridge's `interpreter` against
+    /// `interpreters`) is unenforceable from the patch alone, and checking the
+    /// patch falsely refused `update_agent id=x interpreter=<already allowed>`.
+    /// Called at BOTH create and update; create used to bypass it entirely,
+    /// which let a record be born with meta its own bundle refuses.
+    fn validate_meta(
+        &self,
+        _meta: &Map<String, Value>,
+        _record: &Map<String, Value>,
+    ) -> Option<String> {
+        None
+    }
 
     /// Dispatch a binary-framed verb. The binary channel is **symmetric**:
     /// a request carries `(header, blob)` and the reply carries
@@ -108,6 +140,27 @@ pub trait Bundle: Send + Sync {
     async fn on_delete(
         &self,
         _agent_id: &AgentId,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        Ok(())
+    }
+
+    /// Cancel hook — the SIGTERM half of the `cancel` system verb (the abort is
+    /// the SIGKILL half). Invoked once per agent in a cancelled subtree, BEFORE
+    /// any task is stopped, with the id of the task being killed.
+    ///
+    /// Dropping a future frees NO real resource: it unwinds `async` frames and
+    /// nothing else. A bundle holding an OS subprocess, a PTY, or a socket FOR
+    /// THAT TASK must release it here — this is where the orphaned-subprocess
+    /// class of bug is fixed. Pure-async bundles need nothing (default: noop,
+    /// same optionality as [`Self::on_delete`]).
+    ///
+    /// A hook that errors is logged and the kill still happens: cancel is not
+    /// refusable.
+    async fn on_cancel(
+        &self,
+        _agent_id: &AgentId,
+        _task_id: &TaskId,
         _kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         Ok(())

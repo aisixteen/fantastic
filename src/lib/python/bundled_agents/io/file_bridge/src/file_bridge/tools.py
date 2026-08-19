@@ -53,6 +53,62 @@ def _is_hidden(name: str, hidden: list[str]) -> bool:
     return name in hidden or any(name == p for p in hidden)
 
 
+# One `read` used to return a whole file, however large. MEASURED 2026-08-07: an AI agent
+# read an 86 KB source file, its conversation went to 21k tokens, and the NEXT turn was
+# cancelled mid-prefill because prefill at ~95 tok/s outran the backend's 180s send
+# timeout. Nothing caught it — the context window (32k) was never exceeded, so the
+# compaction handshake never fired and `context_insufficient` never appeared. The turn
+# became un-completable on TIME while staying legal on SIZE, and no guard covers that.
+#
+# So a text read is WINDOWED. Not silently: an unread tail is reported with the totals and
+# the offset to continue from, because a caller that cannot tell a whole file from its
+# first page will reason about the wrong content.
+DEFAULT_MAX_READ_CHARS = 16384
+
+
+def _max_read_chars(rec: dict) -> int:
+    """The leg's text-read window. Per-record like `hidden` — an operator serving small
+    config files can raise it; the default protects a conversation from one call."""
+    try:
+        n = int(rec.get("max_read_chars", DEFAULT_MAX_READ_CHARS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_READ_CHARS
+    return n if n > 0 else DEFAULT_MAX_READ_CHARS
+
+
+def _window_text(rec: dict, payload: dict, text: str) -> tuple[str, dict]:
+    """(slice, reply-extras). `offset`/`limit` page a large file explicitly."""
+    total = len(text)
+    try:
+        offset = max(0, int(payload.get("offset", 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    cap = _max_read_chars(rec)
+    try:
+        limit = int(payload.get("limit", cap))
+    except (TypeError, ValueError):
+        limit = cap
+    limit = min(max(1, limit), cap)
+    chunk = text[offset : offset + limit]
+    end = offset + len(chunk)
+    if offset == 0 and end >= total:
+        return chunk, {}
+    extras = {
+        "total_chars": total,
+        "offset": offset,
+        "returned_chars": len(chunk),
+        "truncated": end < total,
+    }
+    if end < total:
+        extras["next_offset"] = end
+        extras["hint"] = (
+            f"{total - end} of {total} chars unread — continue with "
+            f"{{type:'read', path:…, offset:{end}}} (max {cap} per call, raise the "
+            "leg's `max_read_chars` to widen it)"
+        )
+    return chunk, extras
+
+
 def _readonly_or_none(rec: dict) -> dict | None:
     if rec.get("readonly"):
         return {"error": "agent is readonly"}
@@ -125,7 +181,7 @@ async def _list(id, payload, kernel):
 
 
 async def _read(id, payload, kernel):
-    """args: path:str (req). Returns {path, content:str} for text, {path, image_base64, mime} for images, {path, bytes:bytes, mime} for any other binary (PDF, fonts, archives, etc.) — raw bytes ride the kernel's binary protocol over WS, zero-copy in-process. Refuses paths outside root."""
+    """args: path:str (req), offset:int? (0), limit:int? (the leg's max_read_chars, default 16384). Returns {path, content:str} for text — WINDOWED: a file longer than the window also carries {total_chars, offset, returned_chars, truncated, next_offset, hint} so the tail is fetchable and never silently dropped. {path, image_base64, mime} for images, {path, bytes:bytes, mime} for any other binary (PDF, fonts, archives) — raw bytes ride the kernel's binary protocol over WS, zero-copy in-process. Refuses paths outside root."""
     rec = kernel.get(id) or {}
     root = _root_str(rec)
     path = payload.get("path", "")
@@ -149,7 +205,7 @@ async def _read(id, payload, kernel):
                 "mime": mime,
             }
         try:
-            content = fs.read_text(root, path)
+            content, window = _window_text(rec, payload, fs.read_text(root, path))
         except UnicodeDecodeError:
             # Generic binary: PDF, font, archive, audio, video. Raw bytes — over WS
             # the kernel's binary protocol ships a binary frame; in-process the
@@ -163,7 +219,7 @@ async def _read(id, payload, kernel):
             }
     except (ValueError, OSError) as e:
         return {"error": str(e)}
-    return {"path": path, "content": content}
+    return {"path": path, "content": content, **window}
 
 
 async def _write(id, payload, kernel):
@@ -355,6 +411,31 @@ VERBS = {
 }
 
 UNGATED = {"reflect"}  # discovery must work on a sealed bridge
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse a write this bundle cannot honour.
+
+    `record` is the CURRENT record (empty at create) so a bundle can validate the
+    MERGED state rather than the patch alone — this one needs only the patch, but the
+    hook passes both so a cross-field rule is expressible (see `exec_bridge`, where
+    checking the patch alone refused legal writes). Called by `update_agent` BEFORE the
+    record changes (duck-typed — the substrate never imports this module).
+
+    The only judgement made here is on the auth posture, because that is the one
+    where silently accepting a value you do not implement is actively dangerous: the
+    operator is told `{"updated": true}` and believes a control is in place. An
+    unknown rule now seals rather than raising (see io_bridge.ingress_rules), so the
+    edge is SAFE either way — but safe-and-wrong is still wrong, and the mistake
+    belongs at the write, next to the typo, not three calls later."""
+    if "ingress_rule" in meta:
+        spec = meta["ingress_rule"]
+        if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
+            return (
+                f"ingress_rule={spec!r} is not a rule this bundle implements — "
+                "legal values: allow_all, deny_inbound, password"
+            )
+    return None
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

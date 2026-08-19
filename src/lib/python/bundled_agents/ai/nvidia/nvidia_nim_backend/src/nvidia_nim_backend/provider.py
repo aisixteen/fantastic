@@ -16,6 +16,8 @@ from typing import AsyncIterator
 
 import httpx
 
+from ai_core.core import THINK_CLOSE, THINK_OPEN
+
 DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
 DEFAULT_MODEL = "nvidia/llama-3_1-nemotron-ultra-253b-v1"
 
@@ -53,6 +55,7 @@ class NvidiaNimProvider:
             "messages": messages,
             "stream": True,
         }
+        thinking = False
         async with client.stream("POST", "/chat/completions", json=body) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -70,9 +73,32 @@ class NvidiaNimProvider:
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
-                content = (choices[0].get("delta") or {}).get("content")
+                delta = choices[0].get("delta") or {}
+                # REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style NIM
+                # models stream most tokens as `reasoning_content` and only the
+                # conclusion as `content` — measured 740 chars of reasoning to 129 of
+                # content on one turn. Reading `content` alone silently drops whole
+                # turns: observed live, the model spent an entire pass reasoning, we
+                # saw an EMPTY completion, and the chain died with no error anywhere.
+                # A raw text protocol reads the text the model produced; it does not
+                # let the provider decide which field counts as output.
+                # WRAPPED once (see ollama_backend + `ai_core.core.without_thinking`):
+                # parsed for tool calls, stripped before the turn is persisted.
+                think = delta.get("reasoning_content")
+                if isinstance(think, str) and think:
+                    if not thinking:
+                        thinking = True
+                        yield THINK_OPEN
+                    yield think
+                content = delta.get("content")
                 if isinstance(content, str) and content:
+                    if thinking:
+                        thinking = False
+                        yield THINK_CLOSE
                     yield content
+
+        if thinking:
+            yield THINK_CLOSE
 
     @property
     def model(self) -> str:

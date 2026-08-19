@@ -142,3 +142,122 @@ async def test_readonly_refuses_write(seeded_kernel, file_bridge):
 async def test_unknown_verb_errors(seeded_kernel, file_bridge):
     r = await seeded_kernel.send(file_bridge, {"type": "garbage"})
     assert "error" in r
+
+
+async def test_update_agent_refuses_a_rule_the_bundle_cannot_honour(seeded_kernel):
+    """`update_agent` must REFUSE an ingress rule nobody implements.
+
+    It used to accept anything: on 2026-08-02 an agent set
+    `ingress_rule="password:kernel-internal-transcripts"` and got `{"updated":
+    true}` back, so it believed a security control was in place. The edge now seals
+    on an unknown rule rather than raising, so it was never unsafe — but reporting
+    success for a value you cannot honour is its own failure, and the complaint
+    belongs at the write, next to the typo."""
+    rec = await seeded_kernel.send(
+        "kernel_state",
+        {"type": "create_agent", "handler_module": "file_bridge.tools", "root": "."},
+    )
+    fid = rec["id"]
+    bad = await seeded_kernel.send(
+        "kernel",
+        {"type": "update_agent", "id": fid, "ingress_rule": "password:my-secret"},
+    )
+    assert bad.get("updated") is False
+    assert "password:my-secret" in bad["error"]
+    assert "allow_all" in bad["error"], "must teach the legal set"
+    # and the record is UNCHANGED — a refused patch must not half-apply
+    assert "ingress_rule" not in (seeded_kernel.get(fid) or {})
+    # the real values still go through
+    ok = await seeded_kernel.send(
+        "kernel", {"type": "update_agent", "id": fid, "ingress_rule": "allow_all"}
+    )
+    assert ok.get("updated") is True
+    assert (seeded_kernel.get(fid) or {})["ingress_rule"] == "allow_all"
+
+
+# ─── read is WINDOWED (one call cannot flood a conversation) ─────
+
+
+async def _fb(kernel, tmp_path, **meta) -> str:
+    import os
+
+    os.makedirs("wr", exist_ok=True)
+    rec = await kernel.send(
+        kernel.id,
+        {
+            "type": "create_agent",
+            "handler_module": "file_bridge.tools",
+            "root": "wr",
+            "ingress_rule": "allow_all",
+            **meta,
+        },
+    )
+    return rec["id"]
+
+
+async def test_a_small_read_is_unchanged(seeded_kernel, tmp_path):
+    """The window must not alter the ordinary case: a file inside it returns `content`
+    and NOTHING else, so every existing caller and assertion is untouched."""
+    fid = await _fb(seeded_kernel, tmp_path)
+    await seeded_kernel.send(
+        fid, {"type": "write", "path": "s.txt", "content": "hello"}
+    )
+    r = await seeded_kernel.send(fid, {"type": "read", "path": "s.txt"})
+    assert r["content"] == "hello"
+    assert set(r) == {"path", "content"}, f"window leaked keys on a small read: {r}"
+
+
+async def test_a_large_read_is_windowed_and_says_so(seeded_kernel, tmp_path):
+    """MEASURED 2026-08-07: an AI agent read an 86 KB file, its context reached 21k
+    tokens, and the next turn was cancelled mid-prefill — prefill outran the backend's
+    180s send timeout. The 32k window was never exceeded, so compaction never fired and
+    `context_insufficient` never appeared: the turn became un-completable on TIME while
+    legal on SIZE. A read must therefore be bounded, and must SAY it was bounded — a
+    caller that cannot tell a whole file from its first page reasons about the wrong
+    content."""
+    from file_bridge.tools import DEFAULT_MAX_READ_CHARS as CAP
+
+    fid = await _fb(seeded_kernel, tmp_path)
+    total = CAP * 2 + 77
+    await seeded_kernel.send(
+        fid, {"type": "write", "path": "big.txt", "content": "x" * total}
+    )
+    r = await seeded_kernel.send(fid, {"type": "read", "path": "big.txt"})
+    assert len(r["content"]) == CAP
+    assert r["truncated"] is True
+    assert r["total_chars"] == total and r["next_offset"] == CAP
+    assert "offset" in r["hint"], "the hint must name how to continue"
+
+
+async def test_paging_reassembles_the_whole_file(seeded_kernel, tmp_path):
+    """The tail must be REACHABLE, or the window is just data loss with a label."""
+    from file_bridge.tools import DEFAULT_MAX_READ_CHARS as CAP
+
+    fid = await _fb(seeded_kernel, tmp_path)
+    body = "".join(chr(97 + (i % 26)) for i in range(CAP + 500))
+    await seeded_kernel.send(fid, {"type": "write", "path": "p.txt", "content": body})
+    out, offset = "", 0
+    while True:
+        r = await seeded_kernel.send(
+            fid, {"type": "read", "path": "p.txt", "offset": offset}
+        )
+        out += r["content"]
+        if not r.get("truncated"):
+            break
+        offset = r["next_offset"]
+    assert out == body
+
+
+async def test_the_leg_can_widen_its_own_window(seeded_kernel, tmp_path):
+    """An operator serving small config files may raise it; `limit` above the leg's cap
+    is clamped, so a caller cannot talk its way past the operator's bound."""
+    fid = await _fb(seeded_kernel, tmp_path, max_read_chars=64)
+    await seeded_kernel.send(
+        fid, {"type": "write", "path": "c.txt", "content": "y" * 200}
+    )
+    r = await seeded_kernel.send(fid, {"type": "read", "path": "c.txt"})
+    assert len(r["content"]) == 64 and r["truncated"] is True
+    over = await seeded_kernel.send(
+        fid, {"type": "read", "path": "c.txt", "limit": 10_000}
+    )
+    assert len(over["content"]) == 64, "limit must clamp to the leg's cap"

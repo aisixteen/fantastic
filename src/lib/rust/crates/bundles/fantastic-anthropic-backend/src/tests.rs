@@ -112,8 +112,15 @@ fn readme_present_and_titled() {
 
 #[test]
 fn translate_messages_splits_system_and_text_turns() {
-    // RAW: tool calls/replies are inline TEXT; ai-core mapped tool replies to
-    // role:user before we see them. So translation is pure text turns.
+    // RAW: tool calls and their replies are inline TEXT, never native `tool_use` /
+    // `tool_result` blocks — so translation is pure text turns and this transport
+    // learns nothing about the tool protocol.
+    //
+    // A `role:tool` turn is not something ai-core produces: routing delivers a
+    // reply as an ordinary `user` turn tagged `[reply to <id>]`. It arrives only as
+    // a LEGACY turn in an old store or from a caller-supplied `messages` override,
+    // and ai-core maps it to `role:user` before we see it — mapped again here
+    // because many chat templates render no `tool` role at all.
     let messages = vec![
         json!({"role":"system","content":"sys-a"}),
         json!({"role":"system","content":"sys-b"}),
@@ -266,7 +273,10 @@ async fn send_streams_tokens_via_event_typed_sse() {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
                         tokens.push(t.to_string());
                     }
-                } else if ty == "done" {
+                } else if ty == "status" && ev.get("phase").and_then(Value::as_str) == Some("done")
+                {
+                    // `status(phase:"done")` IS completion — the duplicate bare
+                    // `done` event is gone.
                     saw_done = true;
                 }
             }
@@ -281,22 +291,41 @@ async fn send_streams_tokens_via_event_typed_sse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn envelope_text_streams_verbatim_no_dispatch() {
-    // BARE: a `<tool_call>` envelope split across two text_deltas is just TEXT —
-    // streamed verbatim, nothing parsed, nothing dispatched, exactly ONE request.
+async fn an_envelope_split_across_text_deltas_dispatches() {
+    // A `<tool_call>` split across two `text_delta`s must REASSEMBLE and dispatch.
+    // This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
+    // — "just TEXT, nothing parsed, nothing dispatched"). That was a gap, not a
+    // principle: python's ai_core has dispatched this envelope since 2026-08-02 and
+    // this crate's own header already said ai-core parses it. The transport's
+    // remaining duty is the reassembly + verbatim delivery asserted below —
+    // Anthropic frames text in deltas, so a call arriving in pieces is the real
+    // failure mode.
+    //
+    // `reply_to:null` keeps it to ONE pass: the stub answers with the same envelope
+    // every time, so a default `reply_to` would (correctly) chain against a mock
+    // that never says anything else.
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
-    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let (kernel, ant, fid) = mk_kernel(&tmp, Some(endpoint)).await;
     kernel
         .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
         .await;
 
+    // Address the anthropic agent's OWN file agent: its write lands on disk, which
+    // is proof the dispatch happened and not just that nothing crashed.
+    let whole = format!(
+        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"{fid}\",\
+         \"payload\":{{\"type\":\"write\",\"path\":\"routed.txt\",\"content\":\"ok\"}},\
+         \"reply_to\":null}}}}</tool_call>"
+    );
+    let split = whole.len() / 2;
+    let (part_1, part_2) = whole.split_at(split);
     let body = sse(&[
         json!({"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"co"}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"re\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":part_1}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":part_2}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
         json!({"type":"message_stop"}),
@@ -308,7 +337,7 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(body),
         )
-        .expect(1) // exactly one pass — no loop
+        .expect(1) // one pass: the call discards its reply, so nothing follows
         .mount(&server)
         .await;
 
@@ -320,8 +349,20 @@ async fn envelope_text_streams_verbatim_no_dispatch() {
             json!({"type": "send", "text": "do it", "client_id": client_id}),
         )
         .await;
-    let expected = "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"core\",\"payload\":{\"type\":\"list_agents\"}}}</tool_call>";
-    assert_eq!(reply["response"], expected, "verbatim text: {reply:#?}");
+    assert_eq!(reply["response"], whole, "verbatim text: {reply:#?}");
+
+    let routed = tmp.path().join(".fantastic").join("routed.txt");
+    for _ in 0..250 {
+        if routed.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        routed.exists(),
+        "the delta-split envelope never dispatched: {routed:?} missing"
+    );
+    assert_eq!(std::fs::read_to_string(&routed).unwrap(), "ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -349,6 +390,9 @@ async fn rate_limit_retry_once_then_succeeds() {
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
         json!({"type":"content_block_stop","index":0}),
+        // The real API always sends stop_reason before message_stop; a mock without
+        // it now reads as a cut stream (the provider raises), which is the point.
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
         json!({"type":"message_stop"}),
     ]);
     Mock::given(method("POST"))

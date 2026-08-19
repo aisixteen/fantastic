@@ -145,13 +145,6 @@ let package = Package(
             name: "FantasticScheduler",
             dependencies: ["FantasticKernel", "FantasticJSON"]
         ),
-        // In-process JavaScript executor (JavaScriptCore, Apple system
-        // framework). Mirrors the Rust `fantastic-js-runtime` contract.
-        .target(
-            name: "FantasticJSRuntime",
-            dependencies: ["FantasticKernel", "FantasticJSON"],
-            linkerSettings: [.linkedFramework("JavaScriptCore")]
-        ),
         .target(
             name: "FantasticCliBundle",
             dependencies: ["FantasticKernel", "FantasticJSON"]
@@ -245,24 +238,10 @@ let package = Package(
         // Cross-platform dispatch skeleton (reflect/boot/shutdown/
         // start/stop) behind a `RunnerTransport` seam. The local + ssh
         // runner bundles supply only their transport conformance. NO
-        // `#if os(macOS)` here — the macOS gating lives on the runners.
+        // ── The process edge (macOS only) ────────────────────────
         .target(
-            name: "FantasticRunnerCore",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-
-        // ── Pro-tier subprocess bundles (macOS only) ─────────────
-        .target(
-            name: "FantasticLocalRunner",
-            dependencies: ["FantasticRunnerCore", "FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticPythonRuntime",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
-        ),
-        .target(
-            name: "FantasticSshRunner",
-            dependencies: ["FantasticRunnerCore", "FantasticKernel", "FantasticJSON"]
+            name: "FantasticExecBridge",
+            dependencies: ["FantasticKernel", "FantasticIoBridge", "FantasticJSON"]
         ),
         .target(
             name: "FantasticTerminalBackend",
@@ -278,13 +257,12 @@ let package = Package(
             dependencies: [
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
-                "FantasticScheduler", "FantasticJSRuntime", "FantasticCliBundle",
+                "FantasticScheduler", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticFoundationModelsBackend",
-                "FantasticLocalRunner", "FantasticPythonRuntime",
-                "FantasticSshRunner", "FantasticTerminalBackend",
+                "FantasticExecBridge", "FantasticTerminalBackend",
             ]
         ),
         .testTarget(
@@ -294,9 +272,11 @@ let package = Package(
                 "FantasticProxyAgent",
             ]
         ),
+        // The subprocess bundle's own suite — the ORPHAN gate: `cancel` must
+        // reap the real OS child, asserted on the pid, not on the Swift Task.
         .testTarget(
-            name: "FantasticJSRuntimeTests",
-            dependencies: ["FantasticJSRuntime", "FantasticKernel", "FantasticJSON"]
+            name: "FantasticExecBridgeTests",
+            dependencies: ["FantasticExecBridge", "FantasticKernel", "FantasticJSON"]
         ),
         // ── Cross-runtime parity (Phase 8J) ──────────────────────
         // Spawns the Python kernel binary as a subprocess +
@@ -328,8 +308,7 @@ let package = Package(
                 "FantasticJSON", "FantasticKernel",
                 "FantasticKernelStartup",
                 "FantasticProxyAgent", "FantasticTools",
-                "FantasticLocalRunner", "FantasticPythonRuntime",
-                "FantasticSshRunner", "FantasticTerminalBackend",
+                "FantasticExecBridge", "FantasticTerminalBackend",
             ]
         ),
 
@@ -353,10 +332,17 @@ let package = Package(
             ]
         ),
 
+        // Provider WIRE decoders — the ollama NDJSON / NIM SSE line→chunk
+        // mapping, extracted as PURE functions so the two-channel reading is
+        // testable without a live server. Reading a single channel is exactly
+        // how these shipped broken (a reasoning model's whole turn read as an
+        // empty completion), and it was untestable while the mapping sat inside
+        // the HTTP closure.
         .testTarget(
-            name: "FantasticRunnerCoreTests",
+            name: "FantasticAIBackendsTests",
             dependencies: [
-                "FantasticRunnerCore", "FantasticKernel", "FantasticJSON",
+                "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
+                "FantasticJSON",
             ]
         ),
 

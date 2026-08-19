@@ -1,14 +1,21 @@
 //! The generation: ONE provider pass per `send` — assemble the prompt,
-//! auto-compact to fit the window, stream tokens, persist history. NO tool
-//! loop: the backend is a context-managed conversational completion; tool
-//! dispatch is the caller's job (an authored agent) (it reads the completion + drives its
-//! own loop). Per-backend knobs ride on [`BackendConfig`].
+//! auto-compact to fit the window, stream tokens, persist history (RAW text out
+//! to the caller, `<think>`-stripped text into the store). Per-backend knobs ride
+//! on [`BackendConfig`].
+//!
+//! ONE PASS, and still no loop HERE — but that is not the same as "nothing
+//! happens". This module generates; [`crate::route::route_reply`] then dispatches
+//! whatever the completion named and delivers each reply to its own `reply_to`. A
+//! chain therefore advances one pass at a time, and it advances only because the
+//! model asked again: no call ends the turn, and stop is the default. Nothing
+//! iterates on the model's behalf.
 
 use crate::assembly::assemble_messages;
-use crate::events::{emit_done, emit_status, to_caller, CallerRoute};
+use crate::events::{emit_status, to_caller, CallerRoute};
 use crate::history::save_history;
 use crate::provider::{Provider, ProviderEvent};
 use crate::state::BackendState;
+use crate::think::without_thinking;
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
@@ -40,10 +47,14 @@ fn render_for_model(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// One bare generation: assemble (system + compacted history + user) → project
-/// context ONCE (auto-compact / notice / too_small) → ONE provider pass streaming
-/// tokens → persist. Runs inside the spawned task so `interrupt` can abort. Returns
-/// the completion text.
+/// One generation: assemble (system + compacted history + user) → project context
+/// ONCE (auto-compact / notice / too_small) → ONE provider pass streaming tokens →
+/// persist. Runs INLINE in the `send` dispatch — which is itself a kernel task, so
+/// `cancel` drops this future (and with it the provider stream).
+///
+/// Returns the RAW completion text, thinking markers intact: [`crate::verbs::send`]
+/// hands it to the router, and a tool call the model wrote mid-thought must still
+/// dispatch. Only the DURABLE turn is stripped.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_generation(
     provider: &Arc<dyn Provider>,
@@ -85,7 +96,8 @@ pub async fn run_generation(
         }
     };
 
-    // ONE provider pass — no tool loop. Every chunk is a content token.
+    // ONE provider pass. Every chunk is a content token — the provider knows
+    // nothing of the tool protocol; the envelope is text this crate parses after.
     let model_view = render_for_model(&model_messages);
     let mut stream = provider.chat(&model_view).await?;
     let mut content_parts: Vec<String> = Vec::new();
@@ -132,13 +144,18 @@ pub async fn run_generation(
         m
     })
     .await;
-    emit_done(kernel, self_id, client_id, cfg.route).await;
 
     // APPEND this send's user + assistant turns to the durable chat store so
     // context management (compaction/recall) has the FULL conversation next turn.
     let new_turns = vec![
         json!({"role": "user", "content": user_text}),
-        json!({"role": "assistant", "content": last_text}),
+        // STRIPPED — the deliberation is not part of the conversation. The RAW
+        // text (thinking included) is what gets parsed and what the caller
+        // receives; only durable history loses the `<think>` spans, because a
+        // reasoning model re-fed its own prior deliberation drowns in it
+        // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
+        // 2026-08-02).
+        json!({"role": "assistant", "content": without_thinking(&last_text)}),
     ];
     let _ = save_history(self_id, kernel, client_id, &new_turns).await;
     Ok(last_text)

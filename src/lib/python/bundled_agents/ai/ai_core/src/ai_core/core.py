@@ -3,13 +3,17 @@ nvidia_nim backends.
 
 Two layers:
 
-  1. MODULE-GLOBAL STATE, keyed by agent id. The provider cache, in-flight
-     task table, per-backend FIFO locks, menu cache, and the queue /
-     current-entry status state. These are keyed by the agent's id, so
-     three backends loaded into ONE kernel share these dicts SAFELY — an
-     ollama agent's id never collides with an anthropic agent's id. A
-     bundle's tests patch them as `<bundle>.tools._providers[id] = fake`,
-     so each bundle re-exports the SAME dict objects (see `build()`'s note).
+  1. MODULE-GLOBAL STATE, keyed by agent id. The provider cache, per-backend
+     FIFO locks, and the queue / current-entry status state. These are keyed
+     by the agent's id, so three backends loaded into ONE kernel share these
+     dicts SAFELY — an ollama agent's id never collides with an anthropic
+     agent's id. A bundle's tests patch them as
+     `<bundle>.tools._providers[id] = fake`, so each bundle re-exports the
+     SAME dict objects (see `build()`'s note).
+
+     There is NO backend-private task table: a `send` IS a kernel task (one
+     `ps` row, `"<agent>:<n>"`), the generation runs INLINE in that dispatch,
+     and the kernel's `cancel` aborts it. See `on_cancel` below.
 
   2. PER-BACKEND CONFIG, captured by a `Backend` dataclass. `build()` is a
      CLOSURE FACTORY: each backend calls it with its own Provider builder +
@@ -54,8 +58,9 @@ import os
 import secrets
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ai_core.context import (
     ProjectionCtx,
@@ -68,17 +73,19 @@ from ai_core.context import (
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
 
-# `extract_tool_calls` is kept ONLY for the context-reaction read-model
-# (`_derive_reaction` scans the durable transcript for the model's recall/persist
-# reaction). The backend itself no longer parses tool calls — the agentic LOOP is
-# emergent (an authored agent drives tool dispatch); the backend is a
-# context-managed conversational completion that does ONE provider pass per send.
-from ai_core.tool_parse import extract_tool_calls
+# TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
+# provider pass per send and never iterates — but `_route_reply` DOES parse this
+# pass's output and dispatch what it names, so the parser is load-bearing on the
+# routing path, not just a read-model. (This comment claimed otherwise until
+# 2026-08-06; `tool_parse`'s own docstring had already been corrected, and one of
+# two stale copies of a fact is worse than none.) `_derive_reaction` is the other
+# consumer, scanning the durable transcript for a recall/persist reaction.
+from ai_core.tool_parse import extract_tool_calls, malformed_calls
+from kernel import current_task
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
 _providers: dict = {}
-_tasks: dict[str, asyncio.Task] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
 # Structural state for the `status` verb + status events. One channel,
@@ -88,7 +95,11 @@ _locks: dict[str, asyncio.Lock] = {}
 # _queue[backend_id]: pending entries waiting on the per-backend lock,
 #   in arrival order. Each: {client_id, text, queued_at, send_id}.
 # _current[backend_id]: the entry that holds the lock right now, or
-#   absent. Carries the same fields plus `started_at` and `phase`.
+#   absent. Carries the same fields plus `started_at`, `phase`, and
+#   `task_id` — the KERNEL TASK this generation IS (`"<agent>:<n>"`, the
+#   pid `cancel` addresses; `on_cancel` matches on it to recognise its own
+#   turn). It is the ONLY handle on the in-flight generation, and it is the
+#   kernel's, not ours. `_current[id]` present ⇔ a generation is in flight.
 #   Phases: queued → thinking → streaming → tool_calling → thinking
 #   → ... → done. Surfaces "still working" between tool calls so the
 #   UI can show a pulse indicator (claude-code style).
@@ -181,12 +192,16 @@ def _dequeue_send(self_id: str, send_id: str) -> dict | None:
 
 def _set_current(self_id: str, entry: dict) -> None:
     """Promote a queued entry to `_current` — called once we hold the
-    backend lock. Adds started_at, phase=thinking, empty text_so_far."""
+    backend lock. Adds started_at, phase=thinking, empty text_so_far, and
+    `task_id`: the kernel task this generation runs as. That id is how
+    `cancel` reaches the turn and how `on_cancel` knows the killed task is
+    OURS (not a `history`/`reflect` dispatch on the same agent)."""
     _current[self_id] = {
         **entry,
         "started_at": time.time(),
         "phase": "thinking",
         "text_so_far": "",
+        "task_id": current_task(),
     }
 
 
@@ -194,13 +209,30 @@ def _clear_current(self_id: str) -> None:
     _current.pop(self_id, None)
 
 
+def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
+    """Hand the in-flight entry over to `on_cancel` — but ONLY if `task_id`
+    names the generation itself. Clears `_current` (so `status`/`reflect` stop
+    reporting a phantom generation the instant the kernel aborts the task) and
+    returns the entry so the turn can be closed out for its client. None when
+    the cancelled task is some OTHER dispatch on this agent."""
+    cur = _current.get(self_id)
+    if cur is None or cur.get("task_id") != task_id:
+        return None
+    return _current.pop(self_id)
+
+
 def _redact_text(d: dict | None) -> dict | None:
     """Return a copy of a current/queue entry with text-bearing fields
     stripped. Used to surface the existence of someone else's in-flight
-    work to a caller without leaking content."""
+    work to a caller without leaking content. `task_id` is bookkeeping, not
+    status — it stays out of the snapshot (the live table is `ps`'s job)."""
     if d is None:
         return None
-    return {k: v for k, v in d.items() if k not in ("text", "text_so_far", "last_tool")}
+    return {
+        k: v
+        for k, v in d.items()
+        if k not in ("text", "text_so_far", "last_tool", "task_id")
+    }
 
 
 def _status_snapshot(self_id: str, requesting_client_id: str | None) -> dict:
@@ -403,6 +435,241 @@ nothing is ever truly lost.
 """
 
 
+_SEND_TO_HOWTO = """## Reaching other agents
+Everything is an agent with a string id. `send(target_id, payload)` reaches any of them —
+the payload's `type` names the verb; `{type:'reflect'}` returns that agent's verbs and
+state. To send, emit exactly this, alone on its line:
+<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>
+`reply_to` is where that send's reply goes. It defaults to you — leave it out and the
+answer comes back as your next message. Name another agent's id to hand the answer to
+them instead, or `null` to discard it. Text outside the tag is your message to whoever
+asked. A message tagged `[reply to <id> <verb>]` is the reply to the send you issued
+naming that agent and that verb — replies can lag a turn behind when several calls are
+in flight, so match the tag before assuming a call was lost and re-issuing it.
+"""
+
+# ─── reply routing ──────────────────────────────────────────────
+#
+# After ONE provider pass, its output goes where it was addressed.
+#
+#   the model's own <tool_call>s — each names a target, a payload and `reply_to`. All are
+#     dispatched, and each reply is delivered to its own `reply_to`. `reply_to:'self'` is
+#     what makes a chain, and the chain continues ONLY because the model asked again.
+#     No call ends the turn: stop is the default.
+#
+#   the caller's `send_to` — hands this pass's TEXT to another agent, once.
+#
+# Nothing here bounds how far the model goes. Every dispatch is a `ps` row and `cancel`
+# kills a subtree, so a runaway is visible and killable exactly like a script agent's
+# `while(true)`. Deciding how much thinking is allowed is not this module's call.
+#
+# Detached is the one hard requirement: `_lock_for` is a plain non-reentrant asyncio.Lock,
+# so awaiting a self-addressed send from inside the holder deadlocks until `send_timeout`.
+# Spawned, it queues behind the current turn.
+
+
+async def _deliver(kernel, target, text, client_id, system_prompt) -> None:
+    """Hand `text` to `target` as a fresh turn."""
+    payload = {"type": "send", "text": text, "client_id": client_id}
+    if system_prompt is not None:
+        payload["system_prompt"] = system_prompt
+    await kernel.send(target, payload)
+
+
+# ─── thinking: PARSED, not PERSISTED ────────────────────────────
+#
+# A reasoning model streams two things. ollama labels them `message.thinking` /
+# `message.content`; NIM labels them `reasoning_content` / `content`. We must read
+# BOTH — a turn spent entirely reasoning is otherwise an empty completion that
+# silently ends the chain (gemma4:12b, 2026-08-02). But we must not KEEP both:
+# feeding a reasoning model its own prior deliberation back is against every
+# vendor's guidance, and it compounds — gemma's 3,800-char turn-1 deliberation is
+# re-sent in every later prompt, crowding out the task.
+#
+# So the two uses split. Providers wrap reasoning in these markers; the FULL text
+# is parsed (a tool call the model wrote mid-thought still dispatches) and the
+# STRIPPED text is persisted and shown as the answer. One convention, no provider
+# learns anything about the tool protocol.
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+
+
+def without_thinking(text: str) -> str:
+    """Drop every `<think>…</think>` span — what goes into durable history."""
+    out, i = [], 0
+    while True:
+        a = text.find(THINK_OPEN, i)
+        if a == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:a])
+        b = text.find(THINK_CLOSE, a)
+        if b == -1:
+            break  # unterminated (stream cut mid-thought) — drop the tail
+        i = b + len(THINK_CLOSE)
+    return "".join(out).strip()
+
+
+# NO TRUNCATOR. `_real_output` used to cut every completion at the first
+# `[reply to ` — our own marker, so its presence proves the model started writing
+# replies it never received. The cut was right about that text and wrong about
+# everything after it: on 2026-08-02 opus-5 emitted a fabricated reply BETWEEN two
+# real calls, and the second (`update_agent assets readonly=true`) was silently
+# dropped — never dispatched, no error to the model, no record in the kernel. It
+# only surfaced because the model distrusted the ack and re-verified state itself.
+#
+# Measured against the transcript that motivated the truncator in the first place,
+# it also bought nothing: gpt-oss:120b marked its fabrications `[awaiting response]`
+# and `<awaiting reply>`, never `[reply to `, so all six of its calls — including
+# ones composed from an invented `kv_store` — dispatched with the truncator ON.
+# It caught the case it was built for zero times and cost a real call once.
+#
+# Fabrication is a real failure; silently deleting a model's work is a worse one,
+# because the model can debug the first and cannot even see the second.
+
+
+async def _route_reply(self_id, kernel, text, client_id, send_to, system_prompt):
+    """Honour where this pass's output goes. Runs DETACHED, after the lock is released."""
+    calls = extract_tool_calls(text or "")
+    # An envelope that OPENED and did not parse gets an error, exactly like a call
+    # missing its `target_id` does. Reported even when other calls in the same pass
+    # parsed fine — a partially-read turn dispatched half the model's intent, and
+    # which half was lost is not something it can infer from the replies it got.
+    # Goes to SELF: `reply_to` lives inside the body we could not read, and the
+    # documented default for an absent `reply_to` is self anyway.
+    for bad in malformed_calls(text or ""):
+        await _deliver(kernel, self_id, json.dumps(bad), client_id, system_prompt)
+    if calls:
+        for call in calls:
+            args = call.get("arguments") or {}
+            target = args.get("target_id") or args.get("target")
+            # `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
+            # own answer back, not that the answer is thrown away.
+            #
+            # The old default was fire-and-forget, and it made the one failure a
+            # model can never debug: gemma4:12b once left the key out of an
+            # otherwise perfect call, the reflect ran, its result was dropped, and
+            # the chain died at pass 1 with no reply, no error, and nothing to see.
+            # From inside the model that is indistinguishable from being finished.
+            #
+            # Stopping is still the default and still costs nothing — it is
+            # emitting NO call. A dropped key now costs a wasted turn instead of
+            # the whole task, and discarding a reply became something you must SAY
+            # (`reply_to: null` / "none"), which is the right way round.
+            if "reply_to" in args:
+                reply_to = args.get("reply_to")
+                reply_to = reply_to.strip() if isinstance(reply_to, str) else None
+                if reply_to and reply_to.lower() in ("none", "null", "nobody"):
+                    reply_to = None
+            else:
+                reply_to = self_id
+            if reply_to in ("self", self_id):
+                reply_to = self_id
+            if not isinstance(target, str) or not target.strip():
+                if reply_to:
+                    # NAME THE SHAPE, not just the fault. `tool_parse` translates a
+                    # verb-named tool into a send whenever the args say WHERE to send
+                    # it; what reaches here named a verb and no agent, and that is a
+                    # gap only the model can close — guessing a target would dispatch
+                    # a write to whichever agent we picked. Measured 2026-08-06:
+                    # gemma-4-12B emitted `{"name":"reflect","arguments":
+                    # {"detail":"full"}}` and the bare fault told it nothing about
+                    # how to retry, so it kept re-deriving the envelope from the
+                    # system prompt instead. Every other error on this path states
+                    # the fix; this one used not to.
+                    await _deliver(
+                        kernel,
+                        reply_to,
+                        json.dumps(
+                            {
+                                "error": (
+                                    "no target_id, so nothing was dispatched — a "
+                                    "send must name the AGENT it goes to. Shape: "
+                                    '{"name":"send","arguments":{"target_id":'
+                                    '"<agent>","payload":{"type":"<verb>"}}}. '
+                                    "Send `{type:'reflect'}` to the kernel for the "
+                                    "list of agent ids."
+                                ),
+                                "you_sent": {
+                                    k: v for k, v in args.items() if k != "payload"
+                                },
+                            }
+                        ),
+                        client_id,
+                        system_prompt,
+                    )
+                continue
+            target = target.strip()
+            # NO PAYLOAD, NO SEND. Dispatching `None` reaches the handler as `None`
+            # and raises `'NoneType' object has no attribute 'get'` — a Python error
+            # about our internals, naming neither the verb the model omitted nor the
+            # agent it addressed. Measured three times in one run on 2026-08-06.
+            # `tool_parse` translates every compressed shape it can recognise; what
+            # arrives here with no payload really has no verb in it, and saying so is
+            # the useful answer. Same shape as the `target_id` check above.
+            payload = args.get("payload")
+            if not isinstance(payload, dict):
+                if reply_to:
+                    await _deliver(
+                        kernel,
+                        reply_to,
+                        json.dumps(
+                            {
+                                "error": (
+                                    f"send to {target!r} carried no payload, so "
+                                    "nothing was dispatched. A payload is an object "
+                                    "whose `type` names the verb, e.g. "
+                                    '{"type":"reflect"}.'
+                                ),
+                                "target": target,
+                                "you_sent": {
+                                    k: v for k, v in args.items() if k != "payload"
+                                },
+                            }
+                        ),
+                        client_id,
+                        system_prompt,
+                    )
+                continue
+            # A handler that RAISES must not take the chain down with it. This ran
+            # bare until 2026-08-02, when a `file_bridge` whose ingress rule could
+            # not be resolved raised out of its handler: the exception escaped here,
+            # asyncio logged "Task exception was never retrieved", and the model got
+            # no reply, no error, and no further turn — the run simply stopped
+            # mid-verification and looked finished. An exception is a result too;
+            # the model can act on `{"error": ...}` and can act on nothing at all.
+            try:
+                result = await kernel.send(target, payload)
+            except Exception as exc:  # noqa: BLE001 — deliberately total
+                result = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "raised": True,
+                    "target": target,
+                }
+            if not reply_to:
+                continue  # fire-and-forget: it acted, nobody awaits the answer
+            # The result — INCLUDING an error — goes back. A call that failed silently is
+            # the one thing a model can never debug.
+            await _deliver(
+                kernel,
+                reply_to,
+                # Target AND verb in the tag. With two calls in flight to the same
+                # agent, `[reply to kernel_state]` is unmatchable — measured
+                # 2026-08-07 (combined probe, opus): acks lag a turn behind, the
+                # model couldn't tell which of its two deletes an ack answered,
+                # re-issued both, then built a "duplicate delivery" theory around
+                # its own retries. The verb makes each ack self-describing.
+                f"[reply to {target} {payload.get('type', '?')}]\n"
+                f"{json.dumps(result, default=str)}",
+                client_id,
+                system_prompt,
+            )
+        return
+
+    if send_to is not None:
+        await _deliver(kernel, send_to, text, client_id, system_prompt)
+
+
 async def _assemble(
     self_id: str,
     user_text: str,
@@ -433,6 +700,7 @@ async def _assemble(
             [
                 _render_reflect(primer),
                 f"You are `{self_id}`. " + _render_reflect(me),
+                _SEND_TO_HOWTO,
                 _CONTEXT_HOWTO,
             ]
         )
@@ -523,7 +791,7 @@ def _make_summarizer(provider):
 
     async def _summarize(msgs: list[dict]) -> str:
         rendered = "\n".join(
-            f"{m.get('role', '?')}: {str(m.get('content', ''))}" for m in msgs
+            f"{m.get('role', '?')}: {m.get('content', '')!s}" for m in msgs
         )[:20000]
         prompt = [
             {
@@ -743,10 +1011,10 @@ async def _run(
         )
     last_text = "".join(content_parts)
 
-    # Status before the back-compat `done` event so subscribers can
-    # observe the final phase transition first.
+    # `status(phase='done')` IS the completion event. There is no second `done`
+    # event: two events for one transition is two truths, and a subscriber that
+    # watches the wrong one drifts silently.
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
-    await _to_caller(kernel, self_id, client_id, {"type": "done", "source": self_id})
 
     # APPEND this send's user + assistant turns to the durable `chat` yaml_state.
     # NOT `messages[1:]` — that's the projected/trimmed view; the store keeps the
@@ -754,7 +1022,9 @@ async def _run(
     if not stateless:
         new_turns = [
             {"role": "user", "content": user_text},
-            {"role": "assistant", "content": last_text},
+            # STRIPPED — the deliberation is not part of the conversation. The raw
+            # text (with thinking) already went to `_route_reply` for parsing.
+            {"role": "assistant", "content": without_thinking(last_text)},
         ]
         await _save_history(self_id, kernel, client_id, new_turns)
     return {"response": last_text, "final": last_text, "client_id": client_id}
@@ -779,15 +1049,16 @@ def _make_reflect(cfg: Backend):
                 n: (f.__doc__ or "").strip().splitlines()[0]
                 for n, f in cfg._verbs.items()
             },
-            "generating": id in _tasks and not _tasks[id].done(),
+            # A generation IS its kernel dispatch task — the backend holds no
+            # task handle of its own. `_current[id]` present ⇔ in flight.
+            "generating": id in _current,
+            "cancel": CANCEL_DOC,
             "emits": {
-                "queued": "{type:'queued', source, client_id, send_id} — emitted when send arrives but a previous generation holds the lock. The `status` event with phase='queued' carries the same signal plus structured fields.",
                 "token": "{type:'token', text:str, source, client_id} — streaming chunk. Routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (browser filters by client_id).",
-                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'interrupted'|'timeout'|'error' for done. detail.ahead for queued.",
-                "done": "{type:'done', source, client_id} — end of generation, interrupted, or timed out. Always preceded by status(phase='done', detail.reason).",
+                "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'tool_calling'|'done', detail:{send_id, started_at, queue_depth, ...phase_specific}} — single channel for phase transitions. detail.tool={call_id,target,verb,args,reply_preview?} for tool_calling (entry has no reply_preview, exit re-emits same call_id with it). detail.reason='ok'|'cancelled'|'timeout'|'error' for done. detail.ahead for queued.",
                 "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the context protocol's push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized} when the live view was compacted to fit the window. too_small: detail={context_window, system_tokens, hint} when even the system block + one turn won't fit (the model is NOT called — a failfast). Pull counterpart: the `context_status` verb.",
             },
-            "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`interrupt` skip the lock and stay snappy.",
+            "concurrency": "Per-backend FIFO lock around `send`: one generation at a time. Other callers wait (and receive a `queued` event so their UI can show it). `reflect`/`history`/`status` skip the lock and stay snappy.",
         }
         if cfg.reflect_extra is not None:
             extra = cfg.reflect_extra(id, kernel)
@@ -802,7 +1073,7 @@ def _make_reflect(cfg: Backend):
 
 def _make_send(cfg: Backend):
     async def _send(id, payload, kernel):
-        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits both a back-compat `queued` event AND a structured `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_bridge_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Returns {response, final, client_id}."""
+        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_bridge_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `reply_to` inside its <tool_call>s. Returns {response, final, client_id}."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
         # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
@@ -824,6 +1095,10 @@ def _make_send(cfg: Backend):
             }
         system_prompt = payload.get("system_prompt")
         messages_override = payload.get("messages")
+        # Where this pass's TEXT goes when the model issues no call of its own.
+        send_to = payload.get("send_to")
+        if not isinstance(send_to, str) or not send_to.strip():
+            send_to = None
         # History is auto-mounted (a `chat` yaml_state, persisted through the loader) —
         # no operator wiring needed; nothing to failfast on here.
         # Backends that require a provider up front (nvidia: api_key) failfast here.
@@ -852,51 +1127,43 @@ def _make_send(cfg: Backend):
         # the queue position minus 1.
         if lock.locked():
             ahead = max(0, len(_queue.get(id, [])) - 1)
-            await _to_caller(
-                kernel,
-                id,
-                client_id,
-                {"type": "queued", "source": id, "send_id": send_id},
-            )
             await _emit_status(
                 kernel, id, client_id, "queued", send_id=send_id, ahead=ahead
             )
 
         async with lock:
             # We've got the lock — pop ourselves from the queue and become
-            # the in-flight entry. _set_current establishes phase='thinking'
-            # and the started_at timestamp.
+            # the in-flight entry. _set_current establishes phase='thinking',
+            # the started_at timestamp, and the kernel task id we run as.
             _dequeue_send(id, send_id)
             _set_current(id, entry)
             await _emit_status(kernel, id, client_id, "thinking")
-            task = asyncio.create_task(
-                _run(
-                    id,
-                    text,
-                    kernel,
-                    client_id,
-                    cfg,
-                    system_prompt,
-                    messages_override,
-                )
-            )
-            _tasks[id] = task
             try:
-                return await asyncio.wait_for(
-                    asyncio.shield(task), timeout=cfg.send_timeout
-                )
-            except asyncio.TimeoutError:
-                task.cancel()
+                # The generation runs INLINE in this dispatch — the backend spawns
+                # no task of its own. It doesn't need to: a `send` IS a kernel task
+                # (one `ps` row), so the kernel's `cancel` aborts it, running our
+                # `on_cancel` hook first. That abort raises a CancelledError right
+                # here, which we do NOT catch: it unwinds the provider stream (the
+                # HTTP request dies with it) and releases the FIFO lock, and the
+                # substrate resolves the blocked caller's `send` to
+                # `{"cancelled": True}`. Closing the turn out for the CLIENT is the
+                # one thing the abort cannot do — that is `on_cancel`'s job.
+                async with asyncio.timeout(cfg.send_timeout):
+                    reply = await _run(
+                        id,
+                        text,
+                        kernel,
+                        client_id,
+                        cfg,
+                        system_prompt,
+                        messages_override,
+                    )
+            except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
-                await _to_caller(kernel, id, client_id, {"type": "done", "source": id})
                 return {
                     "error": f"send: timeout after {cfg.send_timeout}s",
                     "client_id": client_id,
                 }
-            except asyncio.CancelledError:
-                await _emit_status(kernel, id, client_id, "done", reason="interrupted")
-                await _to_caller(kernel, id, client_id, {"type": "done", "source": id})
-                return {"response": "", "interrupted": True, "client_id": client_id}
             except Exception as e:
                 # A backend may install a custom error mapper (nvidia: clean
                 # 429 / HTTP messages instead of re-raising).
@@ -906,18 +1173,35 @@ def _make_send(cfg: Backend):
                         await _emit_status(
                             kernel, id, client_id, "done", reason="error", error=mapped
                         )
-                        await _to_caller(
-                            kernel, id, client_id, {"type": "done", "source": id}
-                        )
                         return {"error": mapped, "client_id": client_id}
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
-                await _to_caller(kernel, id, client_id, {"type": "done", "source": id})
                 raise
             finally:
-                _tasks.pop(id, None)
+                # Idempotent: on the cancel path `on_cancel` already took the
+                # entry (BEFORE the abort), which is what let it close the turn
+                # out for the client while this coroutine was still alive.
                 _clear_current(id)
+
+        # OUTSIDE the lock — released by now, so a self-addressed follow-up can
+        # acquire it. Detached (`spawn_task`) so THIS dispatch returns to its caller
+        # immediately: awaiting a self-addressed send here would block on a lock we
+        # just held and deadlock until `send_timeout`. The task row makes the chain
+        # visible in `ps` and reachable by `cancel`.
+        if isinstance(reply, dict) and not reply.get("error"):
+            task = asyncio.create_task(
+                _route_reply(
+                    id,
+                    kernel,
+                    reply.get("response", ""),
+                    client_id,
+                    send_to,
+                    system_prompt,
+                )
+            )
+            kernel.ctx.spawn_task(id, "route_reply", task)
+        return reply
 
     return _send
 
@@ -934,13 +1218,49 @@ def _make_history(cfg: Backend):
     return _history
 
 
-async def _interrupt(id, payload, kernel):
-    """No args. Cancels any in-flight `send` (releases the per-backend lock immediately). Returns {interrupted:bool}."""
-    task = _tasks.get(id)
-    if task and not task.done():
-        task.cancel()
-        return {"interrupted": True}
-    return {"interrupted": False}
+# ─── the on_cancel bundle hook (shared by every backend) ────────
+
+# What every backend's `reflect` says INSTEAD of an `interrupt` verb — the
+# substrate's universal cancel, taught in one line so a caller (or an LLM
+# reading the reflect) needs no bundle-private knowledge to stop a turn.
+CANCEL_DOC = (
+    "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the "
+    "substrate's universal system verbs: send 'kernel' {type:'ps'} for the live task "
+    "table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' "
+    "{type:'cancel', task_id:'<agent>:<n>'}. The turn closes with status(phase='done', "
+    "reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the "
+    "blocked caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole "
+    "SUBTREE, so any work the turn spawned dies with it."
+)
+
+
+async def on_cancel(id, task_id, kernel):
+    """The `on_cancel` bundle hook, SHARED by every backend (each re-exports this
+    module-level name, so the substrate discovers it exactly like `on_delete`).
+
+    The kernel is killing `task_id` and will abort this generation's coroutine the
+    moment we return. That abort frees the provider's HTTP stream and the FIFO lock
+    on its own — what it CANNOT do is tell the client the turn ended. So that is
+    exactly what happens here, while the task is still alive: take the in-flight
+    entry (`status`/`reflect` would otherwise report a phantom generation forever)
+    and emit the final `status(done, reason='cancelled')` + `done` the client is
+    waiting on.
+
+    No-op when the cancelled task is some OTHER dispatch on this agent (a `history`,
+    a `reflect`) — matched on the task id the generation stamped on `_current`."""
+    entry = _take_current_for_cancel(id, task_id)
+    if entry is None:
+        return
+    client_id = entry.get("client_id", DEFAULT_CLIENT_ID)
+    await _emit_status(
+        kernel,
+        id,
+        client_id,
+        "done",
+        reason="cancelled",
+        send_id=entry.get("send_id"),
+        started_at=entry.get("started_at"),
+    )
 
 
 async def _status(id, payload, kernel):
@@ -961,12 +1281,26 @@ def _recall_render(m: dict) -> str:
 
 
 async def _recall(id, payload, kernel):
-    """args: client_id?:str (default 'cli'), query?:str (case-insensitive substring over the
-    serialized turn — matches tool args/replies too), limit?:int (default 20, max 100),
-    before?:int (store index — page backward). Pages turns back from the DURABLE chat store
-    (the FULL conversation, never trimmed — so anything compaction dropped is one call away).
-    Read-only. Returns {messages:[{index,role,content}], total, truncated, client_id}."""
-    client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
+    """args: client_id?:str (default: the conversation this call was issued FROM, else
+    'cli'), query?:str (case-insensitive substring over the serialized turn — matches tool
+    args/replies too), limit?:int (default 20, max 100), before?:int (store index — page
+    backward). Pages turns back from the DURABLE chat store (the FULL conversation, never
+    trimmed — so anything compaction dropped is one call away). Read-only. Returns
+    {messages:[{index,role,content}], total, truncated, client_id, note?} — `note` states
+    WHY an empty page is empty (nothing compacted / query matched nothing)."""
+    explicit = payload.get("client_id")
+    # No explicit client: the model calls recall MID-GENERATION, and that generation
+    # knows which conversation it is (`_current[id].client_id`). Resolving from it is
+    # reading a fact about the in-flight turn, not a default. Measured 2026-08-07
+    # (combined probe, opus): the builder ran under client 'probe', called bare
+    # `recall`, the old code defaulted to 'cli', got the empty thread of a client that
+    # never spoke, and concluded its own history was gone — then stopped working and
+    # asked a question into a walked-away conversation. DEFAULT_CLIENT_ID remains only
+    # for external callers with no generation in flight (the headless/REPL contract,
+    # same as `history`).
+    client_id = _safe_client(
+        explicit or _current.get(id, {}).get("client_id") or DEFAULT_CLIENT_ID
+    )
     full = await _load_history(id, kernel, client_id)
     q = str(payload.get("query") or "").lower().strip()
     try:
@@ -984,7 +1318,7 @@ async def _recall(id, payload, kernel):
         ]
     truncated = len(indexed) > limit
     page = indexed[-limit:]
-    return {
+    reply = {
         "messages": [
             {"index": i, "role": m.get("role"), "content": _recall_render(m)}
             for i, m in page
@@ -993,6 +1327,27 @@ async def _recall(id, payload, kernel):
         "truncated": truncated,
         "client_id": client_id,
     }
+    if not page:
+        # An empty page with no reason reads as "your history is lost" — the opposite of
+        # what it usually means. Say why, so the caller can tell the cases apart.
+        proj = _projection.get(id)
+        if q and full:
+            reply["note"] = (
+                f"query {q!r} matched none of the {len(full)} stored turns "
+                f"for client {client_id!r}."
+            )
+        elif not (proj or {}).get("fired"):
+            reply["note"] = (
+                "nothing has been compacted away — recall pages back turns that "
+                "compaction DROPPED, and none have been. If you can see this reply, "
+                "your live context already holds the whole conversation."
+            )
+        else:
+            reply["note"] = (
+                f"no stored turns for client {client_id!r} in this page; the durable "
+                "thread is keyed per client_id — name one to read another thread."
+            )
+    return reply
 
 
 async def _derive_reaction(id, kernel) -> dict | None:
@@ -1045,7 +1400,7 @@ async def _context_status(id, payload, kernel):
 
 async def _boot(id, payload, kernel):
     """No-op. Returns None."""
-    return None
+    return
 
 
 # ─── the closure factory ────────────────────────────────────────
@@ -1071,8 +1426,14 @@ def build(
     The verb closures capture the returned `Backend`, so the per-backend
     config (sentence, provider builder, stream wrapper, error prefix) is
     isolated; the module-global STATE (`_providers`, `_queue`, `_current`,
-    `_tasks`, `_locks`) is shared and keyed by agent id, so multiple backends
+    `_locks`) is shared and keyed by agent id, so multiple backends
     coexist in one kernel.
+
+    There is no `interrupt` verb: an in-flight `send` is a KERNEL task, killed
+    with the universal `ps` → `cancel` system verbs. The turn-closing half is
+    the module-level `on_cancel` hook above — each backend re-exports it from
+    its `tools` module so the substrate discovers it, exactly as `reflect_extra`
+    / `make_provider` compose the rest of the shared machinery.
 
     Args:
       sentence: the agent's one-line self-description (reflect `sentence`).
@@ -1113,15 +1474,19 @@ def build(
     # public Backend surface.
     cfg._error_mapper = error_mapper  # type: ignore[attr-defined]
 
+    from ai_core.author import author as _author_verb
+
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
         "history": _make_history(cfg),
-        "interrupt": _interrupt,
         **(extra_verbs or {}),
         "status": _status,
         "context_status": _context_status,
         "recall": _recall,
+        # The SELF-CORRECT loop: the agent authors a durable tool and refuses
+        # its own `final` until the tool is OBSERVED answering (see author.py).
+        "author": _author_verb,
         "boot": _boot,
     }
     cfg._verbs = verbs  # type: ignore[attr-defined]  # reflect lists these

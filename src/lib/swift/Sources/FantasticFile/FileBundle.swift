@@ -34,6 +34,23 @@ public struct FileBundle: AgentBundle {
             + " INSIDE the running dir — the running-dir law); verbs are path-safe."
     }
 
+    /// Refuse an `ingress_rule` no resolver implements. An unknown rule now SEALS
+    /// rather than throwing, so the edge is safe either way — but reporting
+    /// `{"updated": true}` for a security control that does not exist is its own
+    /// failure, and the complaint belongs at the write, next to the typo.
+    /// Mirrors py `file_bridge.validate_meta` / rust `FileBundle::validate_meta`.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        guard let spec = meta["ingress_rule"] else { return nil }
+        guard let rule = try? IngressRules.resolve(spec) else { return nil }
+        guard let deny = rule as? IngressRules.DenyInbound, let bad = deny.unknown else {
+            return nil
+        }
+        return "ingress_rule=\"\(bad)\" is not a rule this bundle implements — "
+            + "legal values: allow_all, deny_inbound, password"
+    }
+
     public func handle(
         agentId: AgentId,
         payload: JSON,
@@ -73,7 +90,7 @@ public struct FileBundle: AgentBundle {
             case "list":
                 return listFiles(root: root, payload: payload)
             case "read":
-                return readFile(root: root, payload: payload)
+                return readFile(root: root, agent: agent, payload: payload)
             case "write":
                 return writeFile(root: root, agent: agent, payload: payload)
             case "delete":
@@ -205,7 +222,46 @@ public struct FileBundle: AgentBundle {
         ])
     }
 
-    private func readFile(root: URL, payload: JSON) -> JSON {
+    /// Default text-read window (chars). Py parity: `DEFAULT_MAX_READ_CHARS`.
+    private static let defaultMaxReadChars = 16384
+
+    /// `(slice, reply-extras)` — `offset`/`limit` page a large file explicitly.
+    /// Py parity: `_window_text` (field-for-field, hint included). Measured
+    /// 2026-08-07 on py: an unbounded 86 KB read drove an LLM's context to 21k
+    /// tokens and the next turn was cancelled mid-prefill.
+    private func windowText(agent: Agent, payload: JSON, text: String) -> (
+        String, [(String, JSON)]
+    ) {
+        let chars = Array(text)
+        let total = chars.count
+        let capMeta = agent.metaValue(forKey: "max_read_chars")?.asInt.map(Int.init)
+        let cap = (capMeta ?? 0) > 0 ? capMeta! : Self.defaultMaxReadChars
+        let offset = max(0, payload["offset"].asInt.map(Int.init) ?? 0)
+        let limit = min(max(1, payload["limit"].asInt.map(Int.init) ?? cap), cap)
+        let end = min(offset + limit, total)
+        let chunk = String(chars[min(offset, total)..<end])
+        if offset == 0 && end >= total { return (chunk, []) }
+        var extras: [(String, JSON)] = [
+            ("total_chars", .integer(Int64(total))),
+            ("offset", .integer(Int64(offset))),
+            ("returned_chars", .integer(Int64(chunk.count))),
+            ("truncated", .bool(end < total)),
+        ]
+        if end < total {
+            extras.append(("next_offset", .integer(Int64(end))))
+            extras.append(
+                (
+                    "hint",
+                    .string(
+                        "\(total - end) of \(total) chars unread — continue with "
+                            + "{type:'read', path:…, offset:\(end)} (max \(cap) per call, "
+                            + "raise the leg's `max_read_chars` to widen it)")
+                ))
+        }
+        return (chunk, extras)
+    }
+
+    private func readFile(root: URL, agent: Agent, payload: JSON) -> JSON {
         guard let relative = payload["path"].asString else {
             return .object(["error": .string("read requires path")])
         }
@@ -232,10 +288,13 @@ public struct FileBundle: AgentBundle {
                 "path": .string(relative),
             ])
         }
-        return .object([
+        let (chunk, extras) = windowText(agent: agent, payload: payload, text: content)
+        var reply: OrderedDictionary<String, JSON> = [
             "path": .string(relative),
-            "content": .string(content),
-        ])
+            "content": .string(chunk),
+        ]
+        for (k, v) in extras { reply[k] = v }
+        return .object(reply)
     }
 
     private func writeFile(root: URL, agent: Agent, payload: JSON) -> JSON {

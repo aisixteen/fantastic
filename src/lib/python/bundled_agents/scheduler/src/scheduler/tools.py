@@ -20,7 +20,8 @@ Verbs:
   history      args: limit?, schedule_id?              -> {history: [...]}
 
 A schedule fires by `kernel.send(target, payload)`. After firing, scheduler
-emits `{type:"schedule_fired", ...}` to its OWN inbox AND the target's inbox.
+emits `{type:"schedule_fired", ...}` to its OWN inbox only — the target gets
+the PAYLOAD, which is the tick; echoing telemetry at it doubled every delivery.
 """
 
 from __future__ import annotations
@@ -183,9 +184,16 @@ async def _fire(sid: str, sch: dict, kernel) -> None:
         logger.warning(
             "scheduler %s: history persist failed: %s", sid, err.get("error")
         )
+    # ONE delivery per tick. This used to also emit `schedule_fired` onto the
+    # TARGET's inbox, so a live program (exec_bridge mail → on_message) received
+    # every tick TWICE — the payload send and then this telemetry echo of the same
+    # tick, result included. Measured 2026-08-07 (combined probe, opus): the model
+    # discovered it live, named it "the double-fire hazard", and had to design its
+    # tool around filtering the duplicate. Telemetry about a fire is the
+    # SCHEDULER's story: its own inbox carries the event for watchers and
+    # `history` already persists it; the target got the actual payload, which IS
+    # the tick.
     await kernel.emit(sid, event)
-    if target and target != sid:
-        await kernel.emit(target, event)
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -204,7 +212,7 @@ async def _reflect(id, payload, kernel):
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },
         "emits": {
-            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — broadcast to scheduler's own inbox AND target's inbox after every fire",
+            "schedule_fired": "{type:'schedule_fired', schedule_id, scheduler_id, target, payload, result, error, ts, duration_ms} — emitted on the scheduler's OWN inbox after every fire (never the target's — the payload send is the tick)",
         },
     }
 
