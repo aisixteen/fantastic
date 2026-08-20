@@ -135,7 +135,7 @@ extension Kernel {
 
         // Compose meta from extra payload fields.
         var meta: OrderedDictionary<String, JSON> = [:]
-        if case let .object(dict) = payload {
+        if case .object(let dict) = payload {
             for (k, v) in dict {
                 if k == "type" || k == "id" || k == "handler_module" || k == "parent_id" {
                     continue
@@ -144,16 +144,10 @@ extension Kernel {
             }
         }
 
-        // Stamp the Unix baseline grant, MERGED under any explicit `can_call`:
-        // every created agent may command its own subtree ($self/$children) and
-        // answer its creator ($parent). A BASELINE, not a lateral grant — explicit
-        // keys in the payload add edges on top; deny-all governs every edge NOT here.
-        var grant: OrderedDictionary<String, JSON> = [:]
-        if case .object(let base) = defaultCanCall() { grant = base }
-        if case .object(let explicit) = meta["can_call"] ?? .null {
-            for (k, v) in explicit { grant[k] = v }
-        }
-        meta["can_call"] = .object(grant)
+        // The structural authority baseline ({$self,$parent,$children} on both
+        // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent.init`
+        // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
+        // payload rides in `meta` and merges over the baseline at construction.
 
         // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
         // used to bypass it, so a record could be born with meta its own bundle
@@ -305,7 +299,7 @@ extension Kernel {
         // Patch = every field except type + id.
         var patch: OrderedDictionary<String, JSON> = [:]
         var changed: [String] = []
-        if case let .object(dict) = payload {
+        if case .object(let dict) = payload {
             for (k, v) in dict where k != "type" && k != "id" {
                 patch[k] = v
                 changed.append(k)

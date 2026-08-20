@@ -35,11 +35,21 @@ struct YamlStateTests {
             [
                 "type": "create_agent", "handler_module": "yaml_state.tools",
                 "mode": .string(mode), "file_bridge_id": "store",
-                // Deny-all: yaml_state persists read/write/delete to its store
-                // directly → an explicit grant (wiring pairs with granting).
+                // Two-sided deny-all: yaml_state persists read/write/delete to its
+                // store directly → an explicit egress grant (wiring pairs with granting).
                 "can_call": ["store": "*"],
             ])
-        return AgentId(rec["id"].asString ?? "")
+        let id = rec["id"].asString ?? ""
+        // Ingress half: open the store's `callable_by` for this memory agent (merged
+        // with the store's structural baseline).
+        var accept: JSON = kernel.agent("store")?.metaValue(forKey: "callable_by") ?? .object([:])
+        if case .object(var map) = accept {
+            map[id] = .string("*")
+            accept = .object(map)
+        }
+        _ = await kernel.send(
+            "core", ["type": "update_agent", "id": "store", "callable_by": accept])
+        return AgentId(id)
     }
 
     @Test func setGetRoundtrip() async throws {

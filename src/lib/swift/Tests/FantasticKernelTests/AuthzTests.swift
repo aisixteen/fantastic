@@ -7,17 +7,25 @@ import Testing
 
 @testable import FantasticKernel
 
-// sender "worker", parent "boss", one child "kid", loader "root"
-private func auth(_ canCall: JSON, _ verb: String, _ target: String) -> Decision {
+// holder "worker", parent "boss", one child "kid", loader "root". Egress posture.
+private func auth(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
     authorizeCall(
-        canCall: canCall, verb: verb, targetId: target,
-        senderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "root")
+        grant: grant, verb: verb, otherId: other,
+        holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "root")
+}
+
+// Ingress posture — privileged-no-wildcard is NOT enforced.
+private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Decision {
+    authorizeCall(
+        grant: grant, verb: verb, otherId: other,
+        holderId: "worker", parentId: "boss", childIds: ["kid"], loaderId: "root",
+        enforcePrivileged: false)
 }
 
 @Test func absentGrantDeniesEverything() {
     let d = auth(.null, "send", "peer")
     #expect(!d.allowed)
-    #expect(!d.reason.isEmpty && !d.hint.isEmpty)
+    #expect(!d.hint.isEmpty)  // a denial always teaches (from above)
 }
 
 @Test func emptyGrantDenies() {
@@ -48,12 +56,21 @@ private func auth(_ canCall: JSON, _ verb: String, _ target: String) -> Decision
     #expect(!auth(g, "load", "boss").allowed)
 }
 
-@Test func unixDefaultReachesSelfParentAndChildren() {
-    let g = defaultCanCall()
-    #expect(auth(g, "send", "worker").allowed)  // $self
-    #expect(auth(g, "send", "boss").allowed)  // $parent
-    #expect(auth(g, "send", "kid").allowed)  // $children
-    #expect(!auth(g, "send", "stranger").allowed)
+@Test func baselineReachesSelfParentAndChildren() {
+    for g in [defaultCanCall(), defaultCallableBy()] {
+        #expect(auth(g, "send", "worker").allowed)  // $self
+        #expect(auth(g, "send", "boss").allowed)  // $parent
+        #expect(auth(g, "send", "kid").allowed)  // $children
+        #expect(!auth(g, "send", "stranger").allowed)
+    }
+}
+
+@Test func ingressWildcardAcceptsPrivilegedVerbs() {
+    // enforcePrivileged: false (ingress) — a callee's $children:* legitimately
+    // accepts a privileged verb; escalation is blocked at egress.
+    let g: JSON = .object(["$children": .string("*")])
+    #expect(!auth(g, "create_agent", "kid").allowed)  // egress default
+    #expect(authIngress(g, "create_agent", "kid").allowed)  // ingress
 }
 
 @Test func literalTargetWildcardVerb() {

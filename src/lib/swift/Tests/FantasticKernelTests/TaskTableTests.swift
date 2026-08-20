@@ -140,14 +140,18 @@ private func makeSlowKernel(_ sh: Shared) -> Kernel {
     return kernel
 }
 
-private func makeAgent(_ kernel: Kernel, _ id: String, canCall: JSON = .null) async -> AgentId {
+private func makeAgent(
+    _ kernel: Kernel, _ id: String, canCall: JSON = .null, callableBy: JSON = .null
+) async -> AgentId {
     var payload: OrderedDictionary<String, JSON> = [
         "type": .string("create_agent"),
         "handler_module": .string("slow.tools"),
         "id": .string(id),
     ]
-    // Deny-all: a `chain` send to a SIBLING is lateral egress → an explicit grant.
+    // Two-sided deny-all: a `chain` send to a SIBLING needs BOTH the caller's
+    // `can_call` (egress) and the callee's `callable_by` (ingress).
     if case .object = canCall { payload["can_call"] = canCall }
+    if case .object = callableBy { payload["callable_by"] = callableBy }
     let r = await kernel.send(AgentId("core"), .object(payload))
     #expect(r["id"].asString == id, "create_agent failed: \(r.serialize())")
     return AgentId(id)
@@ -233,7 +237,7 @@ struct TaskTablePsTests {
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
-        let b = await makeAgent(kernel, "slow_b")
+        let b = await makeAgent(kernel, "slow_b", callableBy: ["slow_a": "*"])
 
         let caller = spawnCaller(
             kernel, a, .object(["type": .string("chain"), "next": .string("slow_b")]))
@@ -279,7 +283,7 @@ struct TaskTableCancelTests {
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
-        let b = await makeAgent(kernel, "slow_b")
+        let b = await makeAgent(kernel, "slow_b", callableBy: ["slow_a": "*"])
 
         let caller = spawnCaller(
             kernel, a, .object(["type": .string("chain"), "next": .string("slow_b")]))
@@ -405,7 +409,7 @@ struct TaskTableCancelTests {
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
-        let b = await makeAgent(kernel, "slow_b")
+        let b = await makeAgent(kernel, "slow_b", callableBy: ["slow_a": "*"])
 
         let caller = spawnCaller(
             kernel, a, .object(["type": .string("chain_fork"), "next": .string("slow_b")]))

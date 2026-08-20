@@ -187,11 +187,43 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             ])
             if let storeId {
                 rec["file_bridge_id"] = .string(storeId)
-                // Deny-all: the mounted memory persists read/write/delete to the
-                // store directly, so wiring `file_bridge_id` also grants that edge.
+                // Two-sided deny-all: the mounted memory persists read/write/delete
+                // to the store directly, so wiring `file_bridge_id` also grants that
+                // egress edge on the child.
                 rec["can_call"] = .object([storeId: .string("*")])
             }
-            _ = await kernel.send(agentId, rec)
+            // Boot-time self-provisioning runs FROM ABOVE (operator): the backend
+            // creates its OWN memory subtree, confers the store egress its children
+            // need (a subset it discovered, not one it holds itself), AND opens the
+            // store's reciprocal `callable_by` for each child — exactly the authority
+            // an operator has, which a lateral agent send does not.
+            let reply = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await kernel.send(agentId, rec)
+            }
+            if let storeId, let childId = reply["id"].asString {
+                await openStoreIngress(store: storeId, caller: childId, kernel: kernel)
+            }
+        }
+    }
+
+    /// Open the store's `callable_by` for a mounted memory child (ingress half of
+    /// the two-sided gate), merged with the store's existing grant. Runs as operator
+    /// — the boot-time provisioning authority.
+    private func openStoreIngress(store: String, caller: String, kernel: Kernel) async {
+        var accept: JSON =
+            kernel.agent(AgentId(store))?.metaValue(forKey: "callable_by") ?? .object([:])
+        if case .object(var map) = accept {
+            map[caller] = .string("*")
+            accept = .object(map)
+        }
+        _ = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send(
+                AgentId("core"),
+                .object([
+                    "type": .string("update_agent"),
+                    "id": .string(store),
+                    "callable_by": accept,
+                ]))
         }
     }
 

@@ -394,6 +394,13 @@ func bootMockKernel(
     let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
     kernel.register(root)
     kernel.setRoot(root)
+    // Two-sided deny-all: each callee must ACCEPT the backends that reach it. The
+    // backends persist to `store`, route replies to probe/raiser/slowpoke, and call
+    // each other — so every target's `callable_by` accepts all backend ids (ingress),
+    // the mirror of the backends' `can_call` (egress).
+    var accept: OrderedCollections.OrderedDictionary<String, JSON> = [:]
+    for id in backendIds { accept[id] = .string("*") }
+    let acceptJSON = JSON.object(accept)
     // A file_bridge store so chat history persists through file_bridge_id.
     _ = await kernel.send(
         AgentId("core"),
@@ -401,6 +408,7 @@ func bootMockKernel(
             "type": .string("create_agent"),
             "handler_module": .string("mock_file_bridge.tools"),
             "id": .string("store"),
+            "callable_by": acceptJSON,
         ]))
     _ = await kernel.send(
         AgentId("core"),
@@ -408,6 +416,7 @@ func bootMockKernel(
             "type": .string("create_agent"),
             "handler_module": .string("mock_recorder.tools"),
             "id": .string("probe"),
+            "callable_by": acceptJSON,
         ]))
     _ = await kernel.send(
         AgentId("core"),
@@ -415,6 +424,7 @@ func bootMockKernel(
             "type": .string("create_agent"),
             "handler_module": .string("mock_raiser.tools"),
             "id": .string("raiser"),
+            "callable_by": acceptJSON,
         ]))
     _ = await kernel.send(
         AgentId("core"),
@@ -422,6 +432,7 @@ func bootMockKernel(
             "type": .string("create_agent"),
             "handler_module": .string("mock_slow.tools"),
             "id": .string("slowpoke"),
+            "callable_by": acceptJSON,
         ]))
     // Deny-all: a backend persists to its `store`, streams to `cli`, and routes
     // replies to its peers (probe/raiser/slowpoke + the other backends). Grant
@@ -442,6 +453,8 @@ func bootMockKernel(
                 "file_bridge_id": .string("store"),
                 "context_window": .integer(contextWindow),
                 "can_call": .object(grant),
+                // Peer backends call each other — accept them (ingress).
+                "callable_by": acceptJSON,
             ]))
         out[id] = AgentId(r["id"].asString ?? id)
     }
