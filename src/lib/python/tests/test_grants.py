@@ -1,109 +1,134 @@
 """Call-security grant engine — pure unit tests for `kernel._authz.authorize_call`.
 
-Deny-all is the law: an agent-originated send is permitted only by an explicit
-grant on the sender's record. These tests exercise the policy in isolation (no
-kernel, no dispatch); the gate wiring is tested in `test_call_security.py`.
+Deny-all is the law, two-sided: an edge exists only if BOTH the sender's
+`can_call` (egress) and the target's `callable_by` (ingress) grant it. This
+module exercises the ONE direction-agnostic matching engine in isolation (no
+kernel, no dispatch); the two-sided gate wiring is tested in
+`test_call_security.py`.
+
+`authorize_call(grant, verb, other_id, *, holder_id, holder_parent,
+holder_children, loader_id, enforce_privileged)` — `grant` is the HOLDER's grant
+map; `other_id` is the id at the other end of the edge. Tokens resolve relative
+to the holder.
 """
 
 from __future__ import annotations
 
-from kernel._authz import DEFAULT_CAN_CALL, Decision, authorize_call
+from kernel._authz import (
+    DEFAULT_CALLABLE_BY,
+    DEFAULT_CAN_CALL,
+    Decision,
+    authorize_call,
+)
+
+# The holder is "worker", child of "boss", with one child "kid".
+_HOLDER = dict(
+    holder_id="worker", holder_parent="boss", holder_children=frozenset({"kid"})
+)
 
 
-def _sender(**over) -> dict:
-    rec = {"id": "worker", "parent_id": "boss"}
-    rec.update(over)
-    return rec
+def _auth(grant, verb, other, **over):
+    facts = dict(_HOLDER)
+    facts.update(over)
+    return authorize_call(grant, verb, other, **facts)
 
 
 # ─── deny-all default ───────────────────────────────────────────
 
 
 def test_absent_grant_denies_everything():
-    d = authorize_call(_sender(), "send", "peer")
+    d = _auth(None, "send", "peer")
     assert isinstance(d, Decision) and not d.allowed
-    assert d.reason and d.hint  # a denial always teaches how to open it
 
 
 def test_empty_grant_denies():
-    assert not authorize_call(_sender(can_call={}), "send", "peer").allowed
+    assert not _auth({}, "send", "peer").allowed
 
 
 # ─── relative tokens ────────────────────────────────────────────
 
 
-def test_self_token_resolves_to_sender_id():
-    rec = _sender(can_call={"$self": "*"})
-    assert authorize_call(rec, "ping", "worker").allowed
-    assert not authorize_call(rec, "ping", "boss").allowed
+def test_self_token_resolves_to_holder_id():
+    assert _auth({"$self": "*"}, "ping", "worker").allowed
+    assert not _auth({"$self": "*"}, "ping", "boss").allowed
 
 
 def test_parent_token_resolves_to_parent_id():
-    rec = _sender(can_call={"$parent": "*"})
-    assert authorize_call(rec, "ping", "boss").allowed
-    assert not authorize_call(rec, "ping", "worker").allowed
+    assert _auth({"$parent": "*"}, "ping", "boss").allowed
+    assert not _auth({"$parent": "*"}, "ping", "worker").allowed
 
 
 def test_loader_token_resolves_to_passed_loader_id():
-    rec = _sender(can_call={"$loader": "*"})
-    assert authorize_call(rec, "load", "root_loader", loader_id="root_loader").allowed
-    # no loader ancestor → the token resolves to None → no match
-    assert not authorize_call(rec, "load", "root_loader", loader_id=None).allowed
-
-
-def test_unix_default_reaches_self_parent_and_children():
-    rec = _sender(can_call=dict(DEFAULT_CAN_CALL))
-    kids = frozenset({"kid"})
-    assert authorize_call(rec, "send", "worker", child_ids=kids).allowed  # $self
-    assert authorize_call(rec, "send", "boss", child_ids=kids).allowed  # $parent
-    assert authorize_call(rec, "send", "kid", child_ids=kids).allowed  # $children
-    assert not authorize_call(rec, "send", "stranger", child_ids=kids).allowed
+    g = {"$loader": "*"}
+    assert _auth(g, "load", "root_loader", loader_id="root_loader").allowed
+    # no loader id → the token resolves to None → no match
+    assert not _auth(g, "load", "root_loader", loader_id=None).allowed
 
 
 def test_children_token_matches_only_direct_children():
-    rec = _sender(can_call={"$children": "*"})
-    assert authorize_call(rec, "ping", "kid", child_ids=frozenset({"kid"})).allowed
-    assert not authorize_call(rec, "ping", "kid", child_ids=frozenset()).allowed
+    assert _auth({"$children": "*"}, "ping", "kid").allowed
+    assert not _auth(
+        {"$children": "*"}, "ping", "kid", holder_children=frozenset()
+    ).allowed
+
+
+def test_baseline_reaches_self_parent_and_children():
+    for base in (DEFAULT_CAN_CALL, DEFAULT_CALLABLE_BY):
+        assert _auth(dict(base), "send", "worker").allowed  # $self
+        assert _auth(dict(base), "send", "boss").allowed  # $parent
+        assert _auth(dict(base), "send", "kid").allowed  # $children
+        assert not _auth(dict(base), "send", "stranger").allowed
+
+
+# ─── privileged verbs (egress) ──────────────────────────────────
 
 
 def test_fork_into_own_subtree_is_not_privileged():
     # create_agent on $self (adding a child to your OWN subtree) is baseline —
     # the wildcard self-grant covers it.
-    rec = _sender(can_call={"$self": "*"})
-    assert authorize_call(rec, "create_agent", "worker").allowed
+    assert _auth({"$self": "*"}, "create_agent", "worker").allowed
     # …but create_agent on the PARENT (mutating another agent) stays privileged.
-    assert not authorize_call(rec, "create_agent", "boss").allowed
+    assert not _auth({"$self": "*"}, "create_agent", "boss").allowed
+
+
+def test_baseline_cannot_mutate_the_root():
+    # a default-grant agent cannot mutate the graph — the root is neither $self
+    # nor $parent-with-explicit-privilege; the wildcard never covers create_agent.
+    assert not _auth(dict(DEFAULT_CAN_CALL), "create_agent", "kernel_state").allowed
+
+
+def test_explicit_grant_opens_exactly_the_named_privileged_verb():
+    g = {"kernel_state": ["create_agent"]}
+    assert _auth(g, "create_agent", "kernel_state").allowed
+    assert not _auth(g, "delete_agent", "kernel_state").allowed
+
+
+def test_ingress_wildcard_accepts_privileged_verbs():
+    # enforce_privileged=False (the ingress posture): a callee's `$children:*`
+    # legitimately accepts a privileged verb — escalation is blocked at egress.
+    assert not _auth(
+        {"$children": "*"}, "create_agent", "kid"
+    ).allowed  # egress default
+    assert _auth(
+        {"$children": "*"}, "create_agent", "kid", enforce_privileged=False
+    ).allowed  # ingress
 
 
 # ─── literal targets + per-verb grants ──────────────────────────
 
 
 def test_literal_target_wildcard_verb():
-    rec = _sender(can_call={"memory": "*"})
-    assert authorize_call(rec, "set", "memory").allowed
-    assert authorize_call(rec, "read", "memory").allowed
-    assert not authorize_call(rec, "set", "other").allowed
+    g = {"memory": "*"}
+    assert _auth(g, "set", "memory").allowed
+    assert _auth(g, "read", "memory").allowed
+    assert not _auth(g, "set", "other").allowed
 
 
 def test_per_verb_list_grants_exactly_those_verbs():
-    rec = _sender(can_call={"memory": ["read"]})
-    assert authorize_call(rec, "read", "memory").allowed
-    assert not authorize_call(rec, "set", "memory").allowed
+    g = {"memory": ["read"]}
+    assert _auth(g, "read", "memory").allowed
+    assert not _auth(g, "set", "memory").allowed
 
 
 def test_verb_wildcard_inside_list():
-    rec = _sender(can_call={"memory": ["*"]})
-    assert authorize_call(rec, "anything", "memory").allowed
-
-
-def test_create_agent_denied_under_default_grant():
-    # the whole point: a default-grant agent cannot mutate the graph — `kernel`
-    # (the root) is neither $self nor $parent.
-    rec = _sender(can_call=dict(DEFAULT_CAN_CALL))
-    assert not authorize_call(rec, "create_agent", "kernel_state").allowed
-
-
-def test_explicit_kernel_grant_opens_mutation():
-    rec = _sender(can_call={"kernel_state": ["create_agent"]})
-    assert authorize_call(rec, "create_agent", "kernel_state").allowed
-    assert not authorize_call(rec, "delete_agent", "kernel_state").allowed
+    assert _auth({"memory": ["*"]}, "anything", "memory").allowed

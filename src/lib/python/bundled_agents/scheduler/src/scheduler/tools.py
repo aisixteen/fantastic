@@ -32,6 +32,8 @@ import logging
 import secrets
 import time
 
+from kernel import operator_context
+
 logger = logging.getLogger(__name__)
 
 HISTORY_MAX = 500
@@ -51,19 +53,25 @@ _HISTORY_NAME = "history.jsonl"
 
 async def _file_read(sid: str, kernel, name: str) -> str | None:
     """Read a sidecar THROUGH the loader. Missing / no-store ⇒ None (reads lenient)."""
-    r = await kernel.send(
-        "kernel_state", {"type": "load_blob", "agent_id": sid, "name": name}
-    )
+    # Persist from ABOVE — sidecar I/O through the loader is operator bookkeeping
+    # (a side effect of the scheduler's own authorized verb), not a lateral call.
+    with operator_context():
+        r = await kernel.send(
+            "kernel_state", {"type": "load_blob", "agent_id": sid, "name": name}
+        )
     return r.get("content") if isinstance(r, dict) else None
 
 
 async def _file_write(sid: str, kernel, name: str, content: str) -> dict | None:
     """Write a sidecar THROUGH the loader. Returns an error dict on a denied/no-store
     write (no silent loss), or None on success."""
-    w = await kernel.send(
-        "kernel_state",
-        {"type": "persist_blob", "agent_id": sid, "name": name, "content": content},
-    )
+    with (
+        operator_context()
+    ):  # persist from above — operator bookkeeping (see _file_read)
+        w = await kernel.send(
+            "kernel_state",
+            {"type": "persist_blob", "agent_id": sid, "name": name, "content": content},
+        )
     if isinstance(w, dict) and w.get("error"):
         out = {"error": w["error"]}
         if w.get("reason"):

@@ -47,7 +47,12 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Callable
 
-from kernel._authz import DEFAULT_CAN_CALL, authorize_call
+from kernel._authz import (
+    DEFAULT_CALLABLE_BY,
+    DEFAULT_CAN_CALL,
+    _FROM_ABOVE,
+    authorize_call,
+)
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
     Kernel,
@@ -179,6 +184,21 @@ class Agent:
         self._watcher_ids: set[str] = set()
         self._in_flight: int = 0
         self._meta: dict[str, Any] = dict(meta)
+        # Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
+        # agent that passes through here — the seeded root, a created child, a
+        # disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
+        # (who I may call) and `callable_by` (who may call me) both start as
+        # {$self:*, $parent:*, $children:*} — reach/accept your own subtree and your
+        # creator. It MERGES UNDER any explicit grant already in `meta` (so an
+        # explicit key overrides a baseline key; the merge is idempotent on reload).
+        # Deny-all governs every edge NOT in the merged grant.
+        for _field, _base in (
+            ("can_call", DEFAULT_CAN_CALL),
+            ("callable_by", DEFAULT_CALLABLE_BY),
+        ):
+            _merged = dict(_base)
+            _merged.update(self._meta.get(_field) or {})
+            self._meta[_field] = _merged
         self.ctx = ctx
         self.ctx.register(self)
         # Inbox lives on ctx — same dict that synthetic browser clients
@@ -380,54 +400,144 @@ class Agent:
         """
         if target_id == "kernel":
             target = self._root()
-            # `kernel` is an alias for the tree root. reflect is a pure
-            # read — answer it from the root's identity without a full
-            # dispatch (no telemetry fanout); flags applied below.
-            if payload.get("type") == "reflect":
-                return await self._apply_reflect_flags(
-                    target, payload, target._reflect_identity()
-                )
         else:
             # Resolve a well-known alias (declared via an `alias` meta, e.g.
             # `web_loader`) to its agent id; a literal id resolves to itself.
             target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
         if target is None:
             return self.ctx.unknown_agent(target_id)
-        # ── CALL GATE — deny-all for agent-originated sends ──────────────
-        # The trust boundary is who ORIGINATED the send. An operator send
-        # (`_current_sender` is None — CLI / cold bootstrap / loader-at-boot /
-        # test driver) is the root of trust and passes ungated. An agent send
-        # (a handler/script calling out; `_current_sender` is its id) is
-        # DENY-ALL: permitted only by an explicit grant on the sender's record.
-        # `reflect` is never gated (discovery moat).
         verb = payload.get("type")
+        # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
+        # Operator sends (`_current_sender` is None: CLI / cold bootstrap /
+        # loader-at-boot / test driver, or a verb running under
+        # `operator_context`) are the ORIGIN root of trust and pass ungated. Every
+        # AGENT-originated send — ANY verb, `reflect` included, nothing exempt —
+        # needs BOTH the sender's `can_call` (egress) AND the target's
+        # `callable_by` (ingress) to grant the edge.
         sender_id = _current_sender.get()
-        if sender_id is not None and verb != "reflect":
-            # A sender with no record cannot be vouched for → an empty grant,
-            # which is deny-all (never a hole).
-            sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
-            sender_agent = self.ctx.agents.get(sender_id)
-            child_ids = (
-                frozenset(sender_agent._children) if sender_agent is not None else None
+        if sender_id is not None:
+            denial = self._gate(sender_id, verb, target, payload)
+            if denial is not None:
+                return denial
+        # `kernel` reflect fast-path: a pure identity read (no dispatch/telemetry),
+        # applied AFTER the gate so it is authorized like any other reflect.
+        if target_id == "kernel" and verb == "reflect":
+            return await self._apply_reflect_flags(
+                target, payload, target._reflect_identity()
             )
-            d = authorize_call(
-                sender_rec,
-                verb,
-                target.id,
-                loader_id=self._loader_id(),
-                child_ids=child_ids,
-            )
-            if not d.allowed:
-                return {"error": d.reason, "reason": "unauthorized", "hint": d.hint}
         reply = await self._run_dispatch(target, payload)
         return await self._apply_reflect_flags(target, payload, reply)
 
     def _loader_id(self) -> str | None:
-        """The id `$loader` resolves to in a grant — the persistence loader, which
-        IS the tree root (`kernel_state`, where `persist_blob`/`load_blob` live).
-        A per-namespace sub-loader (e.g. the frontend's `web/<session>`) would
-        refine this to the nearest loader ancestor; the host kernel has one."""
+        """The id `$loader` resolves to in a grant — the persistence root."""
         return self._root().id
+
+    def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
+        """The two-sided call gate. Returns an error dict if the send is refused,
+        else None. Checks egress (sender's `can_call`) then ingress (target's
+        `callable_by`), both via the one `authorize_call` engine, then the
+        authority-conferral rules (no self-raise; delegate only a subset)."""
+        root_id = self._root().id
+        sender = self.ctx.agents.get(sender_id)
+        sender_rec = self.ctx.get(sender_id) or {"id": sender_id}
+        s_can = sender_rec.get("can_call") or {}
+        s_parent = sender_rec.get("parent_id")
+        s_kids = frozenset(sender._children) if sender is not None else frozenset()
+        # Egress — may the SENDER call the target?
+        d = authorize_call(
+            s_can,
+            verb,
+            target.id,
+            holder_id=sender_id,
+            holder_parent=s_parent,
+            holder_children=s_kids,
+            loader_id=root_id,
+        )
+        if not d.allowed:
+            return {
+                "error": f"{sender_id} may not call {verb!r} on {target.id}",
+                "reason": "unauthorized",
+                "side": "egress",
+                "hint": _FROM_ABOVE,
+            }
+        # Ingress — does the TARGET accept the sender? (tokens relative to target)
+        t_call = target._meta.get("callable_by") or {}
+        t_parent = target.parent.id if target.parent is not None else None
+        t_kids = frozenset(target._children)
+        di = authorize_call(
+            t_call,
+            verb,
+            sender_id,
+            holder_id=target.id,
+            holder_parent=t_parent,
+            holder_children=t_kids,
+            loader_id=root_id,
+            enforce_privileged=False,
+        )
+        if not di.allowed:
+            return {
+                "error": f"{target.id} does not accept {verb!r} from {sender_id}",
+                "reason": "unauthorized",
+                "side": "ingress",
+                "hint": _FROM_ABOVE,
+            }
+        # Authority conferral — no self-raise, delegate only a subset you hold.
+        if verb in ("create_agent", "update_agent"):
+            return self._check_conferral(
+                sender_id, s_can, s_parent, s_kids, root_id, payload
+            )
+        return None
+
+    def _check_conferral(self, sender_id, s_can, s_parent, s_kids, root_id, payload):
+        """Authority flows from ABOVE only: an agent may not raise its OWN
+        authority, and may confer on another only a SUBSET of its own `can_call`.
+        Operator conferral (`sender is None`) never reaches here."""
+        if not isinstance(payload, dict):
+            return None
+        if "can_call" not in payload and "callable_by" not in payload:
+            return None
+        edited = payload.get("id")
+        # Self-raise: never edit your own authority fields.
+        if payload.get("type") == "update_agent" and edited == sender_id:
+            return {
+                "error": f"{sender_id} may not edit its own can_call/callable_by",
+                "reason": "unauthorized",
+                "side": "self-grant",
+                "hint": _FROM_ABOVE,
+            }
+        # Subset: every LATERAL edge in the conferred `can_call` must be one the
+        # granter itself holds (structural tokens are free; `callable_by` grants no
+        # reach, so it is unbounded).
+        conferred = payload.get("can_call")
+        if isinstance(conferred, dict):
+            for key, verbs in conferred.items():
+                if key.startswith("$"):
+                    continue  # structural tokens confer no lateral reach
+                need = list(verbs) if isinstance(verbs, (list, tuple)) else None
+                # Conferring `"*"` (or a list containing it) requires the granter
+                # to hold `"*"` on that target; a concrete list requires each verb.
+                probe = need if (need and "*" not in need) else ["*"]
+                for v in probe:
+                    ok = authorize_call(
+                        s_can,
+                        v,
+                        key,
+                        holder_id=sender_id,
+                        holder_parent=s_parent,
+                        holder_children=s_kids,
+                        loader_id=root_id,
+                    ).allowed
+                    if not ok:
+                        return {
+                            "error": (
+                                f"{sender_id} cannot delegate {v!r} on {key} — you "
+                                "may only confer can_call you already hold"
+                            ),
+                            "reason": "unauthorized",
+                            "side": "delegation",
+                            "hint": _FROM_ABOVE,
+                        }
+        return None
 
     async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
         """Run ONE dispatch as a registered, abortable asyncio.Task and await
@@ -1088,15 +1198,10 @@ class Agent:
             for k, v in payload.items()
             if k not in ("type", "handler_module", "id")
         }
-        # Every created agent carries the structural baseline (command your own
-        # subtree, answer your creator, persist your own state through the loader).
-        # It's a BASELINE, not a lateral grant, so it MERGES: an explicit `can_call`
-        # in the payload adds lateral edges on top (and may override a baseline key
-        # by naming it), but never has to re-declare $self/$parent/$children/$loader.
-        # Deny-all still governs every edge NOT in the merged grant.
-        grant = dict(DEFAULT_CAN_CALL)
-        grant.update(meta.get("can_call") or {})
-        meta["can_call"] = grant
+        # The structural authority baseline ({$self,$parent,$children} on both
+        # `can_call` and `callable_by`) is stamped + merged uniformly in Agent.__init__
+        # for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
+        # payload rides in `meta` and merges over the baseline at construction.
         # Refuse BEFORE the agent exists, so a bad wiring value never becomes a record
         # that boots, half-works, and fails three calls later somewhere else.
         # No record exists yet, so the merged view IS the patch — an `interpreter`

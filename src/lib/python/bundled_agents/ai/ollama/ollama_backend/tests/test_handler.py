@@ -37,7 +37,21 @@ async def _make_ollama(kernel, file_bridge_id=None):
         meta["file_bridge_id"] = file_bridge_id
         can_call[file_bridge_id] = "*"
     rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
-    return rec["id"]
+    aid = rec["id"]
+    # Two-sided deny-all: open the callee's reciprocal `callable_by` for each edge.
+    for target in can_call:
+        await _accept(kernel, target, aid)
+    return aid
+
+
+async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
+    """Open the callee's ingress so a granted egress lands — merges (keeps baseline)."""
+    tgt = kernel.ctx.agents.get(target)
+    cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
+    cb[caller] = verbs
+    await kernel.send(
+        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
+    )
 
 
 async def test_reflect_includes_file_bridge_id_and_no_history(

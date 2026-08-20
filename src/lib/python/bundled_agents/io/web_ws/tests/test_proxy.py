@@ -144,8 +144,13 @@ def test_ws_read_stream_cursor_round_trips(
     `call` frames threading `next_offset` (binary replies), reassemble byte-for-byte."""
     monkeypatch.chdir(tmp_path)
     # An OPEN file_bridge SOURCE (sealed-by-default ⇒ open it so the verbs dispatch).
+    # Two-sided deny-all: reciprocally ACCEPT the ws leg that relays calls to it.
     seeded_kernel.create(
-        "file_bridge.tools", id="fb_ws", root="sd", ingress_rule="allow_all"
+        "file_bridge.tools",
+        id="fb_ws",
+        root="sd",
+        ingress_rule="allow_all",
+        callable_by={"test_web_ws": "*"},
     )
     blob = bytes(range(256)) * 40  # 10240 bytes, binary
 

@@ -16,7 +16,15 @@ async def _make_scheduler(kernel):
             "can_call": {"cli": "*"},
         },
     )
-    return rec["id"]
+    sid = rec["id"]
+    # Two-sided deny-all: a fire is a `send` to cli — open cli's reciprocal ingress.
+    cli = kernel.ctx.agents.get("cli")
+    cb = dict(cli._meta.get("callable_by") or {}) if cli is not None else {}
+    cb[sid] = "*"
+    await kernel.send(
+        "kernel_state", {"type": "update_agent", "id": "cli", "callable_by": cb}
+    )
+    return sid
 
 
 async def test_reflect_no_longer_carries_file_bridge_id(seeded_kernel, store_agent):
