@@ -32,20 +32,16 @@ extension Kernel {
         let outerSender = KernelTaskLocals.currentSender ?? target.id
         let verb = payload["type"].asString ?? ""
 
-        // ── CALL GATE — deny-all for agent-originated sends ──────────────
+        // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // Trust boundary = who ORIGINATED the send. An operator send
         // (`currentSender` is nil: CLI/bootstrap/loader-at-boot/test, or a verb
-        // completing its own side effect under `withValue(nil)`) is the root of
-        // trust → ungated. An agent send is DENY-ALL: permitted only by a grant on
-        // the sender's record. `reflect` is never gated.
-        if verb != "reflect", let orig = KernelTaskLocals.currentSender {
-            let decision = gate(sender: orig, verb: verb, target: target)
-            if !decision.allowed {
-                return .object([
-                    "error": .string(decision.reason),
-                    "reason": .string("unauthorized"),
-                    "hint": .string(decision.hint),
-                ])
+        // completing its own side effect under `withValue(nil)`) is the origin root
+        // of trust → ungated. Every AGENT send — ANY verb, `reflect` included,
+        // nothing exempt — needs BOTH the sender's `can_call` (egress) AND the
+        // target's `callable_by` (ingress) to grant the edge.
+        if let orig = KernelTaskLocals.currentSender {
+            if let denial = gate(sender: orig, verb: verb, target: target, payload: payload) {
+                return denial
             }
         }
 
@@ -91,17 +87,10 @@ extension Kernel {
         }
         let verb = header["type"].asString ?? ""
         // Call gate (see `send`) — the binary path carries the same agent-originated
-        // write_stream/read_stream sends. Operator + reflect skip.
-        if verb != "reflect", let orig = KernelTaskLocals.currentSender {
-            let decision = gate(sender: orig, verb: verb, target: target)
-            if !decision.allowed {
-                return (
-                    .object([
-                        "error": .string(decision.reason),
-                        "reason": .string("unauthorized"),
-                        "hint": .string(decision.hint),
-                    ]), Data()
-                )
+        // write_stream/read_stream sends, gated two-sided. Only an operator skips it.
+        if let orig = KernelTaskLocals.currentSender {
+            if let denial = gate(sender: orig, verb: verb, target: target, payload: header) {
+                return (denial, Data())
             }
         }
         let (reply, body): (JSON?, Data) = await KernelTaskLocals.$currentSender.withValue(
@@ -541,22 +530,104 @@ func summarize(_ payload: JSON) -> String {
 }
 
 extension Kernel {
-    /// The call gate's authorization decision for an agent-originated send.
-    /// Reads the SENDER's `can_call` + tree facts (parent, children, root) and
-    /// delegates to `authorizeCall`. A sender with no record cannot be vouched
-    /// for → empty grant → deny-all (never a hole).
-    func gate(sender: AgentId, verb: String, target: Agent) -> Decision {
+    /// The two-sided call gate for an agent-originated send. Returns the error
+    /// `JSON` if the send is refused, else `nil`. Checks egress (the sender's
+    /// `can_call`) then ingress (the target's `callable_by`), both via the one
+    /// `authorizeCall` engine, then the authority-conferral rules (no self-raise;
+    /// delegate only a subset). A holder with no record → empty grant → deny-all.
+    func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
         let loaderId = root?.id.value
-        guard let senderAgent = agent(sender) else {
-            return authorizeCall(
-                canCall: .null, verb: verb, targetId: target.id.value,
-                senderId: sender.value, parentId: nil, childIds: [], loaderId: loaderId)
+        let senderAgent = agent(sender)
+        let sCan = senderAgent?.metaValue(forKey: "can_call") ?? .null
+        let sParent = senderAgent?.parentId?.value
+        let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
+
+        // Egress — may the SENDER call the target?
+        let d = authorizeCall(
+            grant: sCan, verb: verb, otherId: target.id.value,
+            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId)
+        if !d.allowed {
+            return .object([
+                "error": .string("\(sender.value) may not call '\(verb)' on \(target.id.value)"),
+                "reason": .string("unauthorized"), "side": .string("egress"),
+                "hint": .string(d.hint),
+            ])
         }
-        let canCall = senderAgent.metaValue(forKey: "can_call") ?? .null
-        let parentId = senderAgent.parentId?.value
-        let childIds = Set(senderAgent.childIds().map { $0.value })
-        return authorizeCall(
-            canCall: canCall, verb: verb, targetId: target.id.value,
-            senderId: sender.value, parentId: parentId, childIds: childIds, loaderId: loaderId)
+
+        // Ingress — does the TARGET accept the sender? (tokens relative to target;
+        // privileged-no-wildcard is egress-only, so enforcePrivileged: false.)
+        let tCall = target.metaValue(forKey: "callable_by") ?? .null
+        let tParent = target.parentId?.value
+        let tKids = Set(target.childIds().map { $0.value })
+        let di = authorizeCall(
+            grant: tCall, verb: verb, otherId: sender.value,
+            holderId: target.id.value, parentId: tParent, childIds: tKids, loaderId: loaderId,
+            enforcePrivileged: false)
+        if !di.allowed {
+            return .object([
+                "error": .string(
+                    "\(target.id.value) does not accept '\(verb)' from \(sender.value)"),
+                "reason": .string("unauthorized"), "side": .string("ingress"),
+                "hint": .string(di.hint),
+            ])
+        }
+
+        // Authority conferral — no self-raise, delegate only a subset you hold.
+        if verb == "create_agent" || verb == "update_agent" {
+            return checkConferral(
+                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
+                loaderId: loaderId, payload: payload)
+        }
+        return nil
+    }
+
+    /// Authority flows from ABOVE only: an agent may not raise its OWN authority
+    /// fields, and may confer on another only a SUBSET of its own `can_call`.
+    private func checkConferral(
+        sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
+        loaderId: String?, payload: JSON
+    ) -> JSON? {
+        guard case .object(let obj) = payload,
+            obj["can_call"] != nil || obj["callable_by"] != nil
+        else { return nil }
+        let verb = payload["type"].asString ?? ""
+        let edited = payload["id"].asString
+        // Self-raise: never edit your own authority fields.
+        if verb == "update_agent" && edited == sender.value {
+            return .object([
+                "error": .string("\(sender.value) may not edit its own can_call/callable_by"),
+                "reason": .string("unauthorized"), "side": .string("self-grant"),
+                "hint": .string(fromAbove),
+            ])
+        }
+        // Subset: every LATERAL edge in the conferred `can_call` must be one the
+        // granter itself holds (structural tokens free; `callable_by` is unbounded).
+        if case .object(let conferred) = payload["can_call"] {
+            for (key, verbs) in conferred {
+                if key.hasPrefix("$") { continue }
+                // Conferring "*" (or a list with it) requires the granter to hold
+                // "*" on that target; a concrete list requires each verb.
+                var probe: [String] = ["*"]
+                if case .array(let vs) = verbs, !vs.contains(where: { $0.asString == "*" }) {
+                    probe = vs.compactMap { $0.asString }
+                }
+                for v in probe {
+                    let ok = authorizeCall(
+                        grant: sCan, verb: v, otherId: key, holderId: sender.value,
+                        parentId: sParent, childIds: sKids, loaderId: loaderId
+                    ).allowed
+                    if !ok {
+                        return .object([
+                            "error": .string(
+                                "\(sender.value) cannot delegate '\(v)' on \(key) — you may "
+                                    + "only confer can_call you already hold"),
+                            "reason": .string("unauthorized"), "side": .string("delegation"),
+                            "hint": .string(fromAbove),
+                        ])
+                    }
+                }
+            }
+        }
+        return nil
     }
 }

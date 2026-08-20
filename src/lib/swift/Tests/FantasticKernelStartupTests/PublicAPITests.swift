@@ -20,7 +20,8 @@ struct StartKernelInMemoryTests {
     @Test func registersDefaultBundleSet() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         // Spot-check key bundles are registered + dispatchable.
-        for hm in ["file_bridge.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"] {
+        for hm in ["file_bridge.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"]
+        {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
             let r = await kernel.send(
                 AgentId("core"),
@@ -119,14 +120,21 @@ struct SendJsonTests {
                 lock.unlock()
             }
             func snapshot() -> [String] {
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
+                defer { lock.unlock() }
                 return events
             }
         }
+        // Seed a real `weather_ui` agent as a CHILD of the root: every verb is gated
+        // now (reflect included), so only a PERMITTED send fires the state event whose
+        // sender attribution is under test. A child reflecting its parent is covered by
+        // the structural baseline on both ends — no explicit grant needed.
+        _ = await kernel.sendJson(
+            targetId: "core",
+            payloadJson: #"{"type":"create_agent","handler_module":"echo.tools","id":"weather_ui"}"#
+        )
         let cap = Capture()
         _ = kernel.subscribe(listener: cap)
-        // `reflect` (ungated) isolates this to sender ATTRIBUTION — a synthetic
-        // "weather_ui" sender is not a real agent, so a gated verb would deny-all.
         _ = await kernel.sendJsonAs(
             senderId: "weather_ui",
             targetId: "core",
@@ -147,11 +155,13 @@ struct ProxyEmitTests {
             let lock = NSLock()
             var events: [String] = []
             func onEvent(eventJson: String) {
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
+                defer { lock.unlock() }
                 events.append(eventJson)
             }
             func snapshot() -> [String] {
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
+                defer { lock.unlock() }
                 return events
             }
         }

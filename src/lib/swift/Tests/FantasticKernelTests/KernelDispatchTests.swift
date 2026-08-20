@@ -156,11 +156,15 @@ struct KernelSubscribeTests {
 
     @Test func sendAsAttributesSender() async {
         let kernel = makeKernel()
+        // Seed a real `ui` agent as a CHILD of the root: every verb is gated now
+        // (reflect included), so only a PERMITTED send fires the state event whose
+        // sender attribution is under test. A child reflecting its parent is covered
+        // by the structural baseline on both ends — no explicit grant needed.
+        _ = await kernel.send(
+            "core",
+            ["type": "create_agent", "handler_module": "echo.tools", "id": "ui"])
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
-        // `reflect` (ungated) isolates this test to sender ATTRIBUTION — a
-        // synthetic "ui" sender is not a real agent, so a gated verb would be
-        // deny-all; attribution on the state event is what's under test here.
         _ = await kernel.sendAs(
             sender: "ui", target: "core", payload: ["type": "reflect"])
         let evs = cap.snapshot()

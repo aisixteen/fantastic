@@ -164,6 +164,18 @@ struct HTTPServerTests {
                 "can_call": .object(["core": .string("*")]),
             ]))
         let restId = rec["id"].asString ?? "rest"
+        // Two-sided deny-all: the relay dispatches into root AS ITSELF, but it is
+        // root's GRANDCHILD (child of `web`), so $children:* does not cover it — open
+        // root's ingress for the relay (merged with the structural baseline).
+        _ = await kernel.send(
+            AgentId("core"),
+            .object([
+                "type": .string("update_agent"), "id": .string("core"),
+                "callable_by": .object([
+                    "$self": .string("*"), "$parent": .string("*"),
+                    "$children": .string("*"), restId: .string("*"),
+                ]),
+            ]))
         _ = await kernel.send(
             AgentId("web"),
             .object(["type": .string("mount"), "child_id": .string(restId)]))

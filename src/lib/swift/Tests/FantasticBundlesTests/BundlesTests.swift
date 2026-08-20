@@ -225,6 +225,8 @@ struct BundleSmokeTests {
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all",
+                // Two-sided deny-all: accept the scheduler that persists through it.
+                "callable_by": ["sched": "*"],
             ])
         _ = await kernel.send(
             "core",
@@ -276,6 +278,8 @@ struct BundleSmokeTests {
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all",
+                // Two-sided deny-all: accept the scheduler that persists through it.
+                "callable_by": ["sched": "*"],
             ])
         _ = await kernel.send(
             "core",
