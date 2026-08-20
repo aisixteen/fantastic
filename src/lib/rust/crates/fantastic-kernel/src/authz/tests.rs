@@ -9,16 +9,31 @@ fn kids(ids: &[&str]) -> HashSet<String> {
     ids.iter().map(|s| s.to_string()).collect()
 }
 
-// sender "worker", parent "boss", one child "kid"
-fn auth(can_call: &Value, verb: &str, target: &str) -> Decision {
+// holder "worker", parent "boss", one child "kid". Egress posture (enforce_privileged).
+fn auth(grant: &Value, verb: &str, other: &str) -> Decision {
     authorize_call(
-        can_call,
+        grant,
         verb,
-        target,
+        other,
         "worker",
         Some("boss"),
         &kids(&["kid"]),
         Some("root"),
+        true,
+    )
+}
+
+// Ingress posture — privileged-no-wildcard is NOT enforced.
+fn auth_ingress(grant: &Value, verb: &str, other: &str) -> Decision {
+    authorize_call(
+        grant,
+        verb,
+        other,
+        "worker",
+        Some("boss"),
+        &kids(&["kid"]),
+        Some("root"),
+        false,
     )
 }
 
@@ -26,7 +41,7 @@ fn auth(can_call: &Value, verb: &str, target: &str) -> Decision {
 fn absent_grant_denies_everything() {
     let d = auth(&Value::Null, "send", "peer");
     assert!(!d.allowed);
-    assert!(!d.reason.is_empty() && !d.hint.is_empty());
+    assert!(!d.hint.is_empty()); // a denial always teaches (from above)
 }
 
 #[test]
@@ -64,12 +79,23 @@ fn loader_token_resolves_to_passed_loader_id() {
 }
 
 #[test]
-fn unix_default_reaches_self_parent_and_children() {
-    let g = Value::Object(default_can_call());
-    assert!(auth(&g, "send", "worker").allowed); // $self
-    assert!(auth(&g, "send", "boss").allowed); // $parent
-    assert!(auth(&g, "send", "kid").allowed); // $children
-    assert!(!auth(&g, "send", "stranger").allowed);
+fn baseline_reaches_self_parent_and_children() {
+    for base in [default_can_call(), default_callable_by()] {
+        let g = Value::Object(base);
+        assert!(auth(&g, "send", "worker").allowed); // $self
+        assert!(auth(&g, "send", "boss").allowed); // $parent
+        assert!(auth(&g, "send", "kid").allowed); // $children
+        assert!(!auth(&g, "send", "stranger").allowed);
+    }
+}
+
+#[test]
+fn ingress_wildcard_accepts_privileged_verbs() {
+    // enforce_privileged=false (ingress): a callee's `$children:*` legitimately
+    // accepts a privileged verb — escalation is blocked at egress.
+    let g = json!({"$children": "*"});
+    assert!(!auth(&g, "create_agent", "kid").allowed); // egress default
+    assert!(auth_ingress(&g, "create_agent", "kid").allowed); // ingress
 }
 
 #[test]

@@ -101,10 +101,29 @@ impl Agent {
         id: AgentId,
         handler_module: Option<String>,
         parent_id: Option<AgentId>,
-        meta: Map<String, Value>,
+        mut meta: Map<String, Value>,
         root_path: PathBuf,
         ephemeral: bool,
     ) -> Arc<Self> {
+        // Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
+        // agent that passes through here — the seeded root, a created child, a
+        // disk-loaded record alike (one funnel, so nothing lacks it). `can_call`
+        // (who I may call) and `callable_by` (who may call me) both start as
+        // {$self:*, $parent:*, $children:*}. It MERGES UNDER any explicit grant
+        // already in `meta` (an explicit key overrides a baseline key; idempotent on
+        // reload). Deny-all governs every edge NOT in the merged grant.
+        for (field, base) in [
+            ("can_call", crate::authz::default_can_call()),
+            ("callable_by", crate::authz::default_callable_by()),
+        ] {
+            let mut merged = base;
+            if let Some(Value::Object(explicit)) = meta.get(field).cloned() {
+                for (k, v) in explicit {
+                    merged.insert(k, v);
+                }
+            }
+            meta.insert(field.into(), Value::Object(merged));
+        }
         Arc::new(Self {
             id,
             handler_module,

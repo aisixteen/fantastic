@@ -59,6 +59,8 @@ async fn mk_kernel(
                 "id": fid,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all",
+                // Two-sided deny-all: accept the backend that persists through it.
+                "callable_by": { ant.clone(): "*" },
             }),
         )
         .await;

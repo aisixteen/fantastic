@@ -178,13 +178,25 @@ async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     mk_agent_grant(kernel, id, Value::Null).await
 }
 
-/// Create a slow agent with an explicit `can_call` grant. Deny-all: a `chain`
-/// send to a SIBLING is lateral egress, so the chain tests grant that edge.
+/// Create a slow agent with an explicit `can_call` grant. Two-sided deny-all: a
+/// `chain` send to a SIBLING is lateral egress, so the chain tests grant that edge.
 async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
     let mut payload = json!({"type": "create_agent", "handler_module": "slow.tools", "id": id});
     if !can_call.is_null() {
         payload["can_call"] = can_call;
     }
+    let r = kernel.send(&AgentId::from("core"), payload).await;
+    assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
+    AgentId::from(id)
+}
+
+/// Create a slow agent that ACCEPTS a lateral caller (its `callable_by`) — the
+/// ingress half a chain target needs under two-sided deny-all.
+async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> AgentId {
+    let payload = json!({
+        "type": "create_agent", "handler_module": "slow.tools", "id": id,
+        "callable_by": callable_by,
+    });
     let r = kernel.send(&AgentId::from("core"), payload).await;
     assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
     AgentId::from(id)
@@ -245,7 +257,7 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent(&kernel, "slow_b").await;
+    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
@@ -296,7 +308,7 @@ async fn cancel_kills_the_whole_subtree() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent(&kernel, "slow_b").await;
+    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
@@ -472,7 +484,7 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent_grant(&kernel, "slow_a", json!({"slow_b": "*"})).await;
-    let b = mk_agent(&kernel, "slow_b").await;
+    let b = mk_agent_accept(&kernel, "slow_b", json!({"slow_a": "*"})).await;
 
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);

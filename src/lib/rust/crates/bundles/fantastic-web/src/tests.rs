@@ -275,6 +275,17 @@ async fn web_with_rest_child_serves_rest() {
             }),
         )
         .await;
+    // Two-sided deny-all: the relay dispatches into root AS ITSELF, but it is
+    // root's GRANDCHILD (child of `web`), so $children:* does not cover it — open
+    // root's ingress for the relay (merged with the structural baseline).
+    kernel
+        .send(
+            &AgentId::from("core"),
+            json!({"type": "update_agent", "id": "core", "callable_by": {
+                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*",
+            }}),
+        )
+        .await;
     let boot_reply = kernel
         .send(&AgentId::from(web_id), json!({"type": "boot"}))
         .await;

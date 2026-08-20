@@ -1,34 +1,38 @@
 //! Call security — the substrate authorization primitive (mirror of the python
 //! canonical `kernel/_authz.py`).
 //!
-//! Deny-all is the kernel law for an AGENT-originated send (`current_sender` is
-//! `Some`): it is permitted only by an explicit grant on the SENDER's record,
-//! `can_call: { target | token : ["<verb>", …] | "*" }`. An OPERATOR send
-//! (`current_sender` is `None`: the CLI, cold bootstrap, a loader hydrating at
-//! boot, a test driver calling `kernel.send` directly) is the root of trust and
-//! never reaches this module — the gate skips it. `reflect` is never gated.
+//! The model is **fully-gated, two-sided, from-above-only**:
 //!
-//! Relative tokens resolve at the gate:
-//!   `$self`     → the sender's own id
-//!   `$parent`   → the sender's parent id
-//!   `$children` → the sender's direct children (set membership)
-//!   `$loader`   → the persistence root
+//! - Every AGENT-originated send (`current_sender()` is `Some`) is checked TWICE:
+//!   **egress** — the SENDER's `can_call` must allow `(target, verb)` — AND
+//!   **ingress** — the TARGET's `callable_by` must allow `(sender, verb)`. An edge
+//!   exists only if BOTH ends grant it. The gate NEVER branches on a verb name:
+//!   nothing is exempt, not even `reflect`.
+//! - An OPERATOR send (`current_sender()` is `None`: the CLI, cold bootstrap, a
+//!   loader hydrating at boot, a test driver, or a verb completing its own side
+//!   effect under `with_operator`) is the origin root of trust and never reaches
+//!   this module — the gate skips it.
 //!
-//! The Unix baseline the kernel stamps + MERGES on every `create_agent` is
-//! `{$self:*, $parent:*, $children:*}` — command your own subtree and answer your
-//! creator. NOTE the divergence from python, which also carries
-//! `$loader:[persist_blob,load_blob]`: python centralizes persistence through an
-//! agent→loader `persist_blob` call, but the rust substrate persists INLINE
-//! (kernel-native writes to a discovered `file_bridge` store, run as operator), so
-//! there is no agent→loader persist call to grant. A bundle that persists through
-//! its own `file_bridge_id` gets an explicit store grant instead. This is a
-//! deliberate per-runtime difference, like the root-id asymmetry.
+//! Both `can_call` and `callable_by` are grant maps of the same shape,
+//! `{ id | token : ["<verb>", …] | "*" }`. Relative tokens resolve at the gate,
+//! relative to the grant's HOLDER (the sender for `can_call`, the target for
+//! `callable_by`): `$self`, `$parent`, `$children` (set membership), `$loader`
+//! (the persistence root; rarely named, NOT in the baseline).
+//!
+//! The structural baseline stamped + MERGED on every agent (root, created,
+//! disk-loaded — in `Agent::new`), on BOTH fields, is
+//! `{$self:*, $parent:*, $children:*}` — reach/accept your own subtree and your
+//! creator. No `"*"` wildcard token.
+//!
+//! **Authority flows from ABOVE only.** Grants are set by the creator/operator at
+//! `create_agent`, or a parent delegates a subset of its own `can_call`; an agent
+//! can NEVER raise its own authority (enforced at the gate, not here).
 //!
 //! PRIVILEGED verbs (`create_agent`/`delete_agent`/`update_agent`) are never
-//! covered by a wildcard — they must be named explicitly — EXCEPT when the target
-//! is the sender itself (forking/editing your OWN subtree is baseline, not
-//! escalation). This plugs the depth-1 hole: a root child's `$parent:*` cannot
-//! mutate the root.
+//! covered by a wildcard — they must be named explicitly — EXCEPT when the other
+//! end is the holder itself (forking your OWN subtree is baseline). This is an
+//! EGRESS rule (`enforce_privileged`): on the ingress side a `$children:*` callee
+//! legitimately accepts a privileged verb, since egress already guards escalation.
 
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -40,7 +44,7 @@ pub struct Decision {
     pub allowed: bool,
     /// On denial, a one-line statement of what was refused.
     pub reason: String,
-    /// On denial, a teaching pointer: how to open the edge (operator only).
+    /// On denial, a teaching pointer: authority descends, never self-raised.
     pub hint: String,
 }
 
@@ -57,8 +61,13 @@ impl Decision {
 /// Structural graph mutation — privileged (a wildcard never satisfies these).
 pub const PRIVILEGED_VERBS: [&str; 3] = ["create_agent", "delete_agent", "update_agent"];
 
-/// The Unix baseline stamped + merged on every `create_agent`. Command your own
-/// subtree (self + children you spawn) and answer your creator, nothing else.
+/// The remedy shown on any denial: authority descends, it is never self-raised.
+pub const FROM_ABOVE: &str = "authority is granted from ABOVE — set at create_agent by your \
+     creator, or by the operator; a parent may delegate a subset of its own reach. You cannot \
+     grant it to yourself. Agents are deny-all by default (both to call and to be called).";
+
+/// The structural baseline stamped + merged on every agent, on `can_call` (who I
+/// may call). Reach your own subtree (self + children you spawn) and your creator.
 pub fn default_can_call() -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("$self".into(), json!("*"));
@@ -67,8 +76,10 @@ pub fn default_can_call() -> Map<String, Value> {
     m
 }
 
-fn is_privileged(verb: &str) -> bool {
-    PRIVILEGED_VERBS.contains(&verb)
+/// The structural baseline for `callable_by` (who may call me) — the mirror of
+/// [`default_can_call`]: accept your own subtree and your creator.
+pub fn default_callable_by() -> Map<String, Value> {
+    default_can_call()
 }
 
 /// A grant value is `"*"` (any verb) or a list of verb names (which may itself
@@ -91,46 +102,48 @@ fn verb_allowed(grant: &Value, verb: &str, privileged: bool) -> bool {
     false
 }
 
-/// Deny-all + egress grants. Pure — the gate resolves the tree facts (parent,
-/// children, loader) and hands them in.
+/// One matching engine, used BOTH ways. `grant` is the HOLDER's grant map
+/// (`can_call` for egress, `callable_by` for ingress); `other_id` is the id at the
+/// other end of the edge (the target for egress, the sender for ingress). Tokens
+/// resolve relative to the holder. Absent/empty grant ⇒ deny (the default posture).
 ///
-/// `can_call` is the sender's `meta["can_call"]` (a JSON object, or `Null`/absent
-/// ⇒ empty ⇒ deny-all). `target_id` is the send target; the privileged-self
-/// exemption is keyed on it (mirrors python: create_agent to self = fork).
+/// `enforce_privileged` gates the wildcard-exclusion for PRIVILEGED verbs — an
+/// EGRESS concern only (the rule constrains who may REACH a mutation). The gate
+/// passes `false` on the ingress check.
 #[allow(clippy::too_many_arguments)]
 pub fn authorize_call(
-    can_call: &Value,
+    grant: &Value,
     verb: &str,
-    target_id: &str,
-    sender_id: &str,
-    parent_id: Option<&str>,
-    child_ids: &HashSet<String>,
+    other_id: &str,
+    holder_id: &str,
+    holder_parent: Option<&str>,
+    holder_children: &HashSet<String>,
     loader_id: Option<&str>,
+    enforce_privileged: bool,
 ) -> Decision {
-    let privileged = is_privileged(verb) && target_id != sender_id;
-    if let Some(map) = can_call.as_object() {
-        for (key, grant) in map {
+    // Privileged verbs lose wildcard cover UNLESS the other end is the holder
+    // itself (acting on your own subtree is baseline, not escalation) — egress only.
+    let privileged =
+        enforce_privileged && PRIVILEGED_VERBS.contains(&verb) && other_id != holder_id;
+    if let Some(map) = grant.as_object() {
+        for (key, g) in map {
             let matched = match key.as_str() {
-                "$self" => sender_id == target_id,
-                "$parent" => parent_id == Some(target_id),
-                "$children" => child_ids.contains(target_id),
-                "$loader" => loader_id == Some(target_id),
-                literal => literal == target_id,
+                "$self" => other_id == holder_id,
+                "$parent" => holder_parent == Some(other_id),
+                "$children" => holder_children.contains(other_id),
+                "$loader" => loader_id == Some(other_id),
+                lit if lit.starts_with('$') => false,
+                literal => literal == other_id,
             };
-            if matched && verb_allowed(grant, verb, privileged) {
+            if matched && verb_allowed(g, verb, privileged) {
                 return Decision::allow();
             }
         }
     }
     Decision {
         allowed: false,
-        reason: format!("{sender_id} may not call '{verb}' on {target_id}"),
-        hint: format!(
-            "grant it on {sender_id}'s can_call — set it at create_agent, ask the \
-             operator, or open your OWN reach with update_agent on yourself \
-             (id={sender_id}, can_call.{target_id}=['{verb}'], or '*' for all verbs). \
-             Agents are deny-all by default."
-        ),
+        reason: String::new(),
+        hint: FROM_ABOVE.to_string(),
     }
 }
 

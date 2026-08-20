@@ -100,20 +100,10 @@ pub(crate) async fn create_from_payload(
         }
     }
 
-    // Stamp the Unix baseline grant, MERGED under any explicit `can_call`: every
-    // created agent may command its own subtree ($self/$children) and answer its
-    // creator ($parent). It is a BASELINE, not a lateral grant — explicit keys in
-    // the payload add edges on top (and may override a baseline key by naming it),
-    // but never have to re-declare it. Deny-all still governs every edge NOT here.
-    {
-        let mut grant = crate::authz::default_can_call();
-        if let Some(Value::Object(explicit)) = meta.get("can_call").cloned() {
-            for (k, v) in explicit {
-                grant.insert(k, v);
-            }
-        }
-        meta.insert("can_call".into(), Value::Object(grant));
-    }
+    // The structural authority baseline ({$self,$parent,$children} on both
+    // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent::new`
+    // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
+    // payload rides in `meta` and merges over the baseline at construction.
 
     // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical: create
     // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
