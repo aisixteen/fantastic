@@ -41,7 +41,6 @@ use tokio::sync::mpsc;
 mod bg;
 mod browser;
 mod chat;
-mod editor;
 mod hub;
 mod input;
 mod kernels;
@@ -64,45 +63,6 @@ const BRAIN_ID: &str = "brain";
 /// The base "characters" present at boot, in tab order: the brain, the shell, the
 /// workspace kernel. Any agent you address opens its own agent after these.
 const BASE_TABS: [&str; 3] = ["ai", "sh", "ws"];
-
-/// The handler modules whose agents run AUTHORED CODE and serve an `on_message()`
-/// inbox — the agents you can TALK to in prose (design 28: a custom connector, a
-/// plan/execute mind). Matched on the reflect tree's `handler_module`, so the rule is
-/// the agent's KIND, never its id.
-const SCRIPT_HANDLERS: [&str; 2] = ["js_runtime", "lua_runtime"];
-
-/// Collect the ids of script agents (see [`SCRIPT_HANDLERS`]) from a reflect tree.
-fn collect_scripts(v: &Value, out: &mut Vec<String>) {
-    let handler = v
-        .get("handler_module")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if SCRIPT_HANDLERS.iter().any(|h| handler.starts_with(h)) {
-        if let Some(id) = v.get("id").and_then(Value::as_str) {
-            if !out.iter().any(|s| s == id) {
-                out.push(id.to_string());
-            }
-        }
-    }
-    for key in ["children", "agents", "tree"] {
-        match v.get(key) {
-            Some(Value::Array(arr)) => {
-                for c in arr {
-                    collect_scripts(c, out);
-                }
-            }
-            Some(node @ Value::Object(_)) => collect_scripts(node, out),
-            _ => {}
-        }
-    }
-}
-
-/// The script agents of a reflect tree — [`collect_scripts`] as a value.
-fn script_ids(tree: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_scripts(tree, &mut out);
-    out
-}
 
 /// Collect agent ids from a reflect tree (handles `id` + `children`/`agents`).
 fn collect_ids(v: &Value, out: &mut Vec<String>) {
@@ -204,17 +164,13 @@ struct App {
     scroll_max: std::cell::Cell<usize>,
     /// The running connector-setup wizard, if any.
     flow: Option<input::SetupFlow>,
-    /// True while the **add-agent type picker** (`AI agent` · `Custom connector`)
-    /// owns `app.control` — distinguishes it from a running `SetupFlow` on the same
-    /// Select gate. Opened from the Hub's `+ agent` node (design 28).
+    /// True while the **add-agent picker** (one kind: `AI agent`) owns `app.control` —
+    /// distinguishes it from a running `SetupFlow` on the same Select gate. Opened from
+    /// the Hub's `+ agent` node (design 28).
     add_agent_picker: bool,
-    /// The live in-frame code editor (a custom JS connector being authored, or one
-    /// reopened with `/edit`), if any. Modal: while `Some`, it owns the keys + frames
-    /// the chat inset; `^S` saves via a `send`, `Esc` closes.
-    editor: Option<editor::CodeEditor>,
     /// Async onboarding results flow back here (the ollama `list_models` probe from the
-    /// Port step; the `/edit` agent-record read) — drained by the `select!` loop, the
-    /// only place they mutate UI state. See [`onboard`].
+    /// Port step) — drained by the `select!` loop, the only place they mutate UI
+    /// state. See [`onboard`].
     onboard_tx: mpsc::UnboundedSender<OnboardEvent>,
     /// The current probe generation — bumped per probe so a stale result (after Esc
     /// / a restarted flow) is dropped instead of advancing the wrong flow.
@@ -231,14 +187,6 @@ struct App {
     /// Kernel agent ids (cached at boot) — the extra "characters" you can address
     /// + Tab-complete beyond the base agents.
     known_agents: Vec<String>,
-    /// The agents that run AUTHORED CODE (`js_runtime`/`lua_runtime` handlers: a
-    /// custom connector, a plan/execute mind), read off the kernel's reflect tree —
-    /// `handler_module` is the discriminator, not a name prefix. They own an
-    /// `on_message()` inbox, so they take PROSE: a line addressed to one becomes a
-    /// `send` turn ([`chat::Route::Say`]) instead of the `@<id> <verb> k=v` sugar
-    /// every other agent gets (design 12 · 14 · 28). Refreshed with the tree (boot ·
-    /// hub rebuild · kernel switch) and the moment the TUI seeds one itself.
-    scripts: Vec<String>,
     /// AI turns typed while a turn is in flight queue here and fire in order.
     /// Each entry carries the transcript seq of its rendered line (shown dim
     /// + `⏳` while queued) so the drain can flip it to `Done`.
@@ -465,10 +413,8 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
     let active = kernels::ActiveKernel::InProc(Arc::clone(&kernel));
     // Cache the active kernel's agent ids as addressable "characters".
     let known_agents = active.agent_ids().await;
-    // The lobby tree — the active kernel's live agent hierarchy. The same tree names
-    // the SCRIPT agents (the ones you talk to in prose).
+    // The lobby tree — the active kernel's live agent hierarchy.
     let tree = active.reflect_tree().await;
-    let scripts = script_ids(&tree);
     let hub = hub::Hub::from_reflect(&tree);
     // `.fantastic`-driven discovery: the optional `web` (passive, dormant) + cwd
     // folder-host (seeded dormant — reflect-pinged on entering the Kernels screen).
@@ -499,13 +445,11 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
         scroll_max: std::cell::Cell::new(0),
         flow: None,
         add_agent_picker: false,
-        editor: None,
         onboard_tx,
         probe_gen: 0,
         question: None,
         plan: None,
         known_agents,
-        scripts,
         pending: VecDeque::new(),
         ai_tx,
         ai_phase: None,
@@ -610,7 +554,6 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                         app.active =
                             kernels::ActiveKernel::Remote(kernels::RemoteKernel { handle, sub });
                         app.known_agents = app.active.agent_ids().await;
-                        app.scripts = script_ids(&app.active.reflect_tree().await);
                         app.kernels_msg = None;
                         app.brain_ready = false; // a fresh kernel — re-provision on first @ai
                         app.hub_dirty = true;
@@ -673,7 +616,6 @@ pub async fn run(kernel: Arc<Kernel>, _agent_count: usize, cwd: PathBuf) -> Resu
                     // One tree, two readings: the lobby's nodes AND the script agents
                     // (an agent the BRAIN authored becomes speakable here too).
                     let tree = app.active.reflect_tree().await;
-                    app.scripts = script_ids(&tree);
                     app.hub = hub::Hub::from_reflect(&tree);
                     app.hub.sel = sel.min(app.hub.nodes().len().saturating_sub(1));
                 }
@@ -912,13 +854,6 @@ fn handle_input(app: &mut App, ev: Event) {
         app.quit = true;
         return;
     }
-    // The in-frame CODE EDITOR is modal: while it's up it owns every key but the
-    // global Ctrl+Q above (so Ctrl+F/Ctrl+C never steal `^S`/`Esc` or a typed char).
-    // `^S` saves via a `send`; `Esc` closes without saving.
-    if app.editor.is_some() {
-        onboard::handle_editor_key(app, code, modifiers);
-        return;
-    }
     // Ctrl+F toggles PTY focus (only when the terminal viewport is on-screen — in
     // the `@sh` agent). Elsewhere it says why nothing happened.
     if ctrl && code == KeyCode::Char('f') {
@@ -949,12 +884,8 @@ fn handle_input(app: &mut App, ev: Event) {
         }
         app.last_ctrl_c = Some(now);
         let ai_live = app.tabs.chat("ai").is_some_and(|c| c.has_live());
-        // The agent whose loop Ctrl+C stops here, if any: a live plan panel's mind, or
-        // the SCRIPT agent whose chat you're standing in (a mind that never planned).
-        let driver = plan_driver(app).or_else(|| {
-            let id = app.tabs.active_id().to_string();
-            app.scripts.contains(&id).then_some(id)
-        });
+        // The agent whose loop Ctrl+C stops here, if any: a live plan panel's driver.
+        let driver = plan_driver(app);
         // SIGINT goes to the shell only when its viewport is the one in front
         // (the `@sh` agent / focused); elsewhere Ctrl+C cancels the live turn.
         // The note says what THIS press did, so the action is never a mystery.
@@ -1401,14 +1332,6 @@ fn submit_chat(app: &mut App) {
             onboard::start_model_flow(app);
             return;
         }
-        // `/edit` — reopen the ACTIVE agent's program in the in-frame editor (read +
-        // edit a connector in place). Async: the record read lands in the `select!`
-        // loop, which opens the editor (or notes that this agent carries no code).
-        "/edit" => {
-            app.composer.take_message();
-            onboard::start_edit(app);
-            return;
-        }
         "/help" => {
             app.composer.take_message();
             app.help_open = true;
@@ -1423,7 +1346,7 @@ fn submit_chat(app: &mut App) {
                 "system",
                 "you",
                 Body::Note(format!(
-                    "unknown command {cmd} — /help · /intro · /setup · /model · /edit"
+                    "unknown command {cmd} — /help · /intro · /setup · /model"
                 )),
                 State::Done,
             );
@@ -1441,7 +1364,7 @@ fn submit_chat(app: &mut App) {
     let message = app.composer.take_message();
     // Reconstruct the routable line `@sender body` and resolve it.
     let line = format!("@{sender} {message}");
-    let (target, route) = chat::route(&line, &sender, &app.scripts);
+    let (target, route) = chat::route(&line, &sender);
     // Entering the addressed agent (creates its tab if new) + keep the composer
     // pointed there.
     app.tabs.focus(&target);
@@ -1476,42 +1399,11 @@ fn submit_chat(app: &mut App) {
                 fire_ai_turn(app, text);
             }
         }
-        Route::Say(target, text) => say_to_script(app, target, text),
         Route::Reflect(target) => dispatch_kernel(app, target, json!({"type":"reflect"})),
         Route::Kernel(target, payload) => dispatch_kernel(app, target, payload),
         Route::Shell(cmd) => run_shell(app, cmd),
         Route::Workspace(cmd) => dispatch_workspace(app, cmd),
     }
-}
-
-/// **Talk to a script agent** — prose to a `js_runtime`/`lua_runtime` agent (a custom
-/// connector, a plan/execute mind) is a `send` TURN, exactly like `@ai`'s: the whole
-/// line rides in as `text` and lands in the agent's `on_message()` inbox (design 12 ·
-/// 14 · 28). Rendered as a normal `you →` line in THAT agent's chat; whatever the
-/// script emits back (its `say`/`question`/`done`) streams into the same chat, because
-/// [`kernels::ActiveKernel::dispatch`] subscribes our client inbox to the target — the
-/// same door a user's `@<id> <verb>` takes, since this IS the user's command.
-fn say_to_script(app: &mut App, target: AgentId, text: String) {
-    app.tabs.deliver(target.as_str()).push(
-        "you",
-        target.as_str(),
-        Body::Text(text.clone()),
-        State::Done,
-    );
-    // A remote kernel streams the agent's emits over the WS mirror (parity with the
-    // in-proc `watch` inside `dispatch`).
-    if let Some(ws) = &app.ws_stream {
-        ws.watch(target.as_str());
-    }
-    let active = app.active.clone();
-    tokio::spawn(async move {
-        active
-            .dispatch(
-                &target,
-                json!({"type":"send","text":text,"client_id":CLIENT_ID}),
-            )
-            .await;
-    });
 }
 
 /// Drive the LIVE question card from a key. The card owns the modal logic
@@ -2649,31 +2541,26 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
         );
     }
 
-    // Bottom region: the chat composer, or the active setup-flow control. Skipped
-    // entirely while the code editor is up — it owns the frame, and not setting a
-    // cursor here keeps the hardware caret from bleeding through its panel (the
-    // textarea draws its own).
-    if app.editor.is_none() {
-        match &app.control {
-            input::Control::Chat => {
-                // 1 star-gap row (stars peek through) + the 3-row opaque input box.
-                let b = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Min(1)])
-                    .split(bottom);
-                let input_area = b[1];
-                fill_black(f.buffer_mut(), input_area);
-                render_composer(f, input_area, app);
-                // The `@`-palette floats over the transcript bottom while the
-                // sender is being edited — navigate + discover in one gesture.
-                if app.composer.editing_sender {
-                    render_palette(f, transcript_area, app);
-                }
+    // Bottom region: the chat composer, or the active setup-flow control.
+    match &app.control {
+        input::Control::Chat => {
+            // 1 star-gap row (stars peek through) + the 3-row opaque input box.
+            let b = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(bottom);
+            let input_area = b[1];
+            fill_black(f.buffer_mut(), input_area);
+            render_composer(f, input_area, app);
+            // The `@`-palette floats over the transcript bottom while the
+            // sender is being edited — navigate + discover in one gesture.
+            if app.composer.editing_sender {
+                render_palette(f, transcript_area, app);
             }
-            ctrl => {
-                fill_black(f.buffer_mut(), bottom);
-                onboard::render_flow(f, bottom, ctrl);
-            }
+        }
+        ctrl => {
+            fill_black(f.buffer_mut(), bottom);
+            onboard::render_flow(f, bottom, ctrl);
         }
     }
 
@@ -2691,10 +2578,6 @@ fn render_chat(f: &mut Frame, area: Rect, app: &App) {
     if let Some(card) = &app.question {
         card.render(f, inset);
     }
-    // The in-frame code editor FRAMES the chat inset (not an alt-screen takeover).
-    if let Some(ed) = &app.editor {
-        ed.render(f, inset);
-    }
 }
 
 /// The `/help` overlay: the whole interactive surface on one card — routing,
@@ -2705,7 +2588,7 @@ fn render_help(f: &mut Frame, within: Rect) {
         .fg(Color::LightMagenta)
         .add_modifier(Modifier::BOLD);
     let body = Style::default().fg(Color::White);
-    let rows: [(&str, &str); 19] = [
+    let rows: &[(&str, &str)] = &[
         ("@", "palette: ↑↓ pick · ⏎ open · ⇥ complete · esc"),
         (
             "@ai …",
@@ -2725,25 +2608,13 @@ fn render_help(f: &mut Frame, within: Rect) {
             "copy / paste",
             "select + copy in your terminal · Cmd/Ctrl+V pastes",
         ),
-        // The self-emergence ladder, friendly → fully-DIY: connectors are AGENTS
-        // you author, never built-ins (design 28 · 22).
-        (
-            "+ agent",
-            "add an agent: AI · connector · plan/execute mind",
-        ),
+        // Add an AI backend under the root (design 28 · 22).
+        ("+ agent", "add an AI agent under the root"),
         ("connectors", "ollama (keyless: port + model)"),
-        ("", "· author your own JS connector in-frame"),
-        ("", "· @sh launch a coder to write one"),
-        // The third kind: an authored JS MIND that drives the brain and asks YOU
-        // through the live question card (design 28 · 27).
-        ("mind", "a JS agent that plans, drives the brain, ASKS you"),
-        // Its loop is VISIBLE (the plan panel) and CANCELABLE — `ps` → `cancel` kills
-        // the brain call it is blocked in; the mind itself lives on (design 27).
-        ("plan panel", "a mind's live loop · Esc cancels the step"),
-        // A script agent is not write-once: `/edit` reopens the agent you're standing
-        // in and pre-fills the editor with its code (design 28).
-        ("/edit", "reopen this agent's code — read + edit"),
-        ("/commands", "/help · /intro · /setup · /model · /edit"),
+        // A live loop an agent narrates (`{type:"plan"}` + `{type:"step"}`) docks here
+        // and is CANCELABLE — `ps` → `cancel` kills the call it is blocked in.
+        ("plan panel", "a live loop · Esc cancels the step"),
+        ("/commands", "/help · /intro · /setup · /model"),
         ("exit", "Ctrl+Q · Ctrl+C twice · hold q"),
     ];
     // The card's left indent + the key column the rows line up on.
@@ -3087,15 +2958,11 @@ mod e2e {
             scroll_max: std::cell::Cell::new(0),
             flow: None,
             add_agent_picker: false,
-            editor: None,
             onboard_tx,
             probe_gen: 0,
             question: None,
             plan: None,
             known_agents: vec!["kernel".into(), "core".into()],
-            // No authored agents at boot — a seeded connector/mind joins this list (and
-            // a tree refresh discovers ones the brain authored).
-            scripts: Vec::new(),
             pending: VecDeque::new(),
             ai_tx,
             ai_phase: None,
@@ -3406,9 +3273,8 @@ mod e2e {
     }
 
     #[test]
-    fn help_lists_the_self_emergence_ladder() {
-        // /help must teach the three ways to a brain: ollama · your own JS connector
-        // · @sh a coder (design 22 · 28).
+    fn help_lists_the_connector_onramp() {
+        // /help must teach adding a brain: `+ agent` · the ollama connector (design 22).
         let mut app = test_app();
         app.help_open = true;
         let backend = TestBackend::new(100, 30);
@@ -3418,16 +3284,10 @@ mod e2e {
         assert!(text.contains("+ agent"), "the adder is documented");
         assert!(
             text.contains("connectors"),
-            "the connector ladder is documented"
+            "the connector on-ramp is documented"
         );
         assert!(text.contains("ollama"), "the keyless on-ramp");
-        assert!(text.contains("JS connector"), "author your own");
-        assert!(text.contains("@sh"), "launch a coder");
-        // …and that a connector is not write-once: `/edit` reopens it (design 28).
-        assert!(
-            text.contains("/edit"),
-            "reopening a connector is documented"
-        );
+        assert!(text.contains("@sh"), "the shell is documented");
     }
 
     /// The card must FIT its text (design 22). Its longest rows used to be hard-cut by a
@@ -3446,8 +3306,7 @@ mod e2e {
             "run in the live shell (Ctrl+F focus · Esc release)",
             "workspace kernel: up · down · <verb> [k=v…]",
             "select + copy in your terminal · Cmd/Ctrl+V pastes",
-            "a JS agent that plans, drives the brain, ASKS you",
-            "reopen this agent's code — read + edit",
+            "a live loop · Esc cancels the step",
             "Ctrl+Q · Ctrl+C twice · hold q",
         ] {
             assert!(

@@ -667,11 +667,10 @@ mod tests {
         json!({"id":id,"agent":agent,"parent":null,"verb":"script","started_at":1.0})
     }
 
-    /// ① The REAL table a live `js_runtime` mind produces (rows pasted from a running
-    /// kernel): the script is a TASK of its own, and the brain call it is blocked in is
-    /// that row's CHILD. Esc kills the CHILD — the mind's `send` resolves
-    /// `{"cancelled":true}`, and its script row (which IS the mind) survives to take the
-    /// next turn.
+    /// ① The REAL table a live driver agent produces (rows pasted from a running
+    /// kernel): the driver is a TASK of its own, and the brain call it is blocked in is
+    /// that row's CHILD. Esc kills the CHILD — the driver's `send` resolves
+    /// `{"cancelled":true}`, and its own row survives to take the next turn.
     #[test]
     fn a_mind_cancels_the_brain_call_under_its_script_row() {
         let rows = vec![
