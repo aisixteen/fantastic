@@ -40,7 +40,9 @@ pub mod tasks;
 pub mod test_support;
 
 pub use agent::{Agent, AgentId, AgentRecord};
-pub use authz::{authorize_call, default_can_call, Decision, PRIVILEGED_VERBS};
+pub use authz::{
+    authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE, PRIVILEGED_VERBS,
+};
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};

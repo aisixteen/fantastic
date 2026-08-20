@@ -25,7 +25,6 @@
 //! `"type":"emit"`. Errors emit `{"type":"error", ...}`.
 
 use crate::agent::{Agent, AgentId};
-use crate::authz::Decision;
 use crate::kernel::Kernel;
 use crate::tasks::{
     current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
@@ -92,6 +91,27 @@ fn verb_of(payload: &Value) -> &str {
     payload.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
+/// Read a holder's authority grant (`can_call` or `callable_by`) + its tree facts
+/// (parent id, direct-child ids) for the gate. An absent agent → empty grant →
+/// deny-all (never a hole).
+fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, HashSet<String>) {
+    match holder {
+        Some(a) => {
+            let grant = a
+                .meta
+                .read()
+                .expect("meta lock poisoned")
+                .get(field)
+                .cloned()
+                .unwrap_or(Value::Null);
+            let parent = a.parent_id.as_ref().map(|p| p.0.clone());
+            let kids: HashSet<String> = a.child_ids().into_iter().map(|c| c.0).collect();
+            (grant, parent, kids)
+        }
+        None => (Value::Null, None, HashSet::new()),
+    }
+}
+
 impl Kernel {
     /// Send a verb. Resolves target in the flat agents index,
     /// dispatches through system-verb table or the agent's bundle,
@@ -113,20 +133,16 @@ impl Kernel {
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let verb = verb_of(&payload).to_string();
 
-        // ── CALL GATE — deny-all for agent-originated sends ──────────────
+        // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // Trust boundary = who ORIGINATED the send. An operator send
         // (`current_sender()` is None: CLI/bootstrap/loader-at-boot/test, or a
-        // verb completing its own side effect under `with_operator`) is the root
-        // of trust → ungated. An agent send is DENY-ALL: permitted only by a
-        // grant on the sender's record. `reflect` is never gated.
-        if verb != "reflect" {
-            if let Some(orig) = current_sender() {
-                let d = self.gate(&orig, &verb, &target);
-                if !d.allowed {
-                    return json!({
-                        "error": d.reason, "reason": "unauthorized", "hint": d.hint,
-                    });
-                }
+        // verb completing its own side effect under `with_operator`) is the origin
+        // root of trust → ungated. Every AGENT send — ANY verb, `reflect`
+        // included, nothing exempt — needs BOTH the sender's `can_call` (egress)
+        // AND the target's `callable_by` (ingress) to grant the edge.
+        if let Some(orig) = current_sender() {
+            if let Some(denial) = self.gate(&orig, &verb, &target, &payload) {
+                return denial;
             }
         }
 
@@ -163,37 +179,142 @@ impl Kernel {
         reply
     }
 
-    /// The call gate's authorization decision for an agent-originated send.
-    /// Reads the SENDER's `can_call` + tree facts (parent, children, root) and
-    /// delegates to [`crate::authz::authorize_call`]. A sender with no record
-    /// cannot be vouched for → empty grant → deny-all (never a hole).
-    fn gate(self: &Arc<Self>, sender_id: &AgentId, verb: &str, target: &Arc<Agent>) -> Decision {
+    /// The two-sided call gate for an agent-originated send. Returns the error
+    /// `Value` if the send is refused, else `None`. Checks egress (the sender's
+    /// `can_call`) then ingress (the target's `callable_by`), both via the one
+    /// [`crate::authz::authorize_call`] engine, then the authority-conferral rules
+    /// (no self-raise; delegate only a subset). A holder with no record → empty
+    /// grant → deny-all (never a hole).
+    fn gate(
+        self: &Arc<Self>,
+        sender_id: &AgentId,
+        verb: &str,
+        target: &Arc<Agent>,
+        payload: &Value,
+    ) -> Option<Value> {
         let loader_id = self.root().map(|r| r.id.0.clone());
         let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
-        let (can_call, parent_id, child_ids) = match &sender {
-            Some(a) => {
-                let can_call = a
-                    .meta
-                    .read()
-                    .expect("meta lock poisoned")
-                    .get("can_call")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                let parent = a.parent_id.as_ref().map(|p| p.0.clone());
-                let kids: HashSet<String> = a.child_ids().into_iter().map(|c| c.0).collect();
-                (can_call, parent, kids)
-            }
-            None => (Value::Null, None, HashSet::new()),
-        };
-        crate::authz::authorize_call(
-            &can_call,
+        let (s_can, s_parent, s_kids) = grant_facts(sender.as_deref(), "can_call");
+
+        // Egress — may the SENDER call the target?
+        let d = crate::authz::authorize_call(
+            &s_can,
             verb,
             target.id.as_str(),
             sender_id.as_str(),
-            parent_id.as_deref(),
-            &child_ids,
+            s_parent.as_deref(),
+            &s_kids,
             loader_id.as_deref(),
-        )
+            true,
+        );
+        if !d.allowed {
+            return Some(json!({
+                "error": format!("{sender_id} may not call {verb:?} on {}", target.id),
+                "reason": "unauthorized", "side": "egress", "hint": d.hint,
+            }));
+        }
+
+        // Ingress — does the TARGET accept the sender? (tokens relative to target;
+        // privileged-no-wildcard is egress-only, so `enforce_privileged=false`.)
+        let (t_call, t_parent, t_kids) = grant_facts(Some(target.as_ref()), "callable_by");
+        let di = crate::authz::authorize_call(
+            &t_call,
+            verb,
+            sender_id.as_str(),
+            target.id.as_str(),
+            t_parent.as_deref(),
+            &t_kids,
+            loader_id.as_deref(),
+            false,
+        );
+        if !di.allowed {
+            return Some(json!({
+                "error": format!("{} does not accept {verb:?} from {sender_id}", target.id),
+                "reason": "unauthorized", "side": "ingress", "hint": di.hint,
+            }));
+        }
+
+        // Authority conferral — no self-raise, delegate only a subset you hold.
+        if verb == "create_agent" || verb == "update_agent" {
+            return self.check_conferral(
+                sender_id,
+                &s_can,
+                s_parent.as_deref(),
+                &s_kids,
+                loader_id.as_deref(),
+                payload,
+            );
+        }
+        None
+    }
+
+    /// Authority flows from ABOVE only: an agent may not raise its OWN authority
+    /// fields, and may confer on another only a SUBSET of its own `can_call`.
+    fn check_conferral(
+        self: &Arc<Self>,
+        sender_id: &AgentId,
+        s_can: &Value,
+        s_parent: Option<&str>,
+        s_kids: &HashSet<String>,
+        loader_id: Option<&str>,
+        payload: &Value,
+    ) -> Option<Value> {
+        let obj = payload.as_object()?;
+        let confers = obj.contains_key("can_call") || obj.contains_key("callable_by");
+        if !confers {
+            return None;
+        }
+        let verb = verb_of(payload);
+        let edited = obj.get("id").and_then(Value::as_str);
+        // Self-raise: never edit your own authority fields.
+        if verb == "update_agent" && edited == Some(sender_id.as_str()) {
+            return Some(json!({
+                "error": format!("{sender_id} may not edit its own can_call/callable_by"),
+                "reason": "unauthorized", "side": "self-grant", "hint": crate::authz::FROM_ABOVE,
+            }));
+        }
+        // Subset: every LATERAL edge in the conferred `can_call` must be one the
+        // granter itself holds (structural tokens are free; `callable_by` grants no
+        // reach, so it is unbounded).
+        if let Some(Value::Object(conferred)) = obj.get("can_call") {
+            for (key, verbs) in conferred {
+                if key.starts_with('$') {
+                    continue; // structural tokens confer no lateral reach
+                }
+                // Conferring `"*"` (or a list with it) requires the granter to hold
+                // `"*"` on that target; a concrete list requires each verb.
+                let probe: Vec<&str> = match verbs {
+                    Value::Array(vs) if !vs.iter().any(|v| v.as_str() == Some("*")) => {
+                        vs.iter().filter_map(Value::as_str).collect()
+                    }
+                    _ => vec!["*"],
+                };
+                for v in probe {
+                    let ok = crate::authz::authorize_call(
+                        s_can,
+                        v,
+                        key,
+                        sender_id.as_str(),
+                        s_parent,
+                        s_kids,
+                        loader_id,
+                        true,
+                    )
+                    .allowed;
+                    if !ok {
+                        return Some(json!({
+                            "error": format!(
+                                "{sender_id} cannot delegate {v:?} on {key} — you may only \
+                                 confer can_call you already hold"
+                            ),
+                            "reason": "unauthorized", "side": "delegation",
+                            "hint": crate::authz::FROM_ABOVE,
+                        }));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Run ONE dispatch as a registered, killable task and await it — the unit
@@ -333,16 +454,11 @@ impl Kernel {
         let summary = summarize_payload(&header);
 
         // Call gate (see `Kernel::send`) — the binary path carries the same
-        // agent-originated write_stream/read_stream sends. Operator + reflect skip.
-        if verb != "reflect" {
-            if let Some(orig) = current_sender() {
-                let d = self.gate(&orig, &verb, &target);
-                if !d.allowed {
-                    return (
-                        json!({ "error": d.reason, "reason": "unauthorized", "hint": d.hint }),
-                        Vec::new(),
-                    );
-                }
+        // agent-originated write_stream/read_stream sends, gated two-sided.
+        // Only an operator (`current_sender()` is None) skips it.
+        if let Some(orig) = current_sender() {
+            if let Some(denial) = self.gate(&orig, &verb, &target, &header) {
+                return (denial, Vec::new());
             }
         }
 

@@ -70,7 +70,12 @@ async fn create_proxy_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     let r = kernel
         .send(
             &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":PROXY_HM,"id":id}),
+            json!({
+                "type":"create_agent","handler_module":PROXY_HM,"id":id,
+                // Two-sided deny-all: the `tools` agent dispatches to this proxy —
+                // accept it (ingress) so its granted egress lands.
+                "callable_by": { "tools": "*" },
+            }),
         )
         .await;
     assert_eq!(r["id"], id, "create_agent reply: {r}");

@@ -286,6 +286,8 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 // the fs edge seals by default — open it so history persists through it
                 "ingress_rule": "allow_all",
+                // Two-sided deny-all: accept the backend that persists through it.
+                "callable_by": { backend_id.clone(): "*" },
             }),
         )
         .await;
