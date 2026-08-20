@@ -76,6 +76,13 @@ async def test_pump_copies_between_bridges(seeded_kernel, tmp_path, monkeypatch)
     # The pump has dst PULL from src (read_stream) — a lateral edge, so deny-all
     # needs an explicit grant on the sink for exactly that verb on the source.
     dst = await _open(seeded_kernel, root="dst", can_call={src: ["read_stream"]})
+    # Two-sided deny-all: the source must reciprocally ACCEPT the sink's read_stream.
+    src_agent = seeded_kernel.ctx.agents.get(src)
+    cb = dict(src_agent._meta.get("callable_by") or {})
+    cb[dst] = ["read_stream"]
+    await seeded_kernel.send(
+        "kernel_state", {"type": "update_agent", "id": src, "callable_by": cb}
+    )
     await seeded_kernel.send(
         src,
         {

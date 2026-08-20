@@ -79,6 +79,13 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
             "can_call": {"cli": ["token"]},
         },
     )
+    # Two-sided deny-all: open cli's reciprocal ingress for alice's `token`.
+    cli = seeded_kernel.ctx.agents.get("cli")
+    cb = dict(cli._meta.get("callable_by") or {})
+    cb["alice_xxx"] = ["token"]
+    await seeded_kernel.send(
+        "kernel_state", {"type": "update_agent", "id": "cli", "callable_by": cb}
+    )
 
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))

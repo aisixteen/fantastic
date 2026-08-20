@@ -43,6 +43,17 @@ async def _wired(kernel, **meta) -> str:
     )
 
 
+async def _accept(kernel, target: str, caller: str, verbs) -> None:
+    """Two-sided deny-all: open the callee's reciprocal `callable_by` so a spawned
+    program's `kernel.send` (relayed through its owner) actually lands. Merges."""
+    tgt = kernel.ctx.agents.get(target)
+    cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
+    cb[caller] = verbs
+    await kernel.send(
+        kernel.id, {"type": "update_agent", "id": target, "callable_by": cb}
+    )
+
+
 async def _poll_done(kernel, xid: str, job_id: str, timeout: float = 10.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -130,8 +141,11 @@ def test_an_unknown_shim_name_raises_naming_the_served_set():
 async def test_shim_python_gives_the_program_a_working_kernel(seeded_kernel):
     """`shim:'python'` must yield a `kernel` that actually reaches the kernel — its
     whole purpose. The reply proves the full round trip child → spawner → kernel."""
-    xid = await _wired(seeded_kernel, shim="python")
-    peer = await _make(seeded_kernel)  # sealed: `reflect` still answers
+    peer = await _make(seeded_kernel)  # sealed leg: `reflect` still answers
+    # The program (owned by xid) reflects the peer — a gated send now (reflect
+    # included). Grant xid's egress + the peer's reciprocal ingress, both for reflect.
+    xid = await _wired(seeded_kernel, shim="python", can_call={peer: ["reflect"]})
+    await _accept(seeded_kernel, peer, xid, ["reflect"])
     code = (
         "print(kernel.self_id, flush=True)\n"
         f"print(kernel.send({peer!r}, {{'type': 'reflect'}})['id'], flush=True)\n"
@@ -159,8 +173,11 @@ async def test_no_shim_leaves_the_program_unmodified(seeded_kernel):
     """The published WIRE is the contract: a program that names no shim gets the raw fd
     and the framing, with NOTHING prepended — it proves that by speaking the wire and by
     reporting that no `kernel` global was injected."""
-    xid = await _wired(seeded_kernel)  # NO shim, on the record or the call
     peer = await _make(seeded_kernel)
+    # NO shim, on the record or the call — but the raw wire still reflects the peer,
+    # a gated send: grant xid's egress + the peer's reciprocal ingress.
+    xid = await _wired(seeded_kernel, can_call={peer: ["reflect"]})
+    await _accept(seeded_kernel, peer, xid, ["reflect"])
     r = await seeded_kernel.send(
         xid,
         {

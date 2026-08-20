@@ -68,7 +68,23 @@ async def _make_ollama(kernel, grants=None):
             "can_call": can_call,
         },
     )
-    return rec["id"]
+    aid = rec["id"]
+    # Two-sided deny-all: every granted egress needs the callee's reciprocal
+    # `callable_by` (the backend streams its turn to `cli` and routes to peers).
+    for target in can_call:
+        await _accept(kernel, target, aid)
+    return aid
+
+
+async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
+    """Open the callee's ingress so a granted egress actually lands — merges,
+    keeping the callee's structural baseline `callable_by`."""
+    tgt = kernel.ctx.agents.get(target)
+    cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
+    cb[caller] = verbs
+    await kernel.send(
+        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
+    )
 
 
 async def _until_calls(fp, n: int, timeout: float = 5.0) -> bool:
@@ -402,11 +418,12 @@ async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
     mod.VERBS = {}
     sys.modules["raiser.tools"] = mod
 
-    oid = await _make_ollama(seeded_kernel)
     rec = await seeded_kernel.send(
         "kernel_state",
         {"type": "create_agent", "handler_module": "raiser.tools", "id": "raiser"},
     )
+    # oid needs egress to raiser (and _make_ollama opens raiser's reciprocal ingress).
+    oid = await _make_ollama(seeded_kernel, grants={"raiser": ["reflect"]})
     fp = _FakeProvider([[_call(rec["id"], {"type": "reflect"})], ["saw it"]])
     ot._providers[oid] = fp
     try:

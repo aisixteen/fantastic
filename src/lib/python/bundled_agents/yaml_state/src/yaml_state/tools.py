@@ -26,6 +26,8 @@ from typing import Any
 
 import yaml
 
+from kernel import operator_context
+
 _MEM_SENTENCE = (
     "Your durable memory. Facts to remember across sessions live here. `set` a "
     "descriptive key the moment the user tells you something worth keeping (a name, "
@@ -58,10 +60,14 @@ def _emit_yaml(doc: dict[str, Any]) -> str:
 async def _load(agent) -> dict[str, Any]:
     """Read the store THROUGH the loader (`kernel_state.load_blob`). Missing / denied /
     no-store ⇒ {} (reads are lenient; writes failfast)."""
-    r = await agent.send(
-        "kernel_state",
-        {"type": "load_blob", "agent_id": agent.id, "name": "state.yaml"},
-    )
+    # Persistence is processed from ABOVE: reading/writing your own state through
+    # the loader is operator bookkeeping (a side effect of your authorized verb),
+    # not a lateral call — so it runs ungated, like create_agent's child-boot.
+    with operator_context():
+        r = await agent.send(
+            "kernel_state",
+            {"type": "load_blob", "agent_id": agent.id, "name": "state.yaml"},
+        )
     content = r.get("content") if isinstance(r, dict) else None
     if not content:
         return {}
@@ -76,15 +82,16 @@ async def _persist(agent, doc: dict[str, Any], verb: str) -> dict | None:
     """Write the store THROUGH the loader (`kernel_state.persist_blob`); surface a
     denied/failed/no-store write as an error (no silent loss). Returns an error dict,
     or None on success."""
-    w = await agent.send(
-        "kernel_state",
-        {
-            "type": "persist_blob",
-            "agent_id": agent.id,
-            "name": "state.yaml",
-            "content": _emit_yaml(doc),
-        },
-    )
+    with operator_context():  # persist from above — operator bookkeeping (see _load)
+        w = await agent.send(
+            "kernel_state",
+            {
+                "type": "persist_blob",
+                "agent_id": agent.id,
+                "name": "state.yaml",
+                "content": _emit_yaml(doc),
+            },
+        )
     if not isinstance(w, dict):
         return {"error": f"yaml_state.{verb}: loader gave no reply"}
     if w.get("error"):

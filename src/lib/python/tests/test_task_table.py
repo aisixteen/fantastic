@@ -82,11 +82,19 @@ sys.modules["slow_agent.tools"] = _mod
 SLOW = "slow_agent.tools"
 
 
-async def _mk(kernel, agent_id: str, can_call: dict | None = None) -> str:
+async def _mk(
+    kernel,
+    agent_id: str,
+    can_call: dict | None = None,
+    callable_by: dict | None = None,
+) -> str:
     payload = {"type": "create_agent", "handler_module": SLOW, "id": agent_id}
+    # Two-sided deny-all: a `chain` send to a SIBLING needs BOTH the caller's
+    # `can_call` (egress) and the callee's `callable_by` (ingress).
     if can_call is not None:
-        # Deny-all: a `chain` send to a SIBLING is lateral egress → explicit grant.
         payload["can_call"] = can_call
+    if callable_by is not None:
+        payload["callable_by"] = callable_by
     rec = await kernel.send("kernel_state", payload)
     return rec["id"]
 
@@ -110,7 +118,7 @@ async def test_ps_shows_the_tree_of_a_nested_send(seeded_kernel):
     shows both rows with the parent link, so a caller sees who spawned what."""
     _hook_calls.clear()
     a = await _mk(seeded_kernel, "slow_a", can_call={"slow_b": ["slow"]})
-    b = await _mk(seeded_kernel, "slow_b")
+    b = await _mk(seeded_kernel, "slow_b", callable_by={"slow_a": ["slow"]})
 
     caller = asyncio.create_task(seeded_kernel.send(a, {"type": "chain", "next": b}))
     await asyncio.wait_for(_run_flag(b).wait(), timeout=2)
@@ -144,7 +152,7 @@ async def test_cancel_kills_the_whole_subtree(seeded_kernel):
     {"cancelled": True}; it never raises."""
     _hook_calls.clear()
     a = await _mk(seeded_kernel, "slow_a", can_call={"slow_b": ["slow"]})
-    b = await _mk(seeded_kernel, "slow_b")
+    b = await _mk(seeded_kernel, "slow_b", callable_by={"slow_a": ["slow"]})
 
     caller = asyncio.create_task(seeded_kernel.send(a, {"type": "chain", "next": b}))
     await asyncio.wait_for(_run_flag(b).wait(), timeout=2)

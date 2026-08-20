@@ -110,6 +110,8 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
                 "handler_module": "ollama_backend.tools",
                 "id": "the_ai",
                 "file_bridge_id": store_agent,
+                # Two-sided deny-all: accept the mind that drives it (ingress).
+                "callable_by": {"the_mind": "*"},
             },
         )
     )["id"]
@@ -282,6 +284,8 @@ async def _spawn_plan_mind(k, store_agent, scripts):
                 "handler_module": "ollama_backend.tools",
                 "id": "the_ai",
                 "file_bridge_id": store_agent,
+                # Two-sided deny-all: accept the mind that drives it (ingress).
+                "callable_by": {"the_mind": "*"},
             },
         )
     )["id"]

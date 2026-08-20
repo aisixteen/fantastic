@@ -37,8 +37,10 @@ answers `{type:"reflect"}` — the universal discovery verb.
 │            TASK TABLE — every in-flight dispatch, a tree)                │
 │   System verbs (create/delete/update/list_agents + ps/cancel) baked      │
 │   into Agent.                                                            │
-│   CALL GATE — deny-all `Agent.send` (kernel/_authz.py): an AGENT send    │
-│   needs a `can_call` grant; an OPERATOR send (sender=None) is ungated.   │
+│   CALL GATE — two-sided deny-all `Agent.send` (kernel/_authz.py): an     │
+│   AGENT send needs the sender's `can_call` (egress) AND the target's     │
+│   `callable_by` (ingress) — reflect included; OPERATOR (sender=None)      │
+│   ungated. Authority descends only (no self-raise).                      │
 │   Persistence DECOUPLED — `kernel_state` (root) is a weak-bound STREAM      │
 │   CONSUMER: it auto-persists records THROUGH a `file_bridge` provider's     │
 │   write_stream (ephemeral `kernel_store`); cold read stays direct.          │
@@ -378,40 +380,48 @@ the next process start.
   `interrupt` on `exec_bridge` is a DIFFERENT thing — SIGINT to one of ITS
   jobs by `job_id`, the signal-precise twin of `stop`'s SIGKILL; not a call
   cancellation.) Pure-async bundles need nothing.
-- **The CALL GATE (`can_call`) — deny-all is the transport's default.** Every
+- **The CALL GATE — fully-gated, two-sided, from-above-only.** Every
   `Agent.send` passes a gate in `kernel/_authz.py` (`authorize_call` → the one
   `Decision`; io_bridge imports that type UP — the kernel owns it). The trust
   boundary is WHO ORIGINATED the send (`_current_sender`):
   - **Operator send** — `sender is None` (the CLI, the cold bootstrap, a loader
-    hydrating at boot, a test driver calling `kernel.send` directly). The root of
-    trust → **ungated**.
-  - **Agent send** — `sender` is set (a handler/script reaching out). **Deny-all**:
-    permitted only by an egress grant on the SENDER's record,
-    `can_call: { target|token : ["<verb>", ...] | "*" }`.
-  `reflect` is NEVER gated (the discovery moat). Relative tokens resolve at the
-  gate: `$self`, `$parent`, `$children` (direct children — set membership),
-  `$loader` (the persistence root, where `persist_blob`/`load_blob` live). The
-  **Unix baseline** the kernel stamps + MERGES on every `create_agent` is
-  `{$self:*, $parent:*, $children:*, $loader:[persist_blob,load_blob]}` — command
-  your own subtree, answer your creator, persist your own state. An explicit
-  `can_call` in the payload ADDS lateral edges on top (merge, never replace), so a
-  grant never has to re-declare the baseline. **PRIVILEGED verbs**
-  (`create_agent`/`delete_agent`/`update_agent`) are never covered by a wildcard —
-  they must be named explicitly — EXCEPT when the target is the sender itself
-  (forking/editing your OWN subtree is baseline, not escalation). This plugs the
-  depth-1 hole (a root child's `$parent:*` can't mutate the root). An agent can
-  NEVER grant ITSELF new edges — that is why runtime-spawned children are reachable
-  only through the structural `$children` baseline, not a self-issued grant.
-  **Verb-mechanics exception** (NOT a privilege bypass): a verb completing its OWN
-  side effect runs under `operator_context()` — `create_agent` booting the child it
-  just made, and the loader's `persist_blob`/`load_blob`/`aflush` writing to its
-  own store. Nothing else escalates.
-  **Wiring pairs with granting** — least-privilege is explicit, not derived. An
-  operator who wires an egress (a scheduler `target`, an AI's `cli`/peer listener,
-  a bundle's `file_bridge_id` store) ALSO grants that exact edge in `can_call`. An
-  INBOUND relay (`web_ws`/`web_rest`/`ws_bridge`/`relay_connector`) composes the
-  two gates: `ingress_rule` says WHO may call in, its own `can_call` says WHERE
-  into this kernel those calls may land.
+    hydrating at boot, a test driver, or a verb completing its own side effect
+    under `operator_context`). The origin root of trust → **ungated**; it never
+    reaches the gate.
+  - **Agent send** — `sender` is set. Checked TWICE: **egress** — the SENDER's
+    `can_call` must allow `(target, verb)` — AND **ingress** — the TARGET's
+    `callable_by` must allow `(sender, verb)`. An edge exists only if BOTH ends
+    grant it. A denial names the `side` (`egress`|`ingress`). Both fields are grant
+    maps of the same shape, `{ id|token : ["<verb>", …] | "*" }`.
+  The gate NEVER branches on a verb name — **nothing is exempt, `reflect` included**
+  (gating reflect closes lateral discovery; an operator-conferred toolset that
+  needs to see peers must grant `reflect` on them). Relative tokens resolve at the
+  gate relative to the grant's HOLDER: `$self`, `$parent`, `$children` (direct
+  children — set membership), `$loader` (the persistence root; rarely named, NOT in
+  the baseline). The **structural baseline** the kernel stamps + MERGES on every
+  agent (root, created, disk-loaded alike, in `Agent.__init__`), on BOTH fields, is
+  `{$self:*, $parent:*, $children:*}` — reach/accept your own subtree and your
+  creator. An explicit grant in the create payload ADDS edges on top (merge, never
+  replace). **PRIVILEGED verbs** (`create_agent`/`delete_agent`/`update_agent`) are
+  never covered by a wildcard — named explicitly — EXCEPT when the other end is the
+  holder itself (forking your OWN subtree is baseline). This is an EGRESS rule (it
+  constrains who may REACH a mutation); on ingress a `$children:*` callee
+  legitimately accepts a privileged verb, since egress already guards escalation.
+  **Authority flows from ABOVE only:** grants are set by the creator/operator at
+  `create_agent`, or a parent DELEGATES a subset of its OWN `can_call` to a
+  descendant (`callable_by` is freely conferrable — ingress grants no reach). An
+  agent can NEVER raise its own authority — an `update_agent` on itself editing
+  `can_call`/`callable_by` is REFUSED (`side:"self-grant"`); over-delegating more
+  `can_call` than the granter holds is refused (`side:"delegation"`).
+  **Persist is processed from ABOVE** (NOT a verb exemption): a consumer's
+  `persist_blob`/`load_blob` to the loader, and `create_agent`'s child-boot, run
+  under `operator_context()` — bookkeeping, ungated by ORIGIN.
+  **Wiring pairs with granting on BOTH ends** — an operator who wires an egress (a
+  scheduler `target`, an AI's `cli`/peer listener, a bundle's `file_bridge_id`
+  store) grants that edge in the caller's `can_call` AND opens the callee's
+  `callable_by`. An INBOUND relay (`web_ws`/`web_rest`/`ws_bridge`/`relay_connector`)
+  composes the gates: `ingress_rule` says WHO may call in, its own `can_call` says
+  WHERE those calls land, and the local target's `callable_by` must accept the relay.
 - **`on_delete` cascade hook** — substrate calls `await
   agent.on_delete()` depth-first during cascade-delete BEFORE
   detaching the record from `kernel.agents` and the parent's

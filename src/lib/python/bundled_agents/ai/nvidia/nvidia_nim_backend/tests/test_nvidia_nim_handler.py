@@ -30,6 +30,16 @@ class _FakeProvider:
             yield x
 
 
+async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
+    """Open the callee's ingress so a granted egress lands — merges (keeps baseline)."""
+    tgt = kernel.ctx.agents.get(target)
+    cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
+    cb[caller] = verbs
+    await kernel.send(
+        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
+    )
+
+
 async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None):
     # `context_window` explicitly: the 4096 default leaves only ~1k for the conversation
     # once the reflect primer + howtos are in the system block, so these tests (about
@@ -48,6 +58,9 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
         can_call[file_bridge_id] = "*"
     rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
     nid = rec["id"]
+    # Two-sided deny-all: open each callee's reciprocal `callable_by`.
+    for target in can_call:
+        await _accept(kernel, target, nid)
     if with_key and file_bridge_id is not None:
         await kernel.send(
             file_bridge_id,

@@ -60,6 +60,13 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
             },
         )
     )["id"]
+    # Two-sided deny-all: open cli's reciprocal ingress for the scheduler's `say`.
+    cli = seeded_kernel.ctx.agents.get("cli")
+    cb = dict(cli._meta.get("callable_by") or {})
+    cb[sid] = ["say"]
+    await seeded_kernel.send(
+        "kernel_state", {"type": "update_agent", "id": "cli", "callable_by": cb}
+    )
     sch = await seeded_kernel.send(
         sid,
         {

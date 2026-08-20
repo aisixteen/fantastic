@@ -565,6 +565,13 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
         "kernel_state",
         {"type": "update_agent", "id": b_id, "can_call": {fb: "*"}},
     )
+    # Two-sided deny-all: `fb` must reciprocally ACCEPT the bridge's relayed calls.
+    fb_agent = kb_kern.ctx.agents.get(fb)
+    cb = dict(fb_agent._meta.get("callable_by") or {})
+    cb[b_id] = "*"
+    await kb_kern.send(
+        "kernel_state", {"type": "update_agent", "id": fb, "callable_by": cb}
+    )
     blob = bytes(range(256)) * 50  # 12800 bytes, binary
     w = await kb_kern.send(
         fb,
