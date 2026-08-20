@@ -653,12 +653,6 @@ pub fn color_for(id: &str) -> Color {
 /// The destination + intent resolved from one input line.
 pub enum Route {
     Ai(String),
-    /// **Prose to a SCRIPT agent** — a `send` turn carrying the whole line as `text`
-    /// (design 12 · 14). The addressed agent runs authored code with an
-    /// `on_message()` inbox (a `js_runtime` / `lua_runtime` agent: a custom connector,
-    /// a plan/execute mind), so it takes speech the way `@ai` does; only a
-    /// well-formed verb command (`status`, `send text=hi`) still routes as one.
-    Say(AgentId, String),
     Kernel(AgentId, Value),
     Reflect(AgentId),
     /// Run a command in the live PTY and breathe its screen into the chat.
@@ -703,44 +697,13 @@ fn ws_verb(body: &str) -> Route {
     Route::Workspace(WsCmd::Verb(AgentId::from("kernel"), Value::Object(p)))
 }
 
-/// Is `body` a **verb command** (the contract-14 sugar) rather than prose? — its
-/// first token is a bare lowercase verb identifier (`status`, `send`, `list_models`)
-/// and every remaining token is a `k=v` pair. Anything else is speech: a capital, a
-/// question mark, a second bare word, punctuation — "Help me pick a database for a
-/// new service." is prose, `send text=hi` is a verb.
-///
-/// This is the ONE discriminator that lets a script agent take both: prose becomes a
-/// `send` turn, a verb command stays a verb (so `@mind_x status` still stats it).
-/// Shape-based on purpose — the TUI cannot know an agent's verb list without asking,
-/// and a router that asks is a router that can hang.
-fn is_verb_command(body: &str) -> bool {
-    let mut toks = body.split_whitespace();
-    let Some(verb) = toks.next() else {
-        return false;
-    };
-    let bare_verb = verb.starts_with(|c: char| c.is_ascii_lowercase())
-        && verb
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    bare_verb
-        && toks.all(|t| {
-            t.split_once('=')
-                .is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| !c.is_whitespace()))
-        })
-}
-
 /// Resolve a chat input line against the sticky target. Returns the new sticky
 /// target (the resolved destination) + the route. `@target …` retargets;
 /// otherwise the sticky target receives the whole line. `ai`/`brain` go to the
 /// AI; any other id is a kernel agent (empty body → reflect, else a sugar
 /// `<verb> [k=v…]` command).
 ///
-/// `scripts` names the agents that run authored code (`js_runtime`/`lua_runtime` —
-/// the TUI reads them off the kernel's reflect tree). Those **take prose**: a line to
-/// one of them that isn't a well-formed verb command becomes a [`Route::Say`] `send`
-/// turn, the same speech `@ai` gets. Every other agent keeps the verb-sugar contract
-/// unchanged.
-pub fn route(line: &str, sticky: &str, scripts: &[String]) -> (String, Route) {
+pub fn route(line: &str, sticky: &str) -> (String, Route) {
     let line = line.trim();
     if line.is_empty() {
         return (sticky.to_string(), Route::Empty);
@@ -797,11 +760,6 @@ pub fn route(line: &str, sticky: &str, scripts: &[String]) -> (String, Route) {
     let id = AgentId::from(target.as_str());
     let route = if body.is_empty() {
         Route::Reflect(id)
-    } else if scripts.contains(&target) && !is_verb_command(&body) {
-        // A script agent takes SPEECH: the whole line rides in as a `send` turn's
-        // `text`, straight to its `on_message()` — you talk to a mind, you don't
-        // command it. (A verb command still routes as one, below.)
-        Route::Say(id, body)
     } else {
         let mut toks = body.split_whitespace();
         let verb = toks.next().unwrap_or("reflect");
@@ -930,11 +888,8 @@ mod tests {
         assert_ne!(color_for("web"), Color::White);
     }
 
-    /// The classic routing: NO script agents in scope, so every non-`@ai` line takes
-    /// the contract-14 verb sugar. Shadows [`super::route`] so the existing cases read
-    /// unchanged; the script-agent cases call `super::route` with a script list.
     fn route(line: &str, sticky: &str) -> (String, Route) {
-        super::route(line, sticky, &[])
+        super::route(line, sticky)
     }
 
     #[test]
@@ -945,88 +900,6 @@ mod tests {
             Route::Ai(b) => assert_eq!(b, "hello"),
             _ => panic!("expected Ai"),
         }
-    }
-
-    /// **You can TALK to a script agent.** A prose line addressed to one (a mind, a
-    /// custom connector — an agent whose handler runs authored code) is a `send` TURN
-    /// carrying the WHOLE line, exactly like `@ai`: the sentence a user types is the
-    /// sentence the script's `on_message()` receives. This is what the old verb-sugar
-    /// made impossible — `@mind_x Help me pick a database` used to route as the verb
-    /// `Help` with the rest of the sentence silently dropped.
-    #[test]
-    fn route_prose_to_a_script_agent_is_a_send_turn() {
-        let scripts = ["mind_ab12cd".to_string(), "conn_7f31a0".to_string()];
-        let sentence = "Help me pick a database for a new service.";
-        // Explicitly addressed…
-        let (sticky, r) = super::route(&format!("@mind_ab12cd {sentence}"), "ai", &scripts);
-        assert_eq!(sticky, "mind_ab12cd");
-        match r {
-            Route::Say(id, text) => {
-                assert_eq!(id.as_str(), "mind_ab12cd");
-                assert_eq!(text, sentence, "the WHOLE line rides in as the turn's text");
-            }
-            _ => panic!("prose to a script agent must be a Say turn"),
-        }
-        // …and on the sticky target (standing in the mind's chat, you just type).
-        let (sticky, r) = super::route(sentence, "mind_ab12cd", &scripts);
-        assert_eq!(sticky, "mind_ab12cd");
-        assert!(matches!(r, Route::Say(_, t) if t == sentence));
-    }
-
-    /// The verb sugar still works ON script agents — an explicit `@<id> <verb> [k=v…]`
-    /// is a command, not speech (that's how you `status` / `start` / `stop` a mind, and
-    /// how you hand it a `send` with explicit args).
-    #[test]
-    fn route_verb_command_to_a_script_agent_stays_a_verb() {
-        let scripts = ["mind_ab12cd".to_string()];
-        let (_s, r) = super::route("@mind_ab12cd status", "ai", &scripts);
-        match r {
-            Route::Kernel(id, payload) => {
-                assert_eq!(id.as_str(), "mind_ab12cd");
-                assert_eq!(payload["type"], "status");
-            }
-            _ => panic!("a bare verb stays a verb command"),
-        }
-        // `<verb> k=v…` too — the args form is unambiguous.
-        let (_s, r) = super::route("@mind_ab12cd send text=hi", "ai", &scripts);
-        assert!(matches!(&r, Route::Kernel(_, p) if p["type"] == "send" && p["text"] == "hi"));
-        // A bare `@<id>` still reflects it.
-        let (_s, r) = super::route("@mind_ab12cd", "ai", &scripts);
-        assert!(matches!(r, Route::Reflect(_)));
-    }
-
-    /// A NON-script agent is untouched by the rule: prose to it keeps the contract-14
-    /// verb sugar (the first word is the verb) — only agents that run authored code and
-    /// serve an `on_message()` inbox take speech.
-    #[test]
-    fn route_prose_to_a_non_script_agent_is_still_verb_sugar() {
-        let scripts = ["mind_ab12cd".to_string()];
-        let (_s, r) = super::route("@core list_agents please", "ai", &scripts);
-        match r {
-            Route::Kernel(id, payload) => {
-                assert_eq!(id.as_str(), "core");
-                assert_eq!(payload["type"], "list_agents");
-            }
-            _ => panic!("a non-script agent keeps the verb sugar"),
-        }
-    }
-
-    /// The discriminator itself: a bare lowercase verb (+ optional `k=v` args) is a
-    /// command; anything with a capital, punctuation, or a second bare word is speech.
-    #[test]
-    fn verb_command_shape() {
-        assert!(is_verb_command("status"));
-        assert!(is_verb_command("list_models"));
-        assert!(is_verb_command("send text=hi client_id=cli"));
-        assert!(is_verb_command(
-            "create_agent handler_module=web.tools port=8080"
-        ));
-        assert!(!is_verb_command(
-            "Help me pick a database for a new service."
-        ));
-        assert!(!is_verb_command("what is the plan?"));
-        assert!(!is_verb_command("Status"));
-        assert!(!is_verb_command("run the tests"));
     }
 
     #[test]

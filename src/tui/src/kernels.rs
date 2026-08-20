@@ -252,9 +252,8 @@ impl ActiveKernel {
     }
 
     /// Dispatch a verb to `target` **without mirroring it into the UI** — the door for
-    /// INTERNAL plumbing (the onboarding endpoint probe, the `/edit` record read, an
-    /// editor save). The verb is sent, the reply comes back, and nothing about it ever
-    /// reaches a chat.
+    /// INTERNAL plumbing (the onboarding endpoint probe). The verb is sent, the reply
+    /// comes back, and nothing about it ever reaches a chat.
     ///
     /// The ONE difference from [`Self::dispatch`] is the `watch`: without it the kernel
     /// has no watcher to fan the raw request payload out to, so the dispatch leaves no

@@ -34,8 +34,8 @@ pub struct HubNode {
     pub ty: Option<String>,
     /// The brain — pinned home, marked `★`.
     pub is_home: bool,
-    /// The synthetic `+ agent` adder — Enter opens the add-agent type picker (an
-    /// `AI agent` connect flow or a custom JS connector), not an agent chat.
+    /// The synthetic `+ agent` adder — Enter opens the add-agent picker (the
+    /// `AI agent` connect flow), not an agent chat.
     pub is_adder: bool,
     /// Tree depth (0 = root) → the row it sits on.
     pub depth: usize,
