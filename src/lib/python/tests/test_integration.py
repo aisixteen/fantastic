@@ -43,7 +43,7 @@ async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
 # NOTE: inter-LLM tool-calling (A calls B) is no longer a BACKEND concern — the
 # backend does one bare pass, and orchestrating one AI to call another is the
 # emergent MIND's job (a script driving the tool loop). Proven by the mind tests
-# (rust lua/js, python_runtime, swift JS), not here.
+# in each runtime, not here.
 
 
 async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):

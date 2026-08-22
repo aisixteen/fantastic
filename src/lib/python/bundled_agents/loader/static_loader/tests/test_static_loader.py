@@ -18,7 +18,7 @@ agents:
     mode: mem
   - id: worker
     handler_module: file_bridge.tools
-    ingress_rule: allow_all
+    ingress_rule: allow_all_ingress
     can_call:
       memory: [set, read]
 """

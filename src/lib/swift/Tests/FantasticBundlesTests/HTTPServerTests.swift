@@ -124,7 +124,7 @@ struct HTTPServerTests {
                 "id": .string("assets"),
                 "root": .string(rel),
                 // The fs edge SEALS by default — open it for the /file/ proxy.
-                "ingress_rule": .string("allow_all"),
+                "ingress_rule": .string("allow_all_ingress"),
             ]))
         _ = await kernel.send(
             AgentId("web"), .object(["type": .string("boot")]))
@@ -157,7 +157,7 @@ struct HTTPServerTests {
                 "handler_module": .string("web_rest.tools"),
                 "id": .string("rest"),
                 // The web_rest leg SEALS by default — open it for the POST.
-                "ingress_rule": .string("allow_all"),
+                "ingress_rule": .string("allow_all_ingress"),
                 // Deny-all: an inbound relay dispatches browser calls into the
                 // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
                 // says WHERE into the kernel it lands. This test POSTs to `core`.

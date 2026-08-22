@@ -31,9 +31,9 @@ Expected: `Finished ... target(s)` with no errors and no warnings.
 cargo check -p fantastic-cli --no-default-features --features embedded
 ```
 Expected: clean compile. None of the subprocess-using bundles
-(terminal_backend, python_runtime, local_runner, ssh_runner) pull
-in via path-dep resolution. If a future bundle accidentally adds a
-non-`optional` dep to one of those, this check fails.
+(terminal_backend, exec_bridge) pull in via path-dep resolution. If a
+future bundle accidentally adds a non-`optional` dep to one of those,
+this check fails.
 
 ### Test 3: clippy passes with -D warnings under default features
 

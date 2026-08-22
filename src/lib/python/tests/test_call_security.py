@@ -32,7 +32,7 @@ async def _mk(kernel, **meta) -> str:
     payload = {
         "type": "create_agent",
         "handler_module": "file_bridge.tools",
-        "ingress_rule": "allow_all",
+        "ingress_rule": "allow_all_ingress",
     }
     payload.update(meta)
     rec = await kernel.send(kernel.id, payload)

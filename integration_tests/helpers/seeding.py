@@ -206,7 +206,7 @@ def seed_store(binary: Path, workdir: Path) -> None:
         handler_module="file_bridge.tools",
         agent_id="store",
         root=".fantastic",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     if "error" in reply:
         raise RuntimeError(f"store seed failed: {reply}")
@@ -237,7 +237,7 @@ def seed_web_ws(binary: Path, workdir: Path) -> None:
     kernels for WS — the host serves `/<id>/ws` only when a `web_ws`
     child contributes the route (WS is opt-in, parity with Python).
 
-    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all`). IO legs now SEAL
+    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all_ingress`). IO legs now SEAL
     by default (an absent rule ⇒ `deny_inbound`), so a bare `web_ws` would
     refuse every forwarded reflect/call the harness dispatches through it.
     This is a drivable test surface — open it consciously. A test that
@@ -249,7 +249,7 @@ def seed_web_ws(binary: Path, workdir: Path) -> None:
         handler_module="web_ws.tools",
         agent_id="web_ws",
         parent_id="web",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     if "error" in reply and "no bundle" not in str(reply.get("error", "")):
         raise RuntimeError(f"web_ws seed failed: {reply}")
@@ -261,7 +261,7 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
     routes the host mounts at boot. Returns the agent id. Works on
     both kernels (web_rest.tools is registered in each).
 
-    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all`). IO legs now SEAL
+    Seeded EXPLICITLY OPEN (`ingress_rule=allow_all_ingress`). IO legs now SEAL
     by default (an absent rule ⇒ `deny_inbound`), so a bare `web_rest`
     would answer every harness POST with `403 {reason:"unauthorized"}`.
     This is a drivable diagnostic surface — open it consciously."""
@@ -271,7 +271,7 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
         handler_module="web_rest.tools",
         agent_id=agent_id,
         parent_id="web",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     if "error" in reply and "no bundle" not in str(reply.get("error", "")):
         raise RuntimeError(f"web_rest seed failed: {reply}")

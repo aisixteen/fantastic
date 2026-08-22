@@ -1,9 +1,9 @@
 // The child-side connector, VENDORED VERBATIM from python's
-// `python_runtime/_connector.py`.
+// `exec_bridge/_connector.py`.
 //
 // It is pure-stdlib Python (`os, json, socket, struct, threading, queue, sys`) with
-// zero dependency on the python kernel — and every runtime spawns a *python* child,
-// so all three prepend this identical text and implement only the PARENT half of the
+// zero dependency on the python kernel — each runtime's exec bridge prepends this
+// identical text (`shim:'python'`) and implements only the PARENT half of the
 // control socket. The wire is then identical by construction, not by discipline:
 // `[4-byte BE length | JSON body]`, with FANTASTIC_CTRL_FD / FANTASTIC_SELF_ID /
 // FANTASTIC_ARGS in the child env.
@@ -173,7 +173,7 @@ try:
     # idiom `import kernel`. Without this that would rebind the name to the
     # substrate `kernel` PACKAGE (installed in the venv), silently breaking the
     # tool. Register the injected connector under that name so `import kernel`
-    # returns the connector (mirrors the js_runtime `require('kernel')` fix). Safe:
+    # returns the connector (same fix as a `require('kernel')` binding). Safe:
     # the job runs in its OWN subprocess, so this doesn't touch the host's modules.
     _sys.modules["kernel"] = kernel
 except Exception as _e:

@@ -46,13 +46,13 @@ def test_resolve_ingress_absent_is_deny_inbound():
 
 
 def test_resolve_ingress_string_and_object_forms():
-    assert isinstance(resolve_ingress({"ingress_rule": "deny_inbound"}), DenyInbound)
+    assert isinstance(resolve_ingress({"ingress_rule": "deny_ingress"}), DenyInbound)
     # object form — `type` names the rule; config keys ride alongside it
     assert isinstance(
-        resolve_ingress({"ingress_rule": {"type": "deny_inbound"}}), DenyInbound
+        resolve_ingress({"ingress_rule": {"type": "deny_ingress"}}), DenyInbound
     )
     assert isinstance(
-        resolve_ingress({"ingress_rule": {"type": "allow_all"}}), AllowAll
+        resolve_ingress({"ingress_rule": {"type": "allow_all_ingress"}}), AllowAll
     )
 
 
@@ -60,7 +60,7 @@ def test_auth_shorthand_is_enforced_not_only_reported():
     """`auth` opens/closes BOTH directions, and `describe()` must not disagree.
 
     Was three silent defects at once. This test asserted the precedence with
-    `{"ingress_rule": "allow_all", "ingress_rule": "deny_inbound"}` — one dict, one key,
+    `{"ingress_rule": "allow_all_ingress", "ingress_rule": "deny_ingress"}` — one dict, one key,
     the first value discarded by Python before the call — so it asserted nothing about
     precedence, and `resolve_ingress` did not read `auth` at all. Meanwhile `describe()`
     did, so `auth:"allow_all"` reported `sealed:false` and denied every call. Assert the
@@ -74,17 +74,17 @@ def test_auth_shorthand_is_enforced_not_only_reported():
     assert isinstance(resolve_egress({"auth": "password"}), EgressPassword)
     # the per-direction field WINS over the shorthand (two keys, not one)
     assert isinstance(
-        resolve_ingress({"auth": "allow_all", "ingress_rule": "deny_inbound"}),
+        resolve_ingress({"auth": "allow_all", "ingress_rule": "deny_ingress"}),
         DenyInbound,
     )
     # and what reflect reports is what the gate enforces
     posture = describe({"auth": "allow_all"})
     assert posture["sealed"] is False
     assert isinstance(resolve_ingress({"auth": "allow_all"}), AllowAll)
-    sealed = describe({"auth": "allow_all", "ingress_rule": "deny_inbound"})
+    sealed = describe({"auth": "allow_all", "ingress_rule": "deny_ingress"})
     assert sealed["sealed"] is True
     assert isinstance(
-        resolve_ingress({"auth": "allow_all", "ingress_rule": "deny_inbound"}),
+        resolve_ingress({"auth": "allow_all", "ingress_rule": "deny_ingress"}),
         DenyInbound,
     )
 
@@ -140,30 +140,64 @@ def test_egress_password_presents_token(monkeypatch):
 
 def test_resolve_egress_threads_env_and_defaults_silent():
     # the string form names the rule; `auth`'s symmetry is asserted in the auth test
-    assert isinstance(resolve_egress({"egress_rule": "password"}), EgressPassword)
+    assert isinstance(
+        resolve_egress({"egress_rule": "password_egress"}), EgressPassword
+    )
     # object form: `env` (the secret-env key) reaches the rule's own field
     assert (
-        resolve_egress({"egress_rule": {"type": "password", "env": "MY_GROUP"}}).env
+        resolve_egress(
+            {"egress_rule": {"type": "password_egress", "env": "MY_GROUP"}}
+        ).env
         == "MY_GROUP"
     )
     # An INGRESS-only name is not an egress instruction, and absent is not either: both
     # present nothing. (The second assertion below was a byte-identical copy of the one
     # above, under a comment claiming it covered a second spelling. It covered nothing —
     # same rot as the duplicate `ingress_rule` key this file used to carry.)
-    assert isinstance(resolve_egress({"egress_rule": "deny_inbound"}), Silent)
+    assert isinstance(resolve_egress({"egress_rule": "silent_egress"}), Silent)
     assert isinstance(resolve_egress({}), Silent)
 
 
 def test_asymmetric_ingress_egress():
     # a hub: refuse inbound, still present a group token outbound
     rec = {
-        "ingress_rule": "deny_inbound",
-        "egress_rule": {"type": "password", "env": "MY_GROUP"},
+        "ingress_rule": "deny_ingress",
+        "egress_rule": {"type": "password_egress", "env": "MY_GROUP"},
     }
     assert isinstance(resolve_ingress(rec), DenyInbound)
     assert isinstance(resolve_egress(rec), EgressPassword)
 
 
 def test_resolve_tolerates_unknown_config_keys():
-    a = resolve_ingress({"ingress_rule": {"type": "password", "bogus": 1}})
+    a = resolve_ingress({"ingress_rule": {"type": "password_ingress", "bogus": 1}})
     assert isinstance(a, IngressPassword) and a.env == "FANTASTIC_GROUP_TOKEN"
+
+
+def test_a_name_from_the_other_manifold_is_loud_not_silent():
+    """Rule names are MANIFOLD-SCOPED so one name can never half-resolve across the
+    two registries.
+
+    Measured 2026-08-21, before scoping: `auth:"silent"` — a legitimate EGRESS
+    policy — resolved ingress to `DenyInbound(unknown='silent')`, SEALING the leg
+    while recording the unknown name and saying nothing; and `auth:"allow_all"`
+    handed egress a `Silent` nobody asked for. One unscoped name against two
+    registries with different membership is a fallback, and this kernel has none.
+
+    It still DENIES (an unresolvable rule is not an authorization), but it now names
+    the manifold mistake instead of looking like an ordinary seal."""
+    from io_bridge.ingress_rules import resolve_ingress
+
+    d = resolve_ingress({"ingress_rule": "silent_egress"})
+    assert getattr(d, "unknown", None) == "silent_egress"
+    dec = d.authorize(Action("call", "x", "read", {}))
+    assert dec.allowed is False
+    assert "manifold-scoped" in dec.hint, "the denial must teach WHY the name failed"
+    assert "allow_all_ingress" in dec.hint, "and name this manifold's legal values"
+
+    # The `auth` stem is scoped per manifold, so an egress-only stem cannot silently
+    # seal ingress: it surfaces as this manifold's missing rule, by name.
+    assert resolve_ingress({"auth": "silent"}).unknown == "silent_ingress"
+
+    # And the stems that DO span both manifolds still work from one field.
+    assert resolve_ingress({"auth": "password"}).__class__.__name__ == "Password"
+    assert resolve_ingress({"auth": "allow_all"}).__class__.__name__ == "AllowAll"

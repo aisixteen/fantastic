@@ -44,7 +44,9 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
     """Round-trip: drop the endpoint onto a fresh FastAPI app and prove
     a POST routes to kernel.send."""
     # Sealed by default ⇒ give the leg an OPEN record so inbound dispatches.
-    seeded_kernel.create("web_rest.tools", id="rest_xyz", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/{target_id}",
@@ -95,7 +97,9 @@ def test_post_endpoint_rejects_bad_json(seeded_kernel):
 def test_get_reflect_root_returns_tree(seeded_kernel):
     """GET /<rest_id>/_reflect (no target) defaults to the root → uniform
     reflect with the tree. `?bundles=all` adds the catalog."""
-    seeded_kernel.create("web_rest.tools", id="rest_xyz", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect",
@@ -116,7 +120,9 @@ def test_get_reflect_root_returns_tree(seeded_kernel):
 
 def test_get_reflect_target_returns_agent_reflect(seeded_kernel):
     """GET /<rest_id>/_reflect/<target_id> → reflect on that specific agent."""
-    seeded_kernel.create("web_rest.tools", id="rest_xyz", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -135,7 +141,9 @@ def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):
     """Unknown agent: kernel.send returns `{error: "no agent …"}`. The
     GET endpoint serializes it as 200 + JSON (no special-casing) — the
     caller checks the body's `error` field."""
-    seeded_kernel.create("web_rest.tools", id="rest_xyz", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -152,7 +160,9 @@ def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):
 def test_get_reflect_readme_query_flag(seeded_kernel):
     """`?readme=1` on the GET shortcut passes `readme:true` —
     the reply carries the agent's readme.md content."""
-    seeded_kernel.create("web_rest.tools", id="rest_xyz", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/rest_xyz/_reflect/{target_id}",
@@ -175,7 +185,7 @@ def test_get_reflect_readme_query_flag(seeded_kernel):
 
 def test_sealed_rest_leg_denies_and_teaches(seeded_kernel):
     seeded_kernel.create(
-        "web_rest.tools", id="sealed_rest", ingress_rule="deny_inbound"
+        "web_rest.tools", id="sealed_rest", ingress_rule="deny_ingress"
     )
     app = FastAPI()
     app.add_api_route(
@@ -193,7 +203,9 @@ def test_sealed_rest_leg_denies_and_teaches(seeded_kernel):
 
 def test_password_rest_leg_checks_header(seeded_kernel, monkeypatch):
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
-    seeded_kernel.create("web_rest.tools", id="pw_rest", ingress_rule="password")
+    seeded_kernel.create(
+        "web_rest.tools", id="pw_rest", ingress_rule="password_ingress"
+    )
     app = FastAPI()
     app.add_api_route(
         "/pw_rest/{target_id}",
@@ -219,10 +231,10 @@ def test_password_rest_leg_checks_header(seeded_kernel, monkeypatch):
 
 async def test_reflect_surfaces_rest_leg_posture(seeded_kernel):
     seeded_kernel.create(
-        "web_rest.tools", id="sealed_rest2", ingress_rule="deny_inbound"
+        "web_rest.tools", id="sealed_rest2", ingress_rule="deny_ingress"
     )
     r = await _reflect("sealed_rest2", {}, seeded_kernel)
     assert r["sealed"] is True
-    assert r["ingress_rule"] == "deny_inbound"
+    assert r["ingress_rule"] == "deny_ingress"
     assert True  # see removed from posture
     assert r["auth_header"] == "X-Fantastic-Auth"

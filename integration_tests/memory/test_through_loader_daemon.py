@@ -30,7 +30,7 @@ async def test_yaml_state_persists_through_loader_over_ws(
     seed_create(
         python_binary, wd,
         handler_module="file_bridge.tools", agent_id="store",
-        root=".fantastic", ingress_rule="allow_all",
+        root=".fantastic", ingress_rule="allow_all_ingress",
     )
     # Memory agent — NO file_bridge_id. Persists through the loader.
     seed_create(

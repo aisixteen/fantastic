@@ -179,7 +179,7 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
   };
 
   log(`# LLM diagnostic — ${ACTIVE_LLM.model ?? "(default)"} (${ACTIVE_LLM.bundle})\n`);
-  log(`ollama agent: \`${h.ollamaId}\` · python_runtime: \`${h.pyId}\`\n`);
+  log(`ollama agent: \`${h.ollamaId}\` · exec_bridge: \`${h.pyId}\`\n`);
 
   // ── drive the LLM ──
   const t0 = Date.now();
@@ -292,7 +292,7 @@ test("DIAGNOSTIC: can the active LLM wire the panel demo from the readme alone?"
     log(`\n## Browser check`);
     log(`- a panel with a button rendered: **${framed === true}**`);
     log(`- the button was clickable: **${buttonClicked}**`);
-    log(`- a live value appeared after click (button → python_runtime → update): **${liveValue !== null}** — \`${liveValue ?? ""}\``);
+    log(`- a live value appeared after click (button → exec_bridge → update): **${liveValue !== null}** — \`${liveValue ?? ""}\``);
     log(
       `- panels showing the value: **${litPanels}** ${
         litPanels >= 2

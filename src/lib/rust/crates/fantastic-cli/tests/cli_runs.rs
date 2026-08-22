@@ -75,7 +75,7 @@ fn reflect_bundles_all_lists_catalog() {
 }
 
 /// Wire the persistence provider: a `file_bridge` store rooted at the loader's
-/// own `.fantastic`, opened (`ingress_rule=allow_all`). Persistence is now
+/// own `.fantastic`, opened (`ingress_rule=allow_all_ingress`). Persistence is now
 /// provider-routed — without a store, records stay in RAM (lost on a one-shot's
 /// exit). The store persists ITSELF through itself, so it survives to the next
 /// one-shot, after which other agents persist through it.
@@ -87,7 +87,7 @@ fn create_store(dir: &std::path::Path) {
             "handler_module=file_bridge.tools",
             "id=store",
             "root=.fantastic",
-            "ingress_rule=allow_all",
+            "ingress_rule=allow_all_ingress",
         ])
         .current_dir(dir)
         .output()
@@ -118,7 +118,7 @@ fn one_shot_create_agent_persists_record() {
             "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",
-            "ingress_rule=allow_all",
+            "ingress_rule=allow_all_ingress",
         ])
         .current_dir(tmp.path())
         .output()
@@ -150,7 +150,7 @@ fn one_shot_dispatch_returns_json_reply() {
             "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",
-            "ingress_rule=allow_all",
+            "ingress_rule=allow_all_ingress",
         ])
         .current_dir(tmp.path())
         .output()

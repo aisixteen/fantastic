@@ -63,7 +63,7 @@ that `deny_inbound` blocks in-kernel peers too. At turns 14–15 it verified tha
 `readonly` was *enforced* — it wrote a probe file and confirmed the refusal — rather
 than trusting that the record accepted the field.
 
-Then it set `ingress_rule="password:kernel-internal-transcripts"`, a value no rule
+Then it set `ingress_rule="password_ingress:kernel-internal-transcripts"`, a value no rule
 implements. Two defects followed:
 
 1. The scorer only checked `!= "allow_all"` and called it sealed. **False ✅.**
@@ -81,9 +81,9 @@ Fixes that came out of it (py → rust → swift): unknown rule now seals with
 11 passes, all three rules legal:
 
 ```
-assets      want=OPEN   got=OPEN   ingress_rule='allow_all'     ✓
-transcripts want=SEALED got=SEALED ingress_rule='deny_inbound'  ✓
-secrets     want=SEALED got=SEALED ingress_rule='deny_inbound'  ✓
+assets      want=OPEN   got=OPEN   ingress_rule='allow_all_ingress'     ✓
+transcripts want=SEALED got=SEALED ingress_rule='deny_ingress'  ✓
+secrets     want=SEALED got=SEALED ingress_rule='deny_ingress'  ✓
 planning language 4/4 · final turn prose, 2284 chars
 ```
 

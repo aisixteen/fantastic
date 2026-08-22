@@ -136,8 +136,8 @@ This requires the web_ws proxy to route `watch` / `state_subscribe` / `emit` fra
 **Consequences (accepted, not hidden) — these tests/sites re-baseline to OPEN explicitly:**
 
 - `test_bridge_core.py::test_resolve_ingress_absent_is_allow_all` → inverts to **`absent == DenyInbound`**.
-- `test_kernel_bridge.py::test_allow_all_default_dispatches_inbound_call` → either asserts the **denial**, or the leg declares `ingress_rule=allow_all` to keep dispatching.
-- `relay_e2e` round-trip legs (the default `meta_b`/`meta_a` that relied on absent==AllowAll) → declare an explicit opening (`ingress_rule=allow_all` or `password`). The cross-runtime matrix now exercises **opened** legs, which is the realistic posture anyway.
+- `test_kernel_bridge.py::test_allow_all_default_dispatches_inbound_call` → either asserts the **denial**, or the leg declares `ingress_rule=allow_all_ingress` to keep dispatching.
+- `relay_e2e` round-trip legs (the default `meta_b`/`meta_a` that relied on absent==AllowAll) → declare an explicit opening (`ingress_rule=allow_all_ingress` or `password`). The cross-runtime matrix now exercises **opened** legs, which is the realistic posture anyway.
 - ws-outbound dialer: `st.ingress` becomes `DenyInbound` but it is **inert** (a pure client never receives inbound `call`s), so no behavior change there — only the egress rule it *presents* matters outbound.
 
 This is more test churn than the swarm budgeted (the relay matrix + the two unit tests move from "NONE" to "re-baseline"), and it is **the right churn**: every test that wants traffic now *shows* the opening, which is exactly the deny-all-as-documentation property. The flip still lands at **#9** (now at the engine site too, not only the web faces).
@@ -241,7 +241,7 @@ The original model said "a local LLM in a PTY = trusted by physical locality." *
 
 Verified: the daemon boots web + binds uvicorn whenever a `web` agent is persisted, independent of `isatty()` (the tty only adds the REPL loop). web_ws mounts `/{host_id}/ws` and `accept()`s regardless of tty. So "port open, door sealed" is structurally real: the surface binds, the gate denies.
 
-- **tty path:** the operator opens a leg from the REPL: `@<ws_bridge_id> update_agent ingress_rule=password` (and `elevated=true` if remote composition is wanted), then mints remote credentials.
+- **tty path:** the operator opens a leg from the REPL: `@<ws_bridge_id> update_agent ingress_rule=password_ingress` (and `elevated=true` if remote composition is wanted), then mints remote credentials.
 - **container / tty-less path:** the image **bakes** an `ingress_rule` (and `FANTASTIC_GROUP_TOKEN` / `FANTASTIC_CAP_KEY` from env). **Corrected — this is now a HARD build-time check, not operator discipline:** the container build **FAILS** if a web surface ships with `edge_default = deny` AND no baked rule AND no tty path. Rationale: post-flip, web_rest/web_ws are themselves sealed, so a tty-less image with no baked rule has **no in-band opener** and bricks into an un-openable state. The build gate (a small check in the image build script asserting `baked_rule OR has_tty`) makes the brick impossible to ship.
 
 ### 5.4 Migration order — permissive-first / flip-last (corrected suite table)
@@ -249,10 +249,10 @@ Verified: the daemon boots web + binds uvicorn whenever a `web` agent is persist
 | Suite / site | Change | Why |
 |---|---|---|
 | `bridge_core/tests/test_bridge_core.py::test_resolve_ingress_absent_is_allow_all` | **RE-BASELINE → `absent == DenyInbound`** (§2.5 directive) | the engine default flips to deny-all everywhere |
-| `kernel_bridge` allow-all-default dispatch test | **RE-BASELINE** — assert the denial, or declare `ingress_rule=allow_all` on the leg | engine default is deny; an opened leg dispatches |
+| `kernel_bridge` allow-all-default dispatch test | **RE-BASELINE** — assert the denial, or declare `ingress_rule=allow_all_ingress` on the leg | engine default is deny; an opened leg dispatches |
 | `helpers/seeding.py`, `helpers/ws.py`, `_host.ts` | add `ingress_rule=` openings | tests open legs explicitly so traffic flows post-flip (deny-all-as-documentation) |
 | web_ws / web_rest / rust-ws / swift-ws face tests | add an `auth_token` to frames + open the leg | the four net-new faces flip at #9 |
-| **`integration_tests/relay_e2e/test_relay_matrix.py`** | **CHANGES (two reasons now):** (a) at the **cloud carve**, `_HANDLER_MODULE` rust+swift `kernel_bridge.tools` → `cloud_bridge.tools`; (b) **the default round-trip legs declare an explicit opening** (`ingress_rule=allow_all`/`password`) because cloud now denies by default too (§2.5 directive) | the map hard-codes the old handler_module; and the engine flip seals cloud |
+| **`integration_tests/relay_e2e/test_relay_matrix.py`** | **CHANGES (two reasons now):** (a) at the **cloud carve**, `_HANDLER_MODULE` rust+swift `kernel_bridge.tools` → `cloud_bridge.tools`; (b) **the default round-trip legs declare an explicit opening** (`ingress_rule=allow_all_ingress`/`password`) because cloud now denies by default too (§2.5 directive) | the map hard-codes the old handler_module; and the engine flip seals cloud |
 | reflect conformance fixtures (`reflect_conformance.json` + 4 runtimes) | update in the reflect commit (#8) | exact `deepEqual` (§6.1) |
 
 **The one load-bearing ordering constraint:** the readmes + the reflect descriptor (#8) land **before** the flip (#9), or discovery-through-denial has no readme to discover.

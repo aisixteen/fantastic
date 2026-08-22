@@ -185,6 +185,65 @@ async def on_delete(agent):
 # ─── verbs ──────────────────────────────────────────────────────
 
 
+def _browser_reachable(web_id: str, kernel) -> list[str]:
+    """Which agents a browser could actually fetch through this host, right now.
+
+    Asks the REAL gates rather than re-deriving them: `authorize_call` for both
+    directions (the same engine `Agent.send` uses) and the io leg's own resolved
+    ingress rule (the same one `file_bridge` consults). A reimplementation here
+    would be a second truth that silently drifts — which is the exact bug this
+    field exists to expose."""
+    from io_bridge import gate_inbound, resolve_ingress
+    from kernel._authz import authorize_call
+
+    web = kernel.ctx.agents.get(web_id)
+    if web is None:
+        return []
+    out: list[str] = []
+    for aid, agent in kernel.ctx.agents.items():
+        if aid == web_id:
+            continue
+        rec = kernel.get(aid) or {}
+        # An agent that cannot answer the SOURCE verb is not a file server at all.
+        servable = "read_stream" in (
+            rec.get("verbs") or getattr(agent, "verbs", {}) or {}
+        ) or str(rec.get("handler_module", "")).startswith("file_bridge")
+        if not servable:
+            continue
+        egress = authorize_call(
+            web.record.get("can_call"),
+            "read_stream",
+            aid,
+            holder_id=web_id,
+            holder_parent=web.record.get("parent_id"),
+            holder_children=frozenset(
+                c.id for c in getattr(web, "_children", []) or []
+            ),
+        )
+        if not egress.allowed:
+            continue
+        ingress = authorize_call(
+            rec.get("callable_by"),
+            "read_stream",
+            web_id,
+            holder_id=aid,
+            holder_parent=rec.get("parent_id"),
+            holder_children=frozenset(
+                c.id for c in getattr(agent, "_children", []) or []
+            ),
+        )
+        if not ingress.allowed:
+            continue
+        leg = gate_inbound(
+            resolve_ingress(rec),
+            "call",
+            {"target": aid, "payload": {"type": "read_stream"}},
+        )
+        if leg.allowed:
+            out.append(aid)
+    return sorted(out)
+
+
 async def _reflect(id, payload, kernel):
     """Identity + uvicorn port + running flag + currently mounted surfaces (process-local; reflect the live serve for truth)."""
     rec = kernel.get(id) or {}
@@ -201,6 +260,31 @@ async def _reflect(id, payload, kernel):
         "running": id in _servers,
         "served_agent_count": len(kernel.list()),
         "surfaces": surfaces,
+        # THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
+        # and it was described NOWHERE — not here, not in the readme. Measured
+        # 2026-08-21: a model reflected this agent, found no route contract, and
+        # HALLUCINATED one — inventing a `routes` key and the rule "the agent must
+        # be in can_call AND expose read_stream", which omits the ingress half — then
+        # verified against its own fiction. Six runs across two models opened a
+        # public directory's io leg, never granted the web host on its call gate,
+        # and reported the browser could reach it. The field they invented is the
+        # field that was missing.
+        "routes": {
+            "GET /<agent_id>/file/<path>": (
+                "Streams a file by read_stream-ing through the named agent. The "
+                "read is dispatched AS THIS WEB AGENT, so it needs BOTH sides of "
+                "the call gate — this host's can_call[<agent_id>] (egress) AND that "
+                "agent's callable_by[<this web id>] (ingress) — plus that agent's "
+                "own io leg open (ingress_rule). Any one missing → 404. See "
+                "browser_reachable for who actually passes all three."
+            )
+        },
+        # The PROPERTY, computed — not a description of it. Every model so far
+        # "verified" its work by re-reading config, and config did not carry the
+        # answer: `ingress_rule=allow_all_ingress` reads like "open" while the call gate
+        # still refuses. This answers "what can a browser actually get?" in the
+        # one round-trip they already make.
+        "browser_reachable": _browser_reachable(id, kernel),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
         },

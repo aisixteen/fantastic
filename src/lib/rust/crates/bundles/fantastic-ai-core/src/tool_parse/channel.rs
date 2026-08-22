@@ -245,7 +245,7 @@ fn parse_channel_value(s: &str, at: usize) -> Option<(Value, usize)> {
     if head == '"' || head == '\'' {
         // MIXED SYNTAX — the envelope is the channel one, the strings are ordinary
         // quoted text. Measured 2026-08-04: gemma-4-12B-it emitted
-        //   call:kernel_state.update_agent{"id":"assets","ingress_rule":"allow_all"}
+        //   call:kernel_state.update_agent{"id":"assets","ingress_rule":"allow_all_ingress"}
         // Without this branch the bare-token path returns `"assets"` WITH its quote
         // characters, `id` never arrives, and the call comes back
         // `{"error": "update_agent: id required"}` — which is what killed all three

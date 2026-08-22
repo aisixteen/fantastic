@@ -540,8 +540,8 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # 1. The EXECUTOR'S NAME. Unguessable, and a model that lacks it invents
         #    one. MEASURED 2026-08-05 on claude-opus-5: given only the distilled
         #    reflect it authored `handler_module:"local_runner.script"` — a module
-        #    that does not exist — and `python_runtime.tools` never appeared once in
-        #    a 38 KB session, because nothing had ever said it.
+        #    that does not exist — while the executor's REAL module name never
+        #    appeared once in a 38 KB session, because nothing had ever said it.
         #
         # 2. The EXECUTION MODEL. `code` is a SCRIPT, run top to bottom. This line
         #    used to say only "the `code` IS the tool", which reads as "the code
@@ -574,7 +574,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             f"{{type:'create_agent', handler_module:'{_executor_for_example(agent)}', "
             "id:'<name>', "
             "code:'<program>', interpreters:['<allowlisted path>'], shim:'python', "
-            "ingress_rule:'allow_all'} — the `code` is a SCRIPT: it runs top to "
+            "ingress_rule:'allow_all_ingress'} — the `code` is a SCRIPT: it runs top to "
             "bottom when created and again on reboot. A bare `def` only defines and "
             "exits — put the work at module level. To handle later sends, call "
             "kernel.on_message(cb) and keep running. Neither field defaults: reflect "
@@ -600,7 +600,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "agents. ADD - send 'kernel' {type:'create_agent', "
             "handler_module:'<an executor below>', id:'<name>', code:'<your "
             "program as one JSON string>', interpreters:['<an allowlisted "
-            "interpreter>'], shim:'python', ingress_rule:'allow_all'}; the `code` is "
+            "interpreter>'], shim:'python', ingress_rule:'allow_all_ingress'}; the `code` is "
             "a SCRIPT that runs top to "
             "bottom - it persists across reboot and auto-runs. Neither the "
             "interpreter nor the gate has a default: reflect an executor agent that "
@@ -628,11 +628,11 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
 # Named ONCE: the distilled pointer and the full prose must never name different
 # modules.
 #
-# `python_runtime` is DELETED (2026-08-07) and its predecessors are deliberately NOT
-# listed: `exec_bridge` is the executor this kernel ADVERTISES, because it is the one
-# whose process edge is a sealed io leg with an interpreter allowlist. Adding
-# python_runtime back here would advertise a second, ungated way to author the same
-# thing — two truths for one affordance, and the weaker one wins by being first.
+# The per-language runtimes are DELETED (2026-08-07) and are deliberately NOT listed:
+# `exec_bridge` is the executor this kernel ADVERTISES, because it is the one whose
+# process edge is a sealed io leg with an interpreter allowlist. Adding a second
+# executor back here would advertise another, ungated way to author the same thing —
+# two truths for one affordance, and the weaker one wins by being first.
 _EXECUTORS = {
     "exec_bridge.tools": (
         "its program must stay alive to take turns, and receives them through the shim "

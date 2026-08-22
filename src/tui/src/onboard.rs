@@ -1,8 +1,8 @@
 //! **Add an agent** — the connector-onboarding feature in ONE module: the `/setup` ·
 //! `/model` wizard (design `20_provider_onboarding.md`) and the `+ agent` picker that
 //! seeds an AI backend under the root. (The old authored-script kinds — a JS connector,
-//! a plan/execute mind — and their in-frame editor are gone with the `js_runtime`
-//! executor; the ONE executor is `exec_bridge`, its ONE shim `python`.)
+//! a plan/execute mind — and their in-frame editor are gone with the per-language
+//! script executor; the ONE executor is `exec_bridge`, its ONE shim `python`.)
 //!
 //! Feature-shaped: its state transitions, its async kernel work, its keys AND its
 //! render live here. `lib.rs` keeps only thin wiring — the `App` fields, one `select!`
@@ -38,8 +38,8 @@ use crate::{input, App, Phase, BRAIN_ID};
 const OLLAMA_PROBE_ID: &str = "ollama_probe";
 
 /// The only kind the `+ agent` picker offers: an AI backend. (The authored-script
-/// kinds — a JS connector, a plan/execute mind — are gone with the `js_runtime`
-/// executor; the ONE executor is `exec_bridge`, its ONE shim `python`.) The label is
+/// kinds — a JS connector, a plan/execute mind — are gone with the per-language
+/// script executor; the ONE executor is `exec_bridge`, its ONE shim `python`.) The label is
 /// the picker's option string AND the submitted value it matches on.
 const KIND_AI: &str = "AI agent";
 
@@ -826,7 +826,7 @@ mod tests {
                     "handler_module": "file_bridge.tools",
                     "id": "ai_fs",
                     "root": dir.to_string_lossy(),
-                    "ingress_rule": "allow_all",
+                    "ingress_rule": "allow_all_ingress",
                 }),
             )
             .await;

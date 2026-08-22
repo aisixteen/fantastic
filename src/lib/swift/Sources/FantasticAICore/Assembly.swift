@@ -55,7 +55,7 @@ let SEND_TO_HOWTO = """
     `reply_to` is where that send's reply goes. It defaults to you — leave it out and the
     answer comes back as your next message. Name another agent's id to hand the answer to
     them instead, or `null` to discard it. Text outside the tag is your message to whoever
-    asked. A message tagged `[reply to <id> <verb>]` is the reply to the send you issued
+    asked. A message tagged `[reply to <pid> · <id> <verb>]` is the reply to the send you issued
     naming that agent and that verb — replies can lag a turn behind when several calls are
     in flight, so match the tag before assuming a call was lost and re-issuing it.
     """

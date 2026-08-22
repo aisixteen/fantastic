@@ -22,7 +22,7 @@ def client(seeded_kernel):
     seeded_kernel.create(
         "web_ws.tools",
         id="test_web_ws",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
         can_call={"fb_ws": "*"},
     )
     # Mount what web_ws.get_routes would publish — lets the proxy
@@ -149,7 +149,7 @@ def test_ws_read_stream_cursor_round_trips(
         "file_bridge.tools",
         id="fb_ws",
         root="sd",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
         callable_by={"test_web_ws": "*"},
     )
     blob = bytes(range(256)) * 40  # 10240 bytes, binary

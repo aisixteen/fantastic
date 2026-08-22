@@ -200,11 +200,20 @@ private struct TaskEntry {
 /// A plain `NSLock` — every critical section is a few dictionary operations with
 /// no `await` inside (the `onCancel` hooks in `Kernel.cancelTask` run BETWEEN
 /// locked sections, never under the lock).
+/// A one-slot carrier for the PID a dispatch mints, so a caller can read it at send
+/// time. Swift has no inout across an `async` boundary, so the out-param is a box.
+public final class TaskIdBox: @unchecked Sendable {
+    public var value: TaskId?
+    public init() {}
+}
+
 public final class TaskTable: @unchecked Sendable {
     private let lock = NSLock()
     private var tasks: [TaskId: TaskEntry] = [:]
     /// Per-agent task counter (the `n` in `"<agent_id>:<n>"`).
     private var seq: [AgentId: UInt64] = [:]
+    /// Per-table, never persisted — makes the minted token opaque across runs.
+    private let salt = UInt64.random(in: .min ... .max)
     private var order: UInt64 = 0
 
     public init() {}
@@ -212,13 +221,33 @@ public final class TaskTable: @unchecked Sendable {
     /// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
     private func nowSecs() -> Double { Date().timeIntervalSince1970 }
 
-    /// Next task id for `agentId` — `"<agent_id>:<n>"`.
+    /// Next task id for `agentId` — `"<agent_id>:<8 lowercase hex>"`.
+    ///
+    /// OPAQUE on purpose. A visible counter reads as a SEQUENCE, and messaging here is
+    /// fully async: a send may return once, several times, or never, and replies arrive
+    /// out of order. Measured 2026-08-20 (python): with `<agent>:<n>` a model inferred
+    /// ordering from the number, decided "the reply queue is running ahead of me", and
+    /// re-polled forever instead of matching on the id. The monotonic `seq` is KEPT — it
+    /// is what guarantees non-reuse — but hashed out of view, and a collision with a live
+    /// row re-rolls rather than aliasing two dispatches onto one id.
+    ///
+    /// The salt is per-table and never persisted, so ids carry no meaning outside this
+    /// process. Matching the SHAPE is what parity needs; the hash is an implementation
+    /// detail (python uses keyed blake2b).
     func mint(_ agentId: AgentId) -> TaskId {
         lock.lock()
         defer { lock.unlock() }
-        let n = (seq[agentId] ?? 0) + 1
-        seq[agentId] = n
-        return TaskId("\(agentId.value):\(n)")
+        while true {
+            let n = (seq[agentId] ?? 0) + 1
+            seq[agentId] = n
+            var h = Hasher()
+            h.combine(salt)
+            h.combine(agentId.value)
+            h.combine(n)
+            let token = String(format: "%08x", UInt32(truncatingIfNeeded: h.finalize()))
+            let id = TaskId("\(agentId.value):\(token)")
+            if tasks[id] == nil { return id }
+        }
     }
 
     /// Put one in-flight task in the table.

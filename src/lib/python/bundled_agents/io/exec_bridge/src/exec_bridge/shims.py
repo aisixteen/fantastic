@@ -5,10 +5,10 @@ This bridge publishes a WIRE and nothing else. A shim is a blob a request may AS
     {type:'start', code:'…', shim:'python'}   → the blob is prepended to the program
     {type:'start', code:'…'}                  → raw wire; the program speaks it itself
 
-That is the whole reason `exec_bridge` is generic where `python_runtime` was not.
-`python_runtime` prepends 179 lines of Python unconditionally, which is precisely what
-bound an entire executor to one language. Here, adding a language is adding an entry to
-`SHIMS` — a blob — not a code path, not a bundle, not a branch in the spawner.
+That is the whole reason `exec_bridge` is generic where a per-language executor is not.
+Prepending a language's client unconditionally is precisely what binds an entire executor
+to one language. Here, adding a language is adding an entry to `SHIMS` — a blob — not a
+code path, not a bundle, not a branch in the spawner.
 
 ## Why prepending is not the only option
 
@@ -35,9 +35,9 @@ over it, and `shim:` being optional is what keeps the wire primary.
 
 from __future__ import annotations
 
-# The python shim IS the connector — ONE wire client for one protocol. It lived in
-# `python_runtime` until that bundle was deleted (2026-08-07); the blob moved here and
-# the rust/swift byte-equality tests now point at THIS file.
+# The python shim IS the connector — ONE wire client for one protocol. It moved here
+# when the per-language executor was deleted (2026-08-07); the rust/swift byte-equality
+# tests now point at THIS file.
 from exec_bridge._connector import CONNECTOR_SRC as _PYTHON_SHIM
 
 # name → source prepended to the program. One entry per LANGUAGE, not per interpreter:

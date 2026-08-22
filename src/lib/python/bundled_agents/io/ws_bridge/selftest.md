@@ -5,7 +5,6 @@
 > (no network); the WS spec needs a running `fantastic`; the
 > SSH+WS spec needs a real remote host with `fantastic` installed +
 > SSH key access.
-> out-of-scope: `ssh_runner` (separate bundle, separate selftest).
 
 The bridge is **WS-only** (since the HTTP/REST removal). A bridge
 agent on kernel A opens a WS to kernel B's `web_ws` endpoint and
@@ -40,7 +39,7 @@ The headline correctness suite. Covered by the unit tests at
     hub→spoke push); `test_deny_inbound_default_refuses_inbound_call` proves the
     SEAL is the DEFAULT — an absent `auth`/`ingress_rule` refuses too (IO legs seal
     by default). The success path is `test_memory_transport_pair_round_trip`, whose
-    serving leg is opened CONSCIOUSLY with `ingress_rule=allow_all`.
+    serving leg is opened CONSCIOUSLY with `ingress_rule=allow_all_ingress`.
   - `test_password_*` — the kernel-group shared secret across the symmetric
     `ingress_rule` (CHECK the envelope `auth_token`) + `egress_rule` (PRESENT it)
     rules: an inbound `call` with the matching token dispatches, a wrong/missing

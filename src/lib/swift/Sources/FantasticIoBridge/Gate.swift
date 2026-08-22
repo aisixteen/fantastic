@@ -63,7 +63,7 @@ public func gateVerb(
             "error": .string(reason),
             "reason": .string("unauthorized"),
             "hint": .string(
-                "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all"),
+                "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress"),
         ])
     }
     return nil

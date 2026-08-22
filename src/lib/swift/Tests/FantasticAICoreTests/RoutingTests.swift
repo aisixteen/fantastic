@@ -100,7 +100,7 @@ struct RoutingTests {
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(script.calls == 2, "one call = one follow-up turn, then it stopped")
         let turn2 = script.requestText(1)
-        #expect(turn2.contains("[reply to core "), "untagged reply: \(turn2.suffix(400))")
+        #expect(turn2.contains(" · core "), "untagged reply: \(turn2.suffix(400))")
         #expect(turn2.contains("agents"), "the real list_agents result must be in the turn")
     }
 
@@ -164,7 +164,7 @@ struct RoutingTests {
             ]))
         #expect(await theirs.waitForCalls(1), "the send itself must still happen")
         #expect(await mine.waitForCalls(2), "an omitted reply_to must come back to self")
-        #expect(mine.requestText(1).contains("[reply to peer "), "and arrive tagged as a reply")
+        #expect(mine.requestText(1).contains(" · peer "), "and arrive tagged as a reply")
     }
 
     @Test func discardingAReplyMustBeSaidExplicitly() async throws {
@@ -372,7 +372,7 @@ struct RoutingTests {
         #expect(script.calls == 3, "expected 3 passes, got \(script.calls)")
         let followUps = script.requestText(1) + script.requestText(2)
         #expect(followUps.contains("NOT dispatched"), "the malformed sibling was swallowed")
-        #expect(followUps.contains("[reply to probe "), "the parsed sibling's reply was lost")
+        #expect(followUps.contains(" · probe "), "the parsed sibling's reply was lost")
     }
 
     @Test func theErrorPromptsAreVerbatim() async throws {
@@ -419,7 +419,7 @@ struct RoutingTests {
             ]))
         #expect(await script.waitForCalls(2), "the reflect never came back")
         let turn2 = script.requestText(1)
-        #expect(turn2.contains("[reply to probe "), "\(turn2.suffix(300))")
+        #expect(turn2.contains(" · probe "), "\(turn2.suffix(300))")
         #expect(!turn2.contains("no payload"))
         // The translated verb really arrived as the payload's `type` — the reply
         // carries `probe`'s own reflect body, which only a real `reflect` produces.
@@ -446,7 +446,7 @@ struct RoutingTests {
             ]))
         #expect(
             await script.waitForCalls(2), "a call inside thinking must still dispatch")
-        #expect(script.requestText(1).contains("[reply to core "))
+        #expect(script.requestText(1).contains(" · core "))
         // And the deliberation is not in the durable record.
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
@@ -547,7 +547,7 @@ struct RoutingTests {
         let turn = recorder.payloads()[0]
         #expect(turn["type"].asString == "send")
         #expect(turn["client_id"].asString == "c")
-        #expect(turn["text"].asString?.hasPrefix("[reply to core ") == true)
+        #expect(turn["text"].asString?.contains(" · core ") == true)
         #expect(turn.asObject?["_call_stack"] == nil, "routing must not propagate _call_stack")
         // No caller prompt was supplied, so no `system_prompt` is pinned onto the
         // hop — each hop rebuilds the default block from the live tree.

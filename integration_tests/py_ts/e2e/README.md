@@ -9,7 +9,7 @@ This one:
   `curl` + the system's own readmes (no source, no kernel tools),
 
 so it takes **minutes, not seconds, and costs money**. Run it **rarely** — before a
-release, or after touching the workflow substrate (the `python_runtime` connector,
+release, or after touching the workflow substrate (the `exec_bridge` connector,
 the AI backends, the scheduler, `ai_view`, or any of the readmes those depend on).
 
 ## Why it exists — two things the cheap tests can't prove
@@ -29,7 +29,7 @@ both gaps:
    *cardinality* of the four unit kinds from self-description alone, never told a number:
    **terminal_view ↔ terminal_backend = 1:1** (bound by `backend_id` to an exclusive
    PTY), **ai_view ↔ AI backend = 1:1** (bound by `backend_id` to shared compute), and
-   **html_agent panel ↔ python_runtime = 1:N** (a content agent, no binding — its JS
+   **html_agent panel ↔ exec_bridge = 1:N** (a content agent, no binding — its JS
    send/watches a many-jobs runtime by id). `pairing_verify.ts` asserts it structurally;
    a wrong derivation is the signal to strengthen the readme nudge and re-run.
 

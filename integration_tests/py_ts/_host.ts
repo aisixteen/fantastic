@@ -35,6 +35,13 @@ const FANTASTIC = join(repoRoot, "src", "lib", "python", ".venv", "bin", "fantas
 const TARGET = (process.env.FANTASTIC_TARGET ?? "local").trim().toLowerCase();
 const IMAGE = process.env.FANTASTIC_IMAGE ?? "fantastic:latest";
 const CONTAINER_BIN = "/opt/fantastic/venv/bin/fantastic_kernel"; // python in the image
+// The interpreter the ONE executor (`exec_bridge`) is allowed to spawn. It has NO
+// default — the operator names it — so the tests name the venv python that runs the
+// kernel itself (local) or the image's venv python (container).
+const PY_INTERP =
+  TARGET === "container"
+    ? "/opt/fantastic/venv/bin/python"
+    : join(repoRoot, "src", "lib", "python", ".venv", "bin", "python");
 // where ts/dist is mounted in container mode — INSIDE the workdir (/work), because
 // file_bridge clamps every root to the dir the kernel runs in (the running-dir law).
 const CONTAINER_DIST = "/work/dist";
@@ -120,7 +127,7 @@ export interface Host {
   /** id of the `web_loader` (the frontend store), if `bootHost` was asked to
    *  create one — reach it over WS by its `web_loader` alias. */
   webLoaderId?: string;
-  /** id of a `python_runtime` agent, if `pythonRuntime` was set. */
+  /** id of an `exec_bridge` script-executor agent, if `execBridge` was set. */
   pyId?: string;
   /** id of an `ollama_backend` LLM agent, if `llm` was set. */
   ollamaId?: string;
@@ -144,8 +151,8 @@ export interface BootOptions {
    *  `ts_dist`) under web — its ESM mounts at `/ts_dist/file/<path>`, on the
    *  same port as the WS. Requires `npm run build` to have run. */
   serveDist?: boolean;
-  /** Also create a `python_runtime` agent (the background-script runner). */
-  pythonRuntime?: boolean;
+  /** Also create an `exec_bridge` agent (the background-script runner). */
+  execBridge?: boolean;
   /** Also create an LLM backend agent (+ its history `file_bridge` agent). `bundle`
    *  picks the backend (default `ollama_backend.tools`; e.g.
    *  `anthropic_backend.tools` for Claude). `model`/`endpoint` are passed only
@@ -308,7 +315,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     "handler_module=file_bridge.tools",
     "id=store",
     "root=.fantastic",
-    "ingress_rule=allow_all",
+    "ingress_rule=allow_all_ingress",
   ]);
   const webOut = runCli(tmp, [
     "kernel_state",
@@ -325,7 +332,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
     webId,
     "create_agent",
     "handler_module=web_ws.tools",
-    "ingress_rule=allow_all",
+    "ingress_rule=allow_all_ingress",
   ]);
   const webWsId = extractId(wsOut, "web_ws");
 
@@ -366,19 +373,23 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "handler_module=file_bridge.tools",
       "id=ts_dist",
       `root=${distRoot}`,
-      "ingress_rule=allow_all",
+      "ingress_rule=allow_all_ingress",
     ]);
   }
 
   // optional background-script runner (a HOST peer, not under web).
   let pyId: string | undefined;
-  if (opts.pythonRuntime === true || opts.llm !== undefined) {
+  if (opts.execBridge === true || opts.llm !== undefined) {
     const pyOut = runCli(tmp, [
       "kernel_state",
       "create_agent",
-      "handler_module=python_runtime.tools",
+      "handler_module=exec_bridge.tools",
+      // sealed + no-default-interpreter: both must be named to run anything.
+      `interpreters=["${PY_INTERP}"]`,
+      "shim=python",
+      "ingress_rule=allow_all_ingress",
     ]);
-    pyId = extractId(pyOut, "python_runtime");
+    pyId = extractId(pyOut, "exec_bridge");
   }
 
   // optional LLM agent: a `file` agent for its chat-history sidecar + the
@@ -393,7 +404,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "handler_module=file_bridge.tools",
       "id=llm_files",
       "root=.fantastic",
-      "ingress_rule=allow_all", // the fs edge seals by default — open the backing
+      "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
     ]);
     const args = [
       "kernel_state",
@@ -417,7 +428,7 @@ export async function bootHost(port = 8911, opts: BootOptions = {}): Promise<Hos
       "handler_module=file_bridge.tools",
       "id=sched_files",
       "root=.fantastic",
-      "ingress_rule=allow_all", // the fs edge seals by default — open the backing
+      "ingress_rule=allow_all_ingress", // the fs edge seals by default — open the backing
     ]);
     const schedOut = runCli(tmp, [
       "kernel_state",

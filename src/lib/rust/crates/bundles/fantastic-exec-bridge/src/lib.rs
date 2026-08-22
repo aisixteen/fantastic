@@ -52,14 +52,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The child-side connector, VENDORED VERBATIM from python's
-/// `python_runtime/_connector.py`.
+/// `exec_bridge/_connector.py`.
 ///
 /// It is pure-stdlib Python (`os, json, socket, struct, threading, queue, sys`) with
-/// zero dependency on the python kernel — and every runtime here spawns a *python*
-/// child, so all three prepend this identical text and implement only the PARENT half
-/// of the control socket. That makes the wire identical by construction rather than by
-/// discipline: `[4-byte BE length | JSON body]`, with `FANTASTIC_CTRL_FD` /
-/// `FANTASTIC_SELF_ID` / `FANTASTIC_ARGS` in the child env.
+/// zero dependency on the python kernel. Each runtime's exec bridge prepends this
+/// identical text (`shim:'python'`) and implements only the PARENT half of the control
+/// socket. That makes the wire identical by construction rather than by discipline:
+/// `[4-byte BE length | JSON body]`, with `FANTASTIC_CTRL_FD` / `FANTASTIC_SELF_ID` /
+/// `FANTASTIC_ARGS` in the child env.
 ///
 /// It is VENDORED rather than `include_str!`d across the tree because the container's
 /// rust stage copies only `src/lib/rust/` — a cross-tree include is a hard build break
@@ -215,12 +215,12 @@ impl Bundle for ExecBridgeBundle {
             let resolved = fantastic_io_bridge::authorizer::ingress::resolve(Some(spec));
             let known = matches!(
                 spec.as_str(),
-                Some("allow_all") | Some("deny_inbound") | Some("password")
+                Some("allow_all_ingress") | Some("deny_ingress") | Some("password_ingress")
             ) || resolved.is_ok() && spec.is_object();
             if !known {
                 return Some(format!(
                     "ingress_rule={spec} is not a rule this bundle implements — \
-                     legal values: allow_all, deny_inbound, password"
+                     legal values: allow_all_ingress, deny_ingress, password_ingress"
                 ));
             }
         }
@@ -358,8 +358,12 @@ impl Bundle for ExecBridgeBundle {
 /// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
 /// inspects the kind, so a new one costs nothing and the audit trail is honest.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
-    let spec = meta.get("ingress_rule").or_else(|| meta.get("auth"));
-    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec) {
+    let spec = fantastic_io_bridge::authorizer::manifold_spec(
+        meta.get("ingress_rule"),
+        meta.get("auth"),
+        "_ingress",
+    );
+    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref()) {
         Ok(r) => r,
         Err(e) => return Some(json!({"error": e})),
     };
@@ -375,7 +379,7 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         return Some(json!({
             "error": reason,
             "reason": "unauthorized",
-            "hint": "the process edge is sealed; open it: update_agent <id> ingress_rule=allow_all",
+            "hint": "the process edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress",
         }));
     }
     None
@@ -432,11 +436,15 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         .values()
         .filter(|j| &j.owner == agent_id && j.exit_code.is_none())
         .count();
-    let ingress = meta
-        .get("ingress_rule")
-        .or_else(|| meta.get("auth"))
-        .and_then(Value::as_str)
-        .unwrap_or("deny_inbound");
+    let ingress = fantastic_io_bridge::authorizer::rule_name(
+        fantastic_io_bridge::authorizer::manifold_spec(
+            meta.get("ingress_rule"),
+            meta.get("auth"),
+            "_ingress",
+        )
+        .as_ref(),
+        "deny_ingress",
+    );
     json!({
         "id": agent_id.as_str(),
         // Py-canonical sentence — the ALLOWLIST is advertised so an authoring
@@ -466,7 +474,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         "tasks": "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
         "authoring": "This agent's persisted `code` is a durable tool and a SCRIPT: it runs TOP TO BOTTOM, once per `start` and again on `boot`. A bare `def` only defines and exits — put the work at module level, and keep the program running if it must receive later sends. create_agent with `code` + an allowlisted `interpreter`; `delete_agent` removes it. A running program can itself create_agent more agents.",
         "ingress_rule": ingress,
-        "sealed": ingress != "allow_all",
+        "sealed": ingress != "allow_all_ingress",
     })
 }
 

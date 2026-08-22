@@ -438,8 +438,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         WS path), partner_guid (peer to reach), relay_token (X-Fantastic-Auth).
         Authorization: two symmetric, typed per-leg rules — `ingress_rule` (the \
         inbound FILTER) and `egress_rule` (the outbound DECORATOR), each \
-        {type, env}; a legacy `auth` shorthand sets both. Types: allow_all \
-        (default) | deny_inbound (refuse inbound calls, reply \
+        {type, env}; an `auth` shorthand carries a bare STEM that each manifold \
+        scopes. Types: allow_all_ingress \
+        | deny_ingress (default — refuse inbound calls, reply \
         {reason:"unauthorized"}) | password (kernel-GROUP shared secret: ingress \
         checks the envelope auth_token against the group token from an env var, \
         default FANTASTIC_GROUP_TOKEN; egress presents it). These per-leg rules \
@@ -461,16 +462,21 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             let attached = bridgeFor(agentId) != nil
             // The per-leg rule TYPE names (config like a `token_env` is never
             // surfaced). Read-key == write-key (py parity): `ingress_rule` (inbound
-            // FILTER, default deny_inbound — the SEAL) / `egress_rule` (outbound
+            // FILTER, default deny_ingress — the SEAL) / `egress_rule` (outbound
             // DECORATOR, default silent); `auth` is a legacy WRITE shorthand only,
             // never reflected. Swift gates only the relay_connector inbound-call path.
             let a = kernel.agent(agentId)
             let authMeta = a?.metaValue(forKey: "auth")
-            // SEALED BY DEFAULT — an io leg with no rule reflects as deny_inbound.
+            // SEALED BY DEFAULT — an io leg with no rule reflects as deny_ingress.
+            // Through `manifoldSpec` so a leg configured via the `auth` STEM reflects
+            // the SCOPED name it actually resolved to — read-key == write-key, and
+            // reflect never shows a name that would not resolve if written straight back.
             let ingressName = ruleName(
-                a?.metaValue(forKey: "ingress_rule") ?? authMeta, default: "deny_inbound")
+                manifoldSpec(a?.metaValue(forKey: "ingress_rule"), authMeta, "_ingress"),
+                default: "deny_ingress")
             let egressName = ruleName(
-                a?.metaValue(forKey: "egress_rule") ?? authMeta, default: "silent")
+                manifoldSpec(a?.metaValue(forKey: "egress_rule"), authMeta, "_egress"),
+                default: "silent_egress")
             return [
                 "id": .string(agentId.value),
                 "kind": .string(family.label),
@@ -484,7 +490,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 "attached": .bool(attached),
                 "ingress_rule": .string(ingressName),
                 "egress_rule": .string(egressName),
-                "sealed": .bool(ingressName != "allow_all"),
+                "sealed": .bool(ingressName != "allow_all_ingress"),
                 "verbs": [
                     "forward":
                         "args: target, payload. Ships a raw `{type:'call', target, payload}` frame over the transport and returns the reply.",
@@ -521,7 +527,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                         "\(family.label): transport \"\(kind)\" not in this derivation")
                 ])
             }
-            // NOTE: the `auth` policy (deny_inbound) is enforced only on the
+            // NOTE: the `auth` policy (deny stem) is enforced only on the
             // relay_connector leg below — Swift's sole inbound-`call` dispatcher.
             // The ws transport is an asymmetric client (no inbound calls) and the
             // in-memory forward is a direct kernel call, so there is no inbound

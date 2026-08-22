@@ -33,16 +33,15 @@ cd "$PYWORKDIR"
 # Stage some agents under Python.
 fantastic core create_agent handler_module=file.tools id=ff root="$PYWORKDIR" >/dev/null
 fantastic core create_agent handler_module=scheduler.tools id=sch file_agent_id=ff >/dev/null
-fantastic core create_agent handler_module=python_runtime.tools id=py >/dev/null
+fantastic core create_agent handler_module=exec_bridge.tools id=py \
+    interpreters="[\"$(command -v python3)\"]" ingress_rule=allow_all_ingress >/dev/null
 
-# Boot py once so the meta.python auto-fill runs (cf34f47).
-fantastic py boot >/dev/null
-
-# Confirm meta.python landed on disk:
-grep '"python"' "$PYWORKDIR/.fantastic/agents/py/agent.json"
+# Confirm the interpreter allowlist landed on disk:
+grep '"interpreters"' "$PYWORKDIR/.fantastic/agents/py/agent.json"
 ```
-Expected: a line like `"python": "/path/to/python3"` (the absolute
-path to Python's `sys.executable`).
+Expected: a line like `"interpreters": ["/path/to/python3"]` — the
+operator's explicit choice. There is no default and no PATH probing:
+the record IS the answer.
 
 ### Test 2: Same workdir opened under Rust
 
@@ -54,16 +53,17 @@ Expected: the reflect output lists agents `core`, `ff`, `sch`, `py`.
 NO `[kernel] skipping agent` lines (every Python-shipped bundle has
 a Rust equivalent).
 
-### Test 3: Rust uses Python's persisted meta.python
+### Test 3: Rust uses Python's persisted interpreter allowlist
 
 ```bash
 JOB=$("$RUSTBIN" py start code='import sys; print(sys.executable)' | jq -r .job_id)
 "$RUSTBIN" py status job_id="$JOB" | jq -r '.jobs[0].stdout'
 ```
 Expected: the job's `stdout` matches the path written in Test 1
-BYTE-FOR-BYTE. `meta.python` (tier 3) is the ONLY way Rust gets an
-interpreter here — it does not probe PATH, so the persisted record is
-what makes the same workdir deterministic across runtimes.
+BYTE-FOR-BYTE. The record's `interpreters` allowlist is the ONLY way
+Rust gets an interpreter here — it does not probe PATH, so the
+persisted record is what makes the same workdir deterministic across
+runtimes.
 
 ### Test 4: Rust mutates the workdir; Python rehydrates cleanly
 

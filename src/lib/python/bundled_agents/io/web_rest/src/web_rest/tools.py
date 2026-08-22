@@ -45,7 +45,7 @@ from io_bridge import gate_inbound, resolve_ingress
 # shared `gate_inbound` path (EnvelopeExtractor) is reused, and the dispatched
 # target never sees it. Absent rule ⇒ DenyInbound (SEALED by default — a bare leg
 # refuses every request). A sealed leg denies AND teaches (reason/hint/see); open it
-# consciously with `ingress_rule=allow_all`/`password`.
+# consciously with `ingress_rule=allow_all_ingress`/`password`.
 
 
 def _gate(self_id: str, kernel, target_id: str, payload: dict, request: Request):

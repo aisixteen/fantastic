@@ -116,7 +116,21 @@ public enum AIStrategies {
         let summaryCost = AIContext.estimateOne(
             .object(["role": .string("user"), "content": .string(summary)]))
         let avail = max(0, budget - AIContext.noticeEnvelopeReserve - summaryCost)
-        return AIProjection(body: fitTail(recent, avail), summary: summary)
+        // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
+        // is the first thing the overflow split takes. A summary is a lossy retelling;
+        // the one turn that must survive verbatim is the instruction the whole run
+        // serves. Measured 2026-08-20 (python, four live runs): the agent reached the
+        // correct conclusion, then ended "healthy budget, no tasks" — it had not refused
+        // to act, it no longer knew what it was doing. `truncate` already pins this
+        // turn; `compact` did not. Cost is one turn of budget, charged before the tail.
+        guard let first = body.first else {
+            return AIProjection(body: fitTail(recent, avail), summary: summary)
+        }
+        let headCost = AIContext.estimateOne(first)
+        let kept = fitTail(recent, max(0, avail - headCost))
+        // Only re-add it if the recent window does not already carry it (short bodies).
+        let pinned = kept.first == first ? kept : [first] + kept
+        return AIProjection(body: pinned, summary: summary)
     }
 
     /// `truncate`: keep the first (task-framing) turn + the recent turns, drop

@@ -9,7 +9,7 @@ async def _open(kernel, **meta):
         {
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
             **meta,
         },
     )

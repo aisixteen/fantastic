@@ -32,7 +32,7 @@ def test_endpoint_mountable_on_fastapi(seeded_kernel):
     """Round-trip: drop the endpoint onto a fresh FastAPI app and prove
     a `call` frame round-trips through the proxy."""
     # Sealed by default ⇒ open the leg so the inbound `call` dispatches.
-    seeded_kernel.create("web_ws.tools", id="test_ws", ingress_rule="allow_all")
+    seeded_kernel.create("web_ws.tools", id="test_ws", ingress_rule="allow_all_ingress")
     app = FastAPI()
     app.add_api_websocket_route(
         "/{host_id}/ws", _make_endpoint("test_ws", seeded_kernel)

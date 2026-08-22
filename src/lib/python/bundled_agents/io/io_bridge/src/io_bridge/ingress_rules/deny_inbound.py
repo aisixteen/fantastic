@@ -35,11 +35,13 @@ class DenyInbound(IngressRule):
             False,
             reason,
             hint=(
-                "this edge is sealed — open it: update_agent <id> ingress_rule=allow_all"
+                "this edge is sealed — open it: update_agent <id> ingress_rule=allow_all_ingress"
                 " (or password); reflect readme=true on this agent for the channel model"
                 + (
-                    f". {self.unknown!r} is not a rule name — the legal values are"
-                    " allow_all, deny_inbound, password"
+                    f". {self.unknown!r} is not an INGRESS rule name — the legal"
+                    " values are allow_all_ingress, deny_ingress, password_ingress"
+                    " (names are manifold-scoped: an egress name here is a typo,"
+                    " not a policy)"
                     if self.unknown
                     else ""
                 )

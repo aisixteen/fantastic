@@ -108,7 +108,11 @@ async def test_compact_returns_projection_with_summary():
     )
     assert isinstance(proj, Projection)
     assert proj.summary == "SUMMARY"  # artifact, not a fabricated turn
-    assert proj.body == body[-4:]  # recent verbatim, NO summary turn in the body
+    # The task-framing turn is PINNED ahead of the recent window (see
+    # `test_every_strategy_keeps_the_goal_when_the_body_overflows` for why: the goal
+    # is the oldest turn, so the overflow split took it first and the agent lost its
+    # objective mid-run). Everything after it is the recent window, verbatim.
+    assert proj.body == [body[0]] + body[-4:]
     # the strategy never fabricates the old leading marker turn
     assert not any("[Earlier conversation summary]" in m["content"] for m in proj.body)
 
@@ -446,3 +450,122 @@ async def test_cli_context_renders_both_phases(capsys):
     out = capsys.readouterr().out
     assert "compacted" in out and "compact" in out and "9 dropped" in out
     assert "too small" in out and "raise context_window" in out
+
+
+# ─── the GOAL must survive every strategy ───────────────────────
+#
+# MEASURED FAILURE (2026-08-20, live qwen3.8-27b on the `live_plan` probe, four runs).
+# The task is stated ONCE, in the first user turn. On a long run the body overflows and
+# `compact` — the DEFAULT — splits at `recent_n` and replaces the whole overflow with an
+# LLM summary. The oldest turn IS the task framing, so the goal is the FIRST thing at
+# risk. Observed end state: the model had already worked out the correct answer
+# ("assets should be served to any browser client but is currently sealed"), then
+# finished with "healthy budget, no tasks" and "Idle and ready. Give me a task
+# whenever." — it did not refuse to act, it no longer knew what it was doing. Zero
+# change-verbs issued across every run.
+#
+# `truncate` already gets this right ("keep the first (task-framing) turn"), which is
+# what made the diagnosis obvious. This test is deliberately GENERAL over the strategy
+# registry rather than written against one probe: any long task whose goal is stated
+# once, up front, is exposed — which is most agent work. A new strategy inherits the
+# guarantee by being registered.
+async def test_every_strategy_keeps_the_goal_when_the_body_overflows():
+    goal = "GOAL-SENTINEL: seal the secrets bridge and open the assets bridge."
+    body = [_turn("user", goal)] + _body(40, size=400)
+
+    for name in strategy_names():
+        strategy = get_strategy(name)
+        assert strategy is not None, name
+        proj = await strategy(body, [], {}, _ctx(bud=1200, recent_n=4))
+        # The projection is what the model actually sees. The goal must be reachable
+        # from it — carried verbatim in the body, or preserved in the summary the seam
+        # turns into the context notice. Anything else and the agent is flying blind.
+        carried = any(goal in (m.get("content") or "") for m in proj.body)
+        summarized = proj.summary is not None and goal in proj.summary
+        assert carried or summarized, (
+            f"strategy {name!r} dropped the task-framing turn: the agent loses its "
+            f"goal mid-run (body={len(proj.body)} turns, summary={proj.summary!r})"
+        )
+
+
+# ─── reflect bulk: distilled by the reader, then dropped ────────
+#
+# MEASURED (2026-08-20, `live_plan`): reflect replies were 42% of the whole conversation
+# — 73k of 174k chars — and 9 of 16 were a repeat of a target already reflected. That
+# bulk is what fills the window; a full window is what forces compaction; compaction is
+# what put the goal at risk. So the reflect body is kept for exactly one turn — the turn
+# the model reads it — and after the model has answered, only the distillation IT wrote
+# survives. Written by the reader, at read time, with the task in mind: strictly better
+# than a post-hoc summariser that never saw the task.
+def test_answered_reflects_are_dropped_but_the_in_flight_one_survives():
+    body = [
+        _turn("user", "[reply to notes:aaa · notes reflect]\n" + "TREE" * 2000),
+        _turn("assistant", "SEEN notes — key/value store; verbs read/set/keys."),
+        _turn("user", "[reply to assets:bbb · assets reflect]\n" + "TREE" * 2000),
+    ]
+    out = core.drop_answered_reflects(body)
+    # answered → stubbed, and the stub still names the agent (so "I already looked at
+    # this" stays true and the model does not re-reflect out of doubt)
+    assert "TREE" not in out[0]["content"] and "notes" in out[0]["content"]
+    # the model's own distillation is untouched — it is the record now
+    assert out[1] == body[1]
+    # the IN-FLIGHT reflect is verbatim: the model is reading it this very turn
+    assert out[2] == body[2]
+
+
+def test_stale_whole_state_reads_dedupe_but_parameterised_reads_never_do():
+    body = [
+        _turn("user", "[reply to ks:a1 · kernel_state reflect]\nOLD TREE"),
+        _turn("assistant", "noted"),
+        _turn("user", "[reply to fb:b1 · readings read]\nreading_1 = 41"),
+        _turn("user", "[reply to fb:b2 · readings read]\nreading_2 = 42"),
+        _turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
+    ]
+    out = core.dedupe_stale_reads(body)
+    contents = [m["content"] for m in out]
+    # whole-state: the newest reflect supersedes the older one
+    assert not any("OLD TREE" in c for c in contents)
+    assert any("NEW TREE" in c for c in contents)
+    # parameterised: two `read`s are DIFFERENT FILES — dropping either loses data, and
+    # the reply tag carries no args to tell them apart. Both must survive.
+    assert any("reading_1 = 41" in c for c in contents)
+    assert any("reading_2 = 42" in c for c in contents)
+
+
+def test_a_reflect_the_model_did_not_distil_is_kept():
+    """FAIL CLOSED. Measured 2026-08-20 (`live_plan`): the model answered several
+    reflects with a bare tool_call and no prose. The body was dropped anyway, so the
+    facts were simply gone — "The index was dropped from my view. Let me send it again
+    and, THIS TIME, actually record the facts." Re-fetching what it lost is the exact
+    loop this trim exists to prevent. A reflect the model did not distil must survive:
+    non-compliance costs context, never comprehension."""
+    body = [
+        _turn("user", "[reply to notes:aaa · notes reflect]\n" + "TREE" * 500),
+        _turn("assistant", '<tool_call>{"name":"send",...}</tool_call>'),  # no SEEN
+        _turn("user", "[reply to assets:bbb · assets reflect]\n" + "FACTS" * 500),
+        _turn("assistant", "SEEN assets — public web assets; verbs read/list."),
+        _turn("user", "next"),
+    ]
+    out = core.drop_answered_reflects(body)
+    assert "TREE" in out[0]["content"], "undistilled reflect must be KEPT"
+    assert "FACTS" not in out[2]["content"], "distilled reflect is dropped"
+    assert "assets" in out[2]["content"], "the stub still names the agent"
+
+
+def test_the_distillation_instruction_rides_on_the_reflect_reply_itself():
+    """POINT OF USE, not policy. Measured 2026-08-20 (`live_plan`, the passing run):
+    with the instruction stated once as system-block policy, the model wrote a `SEEN`
+    line for 0 of 10 reflects and re-reflected the SAME agent 9 times in 17 turns. The
+    instruction now rides on the body it talks about, so it arrives every time, at the
+    moment it applies — and only on the replies that are actually transient."""
+    assert "SEEN" in core._REFLECT_NUDGE, "the nudge must show the format it asks for"
+    # It is the LAST thing in the message — the model reads it immediately before
+    # writing the answer the distillation belongs in.
+    assert core._REFLECT_NUDGE.rstrip().endswith("]")
+    # What the nudge asks for is exactly what the drop accepts as compliance: one
+    # contract, so a model that obeys the instruction is never punished by the trim.
+    example = "SEEN notes — durable key/value store; verbs: read/set/keys"
+    assert core._DISTILLED.search(example), "nudge format must satisfy _DISTILLED"
+    # And the policy paragraph must NOT re-state the format — two copies drift, and
+    # the system-block copy is the one that measured 0/10.
+    assert "SEEN" not in core._SEND_TO_HOWTO, "the format lives at point of use only"

@@ -9,13 +9,15 @@ import FantasticJSON
 /// Namespace + registry for outbound-decorator rules.
 public enum EgressRules {
     /// Resolve an egress rule spec (string | `{type, env}` | null) BY NAME. Absent ⇒
-    /// `Silent` (back-compat — present nothing). Unknown type ⇒ throws.
+    /// `Silent` (present nothing). Unknown type ⇒ throws. Names are MANIFOLD-SCOPED;
+    /// an inbound-only stem reaching here through `auth` was already collapsed to
+    /// `silent_egress` by `manifoldSpec`, so there are no cross-manifold aliases.
     public static func resolve(_ spec: JSON?) throws -> EgressRule {
         let (name, env) = try parseSpec(spec)
         switch name {
-        case nil, .some("silent"), .some("allow_all"), .some("deny_inbound"):
+        case nil, .some("silent_egress"):
             return Silent()
-        case .some("password"):
+        case .some("password_egress"):
             return Password(tokenEnv: env ?? DefaultGroupTokenEnv)
         case .some(let other):
             throw AuthPolicyError("unknown egress rule type \"\(other)\"")

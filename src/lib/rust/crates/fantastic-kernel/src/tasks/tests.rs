@@ -269,13 +269,21 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     let parent = row_for(&kernel, &a, "chain").await.expect("a's chain row");
     let child = row_for(&kernel, &b, "slow").await.expect("b's slow row");
 
-    // Task id IS a pid: "<agent_id>:<n>", n a per-agent counter. (n=1 went to
-    // the `boot` dispatch create_agent fires — boot is a task like any other.)
+    // Task id IS a pid: "<agent_id>:<8 hex>". The token is OPAQUE on purpose — a
+    // visible counter reads as a SEQUENCE, and messaging is async (a send may return
+    // once, several times, or never). Measured 2026-08-20 on python: a model inferred
+    // ordering from the number and re-polled forever instead of matching on the id.
     for (row, agent) in [(&parent, &a), (&child, &b)] {
         let id = row["id"].as_str().expect("id");
-        let (aid, n) = id.rsplit_once(':').expect("<agent>:<n>");
+        let (aid, token) = id.rsplit_once(':').expect("<agent>:<token>");
         assert_eq!(aid, agent.0);
-        assert!(n.parse::<u64>().expect("numeric n") >= 1);
+        assert_eq!(token.len(), 8, "token is 8 hex chars, got {token:?}");
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "token is lowercase hex, got {token:?}"
+        );
     }
     // The tree: b's dispatch is a child of a's dispatch. a's caller is the test
     // task — not a dispatch — so a's task is a root (init-owned).

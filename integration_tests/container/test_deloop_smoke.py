@@ -1,12 +1,12 @@
 """Container smoke — the shipped image loads the DE-LOOPED AI backends + the
-Python script executor, and a durable authored agent (a "mind") boots and is
+script executor, and a durable authored agent (a "mind") boots and is
 addressable.
 
 This is the container-side proof of the de-loop work: every LLM backend became a
 context-managed conversational completion with the tool loop REMOVED (verbs:
 send·history·recall·context_status·…, and NO `refresh_menu`), while the agentic
-loop is now emergent — an authored agent on a script executor (`python_runtime`
-here; `js_runtime`/`lua_runtime` on the Rust image) drives the tool loop itself.
+loop is now emergent — an authored agent on the ONE script executor
+(`exec_bridge`, `shim:'python'`) drives the tool loop itself.
 
 Runs ONLY under `FANTASTIC_TARGET=container` (skips otherwise). It is PROGRAMMED
 but not run in the default local sweep — set the env + build the image
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # A durable authored agent: on each `ping` inbox turn it echoes back. Proves the
-# python_runtime durable-agent + addressable-inbox path loads and boots in-image.
+# exec_bridge durable-agent + addressable-inbox path loads and boots in-image.
 _ECHO_CODE = (
     "import time\n"
     "def _on(m):\n"
@@ -63,7 +63,7 @@ async def test_container_deloop_backends_and_mind_boot(
         wd,
         handler_module="file_bridge.tools",
         agent_id="store",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     seed_create(
         python_binary,
@@ -72,8 +72,18 @@ async def test_container_deloop_backends_and_mind_boot(
         agent_id="the_ai",
         file_bridge_id="store",
     )
-    # A durable authored agent (the "mind" seat) on the Python script executor.
-    seed_create(python_binary, wd, handler_module="python_runtime.tools", agent_id="the_mind")
+    # A durable authored agent (the "mind" seat) on the ONE script executor. The leg
+    # is SEALED by default and has NO interpreter until the operator names one, so an
+    # in-image interpreter + `shim=python` + an open ingress are all required to run.
+    seed_create(
+        python_binary,
+        wd,
+        handler_module="exec_bridge.tools",
+        agent_id="the_mind",
+        interpreters='["/opt/fantastic/venv/bin/python"]',
+        shim="python",
+        ingress_rule="allow_all_ingress",
+    )
 
     kernel = await python_kernel(wd, port)
 
@@ -86,20 +96,20 @@ async def test_container_deloop_backends_and_mind_boot(
     assert "refresh_menu" not in verbs, "refresh_menu should be gone (loop removed)"
     assert "send" in verbs and "history" in verbs
 
-    # 2) The bundle catalog carries every de-looped backend + the py script executor.
+    # 2) The bundle catalog carries every de-looped backend + the script executor.
     root = await kernel.call("kernel", "reflect", bundles="ids")
     names = set(root.get("bundles", []))
     assert {
         "ollama_backend",
         "nvidia_nim_backend",
         "anthropic_backend",
-        "python_runtime",
-    } <= names, f"expected de-looped backends + python_runtime in catalog, got {sorted(names)}"
+        "exec_bridge",
+    } <= names, f"expected de-looped backends + exec_bridge in catalog, got {sorted(names)}"
 
     # 3) A durable authored agent boots on the script executor + is addressable:
     #    an unknown verb is queued to its running job's inbox (the emergent-loop
     #    seat — the mind receives turns via on_message).
     started = await kernel.call("the_mind", "start", code=_ECHO_CODE)
-    assert started.get("job_id"), f"python_runtime start should return a job_id: {started}"
+    assert started.get("job_id"), f"exec_bridge start should return a job_id: {started}"
     ack = await kernel.call("the_mind", "send", type="ping", text="hi", client_id="c")
     assert ack.get("queued") is True, f"addressable-inbox ack expected: {ack}"

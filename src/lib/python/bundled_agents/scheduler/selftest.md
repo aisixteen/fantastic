@@ -26,7 +26,7 @@ Expected: `{"error":"scheduler: file_bridge_id required"}`.
 ### Test 2: configure with file_bridge_id, then schedule persists
 
 ```bash
-FA=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic kernel_state update_agent id=$SC file_bridge_id=$FA
 SCH=$(fantastic $SC schedule target=cli payload='{"type":"say","text":"hello"}' interval_seconds=60 | python -c "import json,sys;print(json.load(sys.stdin)['schedule_id'])")
 test -f .fantastic/agents/$SC/schedules.json && echo "OK persisted via file_bridge agent"

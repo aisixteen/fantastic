@@ -26,8 +26,8 @@ Fantastic is **two cooperating kernels**, and recipes always split across them:
 HOST kernel (this container: python or rust)         FRONTEND kernel (browser, ts/)
   data · compute · transport · memory                  the VIEW lives here
   kernel_state(root) web web_ws web_rest file_bridge             canvas · *_view · *content
-  python_runtime terminal_backend ai_* yaml_state      (federates to the host over
-  scheduler ws_bridge local_runner ssh_runner          the SAME web_ws WS wire)
+  exec_bridge terminal_backend ai_* yaml_state         (federates to the host over
+  scheduler ws_bridge                                  the SAME web_ws WS wire)
 ```
 
 The host **serves** the frontend (a static `file_bridge` agent) and **relays** the WS
@@ -112,11 +112,11 @@ FRONTEND:  ai_view (chat panel)  ── by id ──▶ the backend
 **Wiring:** send a prompt to the backend; it streams `token`/`done` **on its own
 id**; the prompt *names who listens* and the system prompt carries the `send()`
 signature, so the model **routes its own result** (no `reply_to` primitive; 1:N
-falls out). Tell it the ids of a `python_runtime`, a `file_bridge`, a `yaml_state` and it
+falls out). Tell it the ids of an `exec_bridge`, a `file_bridge`, a `yaml_state` and it
 calls them as tools. A recursion guard keeps AI→AI chains safe.
 
 **Hand to an LLM:** *"Create an `anthropic_backend` (key from env); attach an
-`ai_view`. Here are the ids of a python_runtime and a yaml_state memory — use them
+`ai_view`. Here are the ids of an exec_bridge and a yaml_state memory — use them
 as tools."*
 
 **⚠ Today:** fully ported. Pass the key at launch (`-e ANTHROPIC_KEY=…`). Durable
@@ -133,19 +133,21 @@ background job, stream its progress to a live panel, manage it by `job_id`.
 boards.)*
 
 ```text
-HOST:      python_runtime  (cwd = project)   ── start → job_id; streams progress/job_done
+HOST:      exec_bridge  (cwd = project)      ── start → job_id; streams progress/job_done
              + file_bridge agent  (serves the job's own UI / artifacts)
 FRONTEND:  an html panel (or ai_view) subscribing to progress — or the job's
            own training_ui.html served via the file_bridge agent
 ```
 
-**Wiring:** `python_runtime.start` runs `python -u …` in the background (many in
-parallel), returns a `job_id` immediately, streams `progress`/`job_done`;
+**Wiring:** `exec_bridge.start` runs your `code` under one of its allowlisted
+`interpreters` in the background (many in parallel), returns a `job_id`
+immediately, streams `progress`/`job_done`;
 `status`/`stop`/`interrupt`/`clear` by `job_id`. The spawned code gets a **kernel
 connector** (send/emit/spawn back into the kernel over a socketpair), so a job can
 push frames to a panel, call an AI, or read memory — by id.
 
-**Hand to an LLM:** *"Create a `python_runtime` at my project; start `train.py` as
+**Hand to an LLM:** *"Create an `exec_bridge` at my project (`interpreters` naming
+my python, `shim=python`, `ingress_rule=allow_all_ingress`); start `train.py` as
 a job; render its `progress` stream into an html panel and serve `training_ui.html`
 via a file_bridge agent."*
 
@@ -163,16 +165,16 @@ diffusion-transformer visualization: a looping point-cloud → Gaussian → coll
 motif beside a manim animation.)*
 
 ```text
-HOST:      python_runtime (computes frames/point-clouds) + file_bridge agent (serves js/assets)
+HOST:      exec_bridge (computes frames/point-clouds) + file_bridge agent (serves js/assets)
 FRONTEND:  gl_agent (WebGL content)  ── fed by the host job; iframed by canvas
 ```
 
 **Wiring:** `gl_agent` renders the shader/point-cloud; the host job streams data to
 it by id; static assets via `/<file>/file/<path>`. A separate "explainer" animation
-(e.g. manim) is just a plain `python_runtime` **render job** — no special agent.
+(e.g. manim) is just a plain `exec_bridge` **render job** — no special agent.
 
 **Hand to an LLM:** *"Create a `gl_agent` with my point-cloud shader; feed it frames
-from a `python_runtime` job; drop it on the canvas."*
+from an `exec_bridge` job; drop it on the canvas."*
 
 **⚠ Today:** `gl_agent` **is** ported (frontend). **Not** ported: your specific
 shaders/`*.js` (app content — you supply them), and **headless/CI WebGL is
@@ -187,7 +189,7 @@ audio-capture/playback tool, driven by a Python media backend. *(distilled from 
 generative "trance" panel and audio + geo-data boards.)*
 
 ```text
-HOST:      python_runtime (audio gen/processing; writes wavs/geojson) + file_bridge agent (serves media)
+HOST:      exec_bridge (audio gen/processing; writes wavs/geojson) + file_bridge agent (serves media)
            [+ a HOST "bus" agent if multiple panels must talk]
 FRONTEND:  html_agent / gl_agent panel (WebAudio + canvas/WebGL)
 ```

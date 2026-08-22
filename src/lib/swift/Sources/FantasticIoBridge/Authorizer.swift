@@ -93,9 +93,35 @@ func parseSpec(_ spec: JSON?) throws -> (name: String?, tokenEnv: String?) {
     }
 }
 
+/// The effective spec for ONE manifold, with the `auth` shorthand already SCOPED.
+///
+/// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
+/// written into the wrong field is a loud error instead of a silent policy change.
+/// Measured 2026-08-21 (python, and this runtime had the identical defect): with bare
+/// names, `auth:"silent"` — a legitimate EGRESS policy — resolved ingress to
+/// `DenyInbound(unknown: "silent")`, SEALING the leg while saying nothing; and
+/// `auth:"allow_all"` handed egress a `Silent` nobody asked for. One unscoped name
+/// against two registries with different membership is a fallback, and this kernel does
+/// not have fallbacks.
+///
+/// The per-direction field WINS and is taken as written. `auth` carries a bare STEM and
+/// each manifold appends its own suffix — except that an inbound-only stem presents
+/// nothing outbound, a MEANING spelled out per stem rather than a lookup miss. Scoping
+/// HERE keeps `resolve` and `ruleName` unchanged: they only ever see a scoped spec.
+public func manifoldSpec(_ primary: JSON?, _ auth: JSON?, _ suffix: String) -> JSON? {
+    if let primary, primary != .null { return primary }
+    guard let auth, let (name, env) = try? parseSpec(auth), let stem = name else { return nil }
+    if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
+        return .string("silent_egress")
+    }
+    let scoped = stem + suffix
+    if let env { return .object(["type": .string(scoped), "env": .string(env)]) }
+    return .string(scoped)
+}
+
 /// The rule TYPE name for reflect — never surfaces the rule's config. Absent ⇒ `def`,
-/// which the CALLER supplies: `deny_inbound` for ingress (IO legs seal by default) and
-/// `silent` for egress. This doc used to say `allow_all` for ingress, the opposite of
+/// which the CALLER supplies: `deny_ingress` for ingress (IO legs seal by default) and
+/// `silent_egress` for egress. This doc used to say `allow_all` for ingress, the opposite of
 /// what callers pass and of sealed-by-default.
 public func ruleName(_ spec: JSON?, default def: String) -> String {
     switch spec {
@@ -125,12 +151,12 @@ func constantTimeEquals(_ a: String, _ b: String) -> Bool {
 /// was wrong in the dangerous direction — an operator reading it would believe a fresh
 /// leg admits traffic.
 public func resolveIngress(ingressRule: JSON?, auth: JSON?) throws -> IngressRule {
-    try IngressRules.resolve(ingressRule ?? auth)
+    try IngressRules.resolve(manifoldSpec(ingressRule, auth, "_ingress"))
 }
 
 /// Resolve the leg's EGRESS rule: `egress_rule` if present, else the `auth`
 /// both-directions shorthand (so `auth:"password"` presents the group token).
 /// Absent ⇒ Silent.
 public func resolveEgress(egressRule: JSON?, auth: JSON?) throws -> EgressRule {
-    try EgressRules.resolve(egressRule ?? auth)
+    try EgressRules.resolve(manifoldSpec(egressRule, auth, "_egress"))
 }

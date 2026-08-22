@@ -258,7 +258,7 @@
                 binary: binary, workdir: pyDir, agentId: "kernel_state", verb: "create_agent",
                 args: [
                     "handler_module": "file_bridge.tools", "root": ".fantastic",
-                    "ingress_rule": "allow_all",
+                    "ingress_rule": "allow_all_ingress",
                 ])
             // Two reflect calls in the SAME workdir must read the guid back
             // verbatim from disk (reboot stability — never regenerated).

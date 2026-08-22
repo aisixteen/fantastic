@@ -1,6 +1,6 @@
 # exec_bridge — the process edge of the io family
 
-Sealed by default (`ingress_rule=allow_all` opens it), interpreter **ALLOWLIST**
+Sealed by default (`ingress_rule=allow_all_ingress` opens it), interpreter **ALLOWLIST**
 (`interpreters=[…]` on the record — no default, no PATH fallback, an unlisted
 `interpreter` refuses naming the legal set).
 

@@ -129,7 +129,7 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
                     "id": "the_mind",
                     "interpreters": [sys.executable],
                     "shim": "python",
-                    "ingress_rule": "allow_all",
+                    "ingress_rule": "allow_all_ingress",
                     # Deny-all: the mind drives the AI — an explicit lateral grant.
                     "can_call": {"the_ai": "*"},
                 },
@@ -300,7 +300,7 @@ async def _spawn_plan_mind(k, store_agent, scripts):
                 "id": "the_mind",
                 "interpreters": [sys.executable],
                 "shim": "python",
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
                 # Deny-all: the mind drives the AI — an explicit lateral grant.
                 "can_call": {"the_ai": "*"},
             },

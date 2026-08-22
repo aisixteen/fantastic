@@ -166,7 +166,7 @@ try:
     # idiom `import kernel`. Without this that would rebind the name to the
     # substrate `kernel` PACKAGE (installed in the venv), silently breaking the
     # tool. Register the injected connector under that name so `import kernel`
-    # returns the connector (mirrors the js_runtime `require('kernel')` fix). Safe:
+    # returns the connector (same fix as a `require('kernel')` binding). Safe:
     # the job runs in its OWN subprocess, so this doesn't touch the host's modules.
     _sys.modules["kernel"] = kernel
 except Exception as _e:

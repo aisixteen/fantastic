@@ -58,8 +58,15 @@ impl Bundle for FileBundle {
         meta: &serde_json::Map<String, Value>,
         _record: &serde_json::Map<String, Value>,
     ) -> Option<String> {
-        let spec = meta.get("ingress_rule")?;
-        let rule = fantastic_io_bridge::authorizer::ingress::resolve(Some(spec)).ok()?;
+        // Read the SAME pair the gate reads (`ingress_rule` else the `auth` stem).
+        // It used to read only `ingress_rule`, so a leg configured via `auth` could
+        // validate clean and then behave differently at the gate — two truths.
+        let spec = fantastic_io_bridge::authorizer::manifold_spec(
+            meta.get("ingress_rule"),
+            meta.get("auth"),
+            "_ingress",
+        )?;
+        let rule = fantastic_io_bridge::authorizer::ingress::resolve(Some(&spec)).ok()?;
         let probe = fantastic_io_bridge::authorizer::Action {
             kind: "call",
             target: "",
@@ -228,7 +235,7 @@ impl Bundle for FileBundle {
 
 /// The sealed-by-default GATE — the fs edge is an io_bridge leg. Every verb
 /// except discovery/lifecycle (`reflect`/`boot`/`shutdown`) is denied until
-/// the leg is opened (`ingress_rule=allow_all`). Mirrors py file_bridge's
+/// the leg is opened (`ingress_rule=allow_all_ingress`). Mirrors py file_bridge's
 /// `gate_inbound` choke point. Returns `Some(error)` on deny, `None` to admit.
 /// Shared by the text (`handle`) and binary (`handle_binary`) channels so a
 /// sealed bridge refuses streamed bytes exactly like a text call.
@@ -236,8 +243,12 @@ fn gate(meta: &serde_json::Map<String, Value>, agent_id: &AgentId, verb: &str) -
     if matches!(verb, "reflect" | "boot" | "shutdown") {
         return None;
     }
-    let spec = meta.get("ingress_rule").or_else(|| meta.get("auth"));
-    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec) {
+    let spec = fantastic_io_bridge::authorizer::manifold_spec(
+        meta.get("ingress_rule"),
+        meta.get("auth"),
+        "_ingress",
+    );
+    let rule = match fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref()) {
         Ok(r) => r,
         Err(e) => return Some(json!({"error": e})),
     };
@@ -253,7 +264,7 @@ fn gate(meta: &serde_json::Map<String, Value>, agent_id: &AgentId, verb: &str) -
         return Some(json!({
             "error": reason,
             "reason": "unauthorized",
-            "hint": "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all",
+            "hint": "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress",
         }));
     }
     None

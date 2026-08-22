@@ -14,9 +14,7 @@ compiles to empty off macOS):
 | handler_module | tier |
 |---|---|
 | `terminal_backend.tools` | Full only |
-| `python_runtime.tools` | Full only |
-| `local_runner.tools` | Full only |
-| `ssh_runner.tools` | Full only |
+| `exec_bridge.tools` | Full only |
 
 The `.build/debug/fantastic` binary IS the Full tier. The Embedded
 slice is verified by cross-compiling to a non-macOS triple — the same
@@ -42,7 +40,7 @@ returns a real agent record (not a weak-load shell).
 ```bash
 BIN=/Users/oleksandr/Projects/fantastic_canvas/swift/.build/debug/fantastic
 rm -rf /tmp/fa_full && mkdir -p /tmp/fa_full && cd /tmp/fa_full
-for hm in terminal_backend python_runtime local_runner ssh_runner; do
+for hm in terminal_backend exec_bridge; do
   ID=$("$BIN" core create_agent handler_module=$hm.tools \
     | python3 -c "import json,sys;print(json.load(sys.stdin).get('id','?'))")
   KIND=$("$BIN" "$ID" reflect \
@@ -75,12 +73,11 @@ is NOT a failure. If a future bundle adds a non-gated dep that drags
 subprocess code (Process/PTY/SSH) into the Embedded slice, the
 cross-build fails here — the iOS Lite tier breaks.
 
-### Test 3: the four handler_modules are absent from the Embedded registry
+### Test 3: the pro-tier handler_modules are absent from the Embedded registry
 
 The Embedded umbrella's dep graph (`FantasticKernelEmbedded` target in
-`Package.swift`) must NOT list `FantasticTerminalBackend`,
-`FantasticPythonRuntime`, `FantasticLocalRunner`, or
-`FantasticSshRunner`; only `FantasticKernelFull` does. This is the
+`Package.swift`) must NOT list `FantasticTerminalBackend` or
+`FantasticExecBridge`; only `FantasticKernelFull` does. This is the
 static contract behind the runtime weak-load skip.
 
 ```bash
@@ -88,8 +85,7 @@ cd /Users/oleksandr/Projects/fantastic_canvas/swift
 python3 - <<'PY'
 import re
 src = open("Package.swift").read()
-pro = {"FantasticTerminalBackend","FantasticPythonRuntime",
-       "FantasticLocalRunner","FantasticSshRunner"}
+pro = {"FantasticTerminalBackend","FantasticExecBridge"}
 def target_deps(name):
     # anchor on the `.target(name: "X", dependencies: [...]` form
     # (not the `.library(...)` product decl that shares the name).
@@ -150,7 +146,7 @@ Expected: `tb registered: True` (boot did not abort on the unknown
 bundle — the shell loaded under `core`) and `PASS` (the verb returns
 `no bundle for handler_module "made_up_embedded_excluded.tools"`).
 This is the exact path a Full-tier workdir hits on the Embedded tier:
-`terminal_backend`/`python_runtime`/`local_runner`/`ssh_runner` records
+`terminal_backend`/`exec_bridge` records
 load as inert shells, verbs against them failfast, the rest of the tree
 boots normally.
 
@@ -165,7 +161,7 @@ above, not a log grep.
 |---|------|------|
 | 1 | Full tier registers all four subprocess bundles | |
 | 2 | Embedded slice cross-compiles to iOS Simulator | |
-| 3 | four handler_modules absent from Embedded dep graph | |
+| 3 | pro-tier handler_modules absent from Embedded dep graph | |
 | 4 | unknown-bundle record weak-load-skips (shell loads, verb fails) | |
 
 ## Regression signals

@@ -15,7 +15,7 @@ struct ConnectorParityTests {
 
     @Test func vendoredConnectorMatchesPythonByteForByte() throws {
         let py = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // FantasticPythonRuntimeTests
+            .deletingLastPathComponent()  // FantasticExecBridgeTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // swift
             .deletingLastPathComponent()  // lib

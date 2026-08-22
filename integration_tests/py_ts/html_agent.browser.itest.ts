@@ -2,7 +2,7 @@
 // hand-written (no LLM), with NO bypass.
 //
 // Two html_agent panels. Panel1's button uses the injected `fantastic` connector
-// to (a) `send` to a HOST `python_runtime` (routed by the JS kernel over the
+// to (a) `send` to a HOST `exec_bridge` (routed by the JS kernel over the
 // kernel bridge) and show the value live, then (b) `emit` DIRECTLY to panel2 by
 // id — a LOCAL JS-kernel fan-out, no host rendezvous. Panel2 `onMessage`s and
 // renders it. The iframe talks ONLY to the JS kernel (postMessage); it has no host
@@ -36,7 +36,7 @@ const MOUNT_HTML = `<!doctype html><html><head><meta charset="utf-8">
 </body></html>`;
 const MOUNT_FILE = join(DIST_DIR, "_test_canvas.html");
 
-// Panel1: Run button → `fantastic.send` to the host python_runtime (over the
+// Panel1: Run button → `fantastic.send` to the host exec_bridge (over the
 // kernel bridge) → live value, then `fantastic.emit` DIRECT to panel2 by id.
 function panel1Body(pyId: string): string {
   return `<button id="run">Run</button> <pre id="out" style="display:inline">—</pre>
@@ -93,8 +93,8 @@ before(async () => {
     return;
   }
   try {
-    host = await bootHost(8915, { webLoader: true, serveDist: true, pythonRuntime: true });
-    seedTree(host.tmp, host.pyId ?? "python_runtime");
+    host = await bootHost(8915, { webLoader: true, serveDist: true, execBridge: true });
+    seedTree(host.tmp, host.pyId ?? "exec_bridge");
     writeServedDist(host, "_test_canvas.html", MOUNT_HTML); // into the dir actually served (local: the workdir copy)
     browser = await Browser.launch();
   } catch (e) {
@@ -135,7 +135,7 @@ test("html_agent connector: button → host python (via JS kernel) + DIRECT pane
     "(() => { const e = document.getElementById('out'); return e && e.textContent !== '—' ? e.textContent : null; })()",
     15000,
   );
-  assert.ok(out && /^val-\d{4}$/.test(out), `Panel1 live value from python_runtime (got ${JSON.stringify(out)})`);
+  assert.ok(out && /^val-\d{4}$/.test(out), `Panel1 live value from exec_bridge (got ${JSON.stringify(out)})`);
 
   // Panel2 got it via a DIRECT panel1→panel2 emit (local JS-kernel fan-out, no relay)
   const got = await b.evalInAnyIframe<string>(

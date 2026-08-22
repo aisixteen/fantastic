@@ -28,7 +28,7 @@ rm -rf /tmp/ys_test && mkdir -p /tmp/ys_test && cd /tmp/ys_test
 ```bash
 # a store so the UNWIRED agent's RECORD persists across one-shot calls; its own
 # file_bridge_id is still unset, so `set` must fail fast (not silently fall to RAM).
-fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all >/dev/null
+fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress >/dev/null
 UW=$(fantastic kernel_state create_agent handler_module=yaml_state.tools mode=mem | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $UW set key=k value=v | python -m json.tool | grep -F 'file_bridge_id required'
 ```
@@ -39,7 +39,7 @@ Expected: `{"error":"yaml_state.set: file_bridge_id required …"}` — no silen
 ```bash
 # the .fantastic store: one file_bridge serves both record persistence AND yaml_state's
 # sidecar (store-relative path `agents/<id>/state.yaml` lands next to its agent.json).
-FA=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 YS=$(fantastic kernel_state create_agent handler_module=yaml_state.tools mode=mem file_bridge_id=$FA | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $YS set key=user.name value=Ada
 fantastic $YS read key=user.name | python -m json.tool | grep -F '"value": "Ada"'

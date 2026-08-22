@@ -481,7 +481,7 @@ async def test_forward_round_trips_through_relay_tunnel(two_kernels):
     io_bridge engine with the relay transport, symmetric callee role and all."""
     ka, kb = two_kernels
     a_id = await _make_leg(ka, partner="B")
-    b_id = await _make_leg(kb, partner="A", ingress="allow_all")
+    b_id = await _make_leg(kb, partner="A", ingress="allow_all_ingress")
 
     mt_a, mt_b = _pair("A", "B")
     rc._test_transport_inject[a_id] = mt_a

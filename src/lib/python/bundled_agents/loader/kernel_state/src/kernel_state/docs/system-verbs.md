@@ -17,7 +17,7 @@ their NAMES; this page is where their arguments live.
 
 `update_agent` — args: `id:str`, `**meta`
 : Patch a record's meta in place. Use it to wire an agent after the fact (set a
-  `file_bridge_id`) or to open a sealed io leg (`ingress_rule=allow_all`).
+  `file_bridge_id`) or to open a sealed io leg (`ingress_rule=allow_all_ingress`).
 
 `delete_agent` — args: `id:str`
 : Cascade-delete an agent and its whole subtree, deepest first. Refuses with
@@ -31,7 +31,7 @@ their NAMES; this page is where their arguments live.
 ## Work in flight
 
 The task table models WORK, Linux-style. A task is ONE in-flight dispatch with
-id `"<agent_id>:<n>"`. A send issued inside a handler is a CHILD of that
+id `"<agent_id>:<token>"`. A send issued inside a handler is a CHILD of that
 handler's task, so the table is a tree.
 
 `ps` — no args
@@ -46,7 +46,7 @@ handler's task, so the table is a tree.
   than pretending.
 
   Cancelling frees real resources where a bundle implements `on_cancel`: a
-  `python_runtime` job's child process is SIGKILLed, an AI backend's in-flight
+  `exec_bridge` job's child process is SIGKILLed, an AI backend's in-flight
   generation is cleared and closed out with a `done` event.
 
 ## Process

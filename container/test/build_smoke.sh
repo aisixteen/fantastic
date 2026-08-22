@@ -33,7 +33,7 @@ freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0))
 # These one-shots (entrypoint bypassed) seed web+web_ws+rest into a workdir, the
 # way a project/LLM would, before the daemon boots it. The call legs (web_ws,
 # web_rest) are io_bridge derivations — SEALED by default — so we open them with
-# ingress_rule=allow_all, exactly as the operator must. $1=workdir $2=bin $3=root $4=port
+# ingress_rule=allow_all_ingress, exactly as the operator must. $1=workdir $2=bin $3=root $4=port
 PYBIN=/opt/fantastic/venv/bin/fantastic_kernel
 RUSTBIN=/opt/fantastic/bin/fantastic-rust
 SWIFTBIN=/opt/fantastic/bin/fantastic-swift
@@ -43,10 +43,10 @@ compose_web() {
   # unwired), so without this the web/web_ws/rest one-shots would never reach disk
   # and the daemon would boot empty. The store self-persists (survives to the next
   # one-shot). Idempotent across the calls below.
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all_ingress >/dev/null 2>&1
   $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=web.tools id=web "port=$4" >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws ingress_rule=allow_all >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest ingress_rule=allow_all >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_ws.tools id=web_ws ingress_rule=allow_all_ingress >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" web create_agent handler_module=web_rest.tools id=rest ingress_rule=allow_all_ingress >/dev/null 2>&1
 }
 
 # Serve the head page the ONE gated way — `/head/file/index.html` via read_stream,
@@ -55,7 +55,7 @@ compose_web() {
 # a read-only file_bridge rooted at the relative `head`. $1=workdir $2=bin $3=root
 compose_head() {
   $ENGINE run --rm -v "$1:/work" --entrypoint sh "$TAG" -c 'mkdir -p /work/head && cp /opt/fantastic/head/index.html /work/head/index.html' >/dev/null 2>&1
-  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=head root=head readonly=true ingress_rule=allow_all >/dev/null 2>&1
+  $ENGINE run --rm -v "$1:/work" -w /work --entrypoint "$2" "$TAG" "$3" create_agent handler_module=file_bridge.tools id=head root=head readonly=true ingress_rule=allow_all_ingress >/dev/null 2>&1
 }
 
 # ── build ──────────────────────────────────────────────────────────────────

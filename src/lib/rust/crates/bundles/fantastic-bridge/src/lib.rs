@@ -399,9 +399,20 @@ fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
 }
 
 /// The rule spec for one direction: the per-direction field if present, else the
-/// legacy `auth` shorthand (so `auth:"password"` sets both sides).
+/// `auth` shorthand — which carries a bare STEM that each manifold scopes with its own
+/// suffix (`auth:"password"` ⇒ `password_ingress` + `password_egress`). See
+/// `authorizer::manifold_spec`.
 fn rule_spec(agent_id: &AgentId, kernel: &Kernel, primary: &str) -> Option<Value> {
-    meta_value(agent_id, kernel, primary).or_else(|| meta_value(agent_id, kernel, "auth"))
+    let suffix = if primary == "egress_rule" {
+        "_egress"
+    } else {
+        "_ingress"
+    };
+    authorizer::manifold_spec(
+        meta_value(agent_id, kernel, primary).as_ref(),
+        meta_value(agent_id, kernel, "auth").as_ref(),
+        suffix,
+    )
 }
 
 fn meta_u64(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<u64> {
@@ -449,9 +460,9 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
         // `reflect` → `update_agent` edit is a direct mirror. No `auth` alias in
         // the reflect (it's a legacy WRITE shorthand only). `sealed` = the leg
         // still denies inbound (the conscious-open signal).
-        "ingress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound"),
-        "egress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "egress_rule").as_ref(), "silent"),
-        "sealed": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_inbound") != "allow_all",
+        "ingress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_ingress"),
+        "egress_rule": authorizer::rule_name(rule_spec(agent_id, kernel, "egress_rule").as_ref(), "silent_egress"),
+        "sealed": authorizer::rule_name(rule_spec(agent_id, kernel, "ingress_rule").as_ref(), "deny_ingress") != "allow_all_ingress",
         "pending_count": pending,
         "verbs": {
             "reflect": "Identity + transport + connectivity. No args.",

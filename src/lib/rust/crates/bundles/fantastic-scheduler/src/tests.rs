@@ -52,7 +52,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
                 "handler_module":"file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": { sch_id.clone(): "*" },
             }),

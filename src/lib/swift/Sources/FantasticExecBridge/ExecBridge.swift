@@ -1,6 +1,6 @@
 // Python subprocess execution bundle (macOS only).
 //
-// Mirrors python's `python_runtime`: `start` spawns `python -u -c <connector +
+// Mirrors python's `exec_bridge`: `start` spawns `python -u -c <connector +
 // code>` as a BACKGROUND child and returns `{job_id, status:"running"}` AT ONCE.
 // The program's output is NOT the reply — it arrives as `job_done` on this
 // agent's inbox. The `code` is persisted on the agent record, so the program is
@@ -52,12 +52,11 @@
 // with the entire stdlib: `open()`, `socket`, `subprocess` all work. PROVEN 2026-08-05 — a
 // job did `open('ESCAPED.txt','w')` and the file appeared on disk.
 //
-// So the self-extension doc's "your code's only capability is the kernel connector; it has
-// no direct disk, net, or process access" is TRUE for `js_runtime` (no fs bindings exist in
-// the engine) and TRUE for `lua_runtime` (loads only STRING|TABLE|MATH|COROUTINE, `io`/`os`
-// omitted) — and FALSE here. The connector is the RECOMMENDED path, not the only one, and
-// routing this bundle's data IO "through the loader" would be a convention a program can
-// ignore in one line, not a gate.
+// So "your code's only capability is the kernel connector; it has no direct disk, net, or
+// process access" would be FALSE here. Where an interpreter happens to grant less, you get
+// less — but that is a property of the interpreter, not a promise this bundle makes. The
+// connector is the RECOMMENDED path, not the only one, and routing this bundle's data IO
+// "through the loader" would be a convention a program can ignore in one line, not a gate.
 //
 // CONSEQUENCE FOR THE OPERATOR: registering a python executor GRANTS ARBITRARY LOCAL CODE
 // EXECUTION to whatever authors a program — including an LLM. It is a conscious opt-in, and
@@ -71,8 +70,7 @@
 #if os(macOS)
 
     import FantasticIoBridge
-import FantasticIoBridge
-import FantasticJSON
+    import FantasticJSON
     import FantasticKernel
     import Foundation
 
@@ -115,7 +113,7 @@ import FantasticJSON
         public var readme: String? {
             """
             exec_bridge — the process edge of the io family. Sealed by default \
-            (`ingress_rule=allow_all` opens it); interpreter ALLOWLIST \
+            (`ingress_rule=allow_all_ingress` opens it); interpreter ALLOWLIST \
             (`interpreters=[…]` on the record — no default, no PATH fallback; an \
             unlisted `interpreter` refuses naming the legal set). `start {code?, \
             args?, interpreter?, shim?}` spawns in the BACKGROUND → {job_id, \
@@ -157,7 +155,7 @@ import FantasticJSON
                         "reason": .string("unauthorized"),
                         "hint": .string(
                             "the process edge is sealed; open it: "
-                                + "update_agent <id> ingress_rule=allow_all"),
+                                + "update_agent <id> ingress_rule=allow_all_ingress"),
                     ])
                 }
             }
@@ -486,11 +484,12 @@ import FantasticJSON
                     Interpreter.allowed(record: record).map(JSON.string)),
                 "shims": .array([.string("python")]),
                 "running": .integer(Int64(inFlight(agentId))),
-                "ingress_rule": record?.metaValue(forKey: "ingress_rule")
-                    ?? record?.metaValue(forKey: "auth") ?? .string("deny_inbound"),
-                "sealed": .bool(
-                    (record?.metaValue(forKey: "ingress_rule")?.asString
-                        ?? record?.metaValue(forKey: "auth")?.asString) != "allow_all"),
+                // Through `manifoldSpec` + `ruleName`: this used to read the RAW string,
+                // so a leg configured via the `auth` STEM reported a name the registry
+                // would not accept — and, after scoping, would have reflected `sealed`
+                // while its own gate opened the leg. One resolution path, one answer.
+                "ingress_rule": .string(execIngressName(record)),
+                "sealed": .bool(execIngressName(record) != "allow_all_ingress"),
                 "verbs": .object([
                     "reflect": .string(
                         "Identity + interpreter + count of in-flight subprocesses. No args."),
@@ -572,6 +571,19 @@ import FantasticJSON
             defer { lock.unlock() }
             return data
         }
+    }
+
+    /// The SCOPED ingress rule name for this leg — the same resolution the gate performs.
+    /// This used to be read as a RAW string, so a leg configured through the `auth` STEM
+    /// reported a name the registry would not accept and, after scoping, would have
+    /// reflected `sealed` while its own gate opened the leg. One path, one answer.
+    private func execIngressName(_ record: Agent?) -> String {
+        ruleName(
+            manifoldSpec(
+                record?.metaValue(forKey: "ingress_rule"),
+                record?.metaValue(forKey: "auth"),
+                "_ingress"),
+            default: "deny_ingress")
     }
 
 #endif  // os(macOS)

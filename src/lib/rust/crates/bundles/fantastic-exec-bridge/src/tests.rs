@@ -53,7 +53,7 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     // operator opens the leg (the seal itself is covered separately). The record
     // names the python shim: the connector is now OPT-IN, and these tests are
     // exactly the programs that assume `kernel` in scope.
-    extra.insert("ingress_rule".to_string(), json!("allow_all"));
+    extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("shim".to_string(), json!("python"));
     mk_kernel_with(tmp, extra).await
 }
@@ -263,7 +263,7 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
         d["hint"]
             .as_str()
             .unwrap_or("")
-            .contains("ingress_rule=allow_all"),
+            .contains("ingress_rule=allow_all_ingress"),
         "the denial must teach how to open: {d}"
     );
     let refl = k2.send(&sealed, json!({"type": "reflect"})).await;
@@ -370,7 +370,7 @@ async fn stop_sigkills_the_job() {
 fn connector_matches_python_source() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../..")
-        .join("src/lib/python/bundled_agents/python_runtime/src/python_runtime/_connector.py");
+        .join("src/lib/python/bundled_agents/io/exec_bridge/src/exec_bridge/_connector.py");
     let Ok(src) = std::fs::read_to_string(&py) else {
         eprintln!("skipping: python tree not present at {}", py.display());
         return;

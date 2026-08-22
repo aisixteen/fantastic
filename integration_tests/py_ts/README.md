@@ -17,7 +17,7 @@ no host, no browser). These boot a python subprocess *and* a browser — they're
 - `*.itest.ts` — the integration tests (boot a host via `_host.ts`, drive a
   browser via `_chrome.ts`).
 - `_host.ts` — boots/tears-down a real `fantastic` daemon in a throwaway tmp dir
-  (web + web_ws + optional web_loader / python_runtime / scheduler / LLM agents);
+  (web + web_ws + optional web_loader / exec_bridge / scheduler / LLM agents);
   exposes `bootHost`, `teardownHost`, `restartHost`, `DIST_DIR`, `dotenvKey`.
 - `_chrome.ts` — minimal CDP browser driver; the `*.browser.itest.ts` skip
   cleanly when system Chrome is absent.

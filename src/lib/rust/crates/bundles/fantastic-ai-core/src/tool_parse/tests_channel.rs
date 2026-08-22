@@ -108,7 +108,7 @@ fn channel_envelope_with_json_quoted_args() {
     // posture-changing calls came back `{"error": "update_agent: id required"}`.
     let c = one(concat!(
         "<|tool_call>call:kernel_state.update_agent",
-        r#"{"id":"assets","ingress_rule":"allow_all"}<tool_call|>"#
+        r#"{"id":"assets","ingress_rule":"allow_all_ingress"}<tool_call|>"#
     ));
     assert_eq!(
         c.arguments_value(),
@@ -117,7 +117,7 @@ fn channel_envelope_with_json_quoted_args() {
             "payload": {
                 "type": "update_agent",
                 "id": "assets",
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             },
         })
     );

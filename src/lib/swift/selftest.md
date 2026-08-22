@@ -107,9 +107,7 @@ Surviving bundles that run cross-runtime against the Swift binary
 | ollama_backend | [`ai/ollama/ollama_backend/selftest.md`](../python/bundled_agents/ai/ollama/ollama_backend/selftest.md) (needs running ollama) |
 | nvidia_nim_backend | [`ai/nvidia/nvidia_nim_backend/selftest.md`](../python/bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md) (needs `NVAPI_KEY`) |
 | foundation_models_backend | native overlay (no Python equivalent) — see below |
-| local_runner | [`runner/local_runner/selftest.md`](../python/bundled_agents/runner/local_runner/selftest.md) (Full tier only) |
-| python_runtime | [`python_runtime/selftest.md`](../python/bundled_agents/python_runtime/selftest.md) (Full tier only) |
-| ssh_runner | [`runner/ssh_runner/selftest.md`](../python/bundled_agents/runner/ssh_runner/selftest.md) (Full tier only) |
+| exec_bridge | [`io/exec_bridge/selftest.md`](../python/bundled_agents/io/exec_bridge/selftest.md) (Full tier only) |
 | terminal_backend | [`terminal/selftest.md`](../python/bundled_agents/terminal/selftest.md) (Full tier only) |
 
 `proxy_agent` and `tools` have no standalone Python spec — they are
@@ -118,8 +116,8 @@ exercised structurally by `reflect` and the host WS specs.
 View/webapp specs live in the decoupled frontend kernel — see
 [`../ts/`](../ts/); this host serves it generically via a `file` agent.
 
-The four subprocess bundles (terminal_backend, python_runtime,
-local_runner, ssh_runner) exist **only in the Full (macOS) tier** —
+The subprocess bundles (terminal_backend, exec_bridge) exist
+**only in the Full (macOS) tier** —
 the `.build/debug/fantastic` binary IS the Full tier, so their
 cross-runtime specs run as written. Under the Embedded tier they are
 compile-time excluded; see `selftest/feature_gates.md`.

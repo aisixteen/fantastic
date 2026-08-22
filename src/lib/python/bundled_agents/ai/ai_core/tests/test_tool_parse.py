@@ -128,14 +128,14 @@ def test_channel_envelope_with_json_quoted_args():
     calls came back `{"error": "update_agent: id required"}`."""
     calls = extract_tool_calls(
         "<|tool_call>call:kernel_state.update_agent"
-        '{"id":"assets","ingress_rule":"allow_all"}<tool_call|>'
+        '{"id":"assets","ingress_rule":"allow_all_ingress"}<tool_call|>'
     )
     assert calls[0]["arguments"] == {
         "target_id": "kernel_state",
         "payload": {
             "type": "update_agent",
             "id": "assets",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     }
 
@@ -199,12 +199,15 @@ def test_three_envelopes_interleave_in_document_order():
 
 # ─── malformed_calls (a broken envelope must have a VOICE) ──────
 
-# Verbatim from gemma-4-12B, probe 05, 2026-08-06 — the call that ended the run.
-# The program body is escaped correctly; the `code` value is never closed, so
-# every brace after it is string content and the object runs off the end.
+# From gemma-4-12B, probe 05, 2026-08-06 — the call that ended the run. Kept byte for
+# byte EXCEPT the handler_module, retargeted to the current executor when the
+# per-language runtimes were deleted; the defect under test is the unclosed `code`
+# string, which is untouched. The program body is escaped correctly; the `code` value
+# is never closed, so every brace after it is string content and the object runs off
+# the end.
 GEMMA_UNCLOSED_CODE = (
     '{"name":"send","arguments":{"target_id":"kernel_state","payload":'
-    '{"type":"create_agent","handler_module":"python_runtime.tools",'
+    '{"type":"create_agent","handler_module":"exec_bridge.tools",'
     '"id":"reading_aggregator","code":"def update_totals():\\n'
     '    worker_res = send(\\"reading_worker\\", {\\"type\\": \\"compute_total\\"})\\n'
     '    return f\\"updated to {worker_res}\\"}}'
@@ -477,22 +480,26 @@ if __name__ == "__main__":
 # ─── _route_reply's reply tag (end-to-end through a stub kernel) ─
 
 
-async def test_reply_tag_names_target_and_verb():
-    """`[reply to <id> <verb>]`, not `[reply to <id>]`.
+async def test_reply_tag_names_pid_target_and_verb():
+    """`[reply to <pid> · <id> <verb>]` — the dispatch PID is the correlator.
 
-    Measured 2026-08-07 (combined probe, opus): acks lag a turn behind when several
-    calls are in flight, and a bare `[reply to kernel_state]` cannot be matched to
-    WHICH call it answers — the model re-issued both of its deletes and then
-    theorized "duplicate delivery" from its own retries. Target alone is not a
-    correlation; target+verb is.
+    Measured 2026-08-07 (opus): acks lag a turn behind when several calls are in
+    flight, and a bare `[reply to kernel_state]` cannot be matched to WHICH call it
+    answers — the model re-issued both deletes, then theorized "duplicate delivery"
+    from its own retries. Target+verb narrowed it but is still NOT unique (two
+    identical calls in flight); measured again 2026-08-20 (qwen: "the reply queue is
+    running ahead of me", then re-polled forever). The PID — minted at dispatch, the
+    same id `ps`/`cancel` use — is the one unambiguous correlation.
     """
     from ai_core import core
 
     sent = []
 
     class StubKernel:
-        async def send(self, target, payload):
+        async def send(self, target, payload, *, task_out=None):
             sent.append((target, payload))
+            if task_out is not None:
+                task_out.append(f"{target}:1")  # the kernel mints at dispatch
             if payload.get("type") == "list_agents":
                 return {"agents": []}
             return None  # the reply-delivery self-send
@@ -506,4 +513,6 @@ async def test_reply_tag_names_target_and_verb():
     assert dispatched == [{"type": "list_agents"}], "exactly ONE dispatch per call"
     back = [p for t, p in sent if t == "ai"]
     assert len(back) == 1
-    assert back[0]["text"].startswith("[reply to kernel_state list_agents]\n")
+    assert back[0]["text"].startswith(
+        "[reply to kernel_state:1 · kernel_state list_agents]\n"
+    )

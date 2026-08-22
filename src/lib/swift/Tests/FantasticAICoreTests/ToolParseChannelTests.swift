@@ -89,10 +89,10 @@ struct ToolParseChannelTests {
         // posture-changing calls came back `{"error": "update_agent: id required"}`.
         let calls = extractToolCalls(
             "<|tool_call>call:kernel_state.update_agent"
-                + #"{"id":"assets","ingress_rule":"allow_all"}<tool_call|>"#)
+                + #"{"id":"assets","ingress_rule":"allow_all_ingress"}<tool_call|>"#)
         #expect(
             calls[0].arguments.serialize()
-                == #"{"target_id":"kernel_state","payload":{"type":"update_agent","id":"assets","ingress_rule":"allow_all"}}"#
+                == #"{"target_id":"kernel_state","payload":{"type":"update_agent","id":"assets","ingress_rule":"allow_all_ingress"}}"#
         )
     }
 

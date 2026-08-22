@@ -21,8 +21,8 @@
 // (iOS, iPadOS, visionOS, tvOS, watchOS, sandboxed macOS).
 // FantasticKernelFull is the macOS-only Pro tier and additionally
 // pulls in the subprocess-using bundles (terminal_backend,
-// local_runner, python_runtime, ssh_runner) which are gated by
-// `#if os(macOS)` inside the kernel itself.
+// exec_bridge) which are gated by `#if os(macOS)` inside the kernel
+// itself.
 
 import PackageDescription
 

@@ -7,6 +7,6 @@ Verbs: `read(path)` · `write(path,content)` · `list(path?)` · `delete(path)` 
 - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge.
 A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 
-**Sealed by default** — open: `update_agent <id> ingress_rule=allow_all`.
+**Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
 **Running-dir law**: root is clamped inside the kernel's cwd — `../`, `~`, absolute paths
 outside, and outward symlinks all refuse. Even when open, the edge never leaves the dir.

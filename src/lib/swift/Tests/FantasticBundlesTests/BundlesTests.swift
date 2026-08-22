@@ -80,7 +80,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
-                "root": ".fantastic", "ingress_rule": "allow_all",
+                "root": ".fantastic", "ingress_rule": "allow_all_ingress",
             ])
         #expect(
             fm.fileExists(atPath: file("agents/store/agent.json")),
@@ -115,7 +115,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "fs",
-                "root": .string(rel), "ingress_rule": "allow_all",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
             ])
         // Non-UTF-8 bytes — proves the channel is raw, not text/base64.
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
@@ -224,7 +224,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
-                "root": .string(rel), "ingress_rule": "allow_all",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
             ])
@@ -277,7 +277,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
-                "root": .string(rel), "ingress_rule": "allow_all",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
             ])
@@ -356,7 +356,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "fs",
-                "root": .string(rel), "ingress_rule": "allow_all",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
             ])
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // forward write_stream (binary) → kernel2.fs
@@ -398,7 +398,7 @@ struct BundleSmokeTests {
                 "type": .string("create_agent"),
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
-                "ingress_rule": .string("allow_all"),
+                "ingress_rule": .string("allow_all_ingress"),
             ]))
         let wsId = rec["id"].asString ?? "web_ws"
         _ = await kernel.send(
@@ -423,7 +423,7 @@ struct BundleSmokeTests {
                 "type": .string("create_agent"),
                 "handler_module": .string("file_bridge.tools"),
                 "id": .string("fs"), "root": .string(rel),
-                "ingress_rule": .string("allow_all"),
+                "ingress_rule": .string("allow_all_ingress"),
             ]))
 
         let port = kernel.httpPort()
@@ -549,7 +549,7 @@ struct BundleSmokeTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "web_rest.tools", "id": "rest",
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             ])
         // Simulate the host calling handle_route for
         // POST /rest/core  body={type:list_agents}.

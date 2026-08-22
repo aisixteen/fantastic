@@ -16,12 +16,14 @@ import Testing
 
 @testable import FantasticAICore
 
-// Verbatim from gemma-4-12B, probe 05, 2026-08-06 — the call that ended the run.
-// The program body is escaped correctly; the `code` value is never closed, so
-// every brace after it is string content and the object runs off the end.
+// From gemma-4-12B, probe 05, 2026-08-06 — the call that ended the run (the
+// `handler_module` is updated to the current executor; the parser defect under
+// test is the string, not the module). The program body is escaped correctly;
+// the `code` value is never closed, so every brace after it is string content
+// and the object runs off the end.
 private let GEMMA_UNCLOSED_CODE =
     #"{"name":"send","arguments":{"target_id":"kernel_state","payload":"#
-    + #"{"type":"create_agent","handler_module":"python_runtime.tools","#
+    + #"{"type":"create_agent","handler_module":"exec_bridge.tools","#
     + #""id":"reading_aggregator","code":"def update_totals():\n"#
     + #"    worker_res = send(\"reading_worker\", {\"type\": \"compute_total\"})\n"#
     + #"    return f\"updated to {worker_res}\"}}"#

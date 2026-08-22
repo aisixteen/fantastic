@@ -59,7 +59,7 @@ async def file_bridge(seeded_kernel):
         {
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     )
     assert "id" in rec, f"file_bridge agent creation failed: {rec!r}"
@@ -81,7 +81,7 @@ async def store_agent(seeded_kernel):
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
             "root": ".fantastic",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     )
     assert "id" in rec, f"store agent creation failed: {rec!r}"

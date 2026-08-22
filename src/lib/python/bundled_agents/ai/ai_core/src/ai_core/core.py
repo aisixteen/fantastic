@@ -27,8 +27,7 @@ Two layers:
 
 `SEND_TIMEOUT` is read LIVE off the calling bundle module (each bundle
 re-exports it) so a test's `monkeypatch.setattr("<bundle>.tools.SEND_TIMEOUT",
-0.05)` is honoured on this shared path — mirroring runner_core's transport
-proxy of the lock-poll constants.
+0.05)` is honoured on this shared path.
 
 AI rehaul backlog (TODO — not in scope for the current decoupling).
 These items will need a coordinated redesign across all LLM
@@ -55,6 +54,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -443,9 +443,28 @@ state. To send, emit exactly this, alone on its line:
 `reply_to` is where that send's reply goes. It defaults to you — leave it out and the
 answer comes back as your next message. Name another agent's id to hand the answer to
 them instead, or `null` to discard it. Text outside the tag is your message to whoever
-asked. A message tagged `[reply to <id> <verb>]` is the reply to the send you issued
-naming that agent and that verb — replies can lag a turn behind when several calls are
-in flight, so match the tag before assuming a call was lost and re-issuing it.
+asked.
+
+MESSAGING IS FULLY ASYNCHRONOUS — it is not request/response. Every send is
+dispatched under a PID (`<agent>:<token>`) and any reply comes back tagged
+`[reply to <pid> · <agent> <verb>]`. Read that literally and nothing else:
+
+- A send may produce ONE reply, SEVERAL, or NONE. `reply_to:null` returns nothing
+  at all; `reply_to:<someone else>` sends the answer to THEM, not you; an agent may
+  emit more than one event back. A send with no reply is normal, not a failure.
+- Replies arrive WHENEVER they are ready — out of order, turns later, interleaved
+  with other traffic. Order and count carry no meaning. Match on the PID; never on
+  sequence, position, or how many came back.
+- A reply whose PID you do not recognise is NORMAL — another agent can route its
+  result to you, and it may answer something from a turn you no longer hold. Read
+  it, use it if useful, and move on. It is not an error and not worth diagnosing.
+- Never wait or poll for a reply. There is no "up to date". If you already have
+  what you need in order to act, ACT — re-reading what you know changes nothing.
+
+A `reflect` reply is LARGE and TRANSIENT — you see its full text once, in the turn it
+arrives, and the reply itself carries the instruction for what to record before it
+goes. Follow it there. If you later need a detail you did not keep, reflect that agent
+again — it is cheap and always current, and re-reading beats guessing.
 """
 
 # ─── reply routing ──────────────────────────────────────────────
@@ -492,6 +511,117 @@ async def _deliver(kernel, target, text, client_id, system_prompt) -> None:
 # learns anything about the tool protocol.
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
+
+
+# ─── stale whole-state reads: DEDUPED, not replayed ─────────────
+#
+# Measured (2026-08-20, the `live_plan` probe): reflect replies were 42% of the entire
+# conversation — 73k of 174k chars — and 9 of 16 were a REPEAT of a target already
+# reflected (`kernel_state` six times). That bulk is what fills the window, and a full
+# window is what triggers compaction, which is what put the goal at risk in the first
+# place. Trimming it attacks the cause, not the symptom.
+#
+# The rule is narrow on purpose. A reply may be dropped only when a LATER reply makes
+# it strictly redundant, which requires the verb to return WHOLE state rather than an
+# answer to a question:
+#
+#   reflect · list_agents · ps · keys · state_yaml   → whole-state. The newest reply IS
+#       the truth; older copies describe a state that no longer exists and can only
+#       mislead. Safe to drop.
+#   read · list · status · get                       → PARAMETERISED. Two `read`s on the
+#       same agent are different files; the tag carries no args, so deduping them would
+#       silently delete content. NEVER dropped.
+#
+# This is dedup, NOT stripping: the newest reply stays verbatim, so the model keeps the
+# facts (verbs, ids, tree) and has no reason to re-reflect — re-fetching what it lost is
+# exactly the loop we are trying to avoid. Applied to the PROMPT view only; durable
+# history keeps every turn, so the trace stays complete.
+_WHOLE_STATE_READS = frozenset({"reflect", "list_agents", "ps", "keys", "state_yaml"})
+_REPLY_TAG = re.compile(r"^\[reply to \S+ · (\S+) (\S+)\]")
+
+
+# A reflect that the model has ALREADY ANSWERED is replaced by this stub. The model
+# was told to carry the facts it needs into that answer (by `_REFLECT_NUDGE`, which
+# rode on the reflect reply itself — see the measurement there), so the
+# distillation it wrote is what survives — written by the reader, at read time, with
+# the task in mind, which no post-hoc summarizer can match. The stub names the agent so
+# "I have already looked at this" stays true, and re-reflecting is always available if
+# the distillation turns out to be thin.
+_REFLECT_DROPPED = "[reflect of {agent} — full text dropped; your distillation follows]"
+# What counts as "the model recorded it": the `SEEN <agent> — …` line the system block
+# asks for. Matched leniently (any case, anywhere in the answer) — the point is whether
+# facts were carried forward, not whether a format was obeyed.
+_DISTILLED = re.compile(r"\bSEEN\b", re.I)
+
+# The distillation instruction rides ON the reflect reply, not in the system block.
+# Measured 2026-08-20 (`live_plan`, the passing run): with the instruction stated ONCE
+# as system-block policy, the model wrote a `SEEN` line for 0 of 10 reflects — and
+# re-reflected the SAME agent (`kernel_state`) 9 times in a 17-turn run. Policy sits
+# thousands of tokens from the data and applies to a turn that has not happened yet;
+# this arrives attached to the body it talks about, every time, at the moment it
+# applies. It is deliberately the LAST thing in the message: it is what the model
+# reads immediately before writing its answer.
+_REFLECT_NUDGE = (
+    "\n[this body is TRANSIENT — after your next message it is replaced by a stub. "
+    "Open that message with the facts you will need, one compact line per agent:\n"
+    "SEEN <id> — <what it is for>; verbs: <the ones you intend to use>]"
+)
+
+
+def drop_answered_reflects(history: list[dict]) -> list[dict]:
+    """Replace the body of every reflect reply the model has already responded to.
+
+    The IN-FLIGHT reflect (the last turn, not yet answered) is left intact — the model
+    is reading it right now. Everything older is a reflect it has already had its
+    chance to distil."""
+    out: list[dict] = []
+    for i, turn in enumerate(history):
+        m = (
+            _REPLY_TAG.match(turn.get("content") or "")
+            if turn.get("role") == "user"
+            else None
+        )
+        # FAIL CLOSED. Drop the body only if the model actually WROTE the distillation
+        # in the turn that answered it. Measured 2026-08-20 (`live_plan`): the model
+        # replied to several reflects with a bare tool_call and no prose, the body was
+        # dropped anyway, and it had to re-fetch what it had lost — "The index was
+        # dropped from my view. Let me send it again and, THIS TIME, actually record
+        # the facts." Burning turns re-reading is the exact loop this trim exists to
+        # prevent, so a reflect the model did not distil is KEPT. Non-compliance then
+        # costs context, never comprehension.
+        answer = next(
+            (t for t in history[i + 1 :] if t.get("role") == "assistant"), None
+        )
+        distilled = answer is not None and _DISTILLED.search(
+            answer.get("content") or ""
+        )
+        if m and m.group(2) == "reflect" and distilled:
+            out.append(
+                {"role": "user", "content": _REFLECT_DROPPED.format(agent=m.group(1))}
+            )
+            continue
+        out.append(turn)
+    return out
+
+
+def dedupe_stale_reads(history: list[dict]) -> list[dict]:
+    """Drop whole-state read replies that a later reply to the same (agent, verb)
+    supersedes. Newest wins; order is otherwise preserved."""
+    seen: set[tuple[str, str]] = set()
+    keep_rev: list[dict] = []
+    for turn in reversed(history):
+        m = (
+            _REPLY_TAG.match(turn.get("content") or "")
+            if turn.get("role") == "user"
+            else None
+        )
+        if m and m.group(2) in _WHOLE_STATE_READS:
+            key = (m.group(1), m.group(2))
+            if key in seen:
+                continue  # a later reply already carries this agent's current state
+            seen.add(key)
+        keep_rev.append(turn)
+    return list(reversed(keep_rev))
 
 
 def without_thinking(text: str) -> str:
@@ -638,14 +768,18 @@ async def _route_reply(self_id, kernel, text, client_id, send_to, system_prompt)
             # no reply, no error, and no further turn — the run simply stopped
             # mid-verification and looked finished. An exception is a result too;
             # the model can act on `{"error": ...}` and can act on nothing at all.
+            # `task_out` receives the dispatch PID, minted synchronously at dispatch
+            # (before any reply exists) — the one unambiguous id for this call.
+            pid_out: list[str] = []
             try:
-                result = await kernel.send(target, payload)
+                result = await kernel.send(target, payload, task_out=pid_out)
             except Exception as exc:  # noqa: BLE001 — deliberately total
                 result = {
                     "error": f"{type(exc).__name__}: {exc}",
                     "raised": True,
                     "target": target,
                 }
+            pid = pid_out[0] if pid_out else "-"
             if not reply_to:
                 continue  # fire-and-forget: it acted, nobody awaits the answer
             # The result — INCLUDING an error — goes back. A call that failed silently is
@@ -653,14 +787,18 @@ async def _route_reply(self_id, kernel, text, client_id, send_to, system_prompt)
             await _deliver(
                 kernel,
                 reply_to,
-                # Target AND verb in the tag. With two calls in flight to the same
-                # agent, `[reply to kernel_state]` is unmatchable — measured
-                # 2026-08-07 (combined probe, opus): acks lag a turn behind, the
-                # model couldn't tell which of its two deletes an ack answered,
-                # re-issued both, then built a "duplicate delivery" theory around
-                # its own retries. The verb makes each ack self-describing.
-                f"[reply to {target} {payload.get('type', '?')}]\n"
-                f"{json.dumps(result, default=str)}",
+                # The dispatch PID, then target+verb. Target+verb alone is NOT unique:
+                # with two calls in flight to the same agent, `[reply to kernel_state
+                # set]` is unmatchable — measured 2026-08-07 (opus: re-issued both
+                # deletes, then theorised "duplicate delivery" about its own retries)
+                # and again 2026-08-20 (qwen: "the reply queue is running ahead of
+                # me", then re-polled forever instead of committing). The PID is the
+                # one unambiguous correlator — and it is the same id `ps`/`cancel`
+                # use, so a reply names a row the model can actually act on.
+                f"[reply to {pid} · {target} {payload.get('type', '?')}]\n"
+                f"{json.dumps(result, default=str)}"
+                # Only reflect bodies are dropped, so only they carry the notice.
+                + (_REFLECT_NUDGE if payload.get("type") == "reflect" else ""),
                 client_id,
                 system_prompt,
             )
@@ -711,7 +849,13 @@ async def _assemble(
     if isinstance(messages_override, list) and messages_override:
         messages.extend(messages_override)  # stateless: caller supplies the convo
     else:
-        messages.extend(await _load_history(self_id, kernel, client_id))
+        # Deduped VIEW, not a rewrite of the store: a stale whole-state read that a
+        # later reply supersedes never reaches the model. See `dedupe_stale_reads`.
+        # Trimmed VIEW, not a rewrite of the store (durable history keeps every turn,
+        # so the trace stays complete): stale whole-state reads deduped, and answered
+        # reflects reduced to a stub — the model's own distillation carries the facts.
+        hist = await _load_history(self_id, kernel, client_id)
+        messages.extend(drop_answered_reflects(dedupe_stale_reads(hist)))
     messages.append({"role": "user", "content": user_text})
     return messages
 

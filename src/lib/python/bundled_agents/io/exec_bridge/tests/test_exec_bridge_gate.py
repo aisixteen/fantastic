@@ -67,9 +67,9 @@ async def test_a_sealed_leg_still_reflects(seeded_kernel):
 
 async def test_allow_all_opens_the_leg(seeded_kernel):
     """The seal is a POSTURE, not a wall: the identical verbs answer once the operator
-    sets `ingress_rule=allow_all`."""
+    sets `ingress_rule=allow_all_ingress`."""
     xid = await _make(
-        seeded_kernel, ingress_rule="allow_all", interpreters=[_real_python()]
+        seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
     assert await seeded_kernel.send(xid, {"type": "status"}) == {"jobs": []}
     assert await seeded_kernel.send(xid, {"type": "clear"}) == {"cleared": 0}
@@ -78,14 +78,14 @@ async def test_allow_all_opens_the_leg(seeded_kernel):
 
 async def test_reflect_surfaces_the_posture_both_ways(seeded_kernel):
     """`reflect` is how an operator reads which legs are open — keyed by the field you
-    SET, so `ingress_rule: deny_inbound` is opened with `ingress_rule: allow_all`."""
+    SET, so `ingress_rule: deny_ingress` is opened with `ingress_rule: allow_all_ingress`."""
     sealed = await _make(seeded_kernel)
     r = await seeded_kernel.send(sealed, {"type": "reflect"})
-    assert r["ingress_rule"] == "deny_inbound" and r["sealed"] is True
+    assert r["ingress_rule"] == "deny_ingress" and r["sealed"] is True
 
-    opened = await _make(seeded_kernel, ingress_rule="allow_all")
+    opened = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = await seeded_kernel.send(opened, {"type": "reflect"})
-    assert r["ingress_rule"] == "allow_all" and r["sealed"] is False
+    assert r["ingress_rule"] == "allow_all_ingress" and r["sealed"] is False
 
 
 async def test_reflect_never_raises_on_an_unwired_leg(seeded_kernel):
@@ -116,7 +116,7 @@ async def test_an_unimplementable_ingress_rule_is_refused_at_the_write(seeded_ke
     assert "error" in r and "legal values" in r["error"]
     assert r.get("created") is False and "id" not in r
 
-    good = await _make(seeded_kernel, ingress_rule="allow_all")
+    good = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     u = await seeded_kernel.send(
         "kernel_state",
         {"type": "update_agent", "id": good, "ingress_rule": "deny_all"},
@@ -137,7 +137,7 @@ async def test_a_non_allowlisted_interpreter_is_refused_at_CREATE(seeded_kernel)
         {
             "type": "create_agent",
             "handler_module": "exec_bridge.tools",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
             "interpreters": [py],
             "interpreter": "/nowhere/bin/python",
             "code": "print('must never run')",
@@ -158,7 +158,10 @@ async def test_a_non_allowlisted_interpreter_is_refused_at_UPDATE(seeded_kernel)
     unit regardless of the order they are written in."""
     py = _real_python()
     xid = await _make(
-        seeded_kernel, ingress_rule="allow_all", interpreters=[py], interpreter=py
+        seeded_kernel,
+        ingress_rule="allow_all_ingress",
+        interpreters=[py],
+        interpreter=py,
     )
     u = await seeded_kernel.send(
         "kernel_state",
@@ -180,7 +183,10 @@ async def test_an_allowlisted_interpreter_still_writes(seeded_kernel):
     untouched, and the record keeps the pair the operator chose."""
     py = _real_python()
     xid = await _make(
-        seeded_kernel, ingress_rule="allow_all", interpreters=[py], interpreter=py
+        seeded_kernel,
+        ingress_rule="allow_all_ingress",
+        interpreters=[py],
+        interpreter=py,
     )
     r = await seeded_kernel.send(xid, {"type": "reflect"})
     assert r["interpreters"] == [py] and r["sealed"] is False
@@ -216,7 +222,7 @@ async def test_an_empty_allowlist_refuses_start_and_names_the_operator(seeded_ke
     given nothing to run. It must refuse every `start` and say who fixes it, rather
         than guess an interpreter (the guess has no honest answer)."""
     for meta in ({}, {"interpreters": []}):
-        xid = await _make(seeded_kernel, ingress_rule="allow_all", **meta)
+        xid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", **meta)
         r = await seeded_kernel.send(xid, {"type": "start", "code": "print(1)"})
         assert "error" in r, f"interpreters={meta} spawned something: {r!r}"
         assert "no interpreters are allowlisted" in r["error"]
@@ -229,7 +235,7 @@ async def test_one_allowlisted_interpreter_may_be_left_unnamed_on_start(seeded_k
     """With exactly one legal answer, `start` without `interpreter` must run — making
     the caller restate the only possibility would be ceremony."""
     xid = await _make(
-        seeded_kernel, ingress_rule="allow_all", interpreters=[_real_python()]
+        seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
     r = await seeded_kernel.send(
         xid, {"type": "start", "code": "import time\ntime.sleep(30)"}
@@ -246,7 +252,9 @@ async def test_two_allowlisted_interpreters_must_be_named_on_start(
     picking — and the refusal lists both so the caller can choose."""
     py = _real_python()
     other = str(tmp_path / "other_python")  # need not exist — nothing is spawned
-    xid = await _make(seeded_kernel, ingress_rule="allow_all", interpreters=[py, other])
+    xid = await _make(
+        seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[py, other]
+    )
     r = await seeded_kernel.send(xid, {"type": "start", "code": "print(1)"})
     assert "error" in r, f"an ambiguous start was served: {r!r}"
     assert "name one" in r["error"]
@@ -271,7 +279,7 @@ async def test_a_per_call_interpreter_cannot_leave_the_allowlist(seeded_kernel):
     anything, the allowlist would be a suggestion and the leg would grant arbitrary
     local code execution to whoever can reach it."""
     xid = await _make(
-        seeded_kernel, ingress_rule="allow_all", interpreters=[_real_python()]
+        seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
     r = await seeded_kernel.send(
         xid,

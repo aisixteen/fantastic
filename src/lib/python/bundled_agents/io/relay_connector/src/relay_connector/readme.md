@@ -7,7 +7,7 @@ as `ws_bridge` (both ride the shared `io_bridge` engine) — `forward`,
 `watch_remote`/`unwatch_remote` work identically; replies and binary
 `read_stream` chunks are tunneled over the relay.
 
-**Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all`
+**Sealed by default** — open the inbound leg: `update_agent <id> ingress_rule=allow_all_ingress`
 (or `password` for the group token). The bridge-leg `ingress_rule`/`egress_rule`
 gate the tunneled calls and are INDEPENDENT of the relay's own connection auth.
 

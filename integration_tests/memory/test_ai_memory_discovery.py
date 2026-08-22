@@ -161,7 +161,7 @@ async def test_ai_discovers_and_uses_memory_from_readmes(
         handler_module="file_bridge.tools",
         agent_id="llm_files",
         root=".fantastic",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     _seed_ai(python_binary, wd)
     # The memory agent — NO file_bridge_id. It persists THROUGH the loader (the refactor).

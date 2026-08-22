@@ -58,7 +58,7 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
                 "id": id,
                 "peer_id": peer_id,
                 "transport": transport,
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             }),
         )
         .await;
@@ -474,21 +474,21 @@ fn ingress_resolves_allow_and_deny() {
             .authorize(&call_action(None)),
         Decision::Deny(_)
     ));
-    // explicit allow_all opens it
+    // explicit allow_all_ingress opens it
     assert!(matches!(
-        resolve(Some(&json!("allow_all")))
+        resolve(Some(&json!("allow_all_ingress")))
             .unwrap()
             .authorize(&call_action(None)),
         Decision::Allow
     ));
     // string + object form; `type` is the ONLY object spelling (the `policy` alias was
     // rust-only and is deleted — python's parse_spec never accepted it)
-    let s = resolve(Some(&json!("deny_inbound"))).unwrap();
+    let s = resolve(Some(&json!("deny_ingress"))).unwrap();
     assert!(matches!(s.authorize(&call_action(None)), Decision::Deny(_)));
-    let o = resolve(Some(&json!({"type": "deny_inbound"}))).unwrap();
+    let o = resolve(Some(&json!({"type": "deny_ingress"}))).unwrap();
     assert!(matches!(o.authorize(&call_action(None)), Decision::Deny(_)));
     // an object with no `type` is not a rule — refuse rather than silently defaulting
-    assert!(resolve(Some(&json!({"policy": "deny_inbound"}))).is_err());
+    assert!(resolve(Some(&json!({"policy": "deny_ingress"}))).is_err());
     // The SEAL refuses EVERY inbound kind — dispatch AND telemetry (py-canonical;
     // this used to pin `watch` as allowed, which made the rust seal partial and
     // let a "sealed" leg leak state to watchers).
@@ -520,7 +520,7 @@ fn ingress_resolves_allow_and_deny() {
                 "{reason}"
             );
             assert!(
-                reason.contains("allow_all"),
+                reason.contains("allow_all_ingress"),
                 "must teach the legal set: {reason}"
             );
         }
@@ -535,7 +535,7 @@ fn ingress_password_checks_envelope_token() {
     let env = "FANTASTIC_GROUP_TOKEN_RS_ING";
     std::env::set_var(env, "s3cret");
     // `env` (new) spelling threads to the rule
-    let p = resolve(Some(&json!({"type": "password", "env": env}))).unwrap();
+    let p = resolve(Some(&json!({"type": "password_ingress", "env": env}))).unwrap();
     assert!(matches!(
         p.authorize(&call_action(Some("s3cret"))),
         Decision::Allow
@@ -556,17 +556,23 @@ fn ingress_password_checks_envelope_token() {
 #[test]
 fn egress_resolves_and_presents() {
     use authorizer::egress::resolve;
-    // absent + inbound-only names ⇒ Silent (present nothing)
+    // absent ⇒ Silent (present nothing)
     assert!(resolve(None).unwrap().credential().is_none());
-    assert!(resolve(Some(&json!("deny_inbound")))
-        .unwrap()
-        .credential()
-        .is_none());
+    // An inbound-only STEM arriving through `auth` presents nothing — the collapse is
+    // spelled out in `manifold_spec`, so the registry itself carries no cross-manifold
+    // alias any more (a bare inbound name written straight into `egress_rule` is a typo,
+    // and must be loud).
+    for stem in ["deny", "allow_all"] {
+        let scoped = authorizer::manifold_spec(None, Some(&json!(stem)), "_egress").unwrap();
+        assert_eq!(scoped, json!("silent_egress"));
+        assert!(resolve(Some(&scoped)).unwrap().credential().is_none());
+    }
+    assert!(resolve(Some(&json!("deny_ingress"))).is_err());
     // password ⇒ presents the env token. `env` is the only spelling for the secret key
     // (the `token_env` wire alias was rust-only and is deleted).
     let env = "FANTASTIC_GROUP_TOKEN_RS_EG";
     std::env::set_var(env, "abc");
-    let p = resolve(Some(&json!({"type": "password", "env": env}))).unwrap();
+    let p = resolve(Some(&json!({"type": "password_egress", "env": env}))).unwrap();
     assert_eq!(p.credential().as_deref(), Some("abc"));
     std::env::remove_var(env);
     assert!(p.credential().is_none()); // unset ⇒ presents nothing
@@ -575,13 +581,54 @@ fn egress_resolves_and_presents() {
 }
 
 #[test]
+fn a_name_from_the_other_manifold_is_loud_not_silent() {
+    // Rule names are MANIFOLD-SCOPED so one name can never half-resolve across the two
+    // registries. Measured 2026-08-21, before scoping (python AND this runtime, which
+    // carried the identical aliases): `auth:"silent"` — a legitimate EGRESS policy —
+    // resolved ingress to `DenyInbound(unknown="silent")`, SEALING the leg while
+    // recording the unknown name and saying nothing; and `auth:"allow_all"` handed
+    // egress a `Silent` nobody asked for. One unscoped name against two registries with
+    // different membership is a fallback, and this kernel has none.
+    //
+    // It still DENIES — an unresolvable rule is not an authorization — but it now names
+    // the manifold mistake instead of looking like an ordinary seal.
+    let sealed = authorizer::ingress::resolve(Some(&json!("silent_egress"))).unwrap();
+    let Decision::Deny(reason) = sealed.authorize(&call_action(None)) else {
+        panic!("an egress name in ingress_rule must deny");
+    };
+    assert!(reason.contains("silent_egress"), "{reason}");
+    assert!(reason.contains("manifold-scoped"), "{reason}");
+    assert!(reason.contains("allow_all_ingress"), "{reason}");
+
+    // The `auth` stem is scoped per manifold, so an egress-only stem cannot silently
+    // seal ingress: it surfaces as THIS manifold's missing rule, by name.
+    let scoped = authorizer::manifold_spec(None, Some(&json!("silent")), "_ingress").unwrap();
+    assert_eq!(scoped, json!("silent_ingress"));
+
+    // And the stems that DO span both manifolds still work from one field.
+    for stem in ["password", "allow_all"] {
+        assert!(authorizer::ingress::resolve(
+            authorizer::manifold_spec(None, Some(&json!(stem)), "_ingress").as_ref()
+        )
+        .is_ok());
+    }
+}
+
+#[test]
 fn auth_shorthand_is_symmetric() {
     // `auth:"password"` ⇒ ingress checks AND egress presents (group member)
     let env = "FANTASTIC_GROUP_TOKEN_RS_SYM";
     std::env::set_var(env, "k");
+    // ONE bare stem on `auth`; each manifold appends its own suffix.
     let spec = json!({"type": "password", "env": env});
-    let ing = authorizer::ingress::resolve(Some(&spec)).unwrap();
-    let eg = authorizer::egress::resolve(Some(&spec)).unwrap();
+    let ing = authorizer::ingress::resolve(
+        authorizer::manifold_spec(None, Some(&spec), "_ingress").as_ref(),
+    )
+    .unwrap();
+    let eg = authorizer::egress::resolve(
+        authorizer::manifold_spec(None, Some(&spec), "_egress").as_ref(),
+    )
+    .unwrap();
     assert!(matches!(
         ing.authorize(&call_action(Some("k"))),
         Decision::Allow
@@ -612,7 +659,7 @@ async fn deny_inbound_refuses_inbound_call() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_deny", &tmp);
-    create_bridge_with_auth(&kernel, &bid, "stand_in", "deny_inbound").await;
+    create_bridge_with_auth(&kernel, &bid, "stand_in", "deny").await;
     // Inject A's half; keep the peer half to push a synthetic inbound call.
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
@@ -622,7 +669,7 @@ async fn deny_inbound_refuses_inbound_call() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["ingress_rule"], "deny_inbound");
+    assert_eq!(reflect["ingress_rule"], "deny_ingress");
     assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
@@ -661,7 +708,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
                 "handler_module": "file_bridge.tools",
                 "id": "fb",
                 "root": tmp.path().to_string_lossy(),
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             }),
         )
         .await;
@@ -734,7 +781,7 @@ async fn deny_inbound_default_refuses_inbound_call() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["ingress_rule"], "deny_inbound");
+    assert_eq!(reflect["ingress_rule"], "deny_ingress");
     assert_eq!(reflect["sealed"], true);
 
     peer.send_frame(json!({
@@ -786,7 +833,7 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["ingress_rule"], "password");
+    assert_eq!(reflect["ingress_rule"], "password_ingress");
     assert_eq!(reflect["sealed"], true);
 
     // (1) inbound call WITH the matching envelope token dispatches.
@@ -867,8 +914,8 @@ async fn asymmetric_ingress_egress_via_engine() {
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
-                "ingress_rule": "deny_inbound",
-                "egress_rule": {"type": "password", "env": env},
+                "ingress_rule": "deny_ingress",
+                "egress_rule": {"type": "password_egress", "env": env},
             }),
         )
         .await;
@@ -880,8 +927,8 @@ async fn asymmetric_ingress_egress_via_engine() {
     let reflect = kernel
         .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
         .await;
-    assert_eq!(reflect["ingress_rule"], "deny_inbound");
-    assert_eq!(reflect["egress_rule"], "password");
+    assert_eq!(reflect["ingress_rule"], "deny_ingress");
+    assert_eq!(reflect["egress_rule"], "password_egress");
     // no `auth` in reflect — a legacy WRITE shorthand only (py parity)
     assert!(reflect.get("auth").is_none());
     assert_eq!(reflect["sealed"], true);
