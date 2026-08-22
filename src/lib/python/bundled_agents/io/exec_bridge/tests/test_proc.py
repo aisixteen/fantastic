@@ -18,8 +18,9 @@ from exec_bridge import proc
 def test_an_absent_allowlist_spawns_nothing():
     """An unwired leg must resolve to NOTHING, not to a guessed interpreter.
 
-    `python_runtime` could fall back to `sys.executable` because the host IS python —
-    a fact about the running process. This bridge spawns whatever the operator listed,
+    The per-language executor this replaced could fall back to `sys.executable` because
+    the host IS python — a fact about the running process. This bridge spawns whatever the
+    operator listed,
     so a default here would be a guess that grants local code execution."""
     assert proc.allowed({}) == []
     assert proc.allowed({"interpreters": []}) == []

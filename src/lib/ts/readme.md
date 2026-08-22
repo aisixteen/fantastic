@@ -77,7 +77,7 @@ on the critical path.
    by default — open it consciously:
    ```sh
    fantastic kernel_state create_agent handler_module=file_bridge.tools id=js_kernel \
-     root=serve ingress_rule=allow_all
+     root=serve ingress_rule=allow_all_ingress
    # → GET /js_kernel/file/bundle.min.js now serves the kernel
    ```
 4. **Prereq (operator, one-time)** — the host must expose HTTP + a WS surface +

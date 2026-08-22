@@ -136,9 +136,12 @@ fn gate_seals_by_default_and_opens_with_allow_all() {
     assert!(gate(&bare, &id, "reflect").is_none());
     let denied = gate(&bare, &id, "read").unwrap();
     assert_eq!(denied["reason"], "unauthorized");
-    // ingress_rule=allow_all ⇒ OPEN.
+    // ingress_rule=allow_all_ingress ⇒ OPEN.
     let mut open = serde_json::Map::new();
-    open.insert("ingress_rule".into(), serde_json::json!("allow_all"));
+    open.insert(
+        "ingress_rule".into(),
+        serde_json::json!("allow_all_ingress"),
+    );
     assert!(gate(&open, &id, "read_stream").is_none());
     assert!(gate(&open, &id, "write_stream").is_none());
 }

@@ -138,7 +138,7 @@ async def test_relay_streams_raw_bytes(
         handler_module="file_bridge.tools",
         agent_id="fs",
         root="streams",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
 
     relay = Relay(require_relay(), free_port()).start()

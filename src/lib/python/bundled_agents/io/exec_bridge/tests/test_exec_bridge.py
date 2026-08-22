@@ -1,7 +1,7 @@
 """exec_bridge — the verb surface, the output pump, and per-call `args`.
 
 All of it language-blind by design: the job table, the two streams, the arguments that
-reach a program. Retargeted from `python_runtime`'s suite, because none of that
+reach a program. Retargeted from the predecessor executor's suite, because none of that
 machinery ever knew a language — the interpreter is now a FIELD, wired by the operator
 onto the record. (The durable record, the inbox and the task table are in
 `test_exec_bridge_jobs.py`; the gate and the allowlist in `test_exec_bridge_gate.py`.)
@@ -43,7 +43,7 @@ async def _wired(kernel, **meta) -> str:
     """An OPEN leg allowlisting THIS interpreter. `shim` stays the caller's choice —
     the WIRE is the contract; the shim is a convenience over it."""
     return await _make(
-        kernel, ingress_rule="allow_all", interpreters=[_real_python()], **meta
+        kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()], **meta
     )
 
 

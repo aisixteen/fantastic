@@ -217,7 +217,7 @@ struct RelayTransportTests {
                 "core",
                 [
                     "type": "create_agent", "handler_module": "file_bridge.tools",
-                    "id": "fs", "root": .string(rel), "ingress_rule": "allow_all",
+                    "id": "fs", "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 ])
 
             let (transportA, transportB) = await pairTransports(kernelA: kernelA, kernelB: kernelB)
@@ -278,15 +278,16 @@ struct RelayPasswordTests {
         let env = "FANTASTIC_GROUP_TOKEN_RELAY_UNIT"
         setenv(env, "s3cret", 1)
         defer { unsetenv(env) }
-        let rule: JSON = ["type": "password", "env": .string(env)]
+        // ONE bare stem, as `auth` carries it; each manifold appends its own suffix.
+        let stem: JSON = ["type": "password", "env": .string(env)]
         try await withDeadline(15) {
             let kernelA = await makeKernel(withEcho: false)
             let kernelB = await makeKernel(withEcho: true)
             // A presents the group token (egress); B checks it (ingress). Both pass.
             let (transportA, transportB) = await pairTransports(
                 kernelA: kernelA, kernelB: kernelB,
-                egressA: try EgressRules.resolve(rule),
-                ingressB: try IngressRules.resolve(rule))
+                egressA: try EgressRules.resolve(manifoldSpec(nil, stem, "_egress")),
+                ingressB: try IngressRules.resolve(manifoldSpec(nil, stem, "_ingress")))
             let r = await transportA.forward(
                 target: "echo", payload: ["type": "echo", "msg": "hey"])
             #expect(r["echoed"]["msg"].asString == "hey", "\(r)")
@@ -310,6 +311,49 @@ struct RelayPasswordTests {
             #expect(r["reason"].asString == "unauthorized", "\(r)")
             await transportA.close()
             await transportB.close()
+        }
+    }
+}
+
+@Suite("io rule names are manifold-scoped")
+struct ManifoldScopedRuleNameTests {
+    /// Rule names bind to exactly ONE direction, so a name can never half-resolve
+    /// across the two registries.
+    ///
+    /// Measured 2026-08-21, before scoping (python AND swift, which carried the
+    /// identical aliases): `auth:"silent"` — a legitimate EGRESS policy — resolved
+    /// ingress to `DenyInbound(unknown: "silent")`, SEALING the leg while recording the
+    /// unknown name and saying nothing; and `auth:"allow_all"` handed egress a `Silent`
+    /// nobody asked for. One unscoped name against two registries with different
+    /// membership is a fallback, and this kernel has none.
+    ///
+    /// It still DENIES — an unresolvable rule is not an authorization — but it now names
+    /// the manifold mistake instead of looking like an ordinary seal.
+    @Test func anEgressNameInIngressRuleIsLoudNotSilent() throws {
+        let sealed = try IngressRules.resolve(.string("silent_egress"))
+        let d = sealed.authorize(
+            AuthAction(kind: "call", target: "t", verb: "read", token: nil))
+        guard case .deny(let reason) = d else {
+            Issue.record("an egress name in ingress_rule must deny")
+            return
+        }
+        #expect(reason.contains("silent_egress"))
+        #expect(reason.contains("manifold-scoped"))
+        #expect(reason.contains("allow_all_ingress"))
+    }
+
+    /// The `auth` STEM is scoped per manifold, so an egress-only stem cannot silently
+    /// seal ingress: it surfaces as THIS manifold's missing rule, by name.
+    @Test func theAuthStemIsScopedPerManifold() throws {
+        #expect(manifoldSpec(nil, .string("silent"), "_ingress") == .string("silent_ingress"))
+        // An inbound-only stem presents NOTHING outbound — a meaning spelled out per
+        // stem, not a lookup miss.
+        for stem in ["allow_all", "deny"] {
+            #expect(manifoldSpec(nil, .string(stem), "_egress") == .string("silent_egress"))
+        }
+        // And the stems that DO span both manifolds still work from one field.
+        for stem in ["password", "allow_all"] {
+            _ = try IngressRules.resolve(manifoldSpec(nil, .string(stem), "_ingress"))
         }
     }
 }

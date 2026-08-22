@@ -126,7 +126,10 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
     root = boot_root()
     # operator/LLM wires the provider: a real, persisted, gated file_bridge child.
     root.create(
-        "file_bridge.tools", id="store", root=".fantastic", ingress_rule="allow_all"
+        "file_bridge.tools",
+        id="store",
+        root=".fantastic",
+        ingress_rule="allow_all_ingress",
     )
     assert (
         _find_store(root) == "store"

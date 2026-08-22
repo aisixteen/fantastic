@@ -1,6 +1,8 @@
 //! ingress_rules — the inbound-FILTER registry (the "upper importer").
 //!
 //! Each ingress rule is its own module here; [`resolve`] registers them BY NAME.
+//! Names are MANIFOLD-SCOPED (`*_ingress`) — see `authorizer::manifold_spec` for why an
+//! egress name written here must be a loud error, not a silent seal.
 //! Add a rule = drop a module + one match arm; the read-loop choke point never
 //! changes (it is rule-agnostic, calling `authorize` through `Arc<dyn IngressRule>`).
 
@@ -20,7 +22,7 @@ pub use password::Password;
 
 /// Resolve an ingress rule spec (string | `{type, env}` | null) BY NAME. Absent ⇒
 /// `DenyInbound` — **SEALED by default** (every io leg + the fs edge denies until
-/// opened with `ingress_rule=allow_all`/`password`).
+/// opened with `ingress_rule=allow_all_ingress`/`password_ingress`).
 ///
 /// UNKNOWN TYPE ⇒ `DenyInbound::unknown(name)` — seal, and name the bad rule in every
 /// denial. It used to be `Err`, on the theory of failing loudly; but resolution runs
@@ -30,9 +32,9 @@ pub use password::Password;
 pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn IngressRule>, String> {
     let (name, token_env) = parse_spec(spec)?;
     let rule: Arc<dyn IngressRule> = match name.as_deref() {
-        None | Some("deny_inbound") => Arc::new(DenyInbound::sealed()),
-        Some("allow_all") => Arc::new(AllowAll),
-        Some("password") => Arc::new(Password::new(token_env)),
+        None | Some("deny_ingress") => Arc::new(DenyInbound::sealed()),
+        Some("allow_all_ingress") => Arc::new(AllowAll),
+        Some("password_ingress") => Arc::new(Password::new(token_env)),
         Some(other) => Arc::new(DenyInbound::unknown(other)),
     };
     Ok(rule)

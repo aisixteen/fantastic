@@ -64,7 +64,7 @@ async def _serves_frontend_bundle_via_file_bridge(
         # RELATIVE root: file_bridge clamps roots inside the running dir (= workdir),
         # and the fs edge seals by default - open it for the /file/ proxy.
         root="servedir",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     await spawn(workdir, port)
 

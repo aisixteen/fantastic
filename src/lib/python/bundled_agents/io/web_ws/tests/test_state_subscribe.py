@@ -25,7 +25,7 @@ def client(seeded_kernel):
     seeded_kernel.create(
         "web_ws.tools",
         id="test_web_ws",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
         # Deny-all: the surface relays browser create/delete to kernel_state —
         # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
         can_call={"kernel_state": ["create_agent", "delete_agent"]},
@@ -196,7 +196,7 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
     seeded_kernel.create(
         "web_ws.tools",
         id="test_web_ws",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
         # Deny-all: the surface relays browser create/delete to kernel_state —
         # privileged verbs, so an explicit grant (ingress opens WHO; this opens WHAT).
         can_call={"kernel_state": ["create_agent", "delete_agent"]},

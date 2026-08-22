@@ -18,6 +18,18 @@ extension Kernel {
     /// duration of dispatch, so nested sends attribute to their
     /// target (matches Rust's contextvars-style send.rs).
     public func send(_ targetId: AgentId, _ payload: JSON) async -> JSON {
+        await sendTraced(targetId, payload, taskOut: nil)
+    }
+
+    /// `send`, plus the dispatch PID written into `taskOut` at dispatch time.
+    ///
+    /// The id is the ONE unambiguous correlator: `ps` rows, `cancel`, and the reply tag
+    /// a model reads all name the same thing. Measured 2026-08-07 and again 2026-08-20
+    /// (python): with two calls in flight to one agent, a reply tagged only
+    /// `[reply to <agent> <verb>]` is unmatchable — one model re-issued both deletes and
+    /// then theorised "duplicate delivery" about its own retries.
+    public func sendTraced(_ targetId: AgentId, _ payload: JSON, taskOut: TaskIdBox?) async -> JSON
+    {
         // Resolve target. Special id "kernel" aliases to the root.
         let target: Agent?
         if targetId.value == "kernel" {
@@ -49,7 +61,8 @@ extension Kernel {
         // kernel's task table) and await it — that is what makes ANY send
         // cancelable, on any bundle. A cancelled dispatch does NOT throw out of
         // `send`: it resolves to `{"cancelled": true}`.
-        var reply = await runDispatch(target: target, payload: payload, verb: verb)
+        var reply = await runDispatch(
+            target: target, payload: payload, verb: verb, taskOut: taskOut)
 
         // Universal reflect post-process: compose every reflect reply
         // with the tree/bundles/readme flags + the `description` field.
@@ -219,17 +232,12 @@ extension Kernel {
             // reboot, it survives a reboot, and a bare `def` only defines and exits —
             // so the work goes at module level.
             //
-            // The RECEIVE clause is per-runtime BY DESIGN, because the executors are.
-            // Python ships one executor and names its shape inline ("call
-            // kernel.on_message(cb) and keep running"). Rust advertises THREE with
-            // three different shapes, so it parameterizes the clause instead ("take
-            // each turn from kernel.on_message — each executor's exact shape is named
-            // below"): the callback wording is WRONG for js/lua, whose readme says
-            // "Never pass it a function" — they CALL (js: await) `on_message()` in a
-            // LOOP and it returns the next payload. This kernel keeps python's inline
-            // clause and lets `executorClause()` append each REGISTERED executor's own
-            // receive shape after it (see `Kernel.scriptExecutors`), so a js author
-            // reading it is corrected by the tail.
+            // The RECEIVE clause names the shape the executor's connector really
+            // implements ("call kernel.on_message(cb) and keep running"), and
+            // `executorClause()` appends each REGISTERED executor's own receive shape
+            // after it (see `Kernel.scriptExecutors`). Deriving the tail rather than
+            // hard-coding it is what keeps the advertised shape true for whatever
+            // executors a given build actually ships.
             //
             // Overstating agreement is the same defect class as two copies of one fact
             // where one is wrong: it invites the next editor to "restore parity" by
@@ -398,7 +406,9 @@ extension Kernel {
     ///     resurrect itself: the `currentKilled` guard below refuses every
     ///     further `send` from a killed task — no new row, no handler — which is
     ///     exactly the point at which Rust would have dropped the future.
-    private func runDispatch(target: Agent, payload: JSON, verb: String) async -> JSON {
+    private func runDispatch(
+        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox? = nil
+    ) async -> JSON {
         // My own task is in a subtree the kernel is killing: register no new work
         // and run no handler. The kernel is INERT to a killed task from the
         // moment of the kill.
@@ -410,6 +420,10 @@ extension Kernel {
         // instant the handler can run, or a nested `send` could claim a parent
         // that isn't in the table yet.
         let taskId = tasks.mint(target.id)
+        // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists. A
+        // caller that wants to correlate the answer needs the id at send time, not
+        // after; that is the whole point of the id.
+        taskOut?.value = taskId
         let handle = TaskHandle()
         tasks.register(
             id: taskId,

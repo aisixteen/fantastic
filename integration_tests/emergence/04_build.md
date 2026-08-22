@@ -33,7 +33,7 @@ dictated — the check scans every key, because dictating a name would be dictat
 
 **HARD 3 — THE CANARY.** The harness writes a **fourth** file with a fresh random
 number and re-runs the persisted program (`{"type":"start"}` falls back to the
-record's own `code`, `python_runtime/tools.py:435`). The stored total must become the
+record's own `code`, `exec_bridge/tools.py`). The stored total must become the
 new true total.
 
 This separates the two ways to satisfy HARD 2. A model that read the three files in
@@ -72,8 +72,8 @@ def _total():
 _total()
 ```
 
-`send` / `emit` / `on_message` are **sync** in the python_runtime connector
-(`_connector.py:103/112/142`).
+`send` / `emit` / `on_message` are **sync** in the `exec_bridge` python shim
+(`exec_bridge/_connector.py`), which `shim:'python'` prepends.
 
 Last run: all three checks OK — the probe is passable.
 

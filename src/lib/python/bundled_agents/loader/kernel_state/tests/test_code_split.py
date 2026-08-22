@@ -37,9 +37,7 @@ def _seed(tmp_path, monkeypatch) -> pathlib.Path:
 def test_program_lands_beside_the_record_not_inside_it(tmp_path, monkeypatch):
     d = _seed(tmp_path, monkeypatch) / "agents" / "tool"
     d.mkdir(parents=True)
-    write_record(
-        d, {"id": "tool", "handler_module": "python_runtime.tools", "code": PROG}
-    )
+    write_record(d, {"id": "tool", "handler_module": "exec_bridge.tools", "code": PROG})
 
     assert (d / "main.py").read_text() == PROG
     assert "code" not in json.loads((d / "agent.json").read_text())
@@ -49,9 +47,7 @@ def test_hydration_folds_the_program_back_onto_the_record(tmp_path, monkeypatch)
     root = _seed(tmp_path, monkeypatch)
     d = root / "agents" / "tool"
     d.mkdir(parents=True)
-    write_record(
-        d, {"id": "tool", "handler_module": "python_runtime.tools", "code": PROG}
-    )
+    write_record(d, {"id": "tool", "handler_module": "exec_bridge.tools", "code": PROG})
 
     recs = {r["id"]: r for r in read_tree(root)}
     assert recs["tool"]["code"] == PROG
@@ -89,7 +85,7 @@ async def test_the_provider_write_path_splits_too(tmp_path, monkeypatch):
             "handler_module": "file_bridge.tools",
             "id": "kernel_store",
             "root": ".fantastic",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     )
     await root.send(
@@ -98,7 +94,7 @@ async def test_the_provider_write_path_splits_too(tmp_path, monkeypatch):
             "type": "persist_record",
             "record": {
                 "id": "warm_tool",
-                "handler_module": "python_runtime.tools",
+                "handler_module": "exec_bridge.tools",
                 "parent_id": root.id,
                 "code": PROG,
             },

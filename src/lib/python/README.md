@@ -83,7 +83,7 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   its own typed WS bridge — see the TypeScript frontend kernel below.
 - **exec_bridge** — the PROCESS edge of the io family, and the executor
   the root reflect advertises. Gated like any io_bridge leg and **SEALED
-  BY DEFAULT** (`ingress_rule=allow_all` to open), it spawns ONLY an
+  BY DEFAULT** (`ingress_rule=allow_all_ingress` to open), it spawns ONLY an
   interpreter the record allowlists in `interpreters` — one spawn surface
   (`proc`), no per-call override, no default, no PATH fallback, so an
   unlisted `interpreter` is refused at write time and again at `start`.
@@ -96,14 +96,6 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   the contract. An allowlisted interpreter is a NAMED interpreter, not a
   sandbox — the operator chose which runtime and environment, nothing
   more.
-- **python_runtime** — async Python JOB spawner. `start(code, cwd?)`
-  launches `<interp> -u -c <code>` as a parallel background job, streaming
-  `progress`/`job_done` events; `status` / `stop` / `interrupt` / `clear`
-  by job id; each job gets an injected `kernel` connector. Per-agent venv
-  resolution (record `python` / `venv` fields override the interpreter).
-  Still installed and working, but OMITTED from what the kernel
-  advertises — `exec_bridge` is the executor now; its `python` shim
-  imports this bundle's connector source, so there is one wire client.
 - **yaml_state** — durable YAML key-value memory agent; mount anywhere
   (`mode=mem|data`). Persists `state.yaml` THROUGH a gated `file_bridge`
   agent (`file_bridge_id`, deny-all by default) — owns no disk surface of
@@ -122,9 +114,9 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   CLI running in the PTY (e.g. `claude`): the view ships the bytes,
   the backend saves a file and types its path in — mimicking a
   drag-drop, since the server can't reach the browser clipboard.
-- **ws_bridge + ssh_runner** — cross-host. `ssh_runner` uses
-  subprocess SSH to start/stop a remote `fantastic` and keeps
-  a local tunnel open so a canvas can iframe the remote webapp.
+- **ws_bridge / relay_connector** — cross-host. Sub-kernel reach is
+  the ssh connector + `exec_bridge`; a bridge leg carries the verbs
+  so a canvas can reach a remote kernel.
   `ws_bridge` opens WS (or SSH+WS) to a peer kernel's `web_ws`
   and ships raw call frames (asymmetric — no peer bridge needed);
   local agents reach remote agents through it without merging the two
@@ -203,9 +195,9 @@ These call legs are **io_bridge derivations: SEALED by default** — a freshly-c
 until you open it. Compose them per project, opening each consciously:
 ```bash
 fantastic kernel_state create_agent handler_module=web.tools port=8888
-# open the WS leg wide for local dev (or `ingress_rule=password` for a group token):
-fantastic kernel_state create_agent handler_module=web_ws.tools parent_id=<web_id> ingress_rule=allow_all
-fantastic kernel_state create_agent handler_module=web_rest.tools parent_id=<web_id> ingress_rule=allow_all
+# open the WS leg wide for local dev (or `ingress_rule=password_ingress` for a group token):
+fantastic kernel_state create_agent handler_module=web_ws.tools parent_id=<web_id> ingress_rule=allow_all_ingress
+fantastic kernel_state create_agent handler_module=web_rest.tools parent_id=<web_id> ingress_rule=allow_all_ingress
 ```
 
 After `fantastic`:
@@ -302,8 +294,7 @@ uv run pytest -n auto
     ├── cli/                                  # stdout renderer (ephemeral — composed when isatty)
     ├── web/                                  # HTTP+WS transport (uvicorn) + favicon
     ├── file/, scheduler/                     # filesystem + recurring tasks
-    ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default subprocess spawner, interpreter ALLOWLIST (`interpreters`), one spawn surface (proc.py), wire + optional shim; THE advertised executor
-    ├── python_runtime/                       # exec Python in subprocess (still ships; unadvertised — exec_bridge replaced its role)
+    ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default subprocess spawner, interpreter ALLOWLIST (`interpreters`), one spawn surface (proc.py), wire + optional shim; THE one executor
     ├── yaml_state/                           # durable YAML key-value memory (yaml_state.tools)
     ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
     ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
@@ -313,8 +304,6 @@ uv run pytest -n auto
     ├── io/io_bridge/                         # the IO base — a reflectable keystone agent (channel model, rule registries, read loop/verbs/lifecycle, MemoryTransport); bridges + web faces derive from it; IO legs sealed by default
     ├── io/ws_bridge/                     # cross-kernel WS bridge (asymmetric) — ws / ssh+ws transports
     ├── io/relay_connector/               # cross-kernel bridge through a relay-KERNEL router — dial ws://host/<guid>, X-Fantastic-Auth, reach a partner_guid; tunnels io_bridge frames; auto-reconnect + keepalive + directory (list_peers/watch) + kernelgroup typing (role/owner_guid/exposes via set_identity)
-    ├── runner/runner_core/                   # shared runner lifecycle + Transport seam; local_runner and ssh_runner bind to it
-    └── runner/{local_runner, ssh_runner}     # spawn local / remote `fantastic`
 ```
 
 The browser view layer (canvas compositor + terminal/chat views) is

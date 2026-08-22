@@ -1,6 +1,6 @@
 """`allow_all` — the OPEN ingress rule: full symmetric duplex, a true no-op. NOT the
 default — IO legs seal by default (absent rule ⇒ `deny_inbound`); this is the rule you
-set CONSCIOUSLY to open a leg (`ingress_rule=allow_all`)."""
+set CONSCIOUSLY to open a leg (`ingress_rule=allow_all_ingress`)."""
 
 from __future__ import annotations
 

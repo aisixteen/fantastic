@@ -148,8 +148,33 @@ pub async fn compact(
     // the summary text itself (the seam embeds this exact summary).
     let summary_cost = estimate_one(&json!({"role": "user", "content": summary}));
     let avail = (budget - NOTICE_ENVELOPE_RESERVE - summary_cost).max(0);
+    // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it is
+    // the first thing the overflow split takes. A summary is a lossy retelling; the one
+    // turn that must survive verbatim is the instruction the whole run serves.
+    // Measured 2026-08-20 (python, four live runs): the agent reached the correct
+    // conclusion, then ended "healthy budget, no tasks" / "Give me a task whenever" — it
+    // had not refused to act, it no longer knew what it was doing. `truncate` already
+    // pins this turn; `compact` did not. Cost is one turn of budget, charged before the
+    // tail.
+    let Some(first) = body.first() else {
+        return Projection {
+            body: fit_tail(&recent_turns, avail),
+            summary: Some(summary),
+            omitted_marker: false,
+        };
+    };
+    let head_cost = estimate_one(first);
+    let kept = fit_tail(&recent_turns, (avail - head_cost).max(0));
+    // Only re-add it if the recent window does not already carry it (short bodies).
+    let body = if kept.first() == Some(first) {
+        kept
+    } else {
+        let mut out = vec![first.clone()];
+        out.extend(kept);
+        out
+    };
     Projection {
-        body: fit_tail(&recent_turns, avail),
+        body,
         summary: Some(summary),
         omitted_marker: false,
     }

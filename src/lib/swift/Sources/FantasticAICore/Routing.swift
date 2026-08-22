@@ -235,7 +235,8 @@ func routeReply(
         // (KernelDispatch.swift). So the try/except python needs is the kernel's,
         // and all routing adds is the `target`, which the kernel does not know is
         // interesting.
-        var result = await kernel.send(AgentId(target), .object(payload))
+        let pidBox = TaskIdBox()
+        var result = await kernel.sendTraced(AgentId(target), .object(payload), taskOut: pidBox)
         if result["raised"].asBool == true, var obj = result.asObject, obj["target"] == nil {
             obj["target"] = .string(target)
             result = .object(obj)
@@ -246,14 +247,17 @@ func routeReply(
         // The result — INCLUDING an error — goes back. A call that failed
         // silently is the one thing a model can never debug.
         //
-        // Target AND verb in the tag (py-canonical shape). With two calls in flight
-        // to one agent a bare `[reply to kernel_state]` is unmatchable — measured
-        // 2026-08-07 on py: acks lag a turn, the model re-issued both deletes and
-        // read its own retries as "duplicate delivery".
+        // PID, then target AND verb. Target+verb alone is NOT unique either: with two
+        // calls in flight to one agent `[reply to kernel_state set]` is unmatchable —
+        // measured 2026-08-07 (opus re-issued both deletes, then theorised "duplicate
+        // delivery" about its own retries) and again 2026-08-20 (qwen: "the reply queue
+        // is running ahead of me", then re-polled forever). The PID is the same id
+        // `ps`/`cancel` use, so a reply names a row the model can act on.
         let verb = payload["type"]?.asString ?? "?"
+        let pid = pidBox.value?.value ?? "-"
         await deliverTurn(
             kernel: kernel, target: replyTo,
-            text: "[reply to \(target) \(verb)]\n" + result.serialize(),
+            text: "[reply to \(pid) · \(target) \(verb)]\n" + result.serialize(),
             clientId: clientId, systemPrompt: systemPrompt)
     }
 }

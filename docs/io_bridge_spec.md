@@ -139,8 +139,8 @@ an empty `see` (discovery via the agent's own readme + the `hint`).
 Open a leg consciously, e.g.:
 
 ```bash
-fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all     # local dev
-fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password    # shared group
+fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress     # local dev
+fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password_ingress    # shared group
 ```
 
 A freshly-created `web_ws`/`web_rest` with no rule mounts but a browser/REST client
@@ -156,7 +156,7 @@ denial's inline `hint` — there is no keystone agent to reflect:
 ```
 1. try a verb over a sealed edge  → { reason:"unauthorized", hint }   # `see` is empty
 2. reflect readme=true on the SEALED AGENT ITSELF → its own short readme (the open recipe)
-3. set ingress_rule on the leg    → update_agent ingress_rule=password
+3. set ingress_rule on the leg    → update_agent ingress_rule=password_ingress
 4. present the credential          → auth_token ON THE ENVELOPE (or X-Fantastic-Auth for http)
 5. the edge opens; the wire works
 ```

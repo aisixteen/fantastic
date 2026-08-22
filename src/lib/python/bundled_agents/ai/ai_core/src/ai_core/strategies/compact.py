@@ -25,4 +25,17 @@ async def compact(
     # summary text itself (the seam embeds this exact summary). One budget authority.
     summary_cost = estimate_one({"role": "user", "content": summary})
     avail = max(0, ctx.budget - NOTICE_ENVELOPE_RESERVE - summary_cost)
-    return Projection(body=fit_tail(recent, avail), summary=summary)
+    # PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
+    # is the first thing the overflow split takes. A summary is a lossy retelling; the
+    # one turn that must survive verbatim is the instruction the whole run serves.
+    # Measured 2026-08-20 (live, four runs): the agent reached the correct conclusion,
+    # then ended "healthy budget, no tasks" / "Give me a task whenever" — it had not
+    # refused to act, it no longer knew what it was doing. `truncate` already pins this
+    # turn; `compact` did not. Cost is one turn of budget, charged before the tail.
+    first = body[0]
+    head_cost = estimate_one(first)
+    kept = fit_tail(recent, max(0, avail - head_cost))
+    # Only re-add it if the recent window does not already carry it (short bodies).
+    if kept and kept[0] is first:
+        return Projection(body=kept, summary=summary)
+    return Projection(body=[first] + kept, summary=summary)

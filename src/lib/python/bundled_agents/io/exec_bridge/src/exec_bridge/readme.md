@@ -30,8 +30,8 @@ A freshly created leg denies every verb except `reflect` (`{reason:"unauthorized
 Open it consciously:
 
 ```
-update_agent <id> ingress_rule=allow_all      # open wide (local/dev)
-update_agent <id> ingress_rule=password       # require group token ($FANTASTIC_GROUP_TOKEN)
+update_agent <id> ingress_rule=allow_all_ingress      # open wide (local/dev)
+update_agent <id> ingress_rule=password_ingress       # require group token ($FANTASTIC_GROUP_TOKEN)
 ```
 
 ## The allowlist is the law

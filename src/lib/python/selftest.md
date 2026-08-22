@@ -25,7 +25,7 @@ Strict rules:
 
 - **io legs SEAL by default — a denial is expected, not a failure.** A freshly-created
   `web_ws` / `web_rest` / `file_bridge` denies every inbound frame/verb
-  (`{reason:"unauthorized"}`, REST `403`) until opened with `ingress_rule=allow_all`
+  (`{reason:"unauthorized"}`, REST `403`) until opened with `ingress_rule=allow_all_ingress`
   (or `password`). Selftest pre-flights open the leg they exercise; if you compose your
   own, open it too. Reading a seal as a test failure is the misread to avoid.
 - Never silently fake a skip.
@@ -139,9 +139,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
 | `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
-| `bundled_agents/ssh_runner/selftest.md` | kernel, ssh | remote `fantastic` lifecycle; SSH tunnel for canvas iframing |
 | `bundled_agents/io/exec_bridge/selftest.md` | kernel | sealed-by-default process edge — interpreter allowlist (refusal names the legal set), start/status/stop/interrupt/clear/boot, wire + optional shim, mail to a live program, task-table row + cancel |
-| `bundled_agents/python_runtime/selftest.md` | kernel | async Python JOB spawner — start/status/stop/interrupt/clear; progress/job_done events (still ships; unadvertised — see exec_bridge) |
 
 The root selftest is the `kernel_state` one (id `"kernel_state"`) — the
 persistence/hydration root that owns `.fantastic/`; there's no `core`

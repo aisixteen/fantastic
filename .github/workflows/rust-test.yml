@@ -1,7 +1,7 @@
 name: Rust Tests
 
 # Build + clippy + test the Rust workspace. This is the gate that would have
-# caught the js_runtime / lua / ollama bug class (detached-loop death, spawn
+# caught the script-executor / backend bug class (detached-loop death, spawn
 # races, sandbox holes) — none of it was visible to CI before, because CI ran
 # only lint/spellcheck/CodeQL, never the Rust tests.
 

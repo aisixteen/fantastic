@@ -9,9 +9,9 @@ sidecars) ONLY through a `file_bridge` provider it DISCOVERS — the first
 provider ⇒ no persistence, lost on exit; there is no direct-write fallback.
 So wire the store FIRST, before anything worth keeping:
 
-    create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all
+    create_agent handler_module=file_bridge.tools id=store root=.fantastic ingress_rule=allow_all_ingress
 
-The `file_bridge` edge is SEALED by default — `ingress_rule=allow_all` opens
+The `file_bridge` edge is SEALED by default — `ingress_rule=allow_all_ingress` opens
 it; `reflect` then shows `persistence: {provider: "store"}`. One store
 serves both the root's records AND every agent's sidecar: the sidecar lands
 at `agents/<id>/state.yaml`, next to that agent's own `agent.json`

@@ -22,9 +22,9 @@ public enum IngressRules {
     public static func resolve(_ spec: JSON?) throws -> IngressRule {
         let (name, env) = try parseSpec(spec)
         switch name {
-        case nil, .some("deny_inbound"): return DenyInbound()
-        case .some("allow_all"): return AllowAll()
-        case .some("password"): return Password(tokenEnv: env ?? DefaultGroupTokenEnv)
+        case nil, .some("deny_ingress"): return DenyInbound()
+        case .some("allow_all_ingress"): return AllowAll()
+        case .some("password_ingress"): return Password(tokenEnv: env ?? DefaultGroupTokenEnv)
         case .some(let other): return DenyInbound(unknown: other)
         }
     }

@@ -44,7 +44,7 @@ bash integration_tests/py_ts/e2e/boot_bare_host.sh 8930
 
 Prints `TMP=… PID=… PORT=8930 WEB=… REST=… REST_URL=… CANVAS_URL=…`. This daemon has
 web / web_ws / web_rest / web_loader / a seeded `canvas` / the served frontend — and
-**no** `python_runtime`, scheduler, AI, or panels. The builder creates all of those.
+**no** `exec_bridge`, scheduler, AI, or panels. The builder creates all of those.
 
 ### 2b. Spawn the readme-only builder agent
 
@@ -62,7 +62,7 @@ read this repo's source or use any kernel tools.
 > GOAL — build, from zero, a small but fully CONNECTED workflow system where every
 > piece talks to the others by id:
 >   1. a **scheduler** that periodically wakes a **"router" AI agent**;
->   2. the router, each tick, must DISPATCH work — call a **python_runtime** job to
+>   2. the router, each tick, must DISPATCH work — call an **exec_bridge** job to
 >      compute something AND consult a **second AI** agent — then write the outcome
 >      into a shared **memory** agent (yaml_state);
 >   3. surface results on **two HTML panels** on the `canvas` (one for the router's
@@ -118,12 +118,12 @@ from self-description ALONE — never told a number:
 - **terminal_view ↔ terminal_backend = 1:1** (a view *bound by `backend_id`* to an
   *exclusive PTY session*);
 - **ai_view ↔ AI backend = 1:1** (a view *bound by `backend_id`* to *shared compute*);
-- **html_agent panel ↔ python_runtime = 1:N** (a *content* agent, no binding — its JS
+- **html_agent panel ↔ exec_bridge = 1:N** (a *content* agent, no binding — its JS
   `fantastic.send`/`watch`es a *many-jobs* runtime by id, behaviorally).
 
 Reuses `boot_bare_host.sh` (2a). The builder is **the operating agent's spawned Claude
 Code sub-agent**, NOT the kernel's Anthropic backend — curl + reflect only. It curls
-the HOST backend readmes (terminal/ai/python_runtime); the FRONTEND view-bundle
+the HOST backend readmes (terminal/ai/exec_bridge); the FRONTEND view-bundle
 readmes (not curl-reachable on a bare host) are handed to it verbatim below — real
 strings, **no cardinality stated**. The builder must DERIVE the cardinality.
 
@@ -185,7 +185,7 @@ node integration_tests/py_ts/e2e/pairing_verify.ts <REST_URL>
 
 PASS = `terminal_view`/`ai_view` each carry a `backend_id` to a distinct backend of the
 right type (1:1, no shared/orphan PTY); `html_agent` panels carry NO `backend_id` and
-their `html` send/watches a `python_runtime` (1:N). A wrong derivation (panel given a
+their `html` send/watches an `exec_bridge` (1:N). A wrong derivation (panel given a
 `backend_id`, a shared PTY, a view with none) is the SIGNAL the self-description is
 insufficient → strengthen the still-implicit readme nudge (Phase A) and re-run. That
 iteration loop is the test's value.
@@ -201,7 +201,7 @@ After the run, the operating agent emits, **inline in chat**:
 
    ```
    scheduler ──every 8s──▶ ai_router
-                              ├──▶ python_runtime   (compute N)
+                              ├──▶ exec_bridge      (compute N)
                               ├──▶ ai_helper        (classify)
                               ├──▶ memory           (write result)
                               └──▶ panel_answer / panel_memory  (show)

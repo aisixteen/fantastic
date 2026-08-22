@@ -86,18 +86,37 @@ def rule_name(spec, default: str) -> str:
     return name or default
 
 
+def _scoped(name: str, suffix: str, was_scoped: bool) -> str:
+    """Report the SCOPED rule name whichever field it came from. `auth` carries a bare
+    stem; each manifold appends its own suffix, so `reflect` never shows a name that
+    would not resolve if written straight back into `ingress_rule`/`egress_rule`."""
+    if was_scoped or name.endswith(suffix):
+        return name
+    return (
+        "silent_egress"
+        if suffix == "_egress" and name in ("allow_all", "deny")
+        else name + suffix
+    )
+
+
 def describe(record: dict) -> dict:
     """A leg's auth posture for `reflect` — the rule NAMES (not config) + whether the
     leg is sealed: `{ingress_rule, egress_rule, sealed}`. Keyed by the field you SET
-    (read-key == write-key), so a readme-only LLM reads `ingress_rule: deny_inbound`
-    and opens with `ingress_rule: allow_all` — a direct mirror, no translation."""
+    (read-key == write-key), so a readme-only LLM reads `ingress_rule: deny_ingress`
+    and opens with `ingress_rule: allow_all_ingress` — a direct mirror, no translation."""
     ing_spec = (
         record["ingress_rule"] if "ingress_rule" in record else record.get("auth")
     )
     egr_spec = record["egress_rule"] if "egress_rule" in record else record.get("auth")
-    ingress = rule_name(ing_spec, "deny_inbound")
+    # The name a caller READS is the name it must WRITE, so both are scoped and
+    # an `auth` stem is reported as the manifold rule it actually resolved to.
+    ingress = _scoped(
+        rule_name(ing_spec, "deny_ingress"), "_ingress", "ingress_rule" in record
+    )
     return {
         "ingress_rule": ingress,
-        "egress_rule": rule_name(egr_spec, "silent"),
-        "sealed": ingress != "allow_all",
+        "egress_rule": _scoped(
+            rule_name(egr_spec, "silent_egress"), "_egress", "egress_rule" in record
+        ),
+        "sealed": ingress != "allow_all_ingress",
     }

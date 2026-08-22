@@ -120,6 +120,22 @@ impl Kernel {
     /// `CURRENT_SENDER` is set around dispatch. State event + watcher
     /// fanout fire after a successful dispatch.
     pub async fn send(self: &Arc<Self>, target_id: &AgentId, payload: Value) -> Value {
+        self.send_traced(target_id, payload, None).await
+    }
+
+    /// `send`, plus the dispatch PID written into `task_out` at dispatch time.
+    ///
+    /// The id is the ONE unambiguous correlator: `ps` rows, `cancel`, and the reply tag
+    /// a model reads all name the same thing. Measured 2026-08-07 and again 2026-08-20
+    /// (python): with two calls in flight to one agent, a reply tagged only
+    /// `[reply to <agent> <verb>]` is unmatchable — one model re-issued both deletes and
+    /// then theorised "duplicate delivery" about its own retries.
+    pub async fn send_traced(
+        self: &Arc<Self>,
+        target_id: &AgentId,
+        payload: Value,
+        task_out: Option<&mut Option<TaskId>>,
+    ) -> Value {
         // Resolve target. Special id `"kernel"` aliases to the root.
         let resolved: Option<Arc<Agent>> = if target_id.as_str() == "kernel" {
             self.root()
@@ -150,7 +166,7 @@ impl Kernel {
         // kernel's task table) and await it — that is what makes ANY send
         // cancelable, on any bundle. A cancelled dispatch does NOT raise out of
         // `send`: it resolves to `{"cancelled": true}`.
-        let mut reply = self.run_dispatch(&target, &payload, &verb).await;
+        let mut reply = self.run_dispatch(&target, &payload, &verb, task_out).await;
 
         // Universal post-process: compose every reflect reply with the
         // tree/bundles/readme flags (mirrors Python's
@@ -347,11 +363,18 @@ impl Kernel {
         target: &Arc<Agent>,
         payload: &Value,
         verb: &str,
+        task_out: Option<&mut Option<TaskId>>,
     ) -> Value {
         // Register BEFORE spawning: the row (and its stop handle) must exist
         // the instant the handler can run, or a nested `send` could claim a
         // parent that isn't in the table yet.
         let task_id = self.tasks.mint(&target.id);
+        // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists.
+        // A caller that wants to correlate the answer needs the id at send time, not
+        // after; that is the whole point of the id.
+        if let Some(slot) = task_out {
+            *slot = Some(task_id.clone());
+        }
         let handle = TaskHandle::new();
         self.tasks.register(
             &task_id,

@@ -3,7 +3,7 @@
 The disk is OUTSIDE the trust domain: crossing kernel↔disk is an IO edge,
 gated exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule`
 ⇒ every verb except `reflect` denies with the teaching shape). Open it
-consciously with `ingress_rule=allow_all`. Even open, the LAW is
+consciously with `ingress_rule=allow_all_ingress`. Even open, the LAW is
 running-dir only: the `root` AND every path are clamped inside the dir the
 kernel runs in (`../`, `~`, absolute escapes, outward symlinks all refuse).
 
@@ -433,7 +433,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
             return (
                 f"ingress_rule={spec!r} is not a rule this bundle implements — "
-                "legal values: allow_all, deny_inbound, password"
+                "legal values: allow_all_ingress, deny_ingress, password_ingress"
             )
     return None
 

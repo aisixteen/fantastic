@@ -1,6 +1,6 @@
 """web_ws — the io_bridge ingress gate on the WS leg.
 
-A sealed leg (`ingress_rule=deny_inbound`) refuses inbound calls AND teaches how to
+A sealed leg (`ingress_rule=deny_ingress`) refuses inbound calls AND teaches how to
 open the edge (reason + hint + `see` pointer) — discovery-through-denial. An open
 leg dispatches. A `password` leg checks the credential on the frame ENVELOPE. reflect
 surfaces the leg's posture so a denied client can find the door.
@@ -31,7 +31,7 @@ def _reply(ws, call_id, max_frames=10):
 
 
 def test_sealed_leg_denies_and_teaches(seeded_kernel):
-    seeded_kernel.create("web_ws.tools", id="sealed_ws", ingress_rule="deny_inbound")
+    seeded_kernel.create("web_ws.tools", id="sealed_ws", ingress_rule="deny_ingress")
     with _client(seeded_kernel, "sealed_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             ws.send_text(
@@ -51,7 +51,7 @@ def test_sealed_leg_denies_and_teaches(seeded_kernel):
 
 
 def test_open_leg_dispatches(seeded_kernel):
-    seeded_kernel.create("web_ws.tools", id="open_ws", ingress_rule="allow_all")
+    seeded_kernel.create("web_ws.tools", id="open_ws", ingress_rule="allow_all_ingress")
     with _client(seeded_kernel, "open_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             ws.send_text(
@@ -92,7 +92,7 @@ def test_absent_rule_is_sealed(seeded_kernel):
 
 def test_password_leg_checks_envelope_token(seeded_kernel, monkeypatch):
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
-    seeded_kernel.create("web_ws.tools", id="pw_ws", ingress_rule="password")
+    seeded_kernel.create("web_ws.tools", id="pw_ws", ingress_rule="password_ingress")
     with _client(seeded_kernel, "pw_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             # right token on the ENVELOPE (sibling of id/target) → dispatches
@@ -126,15 +126,17 @@ def test_password_leg_checks_envelope_token(seeded_kernel, monkeypatch):
 
 
 async def test_reflect_surfaces_leg_posture(seeded_kernel):
-    seeded_kernel.create("web_ws.tools", id="sealed_ws2", ingress_rule="deny_inbound")
+    seeded_kernel.create("web_ws.tools", id="sealed_ws2", ingress_rule="deny_ingress")
     r = await handler("sealed_ws2", {"type": "reflect"}, seeded_kernel)
     assert r["sealed"] is True
-    assert r["ingress_rule"] == "deny_inbound"
+    assert r["ingress_rule"] == "deny_ingress"
     assert True  # see removed from posture
     # an open leg reflects unsealed
-    seeded_kernel.create("web_ws.tools", id="open_ws2", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_ws.tools", id="open_ws2", ingress_rule="allow_all_ingress"
+    )
     r2 = await handler("open_ws2", {"type": "reflect"}, seeded_kernel)
-    assert r2["sealed"] is False and r2["ingress_rule"] == "allow_all"
+    assert r2["sealed"] is False and r2["ingress_rule"] == "allow_all_ingress"
 
 
 def _watch_spy(kernel, monkeypatch):
@@ -152,7 +154,7 @@ def test_sealed_leg_skips_autowatch_no_telemetry_leak(seeded_kernel, monkeypatch
     # handshake — otherwise an unauthenticated client that merely opens the socket
     # passively receives the host's inbox events without ever passing the gate.
     calls = _watch_spy(seeded_kernel, monkeypatch)
-    seeded_kernel.create("web_ws.tools", id="sealed_ws3", ingress_rule="deny_inbound")
+    seeded_kernel.create("web_ws.tools", id="sealed_ws3", ingress_rule="deny_ingress")
     with _client(seeded_kernel, "sealed_ws3") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             # the denied call's reply is our sync point: the connect path has fully run
@@ -172,7 +174,9 @@ def test_sealed_leg_skips_autowatch_no_telemetry_leak(seeded_kernel, monkeypatch
 
 def test_open_leg_autowatches_host(seeded_kernel, monkeypatch):
     calls = _watch_spy(seeded_kernel, monkeypatch)
-    seeded_kernel.create("web_ws.tools", id="open_ws3", ingress_rule="allow_all")
+    seeded_kernel.create(
+        "web_ws.tools", id="open_ws3", ingress_rule="allow_all_ingress"
+    )
     with _client(seeded_kernel, "open_ws3") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
             ws.send_text(

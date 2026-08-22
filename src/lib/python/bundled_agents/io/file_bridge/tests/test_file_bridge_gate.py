@@ -47,7 +47,7 @@ async def test_sealed_bridge_still_reflects(seeded_kernel):
 
 
 async def test_open_leg_reads_and_writes(seeded_kernel, tmp_path):
-    fid = await _make(seeded_kernel, ingress_rule="allow_all")
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     w = await seeded_kernel.send(
         fid, {"type": "write", "path": "open.txt", "content": "through the door"}
     )
@@ -62,7 +62,7 @@ async def test_open_leg_reads_and_writes(seeded_kernel, tmp_path):
 
 
 async def test_relative_root_escaping_cwd_refuses(seeded_kernel):
-    fid = await _make(seeded_kernel, ingress_rule="allow_all", root="../x")
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", root="../x")
     for payload in (
         {"type": "read", "path": "a.txt"},
         {"type": "write", "path": "a.txt", "content": "x"},
@@ -74,13 +74,13 @@ async def test_relative_root_escaping_cwd_refuses(seeded_kernel):
 
 async def test_absolute_root_outside_cwd_refuses(seeded_kernel, tmp_path):
     outside = str(tmp_path.parent)  # a real dir, strictly outside cwd
-    fid = await _make(seeded_kernel, ingress_rule="allow_all", root=outside)
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", root=outside)
     r = await seeded_kernel.send(fid, {"type": "list", "path": ""})
     assert "escapes the running dir" in r.get("error", "")
 
 
 async def test_dotdot_path_on_open_in_cwd_bridge_refuses(seeded_kernel):
-    fid = await _make(seeded_kernel, ingress_rule="allow_all")
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = await seeded_kernel.send(fid, {"type": "read", "path": "../../etc/passwd"})
     assert "escape" in r.get("error", "")
 
@@ -89,7 +89,7 @@ async def test_symlink_pointing_outside_cwd_refuses(seeded_kernel, tmp_path):
     secret = tmp_path.parent / "gate_outside_secret.txt"
     secret.write_text("outside the trust domain")
     os.symlink(secret, tmp_path / "innocent.txt")
-    fid = await _make(seeded_kernel, ingress_rule="allow_all")
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = await seeded_kernel.send(fid, {"type": "read", "path": "innocent.txt"})
     assert "escape" in r.get("error", ""), f"symlink escape served: {r!r}"
 
@@ -107,13 +107,13 @@ async def test_reflect_never_raises_on_invalid_root(seeded_kernel):
 async def test_reflect_surfaces_posture(seeded_kernel):
     sealed = await _make(seeded_kernel)
     r = await seeded_kernel.send(sealed, {"type": "reflect"})
-    assert r["ingress_rule"] == "deny_inbound"
+    assert r["ingress_rule"] == "deny_ingress"
     assert r["sealed"] is True
     assert True  # see removed from posture
 
-    opened = await _make(seeded_kernel, ingress_rule="allow_all")
+    opened = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = await seeded_kernel.send(opened, {"type": "reflect"})
-    assert r["ingress_rule"] == "allow_all"
+    assert r["ingress_rule"] == "allow_all_ingress"
     assert r["sealed"] is False
     assert True  # see removed from posture
 
@@ -148,7 +148,7 @@ async def test_an_unimplementable_rule_is_refused_at_CREATE_not_just_update(
     assert "id" not in r, "nothing may be created"
 
     # And the same value on update is refused identically — one implementation.
-    good = await _make(seeded_kernel, ingress_rule="allow_all")
+    good = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     u = await seeded_kernel.send(
         "kernel_state",
         {"type": "update_agent", "id": good, "ingress_rule": "bogus_rule"},
@@ -159,6 +159,6 @@ async def test_an_unimplementable_rule_is_refused_at_CREATE_not_just_update(
 
 async def test_a_legal_rule_still_creates(seeded_kernel):
     """The refusal must not have made the gate paranoid — the happy path is untouched."""
-    fid = await _make(seeded_kernel, ingress_rule="allow_all")
+    fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = await seeded_kernel.send(fid, {"type": "reflect"})
-    assert r["ingress_rule"] == "allow_all" and r["sealed"] is False
+    assert r["ingress_rule"] == "allow_all_ingress" and r["sealed"] is False

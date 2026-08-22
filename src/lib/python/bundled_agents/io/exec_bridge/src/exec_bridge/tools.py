@@ -3,17 +3,17 @@
 A subprocess is OUTSIDE the trust domain: crossing kernel↔process is an IO edge, gated
 exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule` ⇒ every verb except
 `reflect` denies with the teaching shape). Open it consciously with
-`ingress_rule=allow_all`. Even open, the LAW is the ALLOWLIST: only an interpreter the
+`ingress_rule=allow_all_ingress`. Even open, the LAW is the ALLOWLIST: only an interpreter the
 operator listed in `interpreters` can be spawned, and that choice is not overridable per
 call. The spawn primitive lives in `proc` — the ONE process surface. This agent is the
 GATE + verb shape over it; it never spawns directly.
 
 ## Why this exists, and what it replaces
 
-`python_runtime` is an entire executor — job table, connector, relay, boot rehydration,
-addressable inbox — bound to ONE language, and that machinery exists three times over
-(python, js, lua). It is also the only boundary in this kernel that is not a sealed io
-edge: its own docstring says registering it "GRANTS ARBITRARY LOCAL CODE EXECUTION".
+A per-language runtime is an entire executor — job table, connector, relay, boot
+rehydration, addressable inbox — bound to ONE language, and that machinery ended up
+duplicated once per language. It was also the only boundary in this kernel that was not a
+sealed io edge: registering one "GRANTS ARBITRARY LOCAL CODE EXECUTION".
 
 Here the interpreter is a FIELD. "A python agent" stops being a bundle and becomes a
 record. Everything that is not language-specific — the job table, the pump, the relay,
@@ -305,7 +305,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             kernel.unwatch(owner_id, proxy)
             t.cancel()
             # Only if it still names THIS job — a supersede must not evict its
-            # replacement (the bug `c2a4297` fixed in js_runtime).
+            # replacement (the bug `c2a4297` fixed).
             cur = _owner_inbox.get(owner_id)
             if cur and cur["job_id"] == job_id:
                 _owner_inbox.pop(owner_id, None)
@@ -553,8 +553,8 @@ async def _boot(id, payload, kernel):
     if not (isinstance(code, str) and code) or _has_running_job(id):
         return None
     reply = await _start(id, {"code": code}, kernel)
-    # PROPAGATE. `python_runtime._boot` discarded this, and with an allowlist that is a
-    # silent-success hole: a record naming a non-allowlisted interpreter would boot,
+    # PROPAGATE. The predecessor executor's `_boot` discarded this, and with an allowlist
+    # that is a silent-success hole: a record naming a non-allowlisted interpreter would boot,
     # fail to spawn, and still look created — indistinguishable from a program that ran
     # and did nothing. `create_agent` discards a boot REPLY too, which is why the
     # allowlist is ALSO enforced at write time by `validate_meta`; this covers the

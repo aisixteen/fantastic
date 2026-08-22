@@ -1,7 +1,7 @@
 > scopes: cli
-> requires: a real python3 NAMED on the `pr` record (`python=…`) — the ladder does not probe PATH
+> requires: a real python3 NAMED in the `pr` record's `interpreters` allowlist — there is no default and no PATH probing
 
-# python_runtime selftest — durable script agents
+# exec_bridge selftest — durable script agents
 
 Your `code` is a SCRIPT, not a set of verb handlers. It is run top to bottom, once per
 `start` (and again on `boot`). Defining a function does not register a verb —

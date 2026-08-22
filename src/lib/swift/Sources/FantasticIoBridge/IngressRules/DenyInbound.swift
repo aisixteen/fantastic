@@ -17,8 +17,10 @@ extension IngressRules {
             _ = action
             if let name = unknown {
                 return .deny(
-                    "edge sealed — unknown ingress rule \"\(name)\"; "
-                        + "legal values: allow_all, deny_inbound, password")
+                    "edge sealed — unknown ingress rule \"\(name)\"; it is not an "
+                        + "INGRESS rule name — the legal values are allow_all_ingress, "
+                        + "deny_ingress, password_ingress (names are manifold-scoped: an "
+                        + "egress name here is a typo, not a policy)")
             }
             return .deny("inbound calls denied by policy")
         }

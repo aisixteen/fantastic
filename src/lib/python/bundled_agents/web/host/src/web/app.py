@@ -19,10 +19,12 @@ mounts them onto this app at runtime.
 
 from __future__ import annotations
 
+import json
 import mimetypes
 from importlib import resources
 
 from fastapi import FastAPI
+from kernel import sender_context
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 
@@ -83,8 +85,22 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         `read_stream{path,offset,length}` becomes an HTTP file server. file_bridge
         is the canonical implementer. URL convention:
         `<img src="/<file_bridge>/file/imgs/foo.png">` works without registration.
-        The serving ALLOWANCE is the agent's own gate — a sealed file_bridge's
-        `read_stream` denies, so the URL 404s; the path stays clamped to its root.
+        The serving ALLOWANCE is BOTH of the agent's gates. This request enters from
+        OUTSIDE any handler, so without help `_current_sender` would be None and the
+        read would carry OPERATOR authority — the browser inheriting the origin root
+        of trust, and `callable_by` never consulted. It is dispatched under
+        `sender_context(web_agent_id)` instead, so a browser fetch is an ordinary
+        agent send FROM the web host: the served agent's `ingress_rule` gates the io
+        leg AND its `callable_by` decides whether `web` may call it at all.
+
+        Measured 2026-08-21 (`live_plan`): with this route running as operator, a
+        model set `transcripts` to `ingress_rule=allow_all_ingress` plus a `callable_by`
+        excluding every web surface, said "any future web/ws/rest agent are
+        deliberately excluded" — and the browser was served the private chat history
+        anyway. Its two-sided reasoning was right; the route's origin made it false.
+        Before this, "in-kernel readers yes, browser no" was INEXPRESSIBLE for a
+        file_bridge: `ingress_rule` is one switch over both origins and `callable_by`
+        could not reach the HTTP path. Now it is just `callable_by` without `web`.
 
         ONE contract (no fallback): the file is piped chunk-by-chunk over
         `read_stream` so a LARGE file never loads whole into memory. An agent that
@@ -94,10 +110,11 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         if not kernel.get(agent_id):
             return Response(status_code=404)
         # Streaming path: read_stream chunk 0 doubles as the gate + size probe.
-        first = await kernel.send(
-            agent_id,
-            {"type": "read_stream", "path": path, "offset": 0, "length": 262144},
-        )
+        with sender_context(web_agent_id):
+            first = await kernel.send(
+                agent_id,
+                {"type": "read_stream", "path": path, "offset": 0, "length": 262144},
+            )
         if isinstance(first, dict) and isinstance(
             first.get("bytes"), (bytes, bytearray)
         ):
@@ -110,15 +127,19 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
                     yield bytes(chunk["bytes"])
                     if chunk.get("eof"):
                         break
-                    chunk = await kernel.send(
-                        agent_id,
-                        {
-                            "type": "read_stream",
-                            "path": path,
-                            "offset": chunk["next_offset"],
-                            "length": 262144,
-                        },
-                    )
+                    # The generator is iterated by StreamingResponse AFTER the
+                    # handler returned, so it re-enters the context per chunk
+                    # rather than relying on the handler's still being active.
+                    with sender_context(web_agent_id):
+                        chunk = await kernel.send(
+                            agent_id,
+                            {
+                                "type": "read_stream",
+                                "path": path,
+                                "offset": chunk["next_offset"],
+                                "length": 262144,
+                            },
+                        )
                     if not isinstance(chunk, dict) or not isinstance(
                         chunk.get("bytes"), (bytes, bytearray)
                     ):
@@ -129,8 +150,30 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
                 media_type=mime or "application/octet-stream",
                 headers={"content-length": str(size)} if size else None,
             )
-        # Not a SOURCE (denied gate, path escape, missing file, non-file-server):
-        # 404. No whole-file `read` fallback — read_stream is the one contract.
+        # Not a SOURCE: 404. No whole-file `read` fallback — read_stream is the one
+        # contract.
+        #
+        # A GATE denial carries its reason in the body. This kernel teaches through
+        # denials — every refusal names the `side` and a `hint` with the recipe that
+        # fixes it — and this route used to be the one surface that threw that away,
+        # returning a bare 404 for every cause alike. Measured 2026-08-21: five runs
+        # across two frontier models set `ingress_rule=allow_all_ingress` on a public
+        # directory, never granted `web` on its call gate, and reported success;
+        # the kernel had said "assets does not accept 'read_stream' from web" and
+        # the route discarded it, so even curling the URL taught nothing.
+        #
+        # A MISSING FILE stays a bare 404 — no body, no existence leak, no path
+        # probing. The two cases differ because only one of them is the operator's
+        # own misconfiguration, and that one is useless kept secret.
+        detail = first if isinstance(first, dict) else {}
+        if detail.get("reason") == "unauthorized":
+            return Response(
+                content=json.dumps(
+                    {k: detail.get(k) for k in ("error", "reason", "side", "hint")}
+                ),
+                status_code=404,
+                media_type="application/json",
+            )
         return Response(status_code=404)
 
     return app

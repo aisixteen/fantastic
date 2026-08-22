@@ -29,10 +29,10 @@ with a dishonest reassurance would be worse.
 
 ## No default interpreter
 
-There is none, deliberately. `python_runtime` could fall back to `sys.executable`
-because the host IS python — a FACT about the running process, not a guess. This bridge
-spawns whatever the operator listed, so "no interpreter named" has no honest answer and
-refuses instead. "By default no defaults."
+There is none, deliberately. The per-language executor this bridge replaced could fall
+back to `sys.executable` because the host IS python — a FACT about the running process,
+not a guess. This bridge spawns whatever the operator listed, so "no interpreter named"
+has no honest answer and refuses instead. "By default no defaults."
 """
 
 from __future__ import annotations

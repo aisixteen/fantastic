@@ -43,13 +43,13 @@ integrity-check instructions.
 cd ts && npm install && npm run build        # → ts/dist/*.js  (ES modules)
 
 # 1. a GENERIC file_bridge agent rooted at the build output. The bridge is
-#    SEALED by default (open with ingress_rule=allow_all) and its root is
+#    SEALED by default (open with ingress_rule=allow_all_ingress) and its root is
 #    CLAMPED to the running dir — copy the dist INTO the kernel's workdir
 #    and root it relatively. /ts_dist/file/<path> then serves every dist
 #    module; relative ESM imports (./kernel/kernel.js, ./transport/bridge.js,
 #    …) resolve under it.
 cp -R /PATH/TO/ts/dist ./ts_dist_src
-fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist root=ts_dist_src ingress_rule=allow_all
+fantastic kernel_state create_agent handler_module=file_bridge.tools id=ts_dist root=ts_dist_src ingress_rule=allow_all_ingress
 ```
 
 The build emits **no** mount page — only the ESM modules and vendored bytes

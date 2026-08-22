@@ -44,7 +44,7 @@
             "type": .string("create_agent"),
             "handler_module": .string("exec_bridge.tools"),
             "id": .string(id),
-            "ingress_rule": .string("allow_all"),
+            "ingress_rule": .string("allow_all_ingress"),
             "shim": .string("python"),
         ]
         if let interp = py3() {
@@ -144,8 +144,8 @@
 
     // MARK: - tests
 
-    @Suite("FantasticPythonRuntime")
-    struct PythonRuntimeTests {
+    @Suite("FantasticExecBridge")
+    struct ExecBridgeBundleTests {
 
         @Test func readmePresentAndTitled() {
             let bundle = ExecBridgeBundle()
@@ -213,7 +213,7 @@
         /// cannot prove a comment TRUE, only stop these from coming back.
         @Test func theSourceDocsDoNotDescribeAVerbThatIsGone() throws {
             let source = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()  // FantasticPythonRuntimeTests/
+                .deletingLastPathComponent()  // FantasticExecBridgeTests/
                 .deletingLastPathComponent()  // Tests/
                 .deletingLastPathComponent()  // swift/
                 .appendingPathComponent("Sources/FantasticExecBridge/ExecBridge.swift")
@@ -466,7 +466,7 @@
                 AgentId("sealed"), .object(["type": .string("start"), "code": .string("x")]))
             #expect(d["reason"].asString == "unauthorized", "\(d.serialize())")
             #expect(
-                d["hint"].asString?.contains("ingress_rule=allow_all") == true,
+                d["hint"].asString?.contains("ingress_rule=allow_all_ingress") == true,
                 "the denial must teach how to open: \(d.serialize())")
             let r = await kernel.send(AgentId("sealed"), .object(["type": .string("reflect")]))
             #expect(r["sealed"].asBool == true)

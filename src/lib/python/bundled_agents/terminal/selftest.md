@@ -24,7 +24,7 @@ pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
 uv run --active fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
 # WS verb channel is now a sub-agent of web — spawn under web's id.
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all >/dev/null
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done

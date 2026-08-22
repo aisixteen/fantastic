@@ -433,19 +433,18 @@ fn available_bundles(kernel: &Arc<Kernel>) -> Vec<Value> {
 /// advertised set can neither name an executor a caller cannot use nor omit one
 /// it can.
 ///
-/// WHY derived rather than hand-written: the tail used to read literally
-/// "Executors here: js_runtime.tools and lua_runtime.tools", while
-/// `python_runtime.tools` registers unconditionally in the shared kernel and
-/// under `--features full` in the CLI. A model on a full build was therefore
-/// never told its own executor existed — the defect class python fixed on
-/// 2026-08-05, when opus-5 invented `handler_module:'local_runner.script'`
-/// because the real module was never named, and built nothing.
+/// WHY derived rather than hand-written: the tail used to be a hard-coded list
+/// of executor modules, which drifted from what a given build actually
+/// registered. A model was therefore told about an executor it could not use, or
+/// never told its own existed — the defect class python fixed on 2026-08-05,
+/// when opus-5 invented `handler_module:'local_runner.script'` because the real
+/// module was never named, and built nothing. Deriving the tail from the live
+/// registry makes that drift impossible.
 ///
-/// The keys are the same strings the bundles export as
-/// `fantastic_{js,lua,python}_runtime::HANDLER_MODULE`. They are repeated as
-/// literals here (and only here) because bundles depend on the kernel, not the
-/// reverse — a const reference would be a dependency cycle. The registries
-/// themselves must use the consts.
+/// The keys are the same strings the bundles export as `HANDLER_MODULE`. They are
+/// repeated as literals here (and only here) because bundles depend on the
+/// kernel, not the reverse — a const reference would be a dependency cycle. The
+/// registries themselves must use the consts.
 const EXECUTORS: &[(&str, &str)] = &[(
     "exec_bridge.tools",
     "its script takes turns through a CALLBACK it registers - kernel.on_message(cb) - and must keep running; the leg's reflect advertises its interpreter allowlist and shims",

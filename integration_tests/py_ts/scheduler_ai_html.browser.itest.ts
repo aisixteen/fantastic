@@ -1,11 +1,11 @@
-// The workflow keystone: an AI agent (and the scheduler, and python_runtime) are
+// The workflow keystone: an AI agent (and the scheduler, and exec_bridge) are
 // FIRST-CLASS units that drive a real browser UI. Five scenarios, all bypass-free
 // (panels reach the host only through the JS kernel), headless Chrome asserting:
 //
-//   A. scheduler → python_runtime → 3rd html panel        (DETERMINISTIC — always runs)
+//   A. scheduler → exec_bridge → 3rd html panel           (DETERMINISTIC — always runs)
 //   B. scheduler → anthropic ai_agent → 3rd html panel    (live: "apples or bananas")
 //   C. AI tool-call → 3rd html panel                       (live: AI actively drives UI)
-//   D. AI tool-call → python_runtime                       (live: AI spawns compute)
+//   D. AI tool-call → exec_bridge                          (live: AI spawns compute)
 //   E. AI tool-call → another AI (leaf)                    (live: AI→AI, no recursion)
 //
 // A proves the scheduler→unit→panel chain with zero LLM. B–E exercise REAL tool-use
@@ -101,14 +101,14 @@ const READ_OUT =
 const J = (s: string): string => JSON.stringify(s);
 const W = (ms: number): number => Math.round(ms * Number(process.env.LLM_WAIT_X ?? 1)); // scale LLM waits for slow local models
 
-// ─── A. scheduler → python_runtime → 3rd html panel (deterministic) ──
+// ─── A. scheduler → exec_bridge → 3rd html panel (deterministic) ──
 
-test("A: scheduler → python_runtime → 3rd html panel (deterministic chain)", async (t) => {
+test("A: scheduler → exec_bridge → 3rd html panel (deterministic chain)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   await scenario(
     8920,
-    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true },
+    { webLoader: true, serveDist: true, execBridge: true, scheduler: true },
     (tmp, host) => {
       const py = host.pyId as string;
       const sch = host.schedulerId as string;
@@ -208,19 +208,19 @@ const out = () => document.getElementById("out");
   );
 });
 
-// ─── D. AI tool-call → python_runtime (AI spawns compute) ──
+// ─── D. AI tool-call → exec_bridge (AI spawns compute) ──
 
-test("D: AI tool-call → python_runtime (AI spawns a compute job)", async (t) => {
+test("D: AI tool-call → exec_bridge (AI spawns a compute job)", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   if (!existsSync(join(DIST_DIR, "main.js"))) return t.skip("ts/dist not built");
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8923,
-    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ACTIVE_LLM },
+    { webLoader: true, serveDist: true, execBridge: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
-      // The panel watches python_runtime; it asks the AI to run a python job there.
+      // The panel watches exec_bridge; it asks the AI to run a python job there.
       // The JOB's own progress (not the AI) lands on the panel — proving AI→compute.
       const html = `<pre id="out">—</pre><script>
 const out = () => document.getElementById("out");
@@ -290,14 +290,14 @@ test("F: python job uses its kernel connector to call an AI → result on a pane
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8925,
-    { webLoader: true, serveDist: true, pythonRuntime: true, llm: ACTIVE_LLM },
+    { webLoader: true, serveDist: true, execBridge: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
       // The spawned python JOB reaches BACK into the kernel via its injected
       // connector — it calls the AI itself and prints the answer. Proves PY→AI in a
-      // LIVE workflow (not just the connector unit tests): panel → python_runtime →
-      // (job's kernel.send → AI) → job stdout → panel watches python_runtime.
+      // LIVE workflow (not just the connector unit tests): panel → exec_bridge →
+      // (job's kernel.send → AI) → job stdout → panel watches exec_bridge.
       const JOB =
         `r = kernel.send(${J(ai)}, {"type":"send",` +
         `"text":"Reply with exactly one word, apples or bananas. Output only that word.",` +
@@ -377,7 +377,7 @@ test("H: AI tool-calls scheduler to compose a schedule → it fires python → p
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8927,
-    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ACTIVE_LLM },
+    { webLoader: true, serveDist: true, execBridge: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;
@@ -415,7 +415,7 @@ test("I: scheduler fires a python job that calls an AI via its connector → pan
   if (!(await llmReachable())) return t.skip(`${LLM_BACKEND} backend unreachable (key/server/model)`);
   await scenario(
     8928,
-    { webLoader: true, serveDist: true, pythonRuntime: true, scheduler: true, llm: ACTIVE_LLM },
+    { webLoader: true, serveDist: true, execBridge: true, scheduler: true, llm: ACTIVE_LLM },
     (tmp, host) => {
       const ai = host.ollamaId as string;
       const py = host.pyId as string;

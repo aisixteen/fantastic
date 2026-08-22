@@ -3,7 +3,7 @@
 # Meta-possibility — any routine orchestrates the whole substrate
 
 Every routine reaches every agent by id through its connector — a host
-`python_runtime` job (its spawned code gets a `kernel`:
+`exec_bridge` job (its spawned code gets a `kernel`:
 send/emit/reflect/watch/on_message) and a browser view-agent's JS (its
 injected `fantastic`) alike. So from EITHER kernel a routine can: read
 memory from anywhere (`send(<state_id>, {type:"read"})`), run an inference

@@ -1,7 +1,7 @@
 """exec_bridge — the WIRE is the contract; a shim is a convenience over it.
 
-This is the difference between generic and python-shaped. `python_runtime` prepended
-179 lines of Python unconditionally, which is what bound an entire executor to one
+This is the difference between generic and python-shaped. A per-language executor
+prepends its client unconditionally, which is what binds an entire executor to one
 language. Here a program may ASK for a shim (`shim:'python'`), or name none and speak
 the published framing itself — and adding a language is adding a blob to `SHIMS`.
 """
@@ -39,7 +39,7 @@ async def _make(kernel, **meta) -> str:
 async def _wired(kernel, **meta) -> str:
     """An OPEN leg allowlisting THIS interpreter. `shim` stays the caller's choice."""
     return await _make(
-        kernel, ingress_rule="allow_all", interpreters=[_real_python()], **meta
+        kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()], **meta
     )
 
 
@@ -120,8 +120,8 @@ def test_apply_is_a_prepend_and_nothing_else():
 
 def test_the_python_shim_is_imported_not_copied():
     """Two copies of a wire client is two truths for one protocol — the exact defect the
-    rust/swift ports guard with a byte-equality test. While `python_runtime` still ships,
-    the shim must BE its connector, not a fork of it."""
+    rust/swift ports guard with a byte-equality test. The shim must BE the connector
+    module, not a fork of it."""
     from exec_bridge._connector import CONNECTOR_SRC
 
     assert shims.SHIMS["python"] is CONNECTOR_SRC
@@ -215,7 +215,7 @@ async def test_an_unknown_shim_is_refused_at_the_WRITE_too(seeded_kernel):
         {
             "type": "create_agent",
             "handler_module": "exec_bridge.tools",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
             "shim": "ruby",
         },
     )

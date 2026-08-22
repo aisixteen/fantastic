@@ -40,6 +40,7 @@ use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,12 +177,33 @@ struct TaskEntry {
     handle: TaskHandle,
 }
 
-#[derive(Default)]
 struct Inner {
     tasks: HashMap<TaskId, TaskEntry>,
-    /// Per-agent task counter (the `n` in `"<agent_id>:<n>"`).
+    /// Per-agent task counter — the non-reuse guarantee. Hashed out of view by
+    /// [`TaskTable::mint`]; never surfaced, because a visible counter reads as a
+    /// sequence and messaging is async.
     seq: HashMap<AgentId, u64>,
     order: u64,
+    /// Per-table, never persisted — makes the minted token opaque across runs.
+    salt: u64,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        // Address-derived: no RNG dependency in this crate, and the value only has to
+        // be unpredictable-enough and per-process. Ids are process-local and never
+        // persisted, so this is not a security boundary.
+        let seed = Box::into_raw(Box::new(0u8));
+        let salt = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+        // SAFETY: the allocation was just made by `Box::new` and is not used again.
+        unsafe { drop(Box::from_raw(seed)) };
+        Self {
+            tasks: HashMap::new(),
+            seq: HashMap::new(),
+            order: 0,
+            salt,
+        }
+    }
 }
 
 /// The live table of in-flight work. Lives on the [`Kernel`]; `ps` reads it,
@@ -201,12 +223,34 @@ impl TaskTable {
         Self::default()
     }
 
-    /// Next task id for `agent_id` — `"<agent_id>:<n>"`.
+    /// Next task id for `agent_id` — `"<agent_id>:<8 lowercase hex>"`.
+    ///
+    /// OPAQUE on purpose. A visible counter reads as a SEQUENCE, and messaging here is
+    /// fully async: a send may return once, several times, or never, and replies arrive
+    /// out of order. Measured 2026-08-20 (python): with `<agent>:<n>` a model inferred
+    /// ordering from the number, decided "the reply queue is running ahead of me", and
+    /// re-polled forever instead of matching on the id. The monotonic `seq` is KEPT —
+    /// it is what guarantees non-reuse — but it is hashed out of view, and a collision
+    /// with a live row re-rolls rather than aliasing two dispatches onto one id.
+    ///
+    /// The salt is per-table and never persisted, so ids are unguessable across runs and
+    /// carry no meaning outside this process. Matching the SHAPE is what parity needs;
+    /// the hash itself is an implementation detail (python uses keyed blake2b).
     pub fn mint(&self, agent_id: &AgentId) -> TaskId {
         let mut inner = self.inner.lock().expect("task table poisoned");
-        let n = inner.seq.entry(agent_id.clone()).or_insert(0);
-        *n += 1;
-        TaskId(format!("{}:{}", agent_id.0, *n))
+        loop {
+            let n = inner.seq.entry(agent_id.clone()).or_insert(0);
+            *n += 1;
+            let n = *n;
+            let mut h = DefaultHasher::new();
+            inner.salt.hash(&mut h);
+            agent_id.0.hash(&mut h);
+            n.hash(&mut h);
+            let id = TaskId(format!("{}:{:08x}", agent_id.0, h.finish() as u32));
+            if !inner.tasks.contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     /// Put one in-flight task in the table.

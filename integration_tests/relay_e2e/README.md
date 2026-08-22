@@ -49,7 +49,7 @@ only if a runtime's binary isn't built (clear skip reason).
   expects → B's `password` gate refuses `unauthorized`. B = each runtime in turn
   (the enforcing receiver).
 - **`test_relay_asymmetric_rules`** — A is a hub with the symmetric SPLIT
-  (`ingress_rule="deny_inbound"` + `egress_rule="password"`), B a group member.
+  (`ingress_rule="deny_ingress"` + `egress_rule="password_egress"`), B a group member.
   A→B round-trips (A's egress presents, B's ingress checks); B→A is denied (A's
   ingress). Independent per-direction rules, identical wire shape everywhere.
 - **`test_relay_directory[python|rust|swift]`** — two connectors of the runtime

@@ -151,14 +151,14 @@ struct AIBackendTests {
         let turn2 = script.requestText(1)
         #expect(turn2.contains("CALLER BLOCK"))
         #expect(!turn2.contains("Reaching other agents"))
-        #expect(turn2.contains("[reply to core "))
+        #expect(turn2.contains(" · core "))
 
         // Four rows: the envelope turn, then the reply turn it caused.
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
         #expect(msgs.count == 4)
         #expect(msgs[1]["content"].asString == envelope)  // persisted verbatim
         #expect(msgs[1]["tool_calls"].asArray == nil)  // and never as a native block
-        #expect(msgs[2]["content"].asString?.hasPrefix("[reply to core ") == true)
+        #expect(msgs[2]["content"].asString?.contains(" · core ") == true)
     }
 
     @Test func thinkingIsStreamedRawAndPersistedStripped() async throws {
@@ -555,7 +555,10 @@ struct AIBackendTests {
         let cp = await AIStrategies.compact(
             body: body, recentN: 4, budget: 1_000_000, provider: MockProvider(tokens: ["SUMMARY"]))
         #expect(cp.summary == "SUMMARY")
-        #expect(cp.body.count == 4)
+        // recent verbatim PLUS the pinned first turn (the task framing, which the
+        // overflow split would otherwise take first).
+        #expect(cp.body.count == 5)
+        #expect(cp.body.first == body.first)
     }
 
     @Test func contextNoticeShapes() async throws {

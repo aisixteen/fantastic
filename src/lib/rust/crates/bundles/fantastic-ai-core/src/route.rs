@@ -135,9 +135,14 @@ fn you_sent(args: &Map<String, Value>) -> Value {
 /// locals, so the row would land parentless and escape `cancel`. Note a panic
 /// still poisons any kernel mutex the handler held — today's `resume_unwind` has
 /// the same consequence, and this does not fix that.
-async fn dispatch_guarded(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
+async fn dispatch_guarded(
+    kernel: &Arc<Kernel>,
+    target: &str,
+    payload: Value,
+    pid: &mut Option<fantastic_kernel::tasks::TaskId>,
+) -> Value {
     let target_id = AgentId::from(target);
-    let fut = kernel.send(&target_id, payload);
+    let fut = kernel.send_traced(&target_id, payload, Some(pid));
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(reply) => reply,
         Err(panic) => {
@@ -241,7 +246,9 @@ pub async fn route_reply(
                 }
                 continue;
             };
-            let result = dispatch_guarded(&kernel, target, Value::Object(payload.clone())).await;
+            let mut pid: Option<fantastic_kernel::tasks::TaskId> = None;
+            let result =
+                dispatch_guarded(&kernel, target, Value::Object(payload.clone()), &mut pid).await;
             // Fire-and-forget: it acted, nobody awaits the answer.
             let Some(rt) = reply_to.as_deref() else {
                 continue;
@@ -253,8 +260,15 @@ pub async fn route_reply(
             // flight to one agent a bare `[reply to kernel_state]` is unmatchable —
             // measured 2026-08-07 on py: acks lag a turn, the model re-issued both
             // deletes and read its own retries as "duplicate delivery".
+            // PID first, then target+verb. Target+verb alone is NOT unique: with two
+            // calls in flight to one agent `[reply to kernel_state set]` is unmatchable —
+            // measured 2026-08-07 (opus re-issued both deletes, then theorised
+            // "duplicate delivery" about its own retries) and again 2026-08-20 (qwen:
+            // "the reply queue is running ahead of me", then re-polled forever). The PID
+            // is the same id `ps`/`cancel` use, so a reply names a row you can act on.
             let verb = payload.get("type").and_then(Value::as_str).unwrap_or("?");
-            let body = format!("[reply to {target} {verb}]\n{result}");
+            let pid = pid.as_ref().map(|t| t.0.as_str()).unwrap_or("-");
+            let body = format!("[reply to {pid} · {target} {verb}]\n{result}");
             deliver(&kernel, rt, &body, &client_id, sp).await;
         }
         return;

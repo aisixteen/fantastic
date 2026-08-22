@@ -386,7 +386,9 @@ class Agent:
 
     # ─── public API: routing ───────────────────────────────────
 
-    async def send(self, target_id: str, payload: dict) -> dict | None:
+    async def send(
+        self, target_id: str, payload: dict, *, task_out: list | None = None
+    ) -> dict | None:
         """Flat global send. Resolves `target_id` in `ctx.agents` and
         dispatches its handler. Sets `_current_sender` contextvar
         around the dispatch so nested send/emit attribute correctly.
@@ -397,6 +399,14 @@ class Agent:
         kernel task table) — that is what makes any send cancelable
         (`cancel`). A cancelled dispatch does NOT raise out of `send`:
         it resolves to `{"cancelled": True}`.
+
+        `task_out`, when given, receives the dispatch's TASK ID (the
+        `<agent>:<token>` pid) as its single element — minted synchronously at
+        dispatch, so a caller knows the id BEFORE the reply exists. That is
+        what lets a tool loop tag a request and its reply with one
+        unambiguous id (`[sent ai:7 …]` / `[reply to ai:7 …]`); the same pid
+        is the `cancel` handle and the trace's primary key. Absent for the
+        gate-denied and kernel-reflect fast paths, which never dispatch.
         """
         if target_id == "kernel":
             target = self._root()
@@ -425,7 +435,7 @@ class Agent:
             return await self._apply_reflect_flags(
                 target, payload, target._reflect_identity()
             )
-        reply = await self._run_dispatch(target, payload)
+        reply = await self._run_dispatch(target, payload, task_out=task_out)
         return await self._apply_reflect_flags(target, payload, reply)
 
     def _loader_id(self) -> str | None:
@@ -539,7 +549,9 @@ class Agent:
                         }
         return None
 
-    async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
+    async def _run_dispatch(
+        self, target: "Agent", payload: dict, *, task_out: list | None = None
+    ) -> dict | None:
         """Run ONE dispatch as a registered, abortable asyncio.Task and await
         it — the unit of the task table.
 
@@ -559,6 +571,8 @@ class Agent:
         """
         ctx = self.ctx
         task_id = ctx.mint_task_id(target.id)
+        if task_out is not None:
+            task_out.append(task_id)  # the caller learns the pid at dispatch time
         task = asyncio.create_task(
             target._dispatch_task(task_id, payload), name=f"fantastic:{task_id}"
         )
@@ -1241,7 +1255,7 @@ class Agent:
         # string REFUSES the patch and is reported at the point of the mistake.
         #
         # Without this, `update_agent` accepted anything: on 2026-08-02 an agent set
-        # `ingress_rule="password:kernel-internal-transcripts"`, got `{"updated":
+        # `ingress_rule="password_ingress:kernel-internal-transcripts"`, got `{"updated":
         # true}` back, and only discovered it was meaningless when the next call to
         # that agent failed. Accepting a value you cannot honour, and reporting
         # success, is the worst of both — the caller believes a security control is
@@ -1419,7 +1433,7 @@ class Agent:
     # `details` node), so a client reads the IO landscape from ONE root reflect: which
     # legs are open vs sealed-by-default, what a consumer is wired to. The substrate
     # only exposes its own record fields (no rule interpretation, no bundle import) —
-    # the LLM reads `ingress_rule: deny_inbound` (sealed) / `allow_all` (open) /
+    # the LLM reads `ingress_rule: deny_ingress` (sealed) / `allow_all` (open) /
     # `password` (gated) and acts per the keystone readme (read-key == write-key);
     # ABSENT on an io leg ⇒ sealed-by-default. `root`/`file_bridge_id` show the binding.
     _POSTURE_KEYS = ("ingress_rule", "egress_rule", "auth", "root", "file_bridge_id")

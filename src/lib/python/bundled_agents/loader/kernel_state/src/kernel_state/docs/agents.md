@@ -33,7 +33,7 @@ A task id (`"<agent_id>:<n>"`) is a pid. `cancel` kills the task and everything
 it spawned, children first — a process group, not one coroutine. Whoever was
 blocked on the cancelled `send` gets the reply `{cancelled:true}` (it does not
 raise). Bundles that own REAL resources release them on the way down (a
-`python_runtime` job's OS subprocess is SIGKILLed, never orphaned).
+`exec_bridge` job's OS subprocess is SIGKILLed, never orphaned).
 
 These are plain verbs, so YOU can use them: read `ps`, pick the task, cancel it
 — that is how one agent stops another agent's runaway work.

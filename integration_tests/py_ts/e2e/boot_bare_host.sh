@@ -2,7 +2,7 @@
 # Boot a BARE fantastic substrate daemon for the emergence runbook
 # (integration_tests/py_ts/e2e/RUN.md):
 #   web + web_ws + web_rest + web_loader + a seeded `canvas` + the built frontend
-#   served at /ts_dist/file/<path>.  NO workflow agents (python_runtime / scheduler /
+#   served at /ts_dist/file/<path>.  NO workflow agents (exec_bridge / scheduler /
 #   AI / panels) — the spawned builder agent creates all of those from zero, through
 #   the REST door only.  Prints connection info + the daemon PID; leaves it running.
 #
@@ -42,13 +42,13 @@ cd "$TMP"
 # so the subsequent one-shot creates below survive across processes — without it
 # every create stays in RAM and the next one-shot can't see it.
 "$FAN" kernel_state create_agent handler_module=file_bridge.tools id=store \
-    root=.fantastic ingress_rule=allow_all >/dev/null
+    root=.fantastic ingress_rule=allow_all_ingress >/dev/null
 WEB=$("$FAN" kernel_state create_agent handler_module=web.tools "port=$PORT" | idof web)
 [ -n "$WEB" ] || { echo "ERR: failed to create web agent" >&2; exit 1; }
 # web_ws / web_rest SEAL by default — open them so the browser + the REST-only
 # builder can drive the kernel (the inbound-call edge is gated; absent ⇒ deny).
-"$FAN" "$WEB" create_agent handler_module=web_ws.tools ingress_rule=allow_all >/dev/null
-REST=$("$FAN" "$WEB" create_agent handler_module=web_rest.tools ingress_rule=allow_all | idof web_rest)
+"$FAN" "$WEB" create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+REST=$("$FAN" "$WEB" create_agent handler_module=web_rest.tools ingress_rule=allow_all_ingress | idof web_rest)
 "$FAN" "$WEB" create_agent handler_module=kernel_state.tools \
     root=.fantastic/web watch=false alias=web_loader >/dev/null
 "$FAN" web_loader persist_record \
@@ -57,7 +57,7 @@ REST=$("$FAN" "$WEB" create_agent handler_module=web_rest.tools ingress_rule=all
 # seals by default → copy the built dist INTO the workdir, root it relatively, open it.
 cp -R "$DIST" "$TMP/ts_dist_src"
 "$FAN" "$WEB" create_agent handler_module=file_bridge.tools id=ts_dist \
-    root=ts_dist_src ingress_rule=allow_all >/dev/null
+    root=ts_dist_src ingress_rule=allow_all_ingress >/dev/null
 
 nohup "$FAN" >"$TMP/daemon.log" 2>&1 &
 PID=$!

@@ -19,7 +19,7 @@ Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
 
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
-and returns `{response, final}`. A first-class peer of `python_runtime`: a scheduler,
+and returns `{response, final}`. A first-class peer of `exec_bridge`: a scheduler,
 a host job, a peer kernel, or a routine can call it by id. Optional `system_prompt:str`
 REPLACES the default system block (the caller supplies its own role / tool convention).
 Optional `messages:list` REPLACES persisted history (fully stateless — no compaction;

@@ -15,7 +15,7 @@
 //! `ingress_rule`/`egress_rule` (symmetric), or the legacy `auth` shorthand (sets
 //! both sides). Rules are TRANSITIONAL (inline plumbing), not invocational (agents).
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub mod egress;
 pub mod ingress;
@@ -80,6 +80,39 @@ pub(crate) fn parse_spec(spec: Option<&Value>) -> Result<(Option<String>, Option
             Ok((Some(name.to_string()), env))
         }
         other => Err(format!("unsupported rule spec {other:?}")),
+    }
+}
+
+/// The effective spec for ONE manifold, with the `auth` shorthand already SCOPED.
+///
+/// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
+/// written into the wrong field is a loud error instead of a silent policy change.
+/// Measured 2026-08-21 (python, and this runtime had the identical defect): with bare
+/// names, `auth:"silent"` — a legitimate EGRESS policy — resolved ingress to
+/// `DenyInbound(unknown="silent")`, SEALING the leg while saying nothing; and
+/// `auth:"allow_all"` handed egress a `Silent` nobody asked for. One unscoped name
+/// against two registries with different membership is a fallback, and this kernel does
+/// not have fallbacks.
+///
+/// The per-direction field WINS and is taken as written (the author already scoped it).
+/// `auth` carries a bare STEM, and each manifold appends its own suffix — except that an
+/// inbound-only stem presents nothing outbound, which is a MEANING spelled out per stem,
+/// not a lookup miss. Doing the scoping HERE keeps `resolve` and `rule_name` unchanged:
+/// they only ever see an already-scoped spec.
+pub fn manifold_spec(primary: Option<&Value>, auth: Option<&Value>, suffix: &str) -> Option<Value> {
+    if let Some(v) = primary {
+        return Some(v.clone());
+    }
+    let spec = auth?;
+    let (name, env) = parse_spec(Some(spec)).ok()?;
+    let stem = name?;
+    if suffix == "_egress" && (stem == "allow_all" || stem == "deny") {
+        return Some(Value::String("silent_egress".to_string()));
+    }
+    let scoped = format!("{stem}{suffix}");
+    match env {
+        Some(e) => Some(json!({ "type": scoped, "env": e })),
+        None => Some(Value::String(scoped)),
     }
 }
 

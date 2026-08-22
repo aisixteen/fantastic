@@ -163,7 +163,7 @@ async def test_ai_uses_memory_when_needed_not_excessively(
         handler_module="file_bridge.tools",
         agent_id="llm_files",
         root=".fantastic",
-        ingress_rule="allow_all",  # the fs edge seals by default - open the backing
+        ingress_rule="allow_all_ingress",  # the fs edge seals by default - open the backing
     )
     seed_create(
         python_binary,

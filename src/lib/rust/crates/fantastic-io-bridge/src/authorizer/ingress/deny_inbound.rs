@@ -38,8 +38,10 @@ impl IngressRule for DenyInbound {
         let _ = action;
         Decision::Deny(match &self.unknown {
             Some(n) => format!(
-                "edge sealed — unknown ingress rule {n:?}; legal values: \
-                 allow_all, deny_inbound, password"
+                "edge sealed — unknown ingress rule {n:?}; {n:?} is not an INGRESS \
+                 rule name — the legal values are allow_all_ingress, deny_ingress, \
+                 password_ingress (names are manifold-scoped: an egress name here is a \
+                 typo, not a policy)"
             ),
             None => "inbound calls denied by policy".to_string(),
         })

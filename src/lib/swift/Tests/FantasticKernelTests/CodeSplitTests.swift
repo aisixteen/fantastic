@@ -23,7 +23,7 @@ private func tmpdir() -> URL {
 
 private func agentWith(code: String?, id: String = "tool", at root: URL) -> Agent {
     let a = Agent(
-        id: AgentId(id), handlerModule: "python_runtime.tools", parentId: nil, rootPath: root)
+        id: AgentId(id), handlerModule: "exec_bridge.tools", parentId: nil, rootPath: root)
     if let code { _ = a.updateMeta(["code": .string(code)]) }
     return a
 }

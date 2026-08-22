@@ -1,9 +1,9 @@
 name: Swift Tests
 
-# Build + run the Swift test suite (macOS: JavaScriptCore, FoundationModels).
-# Covers the FantasticJSRuntime / kernel / reflect surface that the audit found
-# was invisible to CI — e.g. the js_runtime detached-loop death and compile-error
-# zombie both now have regression tests here.
+# Build + run the Swift test suite (macOS: FoundationModels).
+# Covers the kernel / reflect / exec_bridge surface that the audit found was
+# invisible to CI — e.g. the detached-loop death and compile-error zombie both
+# now have regression tests here.
 
 on:
   pull_request:

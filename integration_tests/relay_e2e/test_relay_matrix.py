@@ -322,8 +322,8 @@ async def test_relay_password_rejects_outsider(
 @pytest.mark.parametrize("rt_a,rt_b", PAIRS, ids=[f"{a}-{b}" for a, b in PAIRS])
 @pytest.mark.asyncio
 async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp, free_port) -> None:
-    """The symmetric SPLIT through the relay: A is a hub (`ingress_rule="deny_inbound"`
-    + `egress_rule="password"`), B a group member. A→B round-trips (egress presents,
+    """The symmetric SPLIT through the relay: A is a hub (`ingress_rule="deny_ingress"`
+    + `egress_rule="password_egress"`), B a group member. A→B round-trips (egress presents,
     ingress checks); B→A is denied (A's ingress). Independent per-direction rules,
     identical wire shape across every runtime pair."""
     reason = _pair_skip_reason(rt_a, rt_b)

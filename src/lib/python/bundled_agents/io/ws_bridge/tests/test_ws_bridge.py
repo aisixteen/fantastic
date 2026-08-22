@@ -98,7 +98,7 @@ async def _wire_memory_pair(ka, kb_kern):
             "peer_id": a_id,
             # B is the SERVING leg: its read_loop dispatches the call A forwards.
             # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted.
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     )
     b_id = rec_b["id"]
@@ -269,8 +269,20 @@ async def _boot_solo_bridge(kernel, *, auth=None):
     }
     if auth is not None:
         # `auth` used to be a shorthand for both legs. It is gone — say which leg.
-        meta["ingress_rule"] = auth
-        meta["egress_rule"] = auth
+        # Rule names are MANIFOLD-SCOPED, so the same policy is a different name on
+        # each side; an inbound-only policy presents no outbound credential.
+        def _scope(spec, suffix):
+            if isinstance(spec, dict):
+                stem = spec["type"]
+                if suffix == "_egress" and stem in ("deny", "allow_all"):
+                    return "silent_egress"
+                return {**spec, "type": stem + suffix}
+            if suffix == "_egress" and spec in ("deny", "allow_all"):
+                return "silent_egress"
+            return spec + suffix
+
+        meta["ingress_rule"] = _scope(auth, "_ingress")
+        meta["egress_rule"] = _scope(auth, "_egress")
     rec = await kernel.send("kernel_state", meta)
     a_id = rec["id"]
     mt_a, mt_test = MemoryTransport.pair()
@@ -286,7 +298,7 @@ async def test_deny_inbound_refuses_inbound_call(two_kernels):
     Targets a REAL agent (kernel_state) so allow_all would have succeeded → proves
     the gate, not a missing target."""
     ka, _ = two_kernels
-    _a_id, mt_test = await _boot_solo_bridge(ka, auth="deny_inbound")
+    _a_id, mt_test = await _boot_solo_bridge(ka, auth="deny")
     await mt_test.send(
         {
             "type": "call",
@@ -554,7 +566,7 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
             "root": "bfiles",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
         },
     )
     fb = rec["id"]

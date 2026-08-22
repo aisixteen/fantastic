@@ -247,14 +247,18 @@ struct TaskTablePsTests {
         let parent = try #require(await rowFor(kernel, a, "chain"))
         let child = try #require(await rowFor(kernel, b, "slow"))
 
-        // Task id IS a pid: "<agent_id>:<n>", n a per-agent counter. (n=1 went to
-        // the `boot` dispatch create_agent fires — boot is a task like any other.)
+        // Task id IS a pid: "<agent_id>:<8 hex>". The token is OPAQUE on purpose — a
+        // visible counter reads as a SEQUENCE, and messaging is async (a send may return
+        // once, several times, or never). Measured 2026-08-20 on python: a model inferred
+        // ordering from the number and re-polled forever instead of matching on the id.
         for (row, agent) in [(parent, a), (child, b)] {
             let id = try #require(row["id"].asString)
             let parts = id.split(separator: ":")
             #expect(parts.count == 2)
             #expect(String(parts[0]) == agent.value)
-            #expect((UInt64(parts[1]) ?? 0) >= 1)
+            let token = String(parts[1])
+            #expect(token.count == 8)
+            #expect(token.allSatisfy { $0.isHexDigit && !$0.isUppercase })
         }
         // The tree: b's dispatch is a child of a's dispatch. a's caller is the
         // test task — not a dispatch — so a's task is a root (init-owned).

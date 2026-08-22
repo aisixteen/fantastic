@@ -38,9 +38,8 @@ serde_json = { workspace = true }
 [features]
 # Default for the standalone CLI binary is the full tier — it runs on
 # Linux servers, macOS Pro builds, CI runners, and any unsandboxed
-# host. Subprocess-spawning bundles (terminal_backend, python_runtime,
-# local_runner, future ssh_runner) gate to this feature; the `embedded`
-# build excludes them at compile time.
+# host. Subprocess-spawning bundles (terminal_backend, exec_bridge) gate
+# to this feature; the `embedded` build excludes them at compile time.
 default = ["full"]
 
 # Full tier — no sandbox constraints. Subprocess-spawning bundles are

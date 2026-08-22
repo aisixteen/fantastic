@@ -26,20 +26,21 @@ mount), and INJECTS a `fantastic` connector the body uses to reach the JS
 kernel — no import, no URL:
 
     let job = null;
-    fantastic.watch("<python_runtime_id>", (ev) => {          // live progress, host → here
+    fantastic.watch("<exec_bridge_id>", (ev) => {          // live progress, host → here
       if (ev.job_id === job && ev.type === "progress") {
         out.textContent = ev.line;                            // updates in place
         fantastic.emit("panel2", {type:"v", value: ev.line}); // → another panel, by id
       }
     });
     run.onclick = async () => {
-      const r = await fantastic.send("<python_runtime_id>",   // a HOST python_runtime you create here
+      const r = await fantastic.send("<exec_bridge_id>",   // a HOST exec_bridge you create here
         {type:"start", code:"import random;print(random.randint(0,9))"}); // NON-BLOCKING — returns a job_id
       job = r.job_id;                                         // output streams as `progress` events
     };
 
-`python_runtime` is an ASYNC job spawner: `start` runs `python -c <code>` in
-the background (many in parallel) and returns `{job_id}` at once; it streams
+`exec_bridge` is an ASYNC job spawner: `start` runs your `code` under one of its
+allowlisted interpreters in the background (many in parallel) and returns
+`{job_id}` at once; it streams
 stdout/stderr as `progress` events + a final `job_done` (with the collected
 output); use `status`/`stop` by job_id. There is no blocking "run-and-wait" —
 watch the events or poll `status`.

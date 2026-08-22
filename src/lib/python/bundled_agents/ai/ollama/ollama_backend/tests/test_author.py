@@ -66,7 +66,7 @@ def _author_act(tool_id: str, code: str) -> str:
                     "code": code,
                     "interpreters": [sys.executable],
                     "shim": "python",
-                    "ingress_rule": "allow_all",
+                    "ingress_rule": "allow_all_ingress",
                 },
             }
         }

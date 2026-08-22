@@ -101,8 +101,8 @@ embedded # iOS Lite, iPadOS, visionOS, sandboxed macOS
 ```
 
 **`full`** includes every ported bundle. Subprocess-spawning bundles
-(`terminal_backend`, `python_runtime`, `local_runner`, `ssh_runner`)
-and the SSH transport in `ws_bridge` are gated to this feature.
+(`terminal_backend`, `exec_bridge`) and the SSH transport in
+`ws_bridge` are gated to this feature.
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
@@ -271,10 +271,10 @@ continues:
 Wire-identical across runtimes — AI agents grep this line so the
 exact string is contract.
 
-Python's `python_runtime` auto-fills `meta.python = sys.executable`
-on first boot if neither `python` nor `venv` is set; that's the
-durable record both runtimes hit on subsequent opens, so cross-
-runtime interpreter resolution is deterministic.
+An `exec_bridge` record names its own interpreters in the
+`interpreters` allowlist — there is no default and no PATH probing, so
+the record itself is the durable, deterministic answer both runtimes
+hit on subsequent opens.
 
 See [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md)
 for the round-trip test plan.
@@ -311,8 +311,6 @@ drive the wire surface against either binary by swapping `PATH`.
 Rust-specific behaviour lives in [`selftest/`](selftest/):
 
 - `feature_gates.md` — `full` vs `embedded` compile matrix
-- `python_runtime_resolution.md` — the 6-tier interpreter ladder (no PATH
-  probing; an explicit unresolvable `venv` refuses)
 - `binary_frame_chunking.md` — chunked WS uploads protocol
 - `cross_runtime_workdir.md` — round-trip workdir loading
 

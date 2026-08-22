@@ -367,7 +367,7 @@ impl Workspace {
                 "handler_module=file_bridge.tools",
                 "id=store",
                 "root=.fantastic",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ],
         )?;
         // web: binds the loopback port.
@@ -389,7 +389,7 @@ impl Workspace {
                 &web_id,
                 "create_agent",
                 "handler_module=web_ws.tools",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ],
         )?;
         // web_rest onto web (the REST door the gateway drives).
@@ -399,7 +399,7 @@ impl Workspace {
                 &web_id,
                 "create_agent",
                 "handler_module=web_rest.tools",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ],
         )?;
         Ok(())
@@ -453,7 +453,7 @@ pub fn surface_steps(root: &str, port: u16) -> Vec<Vec<String>> {
             "handler_module=file_bridge.tools".into(),
             "id=store".into(),
             "root=.fantastic".into(),
-            "ingress_rule=allow_all".into(),
+            "ingress_rule=allow_all_ingress".into(),
         ],
         vec![
             root.to_string(),
@@ -467,14 +467,14 @@ pub fn surface_steps(root: &str, port: u16) -> Vec<Vec<String>> {
             "create_agent".into(),
             "handler_module=web_ws.tools".into(),
             "id=web_ws".into(),
-            "ingress_rule=allow_all".into(),
+            "ingress_rule=allow_all_ingress".into(),
         ],
         vec![
             "web".into(),
             "create_agent".into(),
             "handler_module=web_rest.tools".into(),
             "id=rest".into(),
-            "ingress_rule=allow_all".into(),
+            "ingress_rule=allow_all_ingress".into(),
         ],
     ]
 }
@@ -1058,7 +1058,7 @@ mod tests {
                 "handler_module=file_bridge.tools",
                 "id=store",
                 "root=.fantastic",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ]
         );
         // 2: web with the port embedded.
@@ -1080,7 +1080,7 @@ mod tests {
                 "create_agent",
                 "handler_module=web_ws.tools",
                 "id=web_ws",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ]
         );
         // 4: web_rest under web, id=rest (the REST door).
@@ -1091,7 +1091,7 @@ mod tests {
                 "create_agent",
                 "handler_module=web_rest.tools",
                 "id=rest",
-                "ingress_rule=allow_all",
+                "ingress_rule=allow_all_ingress",
             ]
         );
         // The python root threads through unchanged.

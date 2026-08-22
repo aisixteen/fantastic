@@ -34,11 +34,11 @@ struct StartKernelInMemoryTests {
         }
     }
 
-    /// The SHIPPED registry's self_extension, not a synthetic one. `js_runtime` is
-    /// `#if canImport(JavaScriptCore)` and `python_runtime` is `#if os(macOS)`, so a
-    /// hard-coded "Executor here: js_runtime.tools" was wrong in both directions:
-    /// python_runtime went unnamed here, and on a non-Apple build the named module
-    /// is not registered at all. Assert against what THIS build registered.
+    /// The SHIPPED registry's self_extension, not a synthetic one. A hard-coded
+    /// executor name was wrong in both directions — a conditionally-compiled
+    /// executor went unnamed, and on a build that did not register it the string
+    /// named a module a caller cannot use. Assert against what THIS build
+    /// registered: every executor in the table is named iff it is registered.
     @Test func selfExtensionNamesTheExecutorsThisBuildShips() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         let s = try #require(
@@ -50,11 +50,17 @@ struct StartKernelInMemoryTests {
             .object(["type": .string("reflect"), "bundles": .string("all")]))
         let registered = Set(
             (catalog["bundles"].asArray ?? []).compactMap { $0["handler_module"].asString })
-        for module in ["js_runtime.tools", "python_runtime.tools"] {
+        // Every `<something>.tools` module the self_extension NAMES must actually be
+        // registered in this build — advertising a module a caller cannot use is the
+        // whole defect this derivation exists to prevent.
+        let named = s.split(whereSeparator: { " \t\n,;:'\"`()[]".contains($0) })
+            .map(String.init)
+            .filter { $0.hasSuffix(".tools") }
+        #expect(!named.isEmpty, "the self_extension must name this build's executor: \(s)")
+        for module in named {
             #expect(
-                s.contains(module) == registered.contains(module),
-                "registered=\(registered.contains(module)) named=\(s.contains(module)) for \(module): \(s)"
-            )
+                registered.contains(module),
+                "self_extension names \(module), which this build does not register: \(s)")
         }
         #expect(!s.contains("NO script executor"), "\(s)")
     }

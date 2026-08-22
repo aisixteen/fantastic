@@ -1,9 +1,10 @@
 //! egress_rules — the outbound-DECORATOR registry (the "upper importer").
 //!
 //! Each egress rule is its own module here; [`resolve`] registers them BY NAME.
-//! Inbound-only policy names (`allow_all` / `deny_inbound`) map to `Silent` (present
-//! nothing), so the legacy `auth` shorthand stays consistent (`auth:"deny_inbound"`
-//! ⇒ presents nothing, `auth:"password"` ⇒ presents the group token).
+//! Names are MANIFOLD-SCOPED (`*_egress`). The cross-manifold aliases are GONE: an
+//! inbound-only stem reaching this manifold through the `auth` shorthand is collapsed to
+//! `silent_egress` by `authorizer::manifold_spec` BEFORE resolution, so the meaning is
+//! spelled out per stem rather than reached when a lookup misses.
 
 use std::sync::Arc;
 
@@ -22,8 +23,8 @@ pub use silent::Silent;
 pub fn resolve(spec: Option<&Value>) -> Result<Arc<dyn EgressRule>, String> {
     let (name, token_env) = parse_spec(spec)?;
     let rule: Arc<dyn EgressRule> = match name.as_deref() {
-        None | Some("silent") | Some("allow_all") | Some("deny_inbound") => Arc::new(Silent),
-        Some("password") => Arc::new(Password::new(token_env)),
+        None | Some("silent_egress") => Arc::new(Silent),
+        Some("password_egress") => Arc::new(Password::new(token_env)),
         Some(other) => return Err(format!("unknown egress rule type {other:?}")),
     };
     Ok(rule)

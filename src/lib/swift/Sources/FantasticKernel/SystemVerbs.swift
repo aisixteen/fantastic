@@ -367,7 +367,7 @@ extension Kernel {
     /// `applyReflectFlags`, so the root is not special-cased. Mirrors
     /// Rust's `reflect::reflect_identity` / Python's `_reflect_identity`.
     /// The wiring/posture meta keys surfaced on every reflect tree node — a
-    /// leg's lock (`ingress_rule`/`egress_rule`/`auth`: allow_all = open,
+    /// leg's lock (`ingress_rule`/`egress_rule`/`auth`: allow_all_ingress = open,
     /// password = gated, deny_inbound/absent on an io leg = sealed), a
     /// file_bridge's served `root`, and what a consumer persists THROUGH
     /// (`file_bridge_id`). Mirrors py/rust `_POSTURE_KEYS`.
@@ -443,13 +443,12 @@ extension Kernel {
     }
 
     /// Every script executor this kernel COULD advertise, paired with the
-    /// receive shape its connector really implements. The ONE table the
-    /// root `self_extension` reads — a hard-coded module name there went
-    /// wrong in both directions: on macOS the process-edge executor (registered
-    /// in Startup under `#if os(macOS)`) was never named, and on a non-Apple
-    /// build the string named an in-proc executor, which needed
-    /// JavaScriptCore and is not registered there at all. Swift ships no lua
-    /// executor, so none is listed.
+    /// receive shape its connector really implements. The ONE table the root
+    /// `self_extension` reads — a hard-coded module name there went wrong in
+    /// both directions: the process-edge executor (registered in Startup under
+    /// `#if os(macOS)`) went unnamed on macOS, and on a build that does not
+    /// register it the string named a module a caller cannot use. Deriving the
+    /// advertised set from this table ∩ the live registry makes that impossible.
     static let scriptExecutors: [(handlerModule: String, receiveShape: String)] = [
         (
             "exec_bridge.tools",

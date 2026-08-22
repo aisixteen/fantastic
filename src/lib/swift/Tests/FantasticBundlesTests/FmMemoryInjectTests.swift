@@ -27,7 +27,7 @@ struct FmMemoryInjectTests {
             "core",
             [
                 "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
-                "root": ".fantastic", "ingress_rule": "allow_all",
+                "root": ".fantastic", "ingress_rule": "allow_all_ingress",
             ])
     }
 

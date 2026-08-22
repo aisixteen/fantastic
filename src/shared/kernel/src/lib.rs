@@ -62,7 +62,7 @@ pub fn register_host_bundles() -> BundleRegistry {
         "terminal_backend.tools",
         fantastic_terminal_backend::TerminalBackendBundle,
     );
-    // (The former python_runtime executor and the local/ssh runner bundles were
+    // (The former per-language executor and the local/ssh runner bundles were
     // removed in the de-loop refactor: execution is now `exec_bridge`, and
     // sub-kernel reach is the ssh connector + exec_bridge — no registration.)
     reg

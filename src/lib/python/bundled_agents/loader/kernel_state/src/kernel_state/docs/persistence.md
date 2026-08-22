@@ -10,7 +10,7 @@ a kernel, not a SaaS — one path, no hidden second route). Wire one to make
 the kernel durable:
 
     fantastic kernel create_agent handler_module=file_bridge.tools \
-        id=store root=.fantastic ingress_rule=allow_all   # the persistence sink
+        id=store root=.fantastic ingress_rule=allow_all_ingress   # the persistence sink
 
 Once it exists, every record auto-persists through its `write_stream`/`delete`
 (readme-seeding too). It's a normal, visible, re-gateable agent — reflect it

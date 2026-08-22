@@ -13,12 +13,17 @@ from io_bridge.egress_rules.password import Password
 from io_bridge.egress_rules.silent import Silent
 
 # name → egress rule class. Inbound-only names resolve to Silent (present nothing).
+# MANIFOLD-SCOPED NAMES — see the note in `ingress_rules`. `allow_all`/`deny` are
+# INBOUND policies; an inbound policy presents no outbound credential, so the `auth`
+# stem for either resolves here to `Silent`. That is a MEANING, not a fallback: it is
+# spelled out per stem rather than reached when a lookup misses.
 REGISTRY: dict[str, type[EgressRule]] = {
-    "silent": Silent,
-    "allow_all": Silent,
-    "deny_inbound": Silent,
-    "password": Password,
+    "silent_egress": Silent,
+    "password_egress": Password,
 }
+# `auth` stems whose meaning on THIS manifold is "present nothing".
+_INBOUND_ONLY_STEMS = {"allow_all", "deny"}
+_STEM = "_egress"
 
 
 def resolve_egress(record: dict) -> EgressRule:
@@ -27,12 +32,17 @@ def resolve_egress(record: dict) -> EgressRule:
     `ValueError`.
 
     The `auth` leg of that precedence matches `describe()`, `resolve_ingress` and both
-    other host runtimes; without it `auth:"password"` reflected as `egress_rule:password`
+    other host runtimes; without it `auth:"password"` reflected as `egress_rule:password_egress`
     and then stamped no credential, so a leg that read as authenticated dialled bare."""
-    spec = record["egress_rule"] if "egress_rule" in record else record.get("auth")
+    scoped = "egress_rule" in record
+    spec = record["egress_rule"] if scoped else record.get("auth")
     name, cfg = parse_spec(spec)
     if name is None:
         return Silent()
+    if not scoped:
+        if name in _INBOUND_ONLY_STEMS:
+            return Silent()
+        name = name + _STEM
     cls = REGISTRY.get(name)
     if cls is None:
         raise ValueError(f"unknown egress rule type {name!r}")

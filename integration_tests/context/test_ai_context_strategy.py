@@ -180,7 +180,7 @@ async def test_strategy_fires_and_keeps_durable_record(
         handler_module="file_bridge.tools",
         agent_id="llm_files",
         root=".fantastic",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     _seed_ai(python_binary, wd, strategy)
 
@@ -287,7 +287,7 @@ async def test_model_reacts_to_compaction_notice(
         handler_module="file_bridge.tools",
         agent_id="llm_files",
         root=".fantastic",
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
     )
     _seed_ai(python_binary, wd, strategy)
     # A memory agent in the menu — NO file_bridge_id (persists THROUGH the loader). Gives

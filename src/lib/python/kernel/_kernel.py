@@ -18,7 +18,7 @@ descendant. Holds:
   - `well_known`: short-name → agent_id index for named singletons
     (`webapp`, `file_root`, etc.).
   - `tasks`: the TASK TABLE — every in-flight dispatch, keyed by a
-    task id (`"<agent_id>:<n>"`, a pid). Tasks form a TREE through the
+    task id (`"<agent_id>:<token>"`, a pid). Tasks form a TREE through the
     send chain; `ps` reads it, `cancel` kills a subtree.
 
 `_current_sender` is a process-wide contextvar (not part of Kernel)
@@ -34,8 +34,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import importlib
 import json
+import secrets
 import sys
 import time
 from dataclasses import dataclass, field
@@ -68,7 +70,7 @@ _current_task: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 
 def current_task() -> str | None:
-    """The TASK id of the dispatch running right now (`"<agent_id>:<n>"`), or
+    """The TASK id of the dispatch running right now (`"<agent_id>:<token>"`), or
     None outside any dispatch.
 
     The PUBLIC, non-underscore read of `_current_task` — the twin of
@@ -223,7 +225,7 @@ class Kernel:
     # ONE in-flight dispatch — not an agent: an agent may have many tasks
     # running at once, and each is separately addressable.
     #
-    #   task id  = "<agent_id>:<n>"   (a pid; n is a per-agent counter)
+    #   task id  = "<agent_id>:<token>"   (a pid; n is a per-agent counter)
     #   entry    = {id, agent, parent, verb, started_at, _task: asyncio.Task}
     #
     # Tasks form a TREE through the send chain: a `send` issued INSIDE a
@@ -234,16 +236,44 @@ class Kernel:
     # leaves the kernel — `ps` serves the five public fields only.
     tasks: dict[str, dict] = field(default_factory=dict)
 
-    # Per-agent task counter (the `n` in "<agent_id>:<n>"). Monotonic for
+    # Per-agent task counter (the `n` in "<agent_id>:<token>"). Monotonic for
     # the process lifetime: an id is never reused, so a stale id cancels
     # nothing rather than killing an innocent task.
     task_seq: dict[str, int] = field(default_factory=dict)
+    # Per-kernel salt so the opaque task token cannot be predicted or replayed
+    # across kernels (see `mint_task_id`). Random per process, never persisted.
+    _task_salt: bytes = field(default_factory=lambda: secrets.token_bytes(16))
 
     def mint_task_id(self, agent_id: str) -> str:
-        """Next task id for `agent_id` — `"<agent_id>:<n>"`."""
-        n = self.task_seq.get(agent_id, 0) + 1
-        self.task_seq[agent_id] = n
-        return f"{agent_id}:{n}"
+        """Next task id for `agent_id` — `"<agent_id>:<hex8>"`.
+
+        The token is OPAQUE, not a visible counter. Uniqueness still comes from
+        the monotonic `task_seq` (an id is never reused, so a stale `cancel`
+        kills nothing) — but it is rendered through a per-kernel salted hash, so
+        consecutive ids look unrelated.
+
+        Why: a VISIBLE counter invites an ordering inference that is false. The
+        sequence increments on EVERY dispatch to that agent — boots, internal
+        sends, another caller's traffic — so a caller sees gaps it did not cause.
+        Measured 2026-08-20 (qwen3.8-27b, live): given `[reply to
+        file_bridge_830365:10]` after issuing what it thought was `:5`, the model
+        spent a whole turn reconciling the gap — "Maybe the kernel renumbered it.
+        Strange." — instead of doing the task. A human debugger reads it the same
+        wrong way. An id's job is to be UNIQUE and matchable, not to imply order;
+        `started_at` on the `ps` row is where ordering actually lives.
+        """
+        n = self.task_seq.get(agent_id, 0)
+        while True:
+            n += 1
+            token = hashlib.blake2b(
+                f"{agent_id}:{n}".encode(), digest_size=4, key=self._task_salt
+            ).hexdigest()
+            task_id = f"{agent_id}:{token}"
+            # A 4-byte token can collide; the counter guarantees a fresh input,
+            # so re-roll rather than hand back an id the table already holds.
+            if task_id not in self.tasks:
+                self.task_seq[agent_id] = n
+                return task_id
 
     def register_task(
         self,

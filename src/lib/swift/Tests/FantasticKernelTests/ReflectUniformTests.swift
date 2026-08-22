@@ -214,11 +214,11 @@ struct ReflectUniformTests {
         #expect(s.contains("a LIVE script acks {queued:true}"), "\(s)")
     }
 
-    /// The advertised executor list must be DERIVED, never hard-coded: it named
-    /// `js_runtime.tools` unconditionally, so on macOS `python_runtime.tools`
-    /// (registered under `#if os(macOS)`) went unnamed, and on a non-Apple build
-    /// the string named a module that is not registered at all. Both directions
-    /// are asserted here against `availableBundles()`.
+    /// The advertised executor list must be DERIVED, never hard-coded: a
+    /// hard-coded list drifted from what a build actually registered, so a
+    /// conditionally-compiled executor went unnamed while the string named a
+    /// module that is not registered at all. Both directions are asserted here
+    /// against `availableBundles()`.
     @Test func selfExtensionNamesOnlyRegisteredExecutors() async throws {
         for (module, shape) in Kernel.scriptExecutors {
             let registry = BundleRegistry()

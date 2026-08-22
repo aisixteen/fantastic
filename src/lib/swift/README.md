@@ -40,7 +40,7 @@ env var; skipped cleanly when unset.
 | product | platforms | includes |
 |---|---|---|
 | `FantasticKernelEmbedded` | iOS, iPadOS, visionOS, tvOS, watchOS, sandboxed macOS | All bundles EXCEPT subprocess-using ones |
-| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `terminal_backend`, `local_runner`, `python_runtime`, `ssh_runner` |
+| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `terminal_backend`, `exec_bridge` |
 
 Both tiers are first-class products of this `Package.swift`. The
 Apple app declares the dependency as:
@@ -79,9 +79,7 @@ kernel modules.
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry (thin over `FantasticAICore`) |
 | foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`; thin over `FantasticAICore`) |
 | apple_kvs | `FantasticAppleKVS` | both | synced cross-device KV store (`apple_kvs.tools`; iCloud `NSUbiquitousKeyValueStore`; LIVE-ONLY — gated on iCloud sign-in + network, no local fallback; verbs `set`/`read`/`delete`/`list`/`watch`; Apple-only, reports unavailable elsewhere) |
-| local_runner | `FantasticLocalRunner` | Pro | macOS-only — Process subprocess (thin over `FantasticRunnerCore`) |
-| python_runtime | `FantasticPythonRuntime` | Pro | macOS-only — embedded Python |
-| ssh_runner | `FantasticSshRunner` | Pro | macOS-only — `ssh -L` tunnel (thin over `FantasticRunnerCore`) |
+| exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the ONE executor: spawns an allowlisted interpreter as a background job (`start` → `{job_id}`); `shim:'python'` prepends the kernel connector; sealed by default |
 | terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
 
 ## Wire compatibility

@@ -4,8 +4,8 @@
 //   terminal_view ↔ terminal_backend = 1:1 EXCLUSIVE (each view binds one backend
 //     via backend_id; no backend shared by two views; no orphan backend).
 //   ai_view ↔ AI backend = 1:1 (each view binds one AI backend via backend_id).
-//   html_agent ↔ python_runtime = 1:N (panel has NO backend_id; its html body
-//     send/watches a python_runtime by id — behavioral, non-exclusive).
+//   html_agent ↔ exec_bridge = 1:N (panel has NO backend_id; its html body
+//     send/watches an exec_bridge by id — behavioral, non-exclusive).
 //
 // Reads HOST agents via reflect (backends live there) + FRONTEND view/panel records
 // via the web_loader store (load_tree). Prints the derived structure, then asserts.
@@ -48,7 +48,7 @@ const isAi = (hm: string | undefined) =>
   /(anthropic|ollama|nvidia_nim|foundation_models)_backend\.tools/.test(hm ?? "");
 const termBackends = hostAgents.filter((a) => a.handler_module === "terminal_backend.tools");
 const aiBackends = hostAgents.filter((a) => isAi(a.handler_module));
-const pyRuntimes = hostAgents.filter((a) => a.handler_module === "python_runtime.tools");
+const pyRuntimes = hostAgents.filter((a) => a.handler_module === "exec_bridge.tools");
 const termViews = frontend.filter((r) => r.handler_module === "terminal_view.ts");
 const aiViews = frontend.filter((r) => r.handler_module === "ai_view.ts");
 const htmlPanels = frontend.filter((r) => r.handler_module === "html_agent.ts");
@@ -56,7 +56,7 @@ const htmlPanels = frontend.filter((r) => r.handler_module === "html_agent.ts");
 const fail: string[] = [];
 
 console.log("=== what the builder created ===");
-console.log(`  host backends:   ${termBackends.length} terminal · ${aiBackends.length} ai · ${pyRuntimes.length} python_runtime`);
+console.log(`  host backends:   ${termBackends.length} terminal · ${aiBackends.length} ai · ${pyRuntimes.length} exec_bridge`);
 console.log(`  frontend views:  ${termViews.length} terminal_view · ${aiViews.length} ai_view · ${htmlPanels.length} html_agent`);
 
 // ── 1:1 terminal (exclusive) ──
@@ -79,16 +79,16 @@ for (const v of aiViews) {
   else if (!aiBackendIds.has(v.backend_id)) fail.push(`ai_view ${v.id} → missing AI backend ${v.backend_id}`);
 }
 
-// ── 1:N html ↔ python_runtime (behavioral, no binding) ──
+// ── 1:N html ↔ exec_bridge (behavioral, no binding) ──
 const pyIds = pyRuntimes.map((p) => p.id).filter((x): x is string => !!x);
 let panelsWiredToExec = 0;
 for (const p of htmlPanels) {
   if (p.backend_id) fail.push(`html_agent ${p.id} has a backend_id (${p.backend_id}) — should be 1:N (no exclusive binding)`);
   const body = typeof p.html === "string" ? p.html : "";
-  if (pyIds.some((id) => body.includes(id)) || /python_runtime/.test(body)) panelsWiredToExec++;
+  if (pyIds.some((id) => body.includes(id)) || /exec_bridge/.test(body)) panelsWiredToExec++;
 }
 if (pyRuntimes.length > 0 && panelsWiredToExec === 0) {
-  fail.push("no html panel send/watches a python_runtime in its body (expected 1:N html↔exec wiring)");
+  fail.push("no html panel send/watches an exec_bridge in its body (expected 1:N html↔exec wiring)");
 }
 
 console.log("=== cardinality verdict ===");
@@ -99,5 +99,5 @@ if (fail.length) {
 }
 console.log("  ✓ terminal_view↔terminal_backend 1:1 exclusive");
 console.log("  ✓ ai_view↔AI backend 1:1");
-console.log(`  ✓ html_agent↔python_runtime 1:N (${panelsWiredToExec}/${htmlPanels.length} panels wired to a python_runtime, no backend_id)`);
+console.log(`  ✓ html_agent↔exec_bridge 1:N (${panelsWiredToExec}/${htmlPanels.length} panels wired to an exec_bridge, no backend_id)`);
 console.log("PASS: the LLM derived the kernel pairing cardinality from readmes alone");

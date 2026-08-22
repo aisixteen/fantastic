@@ -92,9 +92,8 @@ View/webapp specs now live in the decoupled frontend kernel — see
 [`../ts/`](../ts/); this host serves it generically via a `file` agent.
 
 Specs with Rust-specific deltas worth noting (verbs match; only the
-binary path + a few env vars differ): python_runtime
-(uses `FANTASTIC_PYTHON` env on Rust — see overlay spec), terminal_backend
-(image-paste via WS binary frame channel, also covered in overlay).
+binary path + a few env vars differ): terminal_backend (image-paste via
+WS binary frame channel, covered in overlay).
 
 ### Rust-specific overlay specs
 
@@ -105,7 +104,6 @@ exercise:
 | File | Scopes | Requires |
 |---|---|---|
 | [`selftest/feature_gates.md`](selftest/feature_gates.md) | build, packaging | `cargo` |
-| [`selftest/python_runtime_resolution.md`](selftest/python_runtime_resolution.md) | python_runtime, env | Rust `fantastic_kernel` binary, a real Python to name (one test skips without it) |
 | [`selftest/binary_frame_chunking.md`](selftest/binary_frame_chunking.md) | WS, transport, multi-modal | Rust `fantastic_kernel` binary, websocket client |
 | [`selftest/cross_runtime_workdir.md`](selftest/cross_runtime_workdir.md) | persistence, cross-runtime | Both Python `uv sync` and Rust binary |
 

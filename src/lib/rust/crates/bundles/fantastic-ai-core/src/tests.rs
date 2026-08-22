@@ -285,7 +285,7 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 // the fs edge seals by default — open it so history persists through it
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the backend that persists through it.
                 "callable_by": { backend_id.clone(): "*" },
             }),
@@ -645,8 +645,11 @@ async fn compact_returns_projection_with_summary() {
     let proj = crate::strategies::compact(&b, 4, 1_000_000, &provider).await;
     assert_eq!(proj.summary.as_deref(), Some("SUMMARY"));
     assert!(!proj.omitted_marker);
-    // recent verbatim, NO fabricated summary turn in the body
-    assert_eq!(proj.body, b[b.len() - 4..].to_vec());
+    // recent verbatim, NO fabricated summary turn in the body — plus the PINNED first
+    // turn (the task framing, which the overflow split would otherwise take first).
+    let mut want = vec![b[0].clone()];
+    want.extend(b[b.len() - 4..].to_vec());
+    assert_eq!(proj.body, want);
 }
 
 #[test]
@@ -921,9 +924,10 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
         "one call = one follow-up turn, then it stopped"
     );
     let turn2 = s.request(1);
-    // target AND verb — a bare `[reply to core]` is unmatchable with two in flight
+    // PID, then target AND verb — a bare `[reply to core]` is unmatchable with two in
+    // flight, and target+verb alone is not unique either
     assert!(
-        turn2.contains("[reply to core list_agents]"),
+        turn2.contains(" · core list_agents]") && turn2.contains("[reply to core:"),
         "untagged reply: {turn2}"
     );
     assert!(
@@ -1257,7 +1261,10 @@ async fn a_verb_named_tool_reaches_the_agent() {
         .await;
     assert!(until_passes(&s, 2).await, "the reflect never came back");
     let turn2 = s.request(1);
-    assert!(turn2.contains("[reply to core reflect]"), "{turn2}");
+    assert!(
+        turn2.contains(" · core reflect]") && turn2.contains("[reply to core:"),
+        "{turn2}"
+    );
     assert!(!turn2.contains("no payload"), "{turn2}");
 }
 
@@ -1389,7 +1396,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             }),
         )
         .await;
@@ -1569,7 +1576,7 @@ fn author_act(tool_id: &str, code: &str) -> String {
     json!({"act": {"target": "core", "payload": {
         "type": "create_agent", "handler_module": "exec_bridge.tools",
         "id": tool_id, "code": code,
-        "interpreters": [py], "shim": "python", "ingress_rule": "allow_all",
+        "interpreters": [py], "shim": "python", "ingress_rule": "allow_all_ingress",
     }}})
     .to_string()
 }
@@ -1611,7 +1618,7 @@ async fn mk_author_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all",
+                "ingress_rule": "allow_all_ingress",
             }),
         )
         .await;

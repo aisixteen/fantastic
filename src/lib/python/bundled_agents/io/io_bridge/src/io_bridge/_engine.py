@@ -87,14 +87,27 @@ def _rule_name(spec, default: str) -> str:
     return name or default
 
 
+def _scoped(name: str, suffix: str, was_scoped: bool) -> str:
+    """Report the SCOPED rule name whichever field it came from. `auth` carries a bare
+    stem; each manifold appends its own suffix, so `reflect` never shows a name that
+    would not resolve if written straight back into `ingress_rule`/`egress_rule`."""
+    if was_scoped or name.endswith(suffix):
+        return name
+    return (
+        "silent_egress"
+        if suffix == "_egress" and name in ("allow_all", "deny")
+        else name + suffix
+    )
+
+
 def _ingress_name(rec: dict) -> str:
     spec = rec["ingress_rule"] if "ingress_rule" in rec else rec.get("auth")
-    return _rule_name(spec, "deny_inbound")
+    return _scoped(_rule_name(spec, "deny_ingress"), "_ingress", "ingress_rule" in rec)
 
 
 def _egress_name(rec: dict) -> str:
     spec = rec["egress_rule"] if "egress_rule" in rec else rec.get("auth")
-    return _rule_name(spec, "silent")
+    return _scoped(_rule_name(spec, "silent_egress"), "_egress", "egress_rule" in rec)
 
 
 @dataclass
@@ -420,7 +433,7 @@ def make_verbs(
             # SECURING is the default, OPENING is the conscious act.
             "ingress_rule": _ingress_name(rec),
             "egress_rule": _egress_name(rec),
-            "sealed": _ingress_name(rec) != "allow_all",
+            "sealed": _ingress_name(rec) != "allow_all_ingress",
         }
         out.update(reflect_fields(rec, st))
         out["verbs"] = {

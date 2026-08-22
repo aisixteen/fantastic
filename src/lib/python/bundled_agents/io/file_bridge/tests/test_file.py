@@ -148,7 +148,7 @@ async def test_update_agent_refuses_a_rule_the_bundle_cannot_honour(seeded_kerne
     """`update_agent` must REFUSE an ingress rule nobody implements.
 
     It used to accept anything: on 2026-08-02 an agent set
-    `ingress_rule="password:kernel-internal-transcripts"` and got `{"updated":
+    `ingress_rule="password_ingress:kernel-internal-transcripts"` and got `{"updated":
     true}` back, so it believed a security control was in place. The edge now seals
     on an unknown rule rather than raising, so it was never unsafe — but reporting
     success for a value you cannot honour is its own failure, and the complaint
@@ -164,15 +164,16 @@ async def test_update_agent_refuses_a_rule_the_bundle_cannot_honour(seeded_kerne
     )
     assert bad.get("updated") is False
     assert "password:my-secret" in bad["error"]
-    assert "allow_all" in bad["error"], "must teach the legal set"
+    assert "allow_all_ingress" in bad["error"], "must teach the legal set"
     # and the record is UNCHANGED — a refused patch must not half-apply
     assert "ingress_rule" not in (seeded_kernel.get(fid) or {})
     # the real values still go through
     ok = await seeded_kernel.send(
-        "kernel", {"type": "update_agent", "id": fid, "ingress_rule": "allow_all"}
+        "kernel",
+        {"type": "update_agent", "id": fid, "ingress_rule": "allow_all_ingress"},
     )
     assert ok.get("updated") is True
-    assert (seeded_kernel.get(fid) or {})["ingress_rule"] == "allow_all"
+    assert (seeded_kernel.get(fid) or {})["ingress_rule"] == "allow_all_ingress"
 
 
 # ─── read is WINDOWED (one call cannot flood a conversation) ─────
@@ -188,7 +189,7 @@ async def _fb(kernel, tmp_path, **meta) -> str:
             "type": "create_agent",
             "handler_module": "file_bridge.tools",
             "root": "wr",
-            "ingress_rule": "allow_all",
+            "ingress_rule": "allow_all_ingress",
             **meta,
         },
     )

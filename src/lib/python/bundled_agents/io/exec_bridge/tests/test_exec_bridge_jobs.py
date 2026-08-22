@@ -4,7 +4,7 @@ The three ways a job outlives the call that made it: the record's `code` is re-r
 `boot` (and its refusal must PROPAGATE — the silent-success hole this bundle exists to
 close), a live program is MAIL-addressable by any verb the bundle does not own, and every
 job holds a row in the kernel task table so `ps` sees it and `cancel` reaps the real OS
-process. Retargeted from `python_runtime`'s suite; the reaping assertions are the
+process. Retargeted from the predecessor executor's suite; the reaping assertions are the
 orphan-bug regressions, kept at full strength.
 """
 
@@ -42,7 +42,7 @@ async def _make(kernel, **meta) -> str:
 async def _wired(kernel, **meta) -> str:
     """An OPEN leg allowlisting THIS interpreter. `shim` stays the caller's choice."""
     return await _make(
-        kernel, ingress_rule="allow_all", interpreters=[_real_python()], **meta
+        kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()], **meta
     )
 
 
@@ -160,13 +160,13 @@ async def test_boot_is_idempotent_while_a_job_is_live(seeded_kernel):
 
 
 async def test_boot_returns_the_spawn_error_when_nothing_is_allowlisted(seeded_kernel):
-    """THE hole this bundle exists to close: `python_runtime._boot` discarded the start
+    """THE hole this bundle exists to close: the predecessor executor's `_boot` discarded the start
     reply, so a record that cannot spawn booted, failed, and still looked created —
     indistinguishable from a program that ran and did nothing. `boot` must RETURN the
     error, not None."""
     xid = await _make(
         seeded_kernel,
-        ingress_rule="allow_all",
+        ingress_rule="allow_all_ingress",
         id="xb_boot_noalw",
         code="print('must never run')",
     )
@@ -253,7 +253,7 @@ async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
 async def test_a_restart_does_not_double_deliver(seeded_kernel):
     """A durable tool re-started (a repairing model does this constantly) must not leave
     two harnesses both processing the owner inbox — exactly ONE echo. The supersede must
-    also not evict its own replacement (the bug `c2a4297` fixed in js_runtime)."""
+    also not evict its own replacement (the bug `c2a4297` fixed)."""
     xid = await _wired(seeded_kernel, id="xb_restart", shim="python", code=_ECHO)
     await asyncio.sleep(0.4)  # first (boot) job registered on_message
     r = await seeded_kernel.send(xid, {"type": "start"})  # durable restart → 2nd job

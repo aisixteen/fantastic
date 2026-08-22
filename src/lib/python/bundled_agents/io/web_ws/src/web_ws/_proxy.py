@@ -144,7 +144,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # own record (`web_agent_id`). Resolved PER FRAME so opening the leg
     # (`update_agent ingress_rule=…`) takes effect live, without a reconnect.
     # Absent rule ⇒ DenyInbound (SEALED by default — a bare leg refuses every
-    # inbound frame; open it consciously with `ingress_rule=allow_all`). A sealed
+    # inbound frame; open it consciously with `ingress_rule=allow_all_ingress`). A sealed
     # leg denies AND teaches how to open, via the reply's `{reason, hint, see}` —
     # discovery-through-denial. The gate itself
     # is the shared `gate_inbound` (same extract+authorize path as the bridge

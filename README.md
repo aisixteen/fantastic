@@ -22,7 +22,7 @@ them on a fresh turn, prunes the rest), entirely through `send`. Proof:
 
 **Every edge is sealed.** All IO — kernel↔kernel, kernel↔disk, kernel↔browser —
 crosses through a **gated bridge that is deny-all by default**, opened on demand
-(`ingress_rule=allow_all` / `password`). Disk is just another gated edge: a
+(`ingress_rule=allow_all_ingress` / `password`). Disk is just another gated edge: a
 `file_bridge` agent is the single surface, and persistence routes through ONE
 `.fantastic` store — no provider wired ⇒ state stays in RAM (a kernel has **no silent
 fallbacks**, one path or none). And the whole lock/wiring landscape is **readable from
@@ -74,7 +74,7 @@ curl -s -X POST -H 'Content-Type: application/json' \
 reads `reflect` over `web_ws` (`/web/ws`) / `rest` (`POST /rest/<target>`) — **no
 client library, the protocol IS the API** — and then **builds** by composing
 agents (`create_agent` + wiring them with `send`) against the folder you mounted
-at **`/work`** (the `file_bridge` / `terminal` / `python_runtime` agents act on it). Hand
+at **`/work`** (the `file_bridge` / `terminal` / `exec_bridge` agents act on it). Hand
 it a [recipe](container/recipes.md) and it assembles a working app — capability
 emerges from self-description, no bespoke glue. Full run contract + 7 recipes:
 [`container/README.md`](container/README.md) · [`container/recipes.md`](container/recipes.md).
@@ -173,7 +173,7 @@ links the **Swift** kernel directly as a SwiftPM dependency — no UniFFI,
 no XCFramework, no Rust on the device:
 
 - **FantasticPro** (macOS, unsandboxed) — full bundle set including
-  PTY / subprocess / `python_runtime` / `ssh_runner`. Macros and
+  PTY / subprocess (`terminal_backend` / `exec_bridge`). Macros and
   in-process Cocoa interop available because the kernel runs as
   Swift in the app's address space.
 - **FantasticLite** (macOS + iOS + iPadOS + visionOS, App Store

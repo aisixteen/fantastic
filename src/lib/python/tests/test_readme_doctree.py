@@ -221,8 +221,8 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     theoretical: on 2026-08-05 claude-opus-5 was given only the distilled reflect,
     read `more`, understood that it could author durable tools — and then invented
     `handler_module:"local_runner.script"`, a module that does not exist, because
-    nothing had ever told it the real one. `python_runtime.tools` appeared ZERO times
-    in a 38 KB session. It built nothing.
+    nothing had ever told it the real one. The executor's actual module name appeared
+    ZERO times in a 38 KB session. It built nothing.
 
     So the rule is sharper than "keep the pointer": an affordance you cannot NAME is
     not discoverable. The prose may leave; the executor's name may not.

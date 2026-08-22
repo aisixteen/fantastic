@@ -30,7 +30,7 @@ Like ollama_backend: per-client `chat.json` history, auto-compaction on overflow
 ## Calling this agent as a workflow unit
 `send {type:'send', text, client_id?}` runs ONE inference turn (per-backend FIFO
 lock) and returns `{response, final}`. It is a first-class peer of
-`python_runtime`: a scheduler, a host job, a peer kernel, or another AI can
+`exec_bridge`: a scheduler, a host job, a peer kernel, or another AI can
 call it by id. Optional `system_prompt:str` REPLACES the auto-built prompt
 (caller-supplied role/context — read it from a state agent yourself; the AI has NO
 yaml coupling). Optional `messages:list` REPLACES persisted history (fully

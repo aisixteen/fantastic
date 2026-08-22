@@ -22,7 +22,7 @@ uv run --active fantastic kernel_state create_agent handler_module=web.tools por
 # uses WS) works end-to-end. Call create_agent on the web agent
 # itself — the new agent lands under <web_id>/agents/.
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all >/dev/null
+uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active fantastic > /tmp/serve.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/serve.log 2>/dev/null && break; sleep 0.5; done
@@ -228,9 +228,9 @@ and relays the bus.
 
 ```bash
 # RELATIVE root — file_bridge clamps every root inside the running dir,
-# and the leg is sealed by default → open it with ingress_rule=allow_all.
+# and the leg is sealed by default → open it with ingress_rule=allow_all_ingress.
 mkdir -p wfp && echo "hello bytes" > wfp/foo.txt
-FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":"wfp","ingress_rule":"allow_all"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":"wfp","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # text content
 out=$(curl -s -i "http://localhost:$PORT/$FA/file/foo.txt")
 echo "$out" | grep -qF "hello bytes" && echo "  text body: OK" || echo "  FAIL"
