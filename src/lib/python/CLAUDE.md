@@ -490,7 +490,7 @@ regression — it belongs in the root readme."
 
 - **Unit** — `pytest -n auto` (`pytest-xdist`). 420+ tests, parallel,
   in-process. Each bundle's tests live in `bundled_agents/<bundle>/tests/`;
-  kernel-level tests live in `tests/`. `conftest.py` at root exposes
+  kernel-level tests live in `tests/kernel/`. `conftest.py` at root exposes
   `kernel`, `seeded_kernel`, `file_bridge` fixtures (the root is an
   `kernel_state`); `_testkit.py` adds `boot_root` / `persist` for disk tests.
 - **Selftests** — scope-tagged markdown specs. AI agents read them,
