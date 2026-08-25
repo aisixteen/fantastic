@@ -23,140 +23,13 @@ from relay_connector import tools as rc
 from relay_connector._relay import RelayTransport
 
 
-class FakeRelayHub:
-    """Emulates the relay kernel's routing: a peer's `send` to a target GUID is
-    delivered to that GUID's socket as a `source`-tagged `event` (preserving the
-    WS frame kind via the shared codec, so raw-byte chunks stay raw). Also
-    emulates the DIRECTORY agent (`target:"relay"`): `call list_peers` → a peers
-    snapshot reply, `watch` → an `{ok}` ack + a `peer_*` event feed, `announce` →
-    stores the peer's opaque attrs blob + emits a `peer_updated` event (no reply)."""
-
-    def __init__(self) -> None:
-        self.inboxes: dict[str, asyncio.Queue] = {}
-        self.dir_watchers: set[str] = set()
-        self.attrs: dict[str, dict] = {}  # per-guid advertised directory attrs
-        self.peers: list[dict] = [
-            {"guid": "A", "status": "green", "last_seen": 1.0, "since": 0.0}
-        ]
-
-    def register(self, guid: str) -> "FakeWS":
-        self.inboxes[guid] = asyncio.Queue()
-        return FakeWS(self, guid)
-
-    async def _deliver(self, guid: str, obj: dict) -> None:
-        q = self.inboxes.get(guid)
-        if q is not None:
-            wire, is_binary = encode_frame(obj)
-            await q.put(wire if is_binary else wire.decode("utf-8"))
-
-    async def route(self, sender: str, raw) -> None:
-        msg = decode_frame(raw)  # str ⇒ JSON text; bytes ⇒ [len|header|body]
-        mtype, target = msg.get("type"), msg.get("target")
-        if mtype == "send":
-            await self._deliver(
-                target,
-                {"type": "event", "source": sender, "payload": msg.get("payload")},
-            )
-        elif target == "relay" and mtype == "call":
-            if (msg.get("payload") or {}).get("type") == "list_peers":
-                await self._deliver(
-                    sender,
-                    {
-                        "type": "reply",
-                        "id": msg.get("id"),
-                        "data": {"peers": self.peers},
-                    },
-                )
-        elif target == "relay" and mtype == "watch":
-            self.dir_watchers.add(sender)
-            await self._deliver(
-                sender, {"type": "reply", "id": msg.get("id"), "data": {"ok": True}}
-            )
-        elif target == "relay" and mtype == "unwatch":
-            self.dir_watchers.discard(sender)
-        elif target == "relay" and mtype == "announce":
-            # Store the opaque attrs blob + broadcast a peer_updated (no reply).
-            self.attrs[sender] = msg.get("attrs") or {}
-            await self.push_directory(
-                {
-                    "type": "peer_updated",
-                    "guid": sender,
-                    "attrs": self.attrs[sender],
-                    "status": "green",
-                }
-            )
-
-    async def push_directory(self, payload: dict) -> None:
-        for w in list(self.dir_watchers):
-            await self._deliver(
-                w, {"type": "event", "source": "relay", "payload": payload}
-            )
-
-
-class _State:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class FakeWS:
-    def __init__(self, hub: FakeRelayHub, guid: str) -> None:
-        self._hub = hub
-        self._guid = guid
-        self.state = _State("OPEN")
-        self._closed = asyncio.Event()
-
-    async def send(self, raw) -> None:  # raw: str (text) | bytes (binary)
-        if self._closed.is_set():
-            raise RuntimeError("send on closed ws")
-        await self._hub.route(self._guid, raw)
-
-    async def recv(self):
-        get = asyncio.ensure_future(self._hub.inboxes[self._guid].get())
-        clo = asyncio.ensure_future(self._closed.wait())
-        done, pending = await asyncio.wait(
-            {get, clo}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for t in pending:
-            t.cancel()
-        if get in done:
-            return get.result()
-        raise RuntimeError("recv on closed ws")  # → transport treats as a drop
-
-    async def close(self) -> None:
-        self.state = _State("CLOSED")
-        self._closed.set()
-
-
-def _const_dialer(ws):
-    async def dial():
-        return ws
-
-    return dial
-
-
-def _pair(a_guid: str, b_guid: str) -> tuple[RelayTransport, RelayTransport]:
-    hub = FakeRelayHub()
-    ws_a, ws_b = hub.register(a_guid), hub.register(b_guid)
-    # ws preset + reconnect=0 ⇒ a stable one-shot transport over the fake hub.
-    return (
-        RelayTransport(
-            dialer=_const_dialer(ws_a),
-            partner_guid=b_guid,
-            reconnect=0,
-            heartbeat=0,
-            ws=ws_a,
-        ),
-        RelayTransport(
-            dialer=_const_dialer(ws_b),
-            partner_guid=a_guid,
-            reconnect=0,
-            heartbeat=0,
-            ws=ws_b,
-        ),
-    )
-
-
-# ─── transport: wrap/unwrap (text + raw bytes) ──────────────────
+from _testkit_relay import (  # noqa: E402,F401 — shared fake relay
+    FakeRelayHub,
+    FakeWS,
+    _State,
+    _const_dialer,
+    _pair,
+)
 
 
 async def test_transport_wraps_in_relay_send_and_unwraps_event():
@@ -416,25 +289,41 @@ async def test_set_identity_verb_persists_and_announces(tmp_path, monkeypatch):
     monkeypatch.setattr(rc_relay, "_default_dialer", fake_default_dialer)
 
     k = boot_root()
-    rec = await k.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "relay_connector.tools",
-            "transport": "relay",
-            "relay_url": "ws://relay",
-            "partner_guid": "B",
-            "guid": "mgr",
-            "role": "manager",
-            "heartbeat": 0,
-            "reconnect": 0,
-        },
-    )
+    rec = (
+        await k.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "relay_connector.tools",
+                        "transport": "relay",
+                        "relay_url": "ws://relay",
+                        "partner_guid": "B",
+                        "guid": "mgr",
+                        "role": "manager",
+                        "heartbeat": 0,
+                        "reconnect": 0,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
-    await k.send(aid, {"type": "boot"})
+    (await k.send([{"target": aid, "payload": {"type": "boot"}}]))[0]["result"]
     assert hub.attrs.get("mgr") == {"role": "manager"}  # announced on connect
 
-    r = await k.send(aid, {"type": "set_identity", "exposes": ["stop", "restart"]})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "set_identity", "exposes": ["stop", "restart"]},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("ok") is True
     assert hub.attrs["mgr"] == {"role": "manager", "exposes": ["stop", "restart"]}
     assert k.get(aid)["exposes"] == ["stop", "restart"]  # persisted for re-announce
@@ -463,6 +352,7 @@ def two_kernels(tmp_path, monkeypatch):
 async def _make_leg(kernel, *, partner, ingress=None):
     rec_payload = {
         "type": "create_agent",
+        "parent_id": kernel.id,
         "handler_module": "relay_connector.tools",
         "transport": "memory",  # the test injects the transport directly
         "relay_url": "ws://relay",
@@ -471,7 +361,9 @@ async def _make_leg(kernel, *, partner, ingress=None):
     }
     if ingress is not None:
         rec_payload["ingress_rule"] = ingress
-    rec = await kernel.send("kernel_state", rec_payload)
+    rec = (await kernel.send([{"target": "kernel_state", "payload": rec_payload}]))[0][
+        "result"
+    ]
     return rec["id"]
 
 
@@ -486,13 +378,37 @@ async def test_forward_round_trips_through_relay_tunnel(two_kernels):
     mt_a, mt_b = _pair("A", "B")
     rc._test_transport_inject[a_id] = mt_a
     rc._test_transport_inject[b_id] = mt_b
-    assert (await ka.send(a_id, {"type": "boot"})).get("booted") is True
-    assert (await kb.send(b_id, {"type": "boot"})).get("booted") is True
-
-    r = await ka.send(
-        a_id,
-        {"type": "forward", "target": "kernel_state", "payload": {"type": "reflect"}},
+    assert (
+        (
+            (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
+                "result"
+            ]
+        ).get("booted")
+        is True
     )
+    assert (
+        (
+            (await kb.send([{"target": b_id, "payload": {"type": "boot"}}]))[0][
+                "result"
+            ]
+        ).get("booted")
+        is True
+    )
+
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "kernel_state",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert isinstance(r, dict), r
     assert r["id"] == "kernel_state", r
     assert r["tree"]["id"] == "kernel_state"
@@ -509,13 +425,23 @@ async def test_forward_denied_when_partner_leg_sealed(two_kernels):
     mt_a, mt_b = _pair("A", "B")
     rc._test_transport_inject[a_id] = mt_a
     rc._test_transport_inject[b_id] = mt_b
-    await ka.send(a_id, {"type": "boot"})
-    await kb.send(b_id, {"type": "boot"})
+    (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
+    (await kb.send([{"target": b_id, "payload": {"type": "boot"}}]))[0]["result"]
 
-    r = await ka.send(
-        a_id,
-        {"type": "forward", "target": "kernel_state", "payload": {"type": "reflect"}},
-    )
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "kernel_state",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("reason") == "unauthorized", r
 
 
@@ -527,17 +453,24 @@ async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
     the same dir the rehydrated record dials the SAME `ws://host/<guid>` path."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "relay_connector.tools",
-            "transport": "relay",
-            "relay_url": "ws://relay:9443",
-            "guid": "kernel-A",
-            "partner_guid": "kernel-B",
-        },
-    )
+    rec = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "relay_connector.tools",
+                        "transport": "relay",
+                        "relay_url": "ws://relay:9443",
+                        "guid": "kernel-A",
+                        "partner_guid": "kernel-B",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     persist(k1)
 
@@ -551,7 +484,9 @@ async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
     assert r2["relay_url"] == "ws://relay:9443"
 
     # The rehydrated agent reflects the persisted guid (boot would re-dial it).
-    reflected = await k2.send(aid, {"type": "reflect"})
+    reflected = (await k2.send([{"target": aid, "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert reflected["guid"] == "kernel-A"
 
 
@@ -573,24 +508,33 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
     monkeypatch.setattr(rc_relay, "_default_dialer", fake_default_dialer)
 
     k1 = boot_root()
-    rec = await k1.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "relay_connector.tools",
-            "transport": "relay",
-            "relay_url": "ws://relay",
-            "partner_guid": "B",  # the peer address stays explicit (required)
-            "heartbeat": 0,
-            "reconnect": 0,
-            # NO guid — it must be minted.
-        },
-    )
+    rec = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "relay_connector.tools",
+                        "transport": "relay",
+                        "relay_url": "ws://relay",
+                        "partner_guid": "B",  # the peer address stays explicit (required)
+                        "heartbeat": 0,
+                        "reconnect": 0,
+                        # NO guid — it must be minted.
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     assert "guid" not in rec or not rec.get("guid")
     # create_agent auto-boots the leg (so the mint already fired); an explicit boot
     # is idempotent. Either path means the transport built and minted our guid.
-    booted = await k1.send(aid, {"type": "boot"})
+    booted = (await k1.send([{"target": aid, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert booted.get("booted") or booted.get("already"), booted
 
     minted = k1.get(aid).get("guid")
@@ -605,18 +549,27 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
 
 async def test_reflect_fields(two_kernels):
     ka, _ = two_kernels
-    rec = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "relay_connector.tools",
-            "transport": "relay",
-            "relay_url": "ws://relay:9443",
-            "guid": "A",
-            "partner_guid": "B",
-        },
-    )
-    r = await ka.send(rec["id"], {"type": "reflect"})
+    rec = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "relay_connector.tools",
+                        "transport": "relay",
+                        "relay_url": "ws://relay:9443",
+                        "guid": "A",
+                        "partner_guid": "B",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (await ka.send([{"target": rec["id"], "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["transport"] == "relay"
     assert r["connected"] is False
     assert r["relay_url"] == "ws://relay:9443"
