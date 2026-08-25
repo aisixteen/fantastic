@@ -47,6 +47,18 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Callable
 
+from dataclasses import dataclass
+
+from kernel._refusal import (
+    BAD_ARG,
+    INVALID_META,
+    NOT_HERE,
+    TIMEOUT,
+    UNAUTHORIZED,
+    UNHANDLED,
+    missing,
+    refusal,
+)
 from kernel._authz import (
     DEFAULT_CALLABLE_BY,
     DEFAULT_CAN_CALL,
@@ -55,11 +67,18 @@ from kernel._authz import (
 )
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
+    CANCELLED,
+    COMPLETED,
+    FAILED,
     Kernel,
+    TIMED_OUT,
+    _current_origin,
     _current_sender,
     _current_task,
     _summarize_payload,
     operator_context,
+    outcome,
+    page,
 )
 
 
@@ -97,26 +116,58 @@ _MUTATING_VERBS = frozenset(
 )
 
 _SYSTEM_VERB_DOCS = {
+    # THE CONSEQUENCE MUST PRECEDE THE FIRST EM-DASH. A default reflect keeps only
+    # the text BEFORE it (see `_apply_reflect_flags`), so anything after the dash
+    # reaches `detail:"full"` callers only — and these are the facts a caller needs
+    # BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent` read
+    # as `args: handler_module:str, id:str?, **meta` with "spawn a child agent"
+    # cut, and a model spent 16 turns unable to work out what the target meant,
+    # finishing with `agents_created: []`.
     "create_agent": (
-        "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it."
+        "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
+        "Creates a CHILD OF `parent_id` — your own id grows your own subtree "
+        "(no grant needed); 'kernel_state' for top-level. No default parent."
     ),
-    "update_agent": "args: id:str, **meta — patch a record's meta.",
+    "update_agent": (
+        "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
+        "(a field you do not name is untouched), so a dict field must be sent "
+        "WHOLE — `can_call`/`callable_by` included: restate every key you want "
+        "to keep, the baseline `$self`/`$parent`/`$children` among them, or the "
+        "keys you omit are GONE. Granting one edge reads like a PATCH and "
+        "behaves like a PUT."
+    ),
     "delete_agent": (
-        "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses)."
+        "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
+        "deepest first; refuses if any descendant carries `delete_lock`."
     ),
-    "list_agents": "No args. Every agent's record, flat.",
+    "list_agents": "No args. Every agent's record, flat. Paged.",
     "ps": (
-        "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, "
-        "started_at}]}. One row per in-flight dispatch; `parent` chains them "
-        "into the send tree."
+        "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
+        "verb, started_at}]}, one row per in-flight dispatch. Paged."
     ),
     "cancel": (
-        "args: task_id:str — kill that task AND ITS SUBTREE (children first). "
-        "Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` "
-        "resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}."
+        "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
+        "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
+        "batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."
     ),
-    "shutdown_kernel": "No args. ROOT ONLY — stop the kernel process gracefully.",
+    "shutdown_kernel": (
+        "No args. Stops the kernel PROCESS — under env:'container', the container."
+    ),
 }
+
+
+@dataclass
+class _Dispatched:
+    """One launched batch item awaiting settle. `pid is None` marks the
+    kernel-reflect fast path — a pure identity read that never enters the
+    task table."""
+
+    index: int
+    pid: str | None
+    task: "asyncio.Task"
+    timeout: float | None
+    target: "Agent"
+    payload: dict
 
 
 class Agent:
@@ -365,9 +416,18 @@ class Agent:
         rec: dict[str, Any] = {"id": self.id}
         if self.handler_module is not None:
             rec["handler_module"] = self.handler_module
+        rec.update(self._meta)
+        # STRUCTURE WINS. `parent_id` is not meta — it is where this agent
+        # actually sits, and the tree is the only thing that knows. It used to be
+        # written BEFORE the meta merge, so a `parent_id` that leaked into meta
+        # overwrote it and the record reported a parent the tree did not have:
+        # `$parent` then resolved differently on the two halves of the gate,
+        # `web/tools.py` read the lie, and a reboot silently corrected it from
+        # disk position. Written last, it cannot be shadowed.
         if self.parent is not None:
             rec["parent_id"] = self.parent.id
-        rec.update(self._meta)
+        else:
+            rec.pop("parent_id", None)  # the root has no parent, whatever meta says
         return rec
 
     @property
@@ -386,28 +446,78 @@ class Agent:
 
     # ─── public API: routing ───────────────────────────────────
 
-    async def send(
-        self, target_id: str, payload: dict, *, task_out: list | None = None
-    ) -> dict | None:
-        """Flat global send. Resolves `target_id` in `ctx.agents` and
-        dispatches its handler. Sets `_current_sender` contextvar
-        around the dispatch so nested send/emit attribute correctly.
-        Verbs in `_SYSTEM_VERBS` are answered natively by the target
-        Agent without consulting handler_module.
+    async def send(self, items: list[dict]) -> list[dict]:
+        """ARRAY-ONLY batch send: [{target, payload, timeout?}, ...] ->
+        [{pid, status, result}]. There is deliberately NO single-call form —
+        one shape prevents single/batch drift. Single call =
+        `(await send([{...}]))[0]`.
 
-        The dispatch runs as a REGISTERED asyncio.Task (one row in the
-        kernel task table) — that is what makes any send cancelable
-        (`cancel`). A cancelled dispatch does NOT raise out of `send`:
-        it resolves to `{"cancelled": True}`.
+        Dispatch is CONCURRENT; the returned array preserves input order.
+        Every dispatched item is a REGISTERED asyncio.Task (one `ps` row,
+        `cancel`-able by its pid, which the outcome carries). Pids are minted
+        in a synchronous launch phase, so the whole batch is visible in `ps`
+        before the first await.
 
-        `task_out`, when given, receives the dispatch's TASK ID (the
-        `<agent>:<token>` pid) as its single element — minted synchronously at
-        dispatch, so a caller knows the id BEFORE the reply exists. That is
-        what lets a tool loop tag a request and its reply with one
-        unambiguous id (`[sent ai:7 …]` / `[reply to ai:7 …]`); the same pid
-        is the `cancel` handle and the trace's primary key. Absent for the
-        gate-denied and kernel-reflect fast paths, which never dispatch.
+        `timeout` is per-item seconds. The kernel NEVER defaults it:
+        absent/None = wait forever. On expiry the item is killed through the
+        front door (`cancel_task`), so every bundle's `on_cancel` hook runs
+        before the abort — a bare task.cancel() would orphan the OS resources
+        those hooks release.
+
+        Statuses: completed | failed | cancelled | timed_out — see the
+        outcome vocabulary in `_kernel.py`. `pid is None` ⟺ the item never
+        reached the task table (refusal, malformed item, kernel-reflect fast
+        path). Nothing raises out of `send` except CancelledError (the caller
+        itself being killed) — a handler raise settles as `failed`.
         """
+        if not isinstance(items, list):
+            raise TypeError("send takes a LIST of {target, payload, timeout?} items")
+        results: list[dict | None] = [None] * len(items)
+        dispatched: list[_Dispatched] = []
+        for i, item in enumerate(items):  # SYNC loop — every pid exists
+            out = self._launch(i, item, dispatched)  # before the first await
+            if out is not None:
+                results[i] = out
+        if dispatched:
+            settled = await asyncio.gather(*(self._settle(d) for d in dispatched))
+            for d, out in zip(dispatched, settled):
+                results[d.index] = out
+        return results
+
+    def _launch(
+        self, index: int, item: Any, dispatched: list["_Dispatched"]
+    ) -> dict | None:
+        """One item's SYNCHRONOUS half: validate, resolve, gate, dispatch.
+        Returns an immediate outcome for anything that never reaches the task
+        table; returns None after appending a `_Dispatched` for the rest."""
+        if not isinstance(item, dict):
+            return outcome(
+                None,
+                FAILED,
+                refusal(BAD_ARG, "send: item must be a dict", arg="item"),
+            )
+        target_id = item.get("target")
+        payload = item.get("payload")
+        timeout = item.get("timeout")
+        if not isinstance(target_id, str) or not target_id:
+            return outcome(None, FAILED, missing("send", "target"))
+        if not isinstance(payload, dict):
+            return outcome(None, FAILED, missing("send", "payload"))
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or timeout <= 0
+        ):
+            return outcome(
+                None,
+                FAILED,
+                refusal(
+                    BAD_ARG,
+                    f"send: timeout must be a positive number of seconds, "
+                    f"got {timeout!r}",
+                    arg="timeout",
+                ),
+            )
         if target_id == "kernel":
             target = self._root()
         else:
@@ -415,7 +525,7 @@ class Agent:
             # `web_loader`) to its agent id; a literal id resolves to itself.
             target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
         if target is None:
-            return self.ctx.unknown_agent(target_id)
+            return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
         verb = payload.get("type")
         # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         # Operator sends (`_current_sender` is None: CLI / cold bootstrap /
@@ -428,15 +538,107 @@ class Agent:
         if sender_id is not None:
             denial = self._gate(sender_id, verb, target, payload)
             if denial is not None:
-                return denial
-        # `kernel` reflect fast-path: a pure identity read (no dispatch/telemetry),
-        # applied AFTER the gate so it is authorized like any other reflect.
+                return outcome(None, FAILED, denial)
+        # `kernel` reflect fast-path: a pure identity read (no dispatch, no
+        # telemetry, no table row), applied AFTER the gate so it is authorized
+        # like any other reflect. Async (reflect flags nest dispatches), so it
+        # rides the settle phase as a pid-less task.
         if target_id == "kernel" and verb == "reflect":
-            return await self._apply_reflect_flags(
-                target, payload, target._reflect_identity()
+            task = asyncio.create_task(
+                self._apply_reflect_flags(target, payload, target._reflect_identity())
             )
-        reply = await self._run_dispatch(target, payload, task_out=task_out)
-        return await self._apply_reflect_flags(target, payload, reply)
+            dispatched.append(_Dispatched(index, None, task, timeout, target, payload))
+            return None
+        pid, task = self._spawn_dispatch(target, payload)
+        dispatched.append(_Dispatched(index, pid, task, timeout, target, payload))
+        return None
+
+    def _spawn_dispatch(
+        self, target: "Agent", payload: dict
+    ) -> tuple[str, "asyncio.Task"]:
+        """Mint the pid and start ONE dispatch as a registered asyncio.Task —
+        the unit of the task table. Synchronous: the pid exists before any
+        await, which is what lets a batch report every pid up front."""
+        ctx = self.ctx
+        task_id = ctx.mint_task_id(target.id)
+        # Captured HERE, before the dispatch rewrites `_current_sender` to the
+        # target's own id — this is the same value the gate just authorized.
+        origin = _current_sender.get()
+        task = asyncio.create_task(
+            target._dispatch_task(task_id, payload, origin),
+            name=f"fantastic:{task_id}",
+        )
+        ctx.register_task(
+            task_id,
+            target.id,
+            payload.get("type"),
+            task,
+            parent=_current_task.get(),
+        )
+        return task_id, task
+
+    async def _settle(self, d: "_Dispatched") -> dict:
+        """One item's settle. Runs as its own gather task, so the cancellation
+        contract from `_run_dispatch` ports verbatim: a CancelledError at
+        `await d.task` with our OWN cancelling() == 0 means the CHILD was
+        killed (→ outcome cancelled); cancelling() > 0 means WE are being
+        killed (→ take the child down, re-raise; gather propagates out of
+        `send` — the one thing that does)."""
+        try:
+            if d.timeout is not None:
+                done, pending = await asyncio.wait({d.task}, timeout=d.timeout)
+                if pending:
+                    if d.pid is not None:
+                        # THE FRONT DOOR. `cancel_task` kills the SUBTREE and
+                        # runs every bundle's `on_cancel` first (exec_bridge
+                        # SIGKILLs its OS child) — a bare task.cancel() here
+                        # would orphan them. `operator_context` because the
+                        # kernel enforcing the caller's own deadline is
+                        # bookkeeping, and it keeps an on_cancel hook's own
+                        # sends (ai_core emits status via send("cli", ...))
+                        # from being gated as the batch caller.
+                        with operator_context():
+                            await self.ctx.cancel_task(d.pid)
+                    else:
+                        # pid-less identity read: nothing real to release
+                        d.task.cancel()
+                    try:
+                        await d.task
+                    except asyncio.CancelledError:
+                        cur = asyncio.current_task()
+                        if cur is not None and cur.cancelling() > 0:
+                            raise  # we were killed mid-timeout-handling
+                        return outcome(
+                            d.pid,
+                            TIMED_OUT,
+                            refusal(
+                                TIMEOUT,
+                                f"send: {d.target.id} "
+                                f"{d.payload.get('type')!r} exceeded its "
+                                f"{d.timeout}s timeout; task cancelled",
+                                task_id=d.pid or "-",
+                            ),
+                        )
+                    # else: the handler finished during the SIGTERM grace —
+                    # fall through and report honestly what happened.
+            reply = await d.task  # instant when already done
+            if d.pid is None:  # fast path already ran _apply_reflect_flags
+                return outcome(None, COMPLETED, reply)
+            reply = await self._apply_reflect_flags(d.target, d.payload, reply)
+            return outcome(d.pid, COMPLETED, reply)
+        except asyncio.CancelledError:
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling() > 0:
+                if not d.task.done():
+                    d.task.cancel()  # caller cancelled: child dies with us
+                raise
+            if d.task.cancelled():
+                return outcome(d.pid, CANCELLED, {"cancelled": True})
+            raise
+        except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
+            return outcome(
+                d.pid, FAILED, {"error": f"{type(e).__name__}: {e}", "raised": True}
+            )
 
     def _loader_id(self) -> str | None:
         """The id `$loader` resolves to in a grant — the persistence root."""
@@ -453,23 +655,56 @@ class Agent:
         s_can = sender_rec.get("can_call") or {}
         s_parent = sender_rec.get("parent_id")
         s_kids = frozenset(sender._children) if sender is not None else frozenset()
+        # FORKING YOUR OWN SUBTREE IS BASELINE — the exemption keys on PLACEMENT,
+        # not on who answers. `create_agent` is privileged, so a wildcard never
+        # covers it; the one documented exception is that acting on YOURSELF needs
+        # no grant, which is what makes self-extension work with zero wiring.
+        # While the verb was answered by every agent that fell out for free —
+        # `other_id == holder_id` because you addressed yourself. Now the verb is
+        # kernel-owned and `other_id` is always the root, so the exemption would
+        # never fire again and every agent would need an explicit `create_agent`
+        # grant on the root just to author its own tool. The property being
+        # preserved was never "you addressed yourself" — it is "the new agent lands
+        # in YOUR subtree", and `parent_id` now states that outright.
+        privileged = not (
+            verb == "create_agent" and payload.get("parent_id") == sender_id
+        )
         # Egress — may the SENDER call the target?
         d = authorize_call(
             s_can,
             verb,
             target.id,
+            enforce_privileged=privileged,
             holder_id=sender_id,
             holder_parent=s_parent,
             holder_children=s_kids,
             loader_id=root_id,
         )
         if not d.allowed:
-            return {
-                "error": f"{sender_id} may not call {verb!r} on {target.id}",
-                "reason": "unauthorized",
-                "side": "egress",
-                "hint": _FROM_ABOVE,
-            }
+            return refusal(
+                UNAUTHORIZED,
+                f"{sender_id} may not call {verb!r} on {target.id}",
+                hint=_FROM_ABOVE,
+                side="egress",
+            )
+        # INGRESS DOES NOT APPLY TO A KERNEL VERB. `callable_by` answers "do I
+        # accept being acted upon by you" — and for `create_agent`/`ps`/`cancel`
+        # and friends the root is not what is acted upon. It is the control
+        # surface; the operand rides in the payload (`parent_id`, `id`,
+        # `task_id`). Asking the root to accept each caller would make the
+        # operator edit the ROOT's record for every agent that needs to read the
+        # task table, and would answer a question about the wrong agent.
+        #
+        # So egress is the whole check here, which is the decision on record:
+        # placement is ungated, `can_call` decides. An agent granted
+        # `kernel_state: [ps, cancel]` can watch and kill ANY task — that
+        # granularity was the price of moving these verbs to the root.
+        if verb in _SYSTEM_VERBS and target.parent is None:
+            if verb in ("create_agent", "update_agent"):
+                return self._check_conferral(
+                    sender_id, s_can, s_parent, s_kids, root_id, payload
+                )
+            return None
         # Ingress — does the TARGET accept the sender? (tokens relative to target)
         t_call = target._meta.get("callable_by") or {}
         t_parent = target.parent.id if target.parent is not None else None
@@ -485,12 +720,12 @@ class Agent:
             enforce_privileged=False,
         )
         if not di.allowed:
-            return {
-                "error": f"{target.id} does not accept {verb!r} from {sender_id}",
-                "reason": "unauthorized",
-                "side": "ingress",
-                "hint": _FROM_ABOVE,
-            }
+            return refusal(
+                UNAUTHORIZED,
+                f"{target.id} does not accept {verb!r} from {sender_id}",
+                hint=_FROM_ABOVE,
+                side="ingress",
+            )
         # Authority conferral — no self-raise, delegate only a subset you hold.
         if verb in ("create_agent", "update_agent"):
             return self._check_conferral(
@@ -549,40 +784,23 @@ class Agent:
                         }
         return None
 
-    async def _run_dispatch(
-        self, target: "Agent", payload: dict, *, task_out: list | None = None
-    ) -> dict | None:
+    async def _run_dispatch(self, target: "Agent", payload: dict) -> dict | None:
         """Run ONE dispatch as a registered, abortable asyncio.Task and await
-        it — the unit of the task table.
-
-        Parent propagation: the task stamps its own id on `_current_task`, so
-        any `send` the handler issues registers as a CHILD of this task. The
-        table is a tree; `cancel` walks it.
+        it — internal single-item helper kept for `_roster`, which needs a
+        dispatch WITHOUT `_apply_reflect_flags` (no recursion). The public
+        surface is the array `send`; both share `_spawn_dispatch`.
 
         The cancellation contract, and why it is not ambiguous. Both cases
         surface as a `CancelledError` at this one await:
           - THE DISPATCH was cancelled (someone sent `cancel`) → the awaiting
             caller is NOT being killed; it gets the reply `{"cancelled": True}`.
-            Cancellation never raises out of `send`.
+            Cancellation never raises out of the dispatch.
           - WE were cancelled (our own task is inside the killed subtree) →
             `current_task().cancelling()` is non-zero, so we re-raise and take
             the dispatch down with us. Swallowing here would resurrect a task
             the kernel just killed.
         """
-        ctx = self.ctx
-        task_id = ctx.mint_task_id(target.id)
-        if task_out is not None:
-            task_out.append(task_id)  # the caller learns the pid at dispatch time
-        task = asyncio.create_task(
-            target._dispatch_task(task_id, payload), name=f"fantastic:{task_id}"
-        )
-        ctx.register_task(
-            task_id,
-            target.id,
-            payload.get("type"),
-            task,
-            parent=_current_task.get(),
-        )
+        _pid, task = self._spawn_dispatch(target, payload)
         try:
             return await task
         except asyncio.CancelledError:
@@ -703,6 +921,13 @@ class Agent:
         # reply already set one.
         if target.description is not None and "description" not in reply:
             reply["description"] = target.description
+        # YOUR OWN AUTHORITY, on your own reflect. A bundle handler composes the
+        # reply and knows nothing of the substrate's gate fields, so they are added
+        # here — the same way `description` is. Absent means "baseline only", which
+        # is what the kernel stamps; it never means "unknown".
+        for _gate in ("can_call", "callable_by"):
+            if _gate in target._meta and _gate not in reply:
+                reply[_gate] = target._meta[_gate]
         # Kernel runtime identity + deployment context — surfaced on the ROOT
         # reflect so a client that hops to this kernel learns, in one
         # round-trip: which runtime (`runtime`), WHERE it runs (`env` —
@@ -730,27 +955,44 @@ class Agent:
         # those are the calls a weak model will not fire blind to find out.
         #
         # Costs ~115 tok, +11-17% on a per-agent reflect. Measured, and accepted.
-        reply["system_verbs"] = (
-            dict(_SYSTEM_VERB_DOCS)
-            if full
-            else {
-                k: (
-                    _SYSTEM_VERB_DOCS[k].split("—")[0].strip()
-                    if k in _MUTATING_VERBS
-                    else ""
-                )
-                for k in sorted(_SYSTEM_VERB_DOCS)
-            }
-        )
+        # `kernel_verbs`, not `system_verbs`, and it sits beside `verbs` on purpose:
+        # `verbs` is what THIS agent does, `kernel_verbs` is what the KERNEL does
+        # when you name this agent. Presenting both under one shape said they were
+        # the same kind of thing, and a model read `delete` (drop one key from this
+        # store) and `delete_agent` (destroy this subtree) as peers.
+        #
+        # Still advertised on EVERY agent even though only the root ANSWERS them.
+        # Root-only advertisement was tried and reverted: gemma4:12b never reflected
+        # the root, never saw the signatures, guessed the args and abandoned the
+        # task. Discoverable everywhere, answered in one place, with the `_` line
+        # saying which is which.
+        reply["kernel_verbs"] = {
+            "_": (
+                "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, "
+                "not the actor. (`verbs` is what this agent itself does.)"
+            ),
+            **(
+                dict(_SYSTEM_VERB_DOCS)
+                if full
+                else {
+                    # Every verb carries its text, truncated at the em-dash.
+                    # Read-only ones used to render as "" (name only), on the
+                    # ground that their reply teaches the rest — but a name with
+                    # no signature is exactly what left `ps` and `list_agents`
+                    # unusable without a `full` reflect, and each is one line.
+                    k: _SYSTEM_VERB_DOCS[k].split("—")[0].strip()
+                    for k in sorted(_SYSTEM_VERB_DOCS)
+                }
+            ),
+        }
         if target.parent is None:
             reply["runtime"] = "python"
             reply["env"] = os.environ.get("FANTASTIC_ENV", "host")
             reply["version"] = os.environ.get("FANTASTIC_VERSION")
-            # The substrate's OWN verbs — answered natively by EVERY agent, so
-            # they appear in no bundle's `verbs` map. Advertised here (once, on
-            # the root) so the reflect surface stays honest: a caller learns
-            # from one round-trip that work in flight is inspectable (`ps`) and
-            # killable (`cancel`), on any agent.
+            # The KERNEL's own verbs — answered by the root alone, so they appear
+            # in no bundle's `verbs` map. Advertised on every agent (see
+            # `kernel_verbs` above) so a caller learns in one round-trip that work
+            # in flight is inspectable (`ps`) and killable (`cancel`).
             # Duck-typed root extension: the root's handler_module (the loader) may
             # contribute root-only fields the substrate can't compute without coupling
             # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
@@ -779,14 +1021,29 @@ class Agent:
                 else await self._roster(target)
             )
         elif tree == "ids":
-            reply["tree"] = target._descendant_ids()
+            # The FLAT id index is the one reflect shape that is a plain list, so
+            # it is the one that pages. `tree:"all"` is a nested subtree whose
+            # value is its structure — slicing it would hand back a forest with
+            # no root and call it a page. Ask for ids to walk a big tree.
+            ids, nxt = page(target._descendant_ids(), payload)
+            reply["tree"] = ids
+            if nxt is not None:
+                reply["next"] = nxt
         if not full:
             reply["more"] = self._MORE_HINT
         bundles = payload.get("bundles", "none")
         if bundles == "all":
-            reply["bundles"] = target._available_bundles()
+            cat, nxt = page(
+                target._available_bundles(), payload, key=lambda b: b["name"]
+            )
+            reply["bundles"] = cat
+            if nxt is not None:
+                reply["bundles_next"] = nxt
         elif bundles == "ids":
-            reply["bundles"] = [b["name"] for b in target._available_bundles()]
+            names, nxt = page([b["name"] for b in target._available_bundles()], payload)
+            reply["bundles"] = names
+            if nxt is not None:
+                reply["bundles_next"] = nxt
         rm = payload.get("readme")
         if rm is True:
             reply["readme"] = target._read_readme()
@@ -954,13 +1211,19 @@ class Agent:
 
     # ─── dispatch (internal) ───────────────────────────────────
 
-    async def _dispatch_task(self, task_id: str, payload: dict) -> dict | None:
+    async def _dispatch_task(
+        self, task_id: str, payload: dict, origin: str | None = None
+    ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
         wrapped in try/finally) because an asyncio task owns a COPY of the
         context — the stamp cannot leak to the caller. The table entry drops via
         the task's done-callback, cancelled or not."""
         _current_task.set(task_id)
+        # The gate read the caller before dispatch; carry it so a handler whose
+        # PAYLOAD names a resource can tell whose it is. `_current_sender` is
+        # about to become this agent's own id, which is why this is separate.
+        _current_origin.set(origin)
         return await self._dispatch(payload)
 
     async def _dispatch(self, payload: dict) -> dict | None:
@@ -971,6 +1234,29 @@ class Agent:
         token = _current_sender.set(self.id)
         try:
             if verb in _SYSTEM_VERBS:
+                # KERNEL-OWNED, answered by the ROOT ONLY. These act on the TREE
+                # (or on the kernel-wide task table); the agent they name is the
+                # OPERAND, never the actor. Answering them everywhere made the
+                # target ambiguous: `create_agent` appeared on all N agents with a
+                # doc naming only its arguments, so "send it to X" could mean X
+                # performs it, X is created under something, or X is the parent —
+                # and only the last was true. Measured 2026-08-24 (`live_subai`,
+                # qwen3.8-27b): the model asked "But how do I invoke create_agent?
+                # Which target?", never resolved it, and finished 16 turns with
+                # `agents_created: []`.
+                #
+                # Refused HERE, in the handler, not in the call gate — the gate
+                # runs long before this and several probes assert a specific
+                # denial `side` for a non-root privileged send. `shutdown_kernel`
+                # already refused this way; this generalises it to all seven.
+                if self.parent is not None:
+                    return refusal(
+                        NOT_HERE,
+                        f"{verb} is a kernel verb — {self.id} does not answer it",
+                        hint="address the kernel root (alias 'kernel'); name the "
+                        "agent you mean in `parent_id` / `id`",
+                        verb=verb,
+                    )
                 return await self._handle_system_verb(verb, payload)
             # The tree root answers `reflect` with the substrate identity
             # even when it carries a handler_module (the root loader): its
@@ -1081,7 +1367,7 @@ class Agent:
             return await self._verb_cancel(payload)
         if verb == "shutdown_kernel":
             return await self._verb_shutdown_kernel(payload)
-        return {"error": f"unhandled system verb {verb!r}"}
+        return refusal(UNHANDLED, f"unhandled system verb {verb!r}", verb=verb)
 
     def _verb_ps(self, payload: dict) -> dict:
         """No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb,
@@ -1089,7 +1375,8 @@ class Agent:
         per in-flight dispatch, `parent` chaining them into the send tree, so a
         caller sees the whole tree and who spawned what. `ps` shows its own row
         too — it is itself a dispatch."""
-        return {"tasks": self.ctx.task_rows()}
+        tasks, nxt = page(self.ctx.task_rows(), payload, key=lambda r: r["id"])
+        return {"tasks": tasks, "next": nxt}
 
     async def _verb_cancel(self, payload: dict) -> dict:
         """args: task_id:str — kill that task AND ITS SUBTREE (children first,
@@ -1101,7 +1388,7 @@ class Agent:
         {"cancelled": True}."""
         task_id = payload.get("task_id")
         if not isinstance(task_id, str) or not task_id:
-            return {"error": "cancel: task_id (str) required"}
+            return missing("cancel", "task_id")
         return await self.ctx.cancel_task(task_id)
 
     async def _verb_shutdown_kernel(self, payload: dict) -> dict:
@@ -1166,10 +1453,12 @@ class Agent:
         # FIRST call. This verb is advertised in every reflect's `system_verbs`, so
         # "list the agents" is a natural opener, and it was a dead end with no
         # signpost back.
-        return {
-            "agents": [a.record for a in self.ctx.agents.values()],
-            "more": self._LIST_HINT,
-        }
+        agents, nxt = page(
+            [a.record for a in self.ctx.agents.values()],
+            payload,
+            key=lambda r: r["id"],
+        )
+        return {"agents": agents, "next": nxt, "more": self._LIST_HINT}
 
     @staticmethod
     def _refuse_meta(
@@ -1204,13 +1493,44 @@ class Agent:
         return validate(meta, record or {})
 
     async def _verb_create_agent(self, payload: dict) -> dict:
+        """args: handler_module, parent_id (REQUIRED), id?, **meta.
+
+        `parent_id` NAMES THE OWNER. Until 2026-08-24 this verb was answered by
+        every agent and the ADDRESSED agent became the parent — the only way to
+        nest — while a `parent_id` in the payload was stripped and silently
+        ignored. Both halves were bad: the working mechanism was undiscoverable
+        (a default reflect truncates the doc before "spawn a child agent"), and
+        the field that looked like it expressed placement did nothing. Verified
+        before the change: asking for `parent_id:"specialist"` produced
+        `parent_id='kernel_state'` with no error.
+
+        Now the placement is always stated. There is no implicit parent — an
+        agent building its own subtree names itself, which is one word and
+        cannot be confused with "wherever this happened to be sent"."""
         handler_module = payload.get("handler_module")
         if not handler_module:
-            return {"error": "create_agent: handler_module required"}
+            return missing("create_agent", "handler_module")
+        parent_id = payload.get("parent_id")
+        if not parent_id:
+            return missing(
+                "create_agent",
+                "parent_id",
+                hint="name the agent that will OWN the new one — your own id for a "
+                "tool you keep, or the root ('kernel_state') for a top-level agent",
+            )
+        # Resolve the same way `send` does, so `parent_id` accepts anything a
+        # caller could have addressed — including the `kernel` alias for the root,
+        # which is otherwise special-cased in `send` alone.
+        if parent_id == "kernel":
+            parent = self._root()
+        else:
+            parent = self.ctx.agents.get(self.ctx.well_known.get(parent_id, parent_id))
+        if parent is None:
+            return self.ctx.unknown_agent(parent_id)
         meta = {
             k: v
             for k, v in payload.items()
-            if k not in ("type", "handler_module", "id")
+            if k not in ("type", "handler_module", "id", "parent_id")
         }
         # The structural authority baseline ({$self,$parent,$children} on both
         # `can_call` and `callable_by`) is stamped + merged uniformly in Agent.__init__
@@ -1221,34 +1541,68 @@ class Agent:
         # No record exists yet, so the merged view IS the patch — an `interpreter`
         # with no `interpreters` beside it genuinely cannot run and is refused here.
         if why := self._refuse_meta(handler_module, meta, {}):
-            return {"error": why, "created": False}
-        rec = self.create(handler_module, id=payload.get("id"), **meta)
+            return refusal(INVALID_META, why)
+        rec = parent.create(handler_module, id=payload.get("id"), **meta)
         if "error" in rec:
             return rec
         # Boot via kernel routing. This send is a SIDE EFFECT of the already-
         # authorized create_agent — the kernel initializing the child it was
         # told to make, not the parent reaching out — so it runs with operator
         # authority (ungated), never against the parent's own grant.
-        try:
-            with operator_context():
-                await self.send(rec["id"], {"type": "boot"})
-        except Exception as e:
-            print(f"  [create_agent] {rec['id']} boot raised: {e}")
+        with operator_context():
+            boot = (
+                await self.send([{"target": rec["id"], "payload": {"type": "boot"}}])
+            )[0]
+        if boot["status"] == FAILED:
+            # A handler raise settles as a failed outcome now — send never
+            # leaks it. Surfaced, not fatal: the agent exists, its boot broke.
+            print(f"  [create_agent] {rec['id']} boot failed: {boot['result']}")
         # Lifecycle event on self's inbox.
-        await self.emit(
-            self.id, {"type": "agent_created", "id": rec["id"], "agent": rec}
+        # On the PARENT's inbox, not the root's: whoever watches an agent for new
+        # children still sees them arrive. Addressing used to make these the same.
+        await parent.emit(
+            parent.id, {"type": "agent_created", "id": rec["id"], "agent": rec}
         )
         return rec
 
     async def _verb_update_agent(self, payload: dict) -> dict:
+        """Set a record's meta. EVERY NAMED FIELD IS REPLACED, NOT MERGED.
+
+        A field you do not name is untouched; a field you DO name overwrites what
+        was there. For a dict field this means the whole map is swapped, never
+        combined — send it WHOLE.
+
+        The trap: granting one edge reads like a PATCH
+        (`callable_by={"web":["read_stream"]}`) and behaves like a PUT — the
+        structural baseline `{$self,$parent,$children}` is stamped once in
+        `Agent.__init__` and nothing re-merges it here, so that call silently
+        severs the agent from its own parent and children and still answers
+        `{"updated": true}`. Send the map WHOLE.
+
+        Measured 2026-08-24 (`live_subai`, qwen3.8-27b): the model reasoned the
+        danger out correctly — "if update_agent does a shallow merge ... I'd lose
+        the baseline grants" — could not settle it from `reflect`, chose to
+        establish it empirically, and lost the run to a repetition loop while
+        trying. The semantics were right; the fact that they were undiscoverable
+        is what cost the run.
+
+        NOT refused when the baseline is absent: dropping a grant is a legitimate
+        thing for an operator to express, and a wrong grant is recoverable with
+        another `update_agent`. Documented, not gated.
+        """
         target_id = payload.get("id")
         if not target_id:
-            return {"error": "update_agent: id required"}
-        meta = {k: v for k, v in payload.items() if k not in ("type", "id")}
+            return missing("update_agent", "id")
+        # `parent_id` is STRUCTURE, not meta: an agent's place in the tree is
+        # changed by creating it there, never by patching a field. Accepting it
+        # here let a record describe a parent it did not have.
+        meta = {
+            k: v for k, v in payload.items() if k not in ("type", "id", "parent_id")
+        }
         changed = list(meta.keys())
         target = self.ctx.agents.get(target_id)
         if target is None:
-            return self.ctx.unknown_agent(target_id, updated=False)
+            return self.ctx.unknown_agent(target_id)
         # WRITE-TIME VALIDATION, duck-typed. A record can carry meta only its bundle
         # understands, so the substrate cannot judge it — but the bundle can. If the
         # handler_module exposes `validate_meta(meta) -> str | None`, a returned
@@ -1261,10 +1615,10 @@ class Agent:
         # success, is the worst of both — the caller believes a security control is
         # in place that is not. Same discovery + optionality as `on_delete`.
         if why := self._refuse_meta(target.handler_module, meta, target.record):
-            return {"error": why, "id": target_id, "updated": False}
+            return refusal(INVALID_META, why, id=target_id)
         rec = self.update(target_id, **meta)
         if rec is None:
-            return self.ctx.unknown_agent(target_id, updated=False)
+            return self.ctx.unknown_agent(target_id)
         # Emit lifecycle event on self's inbox for watchers (canvas
         # frame chrome, panels) — same convention as create/delete.
         await self.emit(
@@ -1281,7 +1635,7 @@ class Agent:
     async def _verb_delete_agent(self, payload: dict) -> dict:
         target_id = payload.get("id")
         if not target_id:
-            return {"error": "delete_agent: id required"}
+            return missing("delete_agent", "id")
         result = await self.delete(target_id)
         if result.get("deleted"):
             await self.emit(self.id, {"type": "agent_deleted", "id": target_id})
@@ -1436,7 +1790,26 @@ class Agent:
     # the LLM reads `ingress_rule: deny_ingress` (sealed) / `allow_all` (open) /
     # `password` (gated) and acts per the keystone readme (read-key == write-key);
     # ABSENT on an io leg ⇒ sealed-by-default. `root`/`file_bridge_id` show the binding.
-    _POSTURE_KEYS = ("ingress_rule", "egress_rule", "auth", "root", "file_bridge_id")
+    # The CALL gate belongs here too. It was left out, and the omission is not
+    # cosmetic: `can_call`/`callable_by` decide whether a send is even attempted,
+    # and with them absent an agent cannot read its OWN authority — it can only
+    # discover it by trying. Measured 2026-08-24 (`live_subai`, qwen3.8-27b): the
+    # model wrote "the key question is: what are MY (ai's) can_call grants? The
+    # full reflect didn't include can_call/callable_by", and across the day it
+    # spent whole turns probing empirically — a throwaway `_probe_script` agent, a
+    # `selfchild` "test create_agent on self", a `_probe_ai` scratch write — to
+    # learn by experiment what one field states. This is not a secrecy boundary:
+    # the gate ENFORCES, it does not hide, and everything surfaced here is already
+    # discoverable by attempting the call. Hiding it only made discovery expensive.
+    _POSTURE_KEYS = (
+        "ingress_rule",
+        "egress_rule",
+        "auth",
+        "root",
+        "file_bridge_id",
+        "can_call",
+        "callable_by",
+    )
     # PURPOSE, not wiring. Posture answers "how is this plumbed" (an operator
     # question, asked once); purpose answers "what is this for" (a routing
     # question, asked every turn). The roster carries purpose.

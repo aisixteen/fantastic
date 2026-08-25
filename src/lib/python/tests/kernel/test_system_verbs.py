@@ -15,19 +15,34 @@ async def test_reflect_returns_uniform_identity(seeded_kernel):
     all), even though the root now carries the `kernel_state` handler_module.
     Transports/wire docs moved to the root readme; the bundle catalog is
     the opt-in `bundles` flag (not in a plain reflect)."""
-    r = await seeded_kernel.send("kernel_state", {"type": "reflect"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "reflect"}}]
+        )
+    )[0]["result"]
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["tree"]["id"] == "kernel_state"
     assert "transports" not in r
     assert "available_bundles" not in r
-    catalog = await seeded_kernel.send(
-        "kernel_state", {"type": "reflect", "bundles": "all"}
-    )
+    catalog = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "reflect", "bundles": "all"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert any(b["name"] == "file_bridge" for b in catalog["bundles"])
 
 
 async def test_list_agents(seeded_kernel):
-    r = await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
+        )
+    )[0]["result"]
     ids = {a["id"] for a in r["agents"]}
     assert "kernel_state" in ids
     assert "cli" in ids
@@ -41,24 +56,42 @@ async def test_list_agents_points_back_at_the_briefing(seeded_kernel):
     and never tried at all. The pointer has to name the verb that carries the
     recipe AND the field, or a caller has no way from here to there.
     """
-    r = await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
+        )
+    )[0]["result"]
     more = r.get("more", "")
     assert "reflect" in more
     assert "self_extension" in more
 
 
 async def test_create_agent_requires_handler_module(seeded_kernel):
-    r = await seeded_kernel.send("kernel_state", {"type": "create_agent"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "create_agent"}}]
+        )
+    )[0]["result"]
     assert "error" in r
 
 
 async def test_create_agent_emits_agent_created(seeded_kernel):
     seeded_kernel.watch("kernel_state", "watcher")
     seeded_kernel.ctx.ensure_inbox("watcher")
-    await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     q = seeded_kernel.ctx.ensure_inbox("watcher")
     events = []
     while not q.empty():
@@ -68,23 +101,56 @@ async def test_create_agent_emits_agent_created(seeded_kernel):
 
 
 async def test_delete_agent(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
-    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": aid})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
+        )
+    )[0]["result"]
     assert r["deleted"] is True
 
 
 async def test_delete_agent_emits_event(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     seeded_kernel.ctx.ensure_inbox("w")
     seeded_kernel.watch("kernel_state", "w")
-    await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": rec["id"]})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "delete_agent", "id": rec["id"]},
+                }
+            ]
+        )
+    )[0]["result"]
     q = seeded_kernel.ctx.ensure_inbox("w")
     events = []
     while not q.empty():
@@ -98,13 +164,27 @@ async def test_delete_agent_runs_on_delete_hook(seeded_kernel):
     The hook tears down bundle process-memory state; disk cleanup is the
     loader's (the `removed` event drives rmtree). Here we verify the
     cascade detaches the record cleanly (no error, gone from the tree)."""
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     assert aid in seeded_kernel.ctx.agents
-    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": aid})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
+        )
+    )[0]["result"]
     assert r["deleted"] is True
     assert seeded_kernel.get(aid) is None
     assert aid not in seeded_kernel.ctx.agents
@@ -114,26 +194,64 @@ async def test_delete_agent_runs_on_delete_hook(seeded_kernel):
 async def test_delete_agent_handler_module_without_on_delete(seeded_kernel):
     """Bundles that don't define `on_delete` fall through cleanly (no
     error). file_bridge.tools has no on_delete hook."""
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
-    r = await seeded_kernel.send(
-        "kernel_state", {"type": "delete_agent", "id": rec["id"]}
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "delete_agent", "id": rec["id"]},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r == {"deleted": True, "id": rec["id"]}
     assert seeded_kernel.get(rec["id"]) is None
 
 
 async def test_update_agent(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "update_agent", "id": rec["id"], "x": 100, "y": 200},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": rec["id"],
+                        "x": 100,
+                        "y": 200,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["updated"] is True
     refreshed = seeded_kernel.get(rec["id"])
     assert refreshed["x"] == 100
@@ -141,20 +259,36 @@ async def test_update_agent(seeded_kernel):
 
 
 async def test_update_agent_emits_event_with_changed_keys(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     seeded_kernel.ctx.ensure_inbox("w")
     seeded_kernel.watch("kernel_state", "w")
     # drain creation events
     q = seeded_kernel.ctx.ensure_inbox("w")
     while not q.empty():
         q.get_nowait()
-    await seeded_kernel.send(
-        "kernel_state",
-        {"type": "update_agent", "id": rec["id"], "model": "x"},
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": rec["id"], "model": "x"},
+                }
+            ]
+        )
+    )[0]["result"]
     events = []
     while not q.empty():
         events.append(q.get_nowait())
@@ -165,16 +299,27 @@ async def test_delete_agent_refused_when_locked(seeded_kernel):
     """delete_lock=True on the record blocks delete. Response carries
     explicit `locked:True` flag for machine-readable detection (LLM
     callers parse this from their tool reply)."""
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "delete_lock": True,
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "delete_lock": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
-    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": aid})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
+        )
+    )[0]["result"]
     assert r.get("locked") is True
     assert r.get("id") == aid
     assert "delete_lock" in r.get("error", "")
@@ -183,36 +328,79 @@ async def test_delete_agent_refused_when_locked(seeded_kernel):
 
 
 async def test_delete_agent_succeeds_after_unlock(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "delete_lock": True,
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "delete_lock": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     # Locked → refused.
-    r1 = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": aid})
+    r1 = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
+        )
+    )[0]["result"]
     assert r1.get("locked") is True
     # Unlock via update_agent.
-    await seeded_kernel.send(
-        "kernel_state", {"type": "update_agent", "id": aid, "delete_lock": False}
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": aid,
+                        "delete_lock": False,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # Now delete succeeds.
-    r2 = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": aid})
+    r2 = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
+        )
+    )[0]["result"]
     assert r2["deleted"] is True
     assert seeded_kernel.get(aid) is None
 
 
 async def test_delete_agent_unlocked_record_works(seeded_kernel):
     """Records without delete_lock (or False) delete normally."""
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
-    r = await seeded_kernel.send(
-        "kernel_state", {"type": "delete_agent", "id": rec["id"]}
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "delete_agent", "id": rec["id"]},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["deleted"] is True
     assert "locked" not in r

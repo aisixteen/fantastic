@@ -46,11 +46,17 @@ async def _slow_handler(id, payload, kernel):
         return {"finished": True}  # never reached in these tests
     if verb == "chain":
         # A nested send — the callee's dispatch becomes a CHILD task of this one.
-        return await kernel.send(payload["next"], {"type": "slow"})
+        return (
+            await kernel.send(
+                [{"target": payload["next"], "payload": {"type": "slow"}}]
+            )
+        )[0]["result"]
     if verb == "kill":
         # An AGENT cancelling another agent's work: discover via `ps`, then
         # `cancel`. Plain verbs — no privileged surface, no bundle coupling.
-        table = await kernel.send("kernel", {"type": "ps"})
+        table = (await kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[
+            0
+        ]["result"]
         victim = [
             t
             for t in table["tasks"]
@@ -58,9 +64,16 @@ async def _slow_handler(id, payload, kernel):
         ]
         if not victim:
             return {"error": "no victim task"}
-        return await kernel.send(
-            "kernel", {"type": "cancel", "task_id": victim[0]["id"]}
-        )
+        return (
+            await kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {"type": "cancel", "task_id": victim[0]["id"]},
+                    }
+                ]
+            )
+        )[0]["result"]
     return {"error": f"unknown verb {verb!r}"}
 
 
@@ -88,19 +101,30 @@ async def _mk(
     can_call: dict | None = None,
     callable_by: dict | None = None,
 ) -> str:
-    payload = {"type": "create_agent", "handler_module": SLOW, "id": agent_id}
+    payload = {
+        "type": "create_agent",
+        "parent_id": kernel.id,
+        "handler_module": SLOW,
+        "id": agent_id,
+    }
     # Two-sided deny-all: a `chain` send to a SIBLING needs BOTH the caller's
     # `can_call` (egress) and the callee's `callable_by` (ingress).
     if can_call is not None:
         payload["can_call"] = can_call
     if callable_by is not None:
         payload["callable_by"] = callable_by
-    rec = await kernel.send("kernel_state", payload)
+    rec = (await kernel.send([{"target": "kernel_state", "payload": payload}]))[0][
+        "result"
+    ]
     return rec["id"]
 
 
 async def _rows(kernel) -> list[dict]:
-    return (await kernel.send("kernel", {"type": "ps"}))["tasks"]
+    return (
+        (await kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0][
+            "result"
+        ]
+    )["tasks"]
 
 
 async def _row_for(kernel, agent: str, verb: str) -> dict | None:
@@ -120,7 +144,9 @@ async def test_ps_shows_the_tree_of_a_nested_send(seeded_kernel):
     a = await _mk(seeded_kernel, "slow_a", can_call={"slow_b": ["slow"]})
     b = await _mk(seeded_kernel, "slow_b", callable_by={"slow_a": ["slow"]})
 
-    caller = asyncio.create_task(seeded_kernel.send(a, {"type": "chain", "next": b}))
+    caller = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "chain", "next": b}}])
+    )
     await asyncio.wait_for(_run_flag(b).wait(), timeout=2)
 
     parent = await _row_for(seeded_kernel, a, "chain")
@@ -153,17 +179,23 @@ async def test_ps_shows_the_tree_of_a_nested_send(seeded_kernel):
 async def test_cancel_kills_the_whole_subtree(seeded_kernel):
     """Cancelling A's task kills A AND the B dispatch A is blocked on — children
     first, like killing a process group. The blocked caller's `send` RESOLVES to
-    {"cancelled": True}; it never raises."""
+    a status:'cancelled' outcome; it never raises."""
     _hook_calls.clear()
     a = await _mk(seeded_kernel, "slow_a", can_call={"slow_b": ["slow"]})
     b = await _mk(seeded_kernel, "slow_b", callable_by={"slow_a": ["slow"]})
 
-    caller = asyncio.create_task(seeded_kernel.send(a, {"type": "chain", "next": b}))
+    caller = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "chain", "next": b}}])
+    )
     await asyncio.wait_for(_run_flag(b).wait(), timeout=2)
     a_task = (await _row_for(seeded_kernel, a, "chain"))["id"]
     b_task = (await _row_for(seeded_kernel, b, "slow"))["id"]
 
-    r = await seeded_kernel.send("kernel", {"type": "cancel", "task_id": a_task})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": a_task}}]
+        )
+    )[0]["result"]
     assert r["cancelled"] is True
     # Leaves-up: the child is killed before the parent that awaits it.
     assert r["killed"] == [b_task, a_task]
@@ -173,7 +205,8 @@ async def test_cancel_kills_the_whole_subtree(seeded_kernel):
     assert a_task not in live and b_task not in live
 
     # The blocked caller gets the cancellation as a REPLY.
-    assert await asyncio.wait_for(caller, timeout=2) == {"cancelled": True}
+    out = (await asyncio.wait_for(caller, timeout=2))[0]
+    assert out["status"] == "cancelled" and out["result"] == {"cancelled": True}
 
     # The on_cancel hook ran for BOTH agents, each with its own task id, and in
     # both cases BEFORE the abort (the asyncio task was still alive).
@@ -189,24 +222,44 @@ async def test_cancel_unknown_or_finished_task_is_honest(seeded_kernel):
     so: {"cancelled": False, "killed": []}. No pretending, no raise."""
     a = await _mk(seeded_kernel, "slow_a")
 
-    r = await seeded_kernel.send(
-        "kernel", {"type": "cancel", "task_id": "no_such_agent:7"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "cancel", "task_id": "no_such_agent:7"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r == {"cancelled": False, "killed": []}
 
     # A task id that WAS live and is now finished (we just cancelled it).
-    caller = asyncio.create_task(seeded_kernel.send(a, {"type": "slow"}))
+    caller = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "slow"}}])
+    )
     await asyncio.wait_for(_run_flag(a).wait(), timeout=2)
     task_id = (await _row_for(seeded_kernel, a, "slow"))["id"]
-    first = await seeded_kernel.send("kernel", {"type": "cancel", "task_id": task_id})
+    first = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": task_id}}]
+        )
+    )[0]["result"]
     assert first["cancelled"] is True
-    assert await asyncio.wait_for(caller, timeout=2) == {"cancelled": True}
+    out = (await asyncio.wait_for(caller, timeout=2))[0]
+    assert out["status"] == "cancelled" and out["result"] == {"cancelled": True}
 
-    again = await seeded_kernel.send("kernel", {"type": "cancel", "task_id": task_id})
+    again = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": task_id}}]
+        )
+    )[0]["result"]
     assert again == {"cancelled": False, "killed": []}
 
     # A malformed call fails LOUD, it does not report a phantom success.
-    bad = await seeded_kernel.send("kernel", {"type": "cancel"})
+    bad = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "cancel"}}])
+    )[0]["result"]
     assert "error" in bad
 
 
@@ -221,16 +274,23 @@ async def test_agent_cancels_another_agents_task(seeded_kernel):
     victim = await _mk(seeded_kernel, "slow_victim")
     killer = await _mk(seeded_kernel, "slow_killer")
 
-    caller = asyncio.create_task(seeded_kernel.send(victim, {"type": "slow"}))
+    caller = asyncio.create_task(
+        seeded_kernel.send([{"target": victim, "payload": {"type": "slow"}}])
+    )
     await asyncio.wait_for(_run_flag(victim).wait(), timeout=2)
     victim_task = (await _row_for(seeded_kernel, victim, "slow"))["id"]
 
-    r = await seeded_kernel.send(killer, {"type": "kill", "victim": victim})
+    r = (
+        await seeded_kernel.send(
+            [{"target": killer, "payload": {"type": "kill", "victim": victim}}]
+        )
+    )[0]["result"]
     assert r["cancelled"] is True
     assert r["killed"] == [victim_task]
 
     assert victim_task not in {t["id"] for t in await _rows(seeded_kernel)}
-    assert await asyncio.wait_for(caller, timeout=2) == {"cancelled": True}
+    out = (await asyncio.wait_for(caller, timeout=2))[0]
+    assert out["status"] == "cancelled" and out["result"] == {"cancelled": True}
 
 
 async def test_script_agent_cancels_another_agents_task(seeded_kernel):
@@ -239,19 +299,28 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
     task id, and sends `cancel`. Nothing about cancellation is special-cased for
     in-process callers."""
     victim = await _mk(seeded_kernel, "slow_victim")
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "exec_bridge.tools",
-            "interpreters": [sys.executable],
-            "shim": "python",
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "exec_bridge.tools",
+                        "interpreters": [sys.executable],
+                        "shim": "python",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     runner = rec["id"]
 
-    caller = asyncio.create_task(seeded_kernel.send(victim, {"type": "slow"}))
+    caller = asyncio.create_task(
+        seeded_kernel.send([{"target": victim, "payload": {"type": "slow"}}])
+    )
     await asyncio.wait_for(_run_flag(victim).wait(), timeout=2)
     victim_task = (await _row_for(seeded_kernel, victim, "slow"))["id"]
 
@@ -262,60 +331,84 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
         "r = kernel.send('kernel', {'type': 'cancel', 'task_id': mine[0]['id']})\n"
         "print('CANCELLED', mine[0]['id'], r['cancelled'], flush=True)\n"
     )
-    started = await seeded_kernel.send(runner, {"type": "start", "code": code})
+    started = (
+        await seeded_kernel.send(
+            [{"target": runner, "payload": {"type": "start", "code": code}}]
+        )
+    )[0]["result"]
     assert "job_id" in started, started
 
     # The victim's caller unblocks with the cancellation reply — the script did it.
-    assert await asyncio.wait_for(caller, timeout=15) == {"cancelled": True}
+    out = (await asyncio.wait_for(caller, timeout=15))[0]
+    assert out["status"] == "cancelled" and out["result"] == {"cancelled": True}
     assert victim_task not in {t["id"] for t in await _rows(seeded_kernel)}
 
 
 # ─── reflect advertises the substrate's own verbs ──────────────
 
 
-async def test_every_reflect_advertises_the_system_verbs(seeded_kernel):
-    """`ps`/`cancel` are universal system verbs — they belong to no bundle, so
-    EVERY reflect advertises them. One round-trip, on any agent, tells a caller
-    that work in flight is inspectable and killable.
+async def test_every_reflect_advertises_the_kernel_verbs(seeded_kernel):
+    """`kernel_verbs` is ADVERTISED everywhere and ANSWERED only by the root.
 
-    Root-only was tried and reverted. It put the surface where it was least
-    needed: gemma4:12b reflected the three agents it cared about (that is where
-    the descriptions are), never reflected the root, and so never saw
-    `update_agent`'s signature. It guessed the args from neighbouring names,
-    guessed wrong, and abandoned the task. Placement follows WHERE A CALLER
-    LOOKS, not where the field is cheapest to attach (~115 tok, +11-17%).
+    Advertised everywhere: root-only advertisement was tried and reverted. It put
+    the surface where it was least needed — gemma4:12b reflected the three agents
+    it cared about (that is where the descriptions are), never reflected the root,
+    never saw `update_agent`'s signature, guessed the args from neighbouring names,
+    guessed wrong, and abandoned the task. Placement follows WHERE A CALLER LOOKS,
+    not where the field is cheapest to attach (~115 tok, +11-17%).
 
-    DISTILLED carries every NAME, plus the ARGUMENTS of the mutating verbs;
-    `detail='full'` carries every docstring.
+    Answered by the root only (2026-08-24): these verbs act on the TREE and on the
+    kernel-wide task table, so the agent they name is the OPERAND, not the actor.
+    While every agent answered them, "send create_agent to X" could mean X performs
+    it, X is created under something, or X is the parent — and only the last was
+    true. A model asked "But how do I invoke create_agent? Which target?", never
+    resolved it, and finished 16 turns with `agents_created: []`.
 
-    Names-only was tried and reverted. The signatures do live in the
-    `system-verbs` doc page (asserted below), but REACHABLE IS NOT READ:
-    gemma4:12b found `update_agent`, guessed from its neighbours that it
-    "requires a task ID" (that is `cancel`), and abandoned the task. The split is
-    by BLAST RADIUS — a wrong guess about `ps` costs one failed read and the
-    reply teaches you; a wrong guess about `update_agent` blocks the task or
-    mutates the wrong thing, and those are the calls a weak model will not fire
-    blind to find out."""
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
-    sv = r["system_verbs"]
+    So the two properties are deliberately different, and the `_` line is what
+    reconciles them for a reader who only ever reflects one leaf."""
+    r = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
+    )[0]["result"]
+    kv = r["kernel_verbs"]
     for v in ("ps", "cancel", "create_agent", "update_agent", "delete_agent"):
-        assert v in sv
-    # mutating verbs carry their args…
-    assert "id:str" in sv["update_agent"], (
-        f"the line gemma needed: {sv['update_agent']!r}"
-    )
-    assert "handler_module:str" in sv["create_agent"]
-    assert "task_id:str" in sv["cancel"]
-    # …read-only verbs stay bare (their reply is self-teaching)
-    assert sv["ps"] == "" and sv["list_agents"] == ""
-    full = await seeded_kernel.send("kernel", {"type": "reflect", "detail": "full"})
-    fsv = full["system_verbs"]
-    assert "task_id" in fsv["cancel"] and "subtree" in fsv["cancel"].lower()
-    assert "tasks" in fsv["ps"]
-    # A NON-ROOT agent carries it too — that is the whole point of the revert.
-    leaf = await seeded_kernel.send("cli", {"type": "reflect"})
-    assert "id:str" in leaf["system_verbs"]["update_agent"]
-    assert leaf["system_verbs"]["ps"] == ""
+        assert v in kv
+    assert "OPERAND" in kv["_"] and "kernel" in kv["_"]
+
+    # Every verb carries its signature — the line gemma needed…
+    assert "id:str" in kv["update_agent"], f"{kv['update_agent']!r}"
+    assert "handler_module:str" in kv["create_agent"]
+    assert "task_id:str" in kv["cancel"]
+    # …including the read-only ones, which used to render as a bare name.
+    assert kv["ps"] and kv["list_agents"], "a name with no signature is unusable"
+
+    # BLAST RADIUS SURVIVES THE TRUNCATION. Distilled keeps only the text before
+    # the first em-dash, and these are the facts a caller needs BEFORE firing.
+    assert "REQUIRED" in kv["create_agent"], "the parent must be stated"
+    assert "CASCADES" in kv["delete_agent"], "a subtree delete must say so"
+    assert "SUBTREE" in kv["cancel"].upper()
+    assert "REPLACED, NOT MERGED" in kv["update_agent"]
+
+    full = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
+    fkv = full["kernel_verbs"]
+    assert "task_id" in fkv["cancel"] and "subtree" in fkv["cancel"].lower()
+    assert "tasks" in fkv["ps"]
+
+    # A NON-ROOT agent ADVERTISES them — the whole point of the revert…
+    leaf = (
+        await seeded_kernel.send([{"target": "cli", "payload": {"type": "reflect"}}])
+    )[0]["result"]
+    assert "id:str" in leaf["kernel_verbs"]["update_agent"]
+    assert leaf["kernel_verbs"]["ps"]
+    # …and REFUSES them, naming where to go instead.
+    denied = (await seeded_kernel.send([{"target": "cli", "payload": {"type": "ps"}}]))[
+        0
+    ]["result"]
+    assert denied["reason"] == "not_here" and denied["verb"] == "ps"
+    assert "kernel" in denied["hint"], f"a refusal must be actionable: {denied!r}"
     # `runtime` stays root-only — it describes the KERNEL, not what an agent answers.
     assert "runtime" not in leaf
 
@@ -324,13 +417,30 @@ async def test_system_verb_signatures_are_reachable_from_the_doc_tree(seeded_ker
     """THE TRIM'S PRECONDITION. Distilled drops the system-verb docstrings, so
     their arguments must be readable somewhere a caller can actually get to —
     otherwise `cancel`'s signature is unreachable at any price."""
-    idx = await seeded_kernel.send("kernel", {"type": "reflect", "readme": "index"})
+    idx = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "readme": "index"}}]
+        )
+    )[0]["result"]
     assert "system-verbs" in {e["key"] for e in idx["readme"]["index"]}
-    doc = await seeded_kernel.send(
-        "kernel", {"type": "reflect", "readme": "system-verbs"}
-    )
+    doc = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "system-verbs"},
+                }
+            ]
+        )
+    )[0]["result"]
     body = doc["readme"]["body"]
     assert "task_id" in body and "handler_module" in body
     # And the distilled reply must POINT at it, or nobody finds the page.
-    more = (await seeded_kernel.send("kernel", {"type": "reflect"}))["more"]
+    more = (
+        (
+            await seeded_kernel.send(
+                [{"target": "kernel", "payload": {"type": "reflect"}}]
+            )
+        )[0]["result"]
+    )["more"]
     assert "system-verbs" in more

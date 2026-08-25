@@ -1,0 +1,57 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/owned_subtree_delete.yaml`.
+
+
+loaders:
+  # ── the doomed roster ────────────────────────────────────────
+  - id: l_a
+    file: fantastic_a.yaml
+    manifest:
+      agents:
+        - id: a_head
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          can_call:
+            a_notes: [set, read]
+            a_leaf: [list]
+        # Carries a sidecar (`state.yaml`), so the cascade has more to remove
+        # than one agent.json.
+        - id: a_notes
+          handler_module: yaml_state.tools
+          mode: data
+          callable_by:
+            a_head: [set, read]
+        - id: a_leaf
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          callable_by:
+            a_head: [list]
+
+  # ── the neighbour roster, and the lock ───────────────────────
+  - id: l_b
+    file: fantastic_b.yaml
+    manifest:
+      agents:
+        # The persistence provider, DISCOVERED by match: a file_bridge whose
+        # root resolves to the loader's own `.fantastic` dir
+        # (kernel_state/tools.py `_find_store`, which walks the subtree).
+        - id: store
+          handler_module: file_bridge.tools
+          root: .fantastic
+          ingress_rule: allow_all_ingress
+        - id: b_head
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          can_call:
+            b_leaf: [list]
+        - id: b_leaf
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          callable_by:
+            b_head: [list]
+        # The lock lives on the NEIGHBOUR so one config can hold both halves:
+        # `l_a` cascades cleanly, `l_b` refuses until this is cleared.
+        - id: b_vault
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          delete_lock: true

@@ -32,7 +32,9 @@ async def _index_page(kernel) -> str:
     """Render the root index — the substrate tree. Reads the HTML scaffold per
     request so editing `templates/index.html` hot-reloads (matches the
     edit-and-refresh dev loop other webapps use)."""
-    primer = await kernel.send("kernel", {"type": "reflect"})
+    primer = (
+        await kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
+    )[0]["result"]
     tree = primer.get("tree", {})
 
     def _esc(s: str) -> str:
@@ -111,10 +113,21 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
             return Response(status_code=404)
         # Streaming path: read_stream chunk 0 doubles as the gate + size probe.
         with sender_context(web_agent_id):
-            first = await kernel.send(
-                agent_id,
-                {"type": "read_stream", "path": path, "offset": 0, "length": 262144},
-            )
+            first = (
+                await kernel.send(
+                    [
+                        {
+                            "target": agent_id,
+                            "payload": {
+                                "type": "read_stream",
+                                "path": path,
+                                "offset": 0,
+                                "length": 262144,
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         if isinstance(first, dict) and isinstance(
             first.get("bytes"), (bytes, bytearray)
         ):
@@ -131,15 +144,21 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
                     # handler returned, so it re-enters the context per chunk
                     # rather than relying on the handler's still being active.
                     with sender_context(web_agent_id):
-                        chunk = await kernel.send(
-                            agent_id,
-                            {
-                                "type": "read_stream",
-                                "path": path,
-                                "offset": chunk["next_offset"],
-                                "length": 262144,
-                            },
-                        )
+                        chunk = (
+                            await kernel.send(
+                                [
+                                    {
+                                        "target": agent_id,
+                                        "payload": {
+                                            "type": "read_stream",
+                                            "path": path,
+                                            "offset": chunk["next_offset"],
+                                            "length": 262144,
+                                        },
+                                    }
+                                ]
+                            )
+                        )[0]["result"]
                     if not isinstance(chunk, dict) or not isinstance(
                         chunk.get("bytes"), (bytes, bytearray)
                     ):

@@ -74,8 +74,12 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         # delete) subscribe + persist. The debounce task won't tick
         # before we exit, so drain it synchronously after the call.
         if kernel.root is not None:
-            await kernel.send(kernel.root.id, {"type": "boot"})
-        reply = await kernel.send(target, body)
+            (
+                await kernel.send(
+                    [{"target": kernel.root.id, "payload": {"type": "boot"}}]
+                )
+            )[0]["result"]
+        reply = (await kernel.send([{"target": target, "payload": body}]))[0]["result"]
         print(json.dumps(reply, indent=2, default=str))
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:
@@ -114,18 +118,30 @@ async def init(kernel, rest: list[str]) -> None:
     with FantasticLock():
         if kernel.root is not None:
             # Boot the root loader so the new records subscribe + persist.
-            await kernel.send(kernel.root.id, {"type": "boot"})
+            (
+                await kernel.send(
+                    [{"target": kernel.root.id, "payload": {"type": "boot"}}]
+                )
+            )[0]["result"]
         # create_agent boots the loader child → its own boot reads the manifest
         # and hydrates the roster. The kernel never parses YAML; the loader does.
-        reply = await kernel.send(
-            kernel.root.id,
-            {
-                "type": "create_agent",
-                "handler_module": f"{loader_name}.tools",
-                "id": loader_name,
-                "manifest": manifest,
-            },
-        )
+        reply = (
+            await kernel.send(
+                [
+                    {
+                        "target": kernel.root.id,
+                        "payload": {
+                            "type": "create_agent",
+                            # A top-level loader — the root owns it.
+                            "parent_id": kernel.root.id,
+                            "handler_module": f"{loader_name}.tools",
+                            "id": loader_name,
+                            "manifest": manifest,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         print(json.dumps(reply, indent=2, default=str))
         loop = getattr(kernel.root, "_fs_flush_loop", None)
         if loop is not None:
@@ -150,6 +166,6 @@ async def reflect(kernel, rest: list[str]) -> None:
     else:
         target, kv = "kernel", rest
     body = {"type": "reflect", **_parse_kv(kv)}
-    reply = await kernel.send(target, body)
+    reply = (await kernel.send([{"target": target, "payload": body}]))[0]["result"]
     print(json.dumps(reply, indent=2, default=str))
     return None

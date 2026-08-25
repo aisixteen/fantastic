@@ -56,7 +56,7 @@ what makes output line-live).
 ## Your `code` is a SCRIPT
 
 Give a record `code` + an interpreter and it becomes a durable tool:
-`create_agent handler_module=exec_bridge.tools id=<name>
+`create_agent parent_id=<owner> handler_module=exec_bridge.tools id=<name>
 interpreters='["<abs path to an interpreter>"]' shim=python code='<program as one JSON
 string>'` — one entry needs no `interpreter` field to pick it (`code` is ONE JSON string, so
 escape newlines as `\n` and quotes as `\"`).

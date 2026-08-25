@@ -71,6 +71,7 @@ testpaths = [
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/llamacpp/llamacpp_backend/tests",
   "bundled_agents/ai/nvidia/nvidia_nim_backend/tests",
+  "bundled_agents/ai/anthropic/anthropic_backend/tests",
   "bundled_agents/io/io_bridge/tests",
   "bundled_agents/io/ws_bridge/tests",
   "bundled_agents/io/relay_connector/tests",

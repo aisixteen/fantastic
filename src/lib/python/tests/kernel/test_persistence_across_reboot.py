@@ -21,10 +21,21 @@ from _testkit import boot_root, persist
 async def test_top_level_agent_rehydrates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(
-        k1.id,
-        {"type": "create_agent", "handler_module": "file_bridge.tools", "x": 7},
-    )
+    rec = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k1.id,
+                        "handler_module": "file_bridge.tools",
+                        "x": 7,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     assert aid in k1.ctx.agents
     persist(k1)
@@ -40,13 +51,35 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
     parent-child link). Structure rehydrates from disk position."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    parent = await k1.send(
-        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    parent = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k1.id,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     parent_id = parent["id"]
-    child = await k1.send(
-        parent_id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    child = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": parent_id,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     child_id = child["id"]
     persist(k1)
 
@@ -63,9 +96,20 @@ async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
     other agents in the same dir hydrate fine."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(
-        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    rec = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k1.id,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     good_id = rec["id"]
     persist(k1)
     # Plant a corrupt sibling.
@@ -83,9 +127,20 @@ async def test_reboot_resets_in_flight_counters(tmp_path, monkeypatch):
     NOT persist. Only records do."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    rec = await k1.send(
-        k1.id, {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    rec = (
+        await k1.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k1.id,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     persist(k1)
     # Bump in_flight artificially then reboot.

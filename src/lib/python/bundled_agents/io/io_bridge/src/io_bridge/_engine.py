@@ -163,7 +163,7 @@ async def _read_loop(id: str, kernel: Any) -> None:
     """Long-lived consumer of the transport. Frame shapes:
 
       - inbound `call` — `{type:'call', id, target, payload}`: dispatch via
-        `kernel.send(target, payload)`, reply `{type:'reply', id, data}`. (For a
+        `kernel.send([{"target": target, "payload": payload}])`, reply `{type:'reply', id, data}`. (For a
         pure-client WS bridge this never fires — its peer is `web_ws`; for paired
         transports — MemoryTransport tests, the relay — it carries the callee role.)
       - inbound `reply` — resolve the pending Future for `id`.
@@ -201,10 +201,11 @@ async def _read_loop(id: str, kernel: Any) -> None:
                     if decision.see:
                         reply["see"] = decision.see
                 else:
-                    try:
-                        reply = await kernel.send(target, payload)
-                    except Exception as e:
-                        reply = {"error": f"bridge: kernel.send raised: {e}"}
+                    # A handler raise settles as a failed outcome — the error
+                    # rides in `result`, so the wire keeps its `data` shape.
+                    reply = (
+                        await kernel.send([{"target": target, "payload": payload}])
+                    )[0]["result"]
                 await transport.send(
                     {"type": "reply", "id": frame.get("id"), "data": reply}
                 )

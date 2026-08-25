@@ -1,8 +1,14 @@
 # Fantastic Kernel — Claude Code working notes
 
 A medium that unifies humans and AIs into a single workspace. Recursive
-`Agent` class + a `Kernel` shared-context object, one primitive
-(`send(target_id, payload)`), plugin-discovered bundles. Every agent
+`Agent` class + a `Kernel` shared-context object, one primitive — the ARRAY-ONLY
+batch send `send([{target, payload, timeout?}, ...]) -> [{pid, status, result}]`
+(single call = `(await send([{...}]))[0]`; statuses
+`completed|failed|cancelled|timed_out`; concurrent dispatch, input order
+preserved; timeout per item, NEVER defaulted by the kernel, enforced through
+`cancel_task` so `on_cancel` hooks run; there is deliberately NO single-call
+sugar — one shape prevents drift) — plugin-discovered bundles. Python is ahead
+of rust/swift/ts on this contract until `tmp/pychanges.md` #29 is ported. Every agent
 answers `{type:"reflect"}` — the universal discovery verb.
 
 > **NO FALLBACKS — this is a kernel, not a SaaS. Build it fallback-less, close to
@@ -35,7 +41,8 @@ answers `{type:"reflect"}` — the universal discovery verb.
 │   Agent  — recursive node; .send / .emit / .create / .delete             │
 │   Kernel — tree-wide ctx (flat agents index, state stream, save/load,    │
 │            TASK TABLE — every in-flight dispatch, a tree)                │
-│   System verbs (create/delete/update/list_agents + ps/cancel) baked      │
+│   KERNEL verbs (create/delete/update/list_agents + ps/cancel) — the      │
+│   ROOT answers them; every reflect ADVERTISES them as `kernel_verbs`.    │
 │   into Agent.                                                            │
 │   CALL GATE — two-sided deny-all `Agent.send` (kernel/_authz.py): an     │
 │   AGENT send needs the sender's `can_call` (egress) AND the target's     │
@@ -98,7 +105,7 @@ browser JS, peers over one WS):
 
 - **Three unit kinds, one calling convention.** `exec_bridge` (a background
   compute job), an AI backend (one inference turn), and `yaml_state` (durable
-  memory) are all reached the same way: `send(<id>, {type, ...})`. A workflow step
+  memory) are all reached the same way: one item in a `send([...])` batch. A workflow step
   written as code and the same step written as an LLM call are **substitutable** —
   swap an `exec_bridge.start` for an `ai.send` and the wiring is unchanged. This
   is the point: anywhere you'd hand-write a classifier / decision / transform, you
@@ -147,7 +154,7 @@ uv sync                                              # install workspace + bundl
 fantastic                                            # boot all + REPL (tty) + daemon (if web is persisted)
 fantastic <id> <verb> [k=v ...]                      # one-shot RPC
 fantastic reflect [<id>]                             # shorthand: <id> reflect (default: kernel)
-fantastic kernel_state create_agent handler_module=web.tools port=8888    # persist web record (first time)
+fantastic kernel create_agent parent_id=kernel_state parent_id=kernel_state handler_module=web.tools port=8888   # persist web record
 fantastic init static_loader ./fantastic.yaml        # seed a declarative-roster loader + boot it
 ```
 
@@ -173,9 +180,9 @@ serves only render/static routes; its call surfaces (`web_ws`, `web_rest`) are
 
 ```bash
 # local dev — open the WS leg wide:
-fantastic <web> create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress
+fantastic kernel create_agent parent_id=kernel_state parent_id=<web> handler_module=web_ws.tools ingress_rule=allow_all_ingress
 # shared group — require the group token (from $FANTASTIC_GROUP_TOKEN):
-fantastic <web> create_agent handler_module=web_rest.tools ingress_rule=password_ingress
+fantastic kernel create_agent parent_id=kernel_state parent_id=<web> handler_module=web_rest.tools ingress_rule=password_ingress
 ```
 
 Without the `ingress_rule`, the leg mounts but every inbound frame/request is
@@ -235,7 +242,7 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 
 | bundle | role |
 |---|---|
-| `kernel_state` | the ROOT agent (`id="kernel_state"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). System verbs are native to Agent; the bootstrap wires Cli when `stdin.isatty()`. |
+| `kernel_state` | the ROOT agent (`id="kernel_state"`) AND the persistence/hydration root: owns `.fantastic/`; answers `load_tree` / `persist_record` / `forget_record`; auto-persists the live tree by subscribing to the kernel state stream (debounced flush). A `root` meta lets a non-root instance serve a sub-namespace (the host-side of the frontend's `web/<session>/`). Kernel verbs are answered HERE, at the root, and nowhere else; the bootstrap wires Cli when `stdin.isatty()`. |
 | `static_loader` | a DECLARATIVE roster loader (`loader/static_loader`). Reads a `fantastic.yaml` manifest (`manifest` field) and at `boot` hydrates the declared agents as OPERATOR (`operator_context` + normal `create_agent`), as its own children — each carrying the baseline grant + the manifest's explicit `can_call`. The kernel never parses YAML; this bundle owns the format (mirror of `kernel_state` owning the `.fantastic` layout). After boot the roster is CLOSED by deny-all (an agent can't `create_agent`), so the manifest IS the roster. Idempotent by id (a reboot re-reads + skips existing). Seed with `fantastic init static_loader ./fantastic.yaml`. |
 | `cli` | singleton child of root; renders token/done/say/error events to stdout |
 | `web` | uvicorn HTTP host. Serves rendering only — `/` (root index from `templates/index.html`), `/<id>/` (agent's `render_html`), `/<id>/file/<path>` (read-verb file proxy), favicon. Call surfaces (WS, REST) live in sibling sub-agents and mount via the duck-typed `get_routes` verb. The TS frontend kernel brings its own typed WS bridge (`ts/`) — no transport script is injected here. |
@@ -353,16 +360,30 @@ the next process start.
   dispatch as a registered `asyncio.Task`; a `send` issued INSIDE a handler
   is a **CHILD** of that handler's task (the current id rides a
   `_current_task` contextvar, exactly as the sender rides `_current_sender`),
-  so the table is a **tree**. Two universal SYSTEM verbs read and act on it —
-  baked into `Agent`, in no bundle's `verbs` map, so EVERY agent is
-  cancelable and an AGENT can wield them on another agent:
-  - `ps` → `{tasks:[{id, agent, parent, verb, started_at}]}` — the live table.
+  so the table is a **tree**. Two KERNEL verbs read and act on it — baked into
+  the substrate, in no bundle's `verbs` map, answered by the ROOT. A task id
+  already names its own agent (`<agent>:<token>`), which is why neither verb
+  needs a target. An agent granted `cancel` on the kernel can kill ANY task:
+  before 2026-08-24 every agent answered these, so a manifest could grant
+  "A may watch and kill B's work" as one edge — that granularity is gone,
+  knowingly, in exchange for one unambiguous address:
+  - `ps` → `{tasks:[{id, agent, parent, verb, started_at}], next}` — the live table.
+    PAGED like `list_agents` and `reflect tree=ids`: pass `limit` (+ `after`,
+    the opaque cursor a previous page returned) to bound the reply. Absent
+    `limit` ⇒ everything and `next:null`, so the default is unchanged and the
+    field is inert until asked for. The cursor names the last item handed
+    over, never an offset; over a live tree it may miss an item deleted
+    mid-walk — this is a kernel, not a snapshot store. A cursor naming
+    something gone returns EMPTY rather than silently restarting from the top.
   - `cancel task_id=<id>` → kills that task **AND ITS SUBTREE** (children
     first, like a process group) → `{cancelled:true, killed:[id,...]}`; an
     unknown/finished id → `{cancelled:false, killed:[]}` (no pretending).
-    The cancelled dispatch's blocked caller gets the REPLY `{cancelled:true}` —
-    cancellation never raises out of `send`.
-  Advertised on the ROOT reflect as `system_verbs`. Bundles that fork work
+    The cancelled dispatch's blocked caller sees its batch item settle as
+    `{status:'cancelled', result:{cancelled:true}}` — cancellation never raises
+    out of `send`.
+  Advertised on EVERY reflect as `kernel_verbs` (answered by the root alone —
+  advertised widely because root-only advertisement was tried and reverted: a
+  model that never reflects the root never learns they exist). Bundles that fork work
   OUTLIVING a dispatch (an `exec_bridge` job) register it with
   `kernel.ctx.spawn_task(...)`, so `ps` sees it and `cancel` reaches it.
 - **`on_cancel` bundle hook** — the SIGTERM half of `cancel`: cancelling an
@@ -562,7 +583,7 @@ unbypassable:
    **SEALED / deny-all by default** (every verb except `reflect` denies). A bundle that
    needs disk does NOT import `fs`; it `send`s `read`/`write`/`read_stream`/`write_stream`
    to a file_bridge agent referenced by **`file_bridge_id`** on its record. The operator/LLM
-   **wires + opens** that provider on demand (`create_agent file_bridge … ingress_rule=…`,
+   **wires + opens** that provider on demand (`create_agent parent_id=<owner> file_bridge … ingress_rule=…`,
    then set `file_bridge_id`). So the *access control* is real for in-process bundles too —
    not just the clamp. `yaml_state` / `scheduler` / `ai_core` / `nvidia_nim` already route
    this way; they failfast if `file_bridge_id` is unset (no silent RAM).

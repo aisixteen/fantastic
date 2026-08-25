@@ -86,15 +86,11 @@ async def _status(id, payload, kernel):
         if "reply_preview" in tool:
             # exit
             preview = tool.get("reply_preview", "")
-            if len(preview) > 80:
-                preview = preview[:80] + "…"
             print(f"{prefix} ← {verb}({target})  {preview}")
         else:
             # entry — args summary on the line
             args = tool.get("args") or {}
             args_str = json.dumps(args, default=str)
-            if len(args_str) > 80:
-                args_str = args_str[:80] + "…"
             print(f"{prefix} → {verb}({target})  {args_str}")
     # `streaming` and `done` are silent — handled by other verbs.
     return None

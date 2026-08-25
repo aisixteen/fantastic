@@ -3,14 +3,14 @@
 A bridge agent on kernel A opens a WS connection to kernel B's `web_ws` endpoint
 and ships **raw** bridge frames. A local agent reaches a remote agent with:
 
-    await kernel.send(local_bridge_id, {
+    (await kernel.send([{"target": local_bridge_id, "payload": {
         "type": "forward",
         "target": "<remote_agent_id>",
         "payload": {"type": "reflect"},
-    })
+    }}]))[0]["result"]
 
 The bridge sends `{type:'call', id, target, payload}`; B's `web_ws` dispatches it
-via `kernel.send(target, payload)` exactly like a browser call, and the matching
+via `kernel.send([{"target": target, "payload": payload}])` exactly like a browser call, and the matching
 `{type:'reply', id, data}` flows back. **No B-side bridge agent needed** — the
 bridge is an asymmetric client. Streaming uses `watch_remote` →
 `{type:'watch', src}`; `{type:'event'}` frames re-emit on the bridge's own inbox.

@@ -28,10 +28,21 @@ def _real_python() -> str:
 
 
 async def _make(kernel, **meta) -> str:
-    rec = await kernel.send(
-        kernel.id,
-        {"type": "create_agent", "handler_module": "exec_bridge.tools", **meta},
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "exec_bridge.tools",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, f"exec_bridge creation failed: {rec!r}"
     return rec["id"]
 
@@ -49,15 +60,32 @@ async def _accept(kernel, target: str, caller: str, verbs) -> None:
     tgt = kernel.ctx.agents.get(target)
     cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
     cb[caller] = verbs
-    await kernel.send(
-        kernel.id, {"type": "update_agent", "id": target, "callable_by": cb}
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": kernel.id,
+                    "payload": {
+                        "type": "update_agent",
+                        "id": target,
+                        "callable_by": cb,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 async def _poll_done(kernel, xid: str, job_id: str, timeout: float = 10.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        j = (await kernel.send(xid, {"type": "status", "job_id": job_id}))["jobs"][0]
+        j = (
+            (
+                await kernel.send(
+                    [{"target": xid, "payload": {"type": "status", "job_id": job_id}}]
+                )
+            )[0]["result"]
+        )["jobs"][0]
         if j["status"] in ("done", "failed", "stopped"):
             return j
         await asyncio.sleep(0.05)
@@ -150,7 +178,11 @@ async def test_shim_python_gives_the_program_a_working_kernel(seeded_kernel):
         "print(kernel.self_id, flush=True)\n"
         f"print(kernel.send({peer!r}, {{'type': 'reflect'}})['id'], flush=True)\n"
     )
-    r = await seeded_kernel.send(xid, {"type": "start", "code": code})
+    r = (
+        await seeded_kernel.send(
+            [{"target": xid, "payload": {"type": "start", "code": code}}]
+        )
+    )[0]["result"]
     j = await _poll_done(seeded_kernel, xid, r["job_id"])
     assert j["status"] == "done", f"shimmed job failed: {j!r}"
     assert xid in j["stdout"], "the program must know its OWNER id, not the job id"
@@ -161,10 +193,20 @@ async def test_the_shim_may_be_asked_for_per_call_not_only_on_the_record(seeded_
     """`shim` on the payload is what makes one leg serve both shapes; if only the record
     could carry it, a leg would be as language-bound as the bundle it replaces."""
     xid = await _wired(seeded_kernel)  # NO shim on the record
-    r = await seeded_kernel.send(
-        xid,
-        {"type": "start", "shim": "python", "code": "print(kernel.self_id)"},
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "shim": "python",
+                        "code": "print(kernel.self_id)",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     j = await _poll_done(seeded_kernel, xid, r["job_id"])
     assert xid in j["stdout"], f"per-call shim not applied: {j!r}"
 
@@ -178,14 +220,20 @@ async def test_no_shim_leaves_the_program_unmodified(seeded_kernel):
     # a gated send: grant xid's egress + the peer's reciprocal ingress.
     xid = await _wired(seeded_kernel, can_call={peer: ["reflect"]})
     await _accept(seeded_kernel, peer, xid, ["reflect"])
-    r = await seeded_kernel.send(
-        xid,
-        {
-            "type": "start",
-            "code": _RAW_WIRE.replace("__TARGET__", peer),
-            "args": {"k": 1},
-        },
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": _RAW_WIRE.replace("__TARGET__", peer),
+                        "args": {"k": 1},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     j = await _poll_done(seeded_kernel, xid, r["job_id"])
     assert j["status"] == "done", f"raw-wire job failed: {j!r}"
     out = j["stdout"]
@@ -199,9 +247,16 @@ async def test_an_unknown_shim_is_refused_at_start_naming_the_served_set(seeded_
     """A caller asking for a language this bridge does not serve must be told which it
     does — and nothing may be spawned in the meantime."""
     xid = await _wired(seeded_kernel)
-    r = await seeded_kernel.send(
-        xid, {"type": "start", "shim": "ruby", "code": "puts 1"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {"type": "start", "shim": "ruby", "code": "puts 1"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "unknown shim" in r["error"]
     assert "python" in r["error"], "the refusal must name the served set"
     assert "job_id" not in r, "nothing may be spawned"
@@ -210,15 +265,22 @@ async def test_an_unknown_shim_is_refused_at_start_naming_the_served_set(seeded_
 async def test_an_unknown_shim_is_refused_at_the_WRITE_too(seeded_kernel):
     """`create_agent` discards the boot reply, so a record carrying an unservable shim
     would look created and fail only when someone ran it."""
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "exec_bridge.tools",
-            "ingress_rule": "allow_all_ingress",
-            "shim": "ruby",
-        },
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "exec_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        "shim": "ruby",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "unknown" in r["error"]
     assert "python" in r["error"]
-    assert r.get("created") is False and "id" not in r
+    assert r.get("reason") == "invalid_meta" and "id" not in r

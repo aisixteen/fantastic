@@ -46,16 +46,23 @@ async def _host_with_web_loader():
     """Host root + a real `web_loader` (created → booted → anchor seeded +
     alias registered). Returns (host_root_agent, web_loader_id)."""
     host = boot_root()
-    wl = await host.send(
-        host.id,
-        {
-            "type": "create_agent",
-            "handler_module": "kernel_state.tools",
-            "root": ".fantastic/web",
-            "watch": False,
-            "alias": "web_loader",
-        },
-    )
+    wl = (
+        await host.send(
+            [
+                {
+                    "target": host.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": host.id,
+                        "handler_module": "kernel_state.tools",
+                        "root": ".fantastic/web",
+                        "watch": False,
+                        "alias": "web_loader",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     return host, wl["id"]
 
 
@@ -75,24 +82,39 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
 
     # ── PERSIST each record through web_loader via the ALIAS (re-rooted) ──
     for rec in fe.save()["records"]:
-        reply = await host.send(
-            "web_loader",
-            {"type": "persist_record", "record": _persist_reroot(rec, wl_id)},
-        )
+        reply = (
+            await host.send(
+                [
+                    {
+                        "target": "web_loader",
+                        "payload": {
+                            "type": "persist_record",
+                            "record": _persist_reroot(rec, wl_id),
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert reply.get("ok") is True
     # a `*.ts` record persists too — the loader is a dumb store; the host never
     # runs it (proves frontend bundle records round-trip intact).
-    await host.send(
-        "web_loader",
-        {
-            "type": "persist_record",
-            "record": {
-                "id": "vfx",
-                "handler_module": "gl_agent.ts",
-                "parent_id": "canvas",
-            },
-        },
-    )
+    (
+        await host.send(
+            [
+                {
+                    "target": "web_loader",
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {
+                            "id": "vfx",
+                            "handler_module": "gl_agent.ts",
+                            "parent_id": "canvas",
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
     # ── on host disk, under the web/ namespace ──
     web = tmp_path / ".fantastic" / "web" / "agents"
@@ -101,7 +123,9 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
     assert (web / "canvas" / "agents" / "vfx" / "agent.json").exists()
 
     # ── REHYDRATE: a fresh frontend kernel loads via web_loader.load_tree ──
-    reply = await host.send("web_loader", {"type": "load_tree"})
+    reply = (
+        await host.send([{"target": "web_loader", "payload": {"type": "load_tree"}}])
+    )[0]["result"]
     records = _load_reroot(reply["records"], wl_id)
     by_id = {r["id"]: r for r in records}
     assert by_id["vfx"]["handler_module"] == "gl_agent.ts"  # *.ts round-tripped intact
@@ -118,7 +142,9 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
     assert "canvas" in fe2.get("panel")["parent_id"]
 
     # ── NAMESPACE SEPARATION: the host MAIN kernel never holds these records ──
-    listed = await host.send(host.id, {"type": "list_agents"})
+    listed = (
+        await host.send([{"target": host.id, "payload": {"type": "list_agents"}}])
+    )[0]["result"]
     host_ids = {a["id"] for a in listed["agents"]}
     assert wl_id in host_ids  # the loader itself IS a host agent
     assert not ({"canvas", "panel", "term", "vfx"} & host_ids)
@@ -130,24 +156,55 @@ async def test_two_tree_roundtrip(tmp_path, monkeypatch):
 async def test_two_tree_forget(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     host, wl_id = await _host_with_web_loader()
-    await host.send(
-        "web_loader",
-        {"type": "persist_record", "record": {"id": "canvas", "parent_id": wl_id}},
-    )
-    await host.send(
-        "web_loader",
-        {"type": "persist_record", "record": {"id": "child", "parent_id": "canvas"}},
-    )
+    (
+        await host.send(
+            [
+                {
+                    "target": "web_loader",
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {"id": "canvas", "parent_id": wl_id},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await host.send(
+            [
+                {
+                    "target": "web_loader",
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {"id": "child", "parent_id": "canvas"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     child_dir = (
         tmp_path / ".fantastic" / "web" / "agents" / "canvas" / "agents" / "child"
     )
     assert child_dir.exists()
     # forget the nested child (parent_id resolves the path — it's no longer live)
-    await host.send(
-        "web_loader", {"type": "forget_record", "id": "child", "parent_id": "canvas"}
-    )
+    (
+        await host.send(
+            [
+                {
+                    "target": "web_loader",
+                    "payload": {
+                        "type": "forget_record",
+                        "id": "child",
+                        "parent_id": "canvas",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert not child_dir.exists()
     # the parent survives + still loads
-    reply = await host.send("web_loader", {"type": "load_tree"})
+    reply = (
+        await host.send([{"target": "web_loader", "payload": {"type": "load_tree"}}])
+    )[0]["result"]
     assert "canvas" in {r["id"] for r in reply["records"]}
     assert "child" not in {r["id"] for r in reply["records"]}

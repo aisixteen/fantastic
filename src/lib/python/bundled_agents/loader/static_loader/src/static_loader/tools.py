@@ -100,10 +100,25 @@ async def _boot(id, payload, agent):
             if aid and agent.ctx.agents.get(aid) is not None:
                 skipped.append(aid)
                 continue
-            # create_agent to SELF → the declared agent becomes THIS loader's child
-            # ($parent = the loader). Baseline grant is stamped + the manifest's
-            # explicit `can_call` merges on top; the child boots inside create_agent.
-            rec = await agent.send(agent.id, {"type": "create_agent", **spec})
+            # `parent_id` = THIS loader → the declared agent becomes the loader's
+            # child ($parent = the loader), exactly as addressing the loader used to
+            # do. Baseline grant is stamped + the manifest's explicit `can_call`
+            # merges on top; the child boots inside create_agent. The verb itself is
+            # kernel-owned, so it goes to `kernel` and names its operand.
+            rec = (
+                await agent.send(
+                    [
+                        {
+                            "target": "kernel",
+                            "payload": {
+                                "type": "create_agent",
+                                "parent_id": agent.id,
+                                **spec,
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
             if isinstance(rec, dict) and rec.get("id"):
                 created.append(rec["id"])
             else:

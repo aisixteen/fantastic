@@ -97,6 +97,7 @@ def test_state_event_lifecycle_added(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
+                        "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
                     },
                     "id": "create1",
@@ -123,6 +124,7 @@ def test_state_event_lifecycle_removed(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
+                        "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
                     },
                     "id": "c",
@@ -226,6 +228,7 @@ def test_state_event_carries_display_name_when_present(client, seeded_kernel):
                     "target": "kernel_state",
                     "payload": {
                         "type": "create_agent",
+                        "parent_id": "kernel_state",
                         "handler_module": "file_bridge.tools",
                         "display_name": "my-store",
                     },

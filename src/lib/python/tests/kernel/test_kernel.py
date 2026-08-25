@@ -178,13 +178,22 @@ async def test_reflect_kernel_returns_uniform_identity(seeded_kernel):
     tree (default all). The alias "kernel" and the real id "kernel_state" give
     the same reply. Old primer keys (transports etc.) are gone — they
     live in the root readme now."""
-    r = await seeded_kernel.send("kernel", {"type": "reflect"})
+    r = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
+    )[0]["result"]
     assert r["id"] == "kernel_state"
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["tree"]["id"] == "kernel_state"
     assert "transports" not in r
     assert "available_bundles" not in r
-    assert r == await seeded_kernel.send("kernel_state", {"type": "reflect"})
+    assert (
+        r
+        == (
+            await seeded_kernel.send(
+                [{"target": "kernel_state", "payload": {"type": "reflect"}}]
+            )
+        )[0]["result"]
+    )
 
 
 async def test_inbox_bounded_drops_oldest(kernel):

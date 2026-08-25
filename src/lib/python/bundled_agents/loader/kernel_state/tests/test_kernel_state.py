@@ -98,16 +98,25 @@ async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
     never papers over a missing provider with a direct-write back-channel."""
     monkeypatch.chdir(tmp_path)
     root = boot_root()
-    await root.send(root.id, {"type": "boot"})  # start the flush loop (no provider)
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]  # start the flush loop (no provider)
     try:
-        rec = await root.send(
-            root.id,
-            {
-                "type": "create_agent",
-                "handler_module": "yaml_state.tools",
-                "mode": "mem",
-            },
-        )
+        rec = (
+            await root.send(
+                [
+                    {
+                        "target": root.id,
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": root.id,
+                            "handler_module": "yaml_state.tools",
+                            "mode": "mem",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         aid = rec["id"]
         await asyncio.sleep(0.3)  # debounce window
         assert root.ctx.get_agent(aid) is not None  # live in the tree (RAM)
@@ -134,12 +143,25 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
     assert (
         _find_store(root) == "store"
     )  # discovered by match (root resolves to .fantastic)
-    await root.send(root.id, {"type": "boot"})  # start the flush loop
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]  # start the flush loop
     try:
-        rec = await root.send(
-            root.id,
-            {"type": "create_agent", "handler_module": "file_bridge.tools", "x": 7},
-        )
+        rec = (
+            await root.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": root.id,
+                            "handler_module": "file_bridge.tools",
+                            "x": 7,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         aid = rec["id"]
         agent_dir = tmp_path / ".fantastic" / "agents" / aid
         await asyncio.sleep(0.3)  # let the debounce flush stream the record
@@ -147,7 +169,11 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
         assert json.loads((agent_dir / "agent.json").read_text())["x"] == 7
         assert (agent_dir / "readme.md").exists()  # readme seeded via stream too
 
-        await root.send(root.id, {"type": "delete_agent", "id": aid})
+        (
+            await root.send(
+                [{"target": root.id, "payload": {"type": "delete_agent", "id": aid}}]
+            )
+        )[0]["result"]
         await asyncio.sleep(0.3)  # recursive delete routed through the provider
         assert not agent_dir.exists()
     finally:
@@ -162,15 +188,22 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = boot_root()
     sess = ".fantastic/web/s1"
-    rec = await root.send(
-        root.id,
-        {
-            "type": "create_agent",
-            "handler_module": "kernel_state.tools",
-            "watch": False,
-            "root": sess,
-        },
-    )
+    rec = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "kernel_state.tools",
+                        "watch": False,
+                        "root": sess,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     sid = rec["id"]
     # boot seeds the namespace anchor (read_tree needs a root agent.json)
     assert (tmp_path / sess / "agent.json").exists()
@@ -178,43 +211,68 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     # persist two JS view records (NOT live host agents) — they nest under
     # the session root. The JS root (canvas) sends parent_id = the session
     # loader's id, so it lands as a direct child of the namespace.
-    await root.send(
-        sid,
-        {
-            "type": "persist_record",
-            "record": {
-                "id": "canvas",
-                "handler_module": "canvas.ts",
-                "parent_id": sid,
-            },
-        },
-    )
-    await root.send(
-        sid,
-        {
-            "type": "persist_record",
-            "record": {
-                "id": "term1",
-                "handler_module": "terminal_view.ts",
-                "parent_id": "canvas",
-            },
-        },
-    )
+    (
+        await root.send(
+            [
+                {
+                    "target": sid,
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {
+                            "id": "canvas",
+                            "handler_module": "canvas.ts",
+                            "parent_id": sid,
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": sid,
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {
+                            "id": "term1",
+                            "handler_module": "terminal_view.ts",
+                            "parent_id": "canvas",
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     canvas_dir = tmp_path / sess / "agents" / "canvas"
     term_dir = canvas_dir / "agents" / "term1"
     assert (canvas_dir / "agent.json").exists()
     assert (term_dir / "agent.json").exists()
 
     # load_tree reads the namespace back (anchor + canvas + term1)
-    reply = await root.send(sid, {"type": "load_tree"})
+    reply = (await root.send([{"target": sid, "payload": {"type": "load_tree"}}]))[0][
+        "result"
+    ]
     by_id = {r["id"]: r for r in reply["records"]}
     assert {sid, "canvas", "term1"}.issubset(by_id)
     assert by_id["canvas"]["parent_id"] == sid  # disk position
     assert by_id["term1"]["parent_id"] == "canvas"
 
     # forget removes the JS agent's nested dir (parent_id resolves the path)
-    await root.send(
-        sid, {"type": "forget_record", "id": "term1", "parent_id": "canvas"}
-    )
+    (
+        await root.send(
+            [
+                {
+                    "target": sid,
+                    "payload": {
+                        "type": "forget_record",
+                        "id": "term1",
+                        "parent_id": "canvas",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert not term_dir.exists()
     assert canvas_dir.exists()  # sibling untouched

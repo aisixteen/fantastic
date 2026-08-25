@@ -31,10 +31,21 @@ def _real_python() -> str:
 
 
 async def _make(kernel, **meta) -> str:
-    rec = await kernel.send(
-        kernel.id,
-        {"type": "create_agent", "handler_module": "exec_bridge.tools", **meta},
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "exec_bridge.tools",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, f"exec_bridge creation failed: {rec!r}"
     return rec["id"]
 
@@ -57,7 +68,13 @@ def _watch(kernel, agent_id: str):
 async def _poll_done(kernel, xid: str, job_id: str, timeout: float = 10.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        j = (await kernel.send(xid, {"type": "status", "job_id": job_id}))["jobs"][0]
+        j = (
+            (
+                await kernel.send(
+                    [{"target": xid, "payload": {"type": "status", "job_id": job_id}}]
+                )
+            )[0]["result"]
+        )["jobs"][0]
         if j["status"] in ("done", "failed", "stopped"):
             return j
         await asyncio.sleep(0.05)
@@ -69,7 +86,11 @@ async def _poll_settled(kernel, xid: str, n: int = 1, timeout: float = 10.0):
     rather than no-op, and stdout has been finalized on every row."""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        jobs = (await kernel.send(xid, {"type": "status"}))["jobs"]
+        jobs = (
+            (await kernel.send([{"target": xid, "payload": {"type": "status"}}]))[0][
+                "result"
+            ]
+        )["jobs"]
         if len(jobs) >= n and all(
             j["status"] not in ("running", "stopping") for j in jobs
         ):
@@ -123,11 +144,23 @@ async def test_start_with_no_code_falls_back_to_the_record(seeded_kernel):
     """The persisted `code` IS the tool: `start` with no payload code must run it, or a
     durable tool could only ever be invoked by resending its own source."""
     xid = await _wired(seeded_kernel)
-    await seeded_kernel.send(
-        "kernel_state",
-        {"type": "update_agent", "id": xid, "code": "print('FROM_THE_RECORD')"},
-    )
-    r = await seeded_kernel.send(xid, {"type": "start"})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": xid,
+                        "code": "print('FROM_THE_RECORD')",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "start"}}]))[0][
+        "result"
+    ]
     assert r["status"] == "running", f"record code not used: {r!r}"
     j = await _poll_done(seeded_kernel, xid, r["job_id"])
     assert "FROM_THE_RECORD" in j["stdout"]
@@ -140,7 +173,16 @@ async def test_create_agent_with_code_auto_runs_via_boot(seeded_kernel):
     jobs = await _poll_settled(seeded_kernel, xid, n=1)
     assert len(jobs) == 1, f"create_agent did not boot the code: {jobs!r}"
     snap = (
-        await seeded_kernel.send(xid, {"type": "status", "job_id": jobs[0]["job_id"]})
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": xid,
+                        "payload": {"type": "status", "job_id": jobs[0]["job_id"]},
+                    }
+                ]
+            )
+        )[0]["result"]
     )["jobs"][0]
     assert "AUTOBOOTED" in snap["stdout"] and snap["exit_code"] == 0
 
@@ -150,10 +192,18 @@ async def test_boot_is_idempotent_while_a_job_is_live(seeded_kernel):
     harnesses on one inbox double-deliver every inbound send."""
     xid = await _wired(seeded_kernel, id="xb_bootonce", shim="python", code=_ECHO)
     await asyncio.sleep(0.4)  # create → boot → parked on the inbox
-    assert await seeded_kernel.send(xid, {"type": "boot"}) is None
-    jobs = (await seeded_kernel.send(xid, {"type": "status"}))["jobs"]
+    assert (await seeded_kernel.send([{"target": xid, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"] is None
+    jobs = (
+        (await seeded_kernel.send([{"target": xid, "payload": {"type": "status"}}]))[0][
+            "result"
+        ]
+    )["jobs"]
     assert len(jobs) == 1, f"boot stacked another job: {jobs!r}"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 # ─── boot PROPAGATES the refusal (the silent-success hole) ──────
@@ -170,11 +220,22 @@ async def test_boot_returns_the_spawn_error_when_nothing_is_allowlisted(seeded_k
         id="xb_boot_noalw",
         code="print('must never run')",
     )
-    r = await seeded_kernel.send(xid, {"type": "boot"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert isinstance(r, dict) and "error" in r, f"boot reported silent success: {r!r}"
     assert "no interpreters are allowlisted" in r["error"]
     assert "operator must set" in r["error"]
-    assert (await seeded_kernel.send(xid, {"type": "status"}))["jobs"] == []
+    assert (
+        (
+            (
+                await seeded_kernel.send(
+                    [{"target": xid, "payload": {"type": "status"}}]
+                )
+            )[0]["result"]
+        )["jobs"]
+        == []
+    )
 
 
 async def test_boot_returns_the_refusal_after_the_allowlist_is_narrowed(seeded_kernel):
@@ -199,28 +260,51 @@ async def test_boot_returns_the_refusal_after_the_allowlist_is_narrowed(seeded_k
     assert (
         "ran once"
         in (
-            await seeded_kernel.send(
-                xid, {"type": "status", "job_id": first[0]["job_id"]}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": xid,
+                            "payload": {"type": "status", "job_id": first[0]["job_id"]},
+                        }
+                    ]
+                )
+            )[0]["result"]
         )["jobs"][0]["stdout"]
     )
 
     # The verb WOULD refuse this — assert that, so the guard cannot silently regress…
-    refused = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "update_agent", "id": xid, "interpreters": ["/nowhere/bin/python"]},
-    )
-    assert refused.get("updated") is False, (
+    refused = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": xid,
+                        "interpreters": ["/nowhere/bin/python"],
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert refused.get("reason") == "invalid_meta", (
         "narrowing under a named interpreter must refuse"
     )
     assert "not allowlisted" in refused["error"]
     # …then reach the state the way hydration does: straight onto the record.
     seeded_kernel.update(xid, interpreters=["/nowhere/bin/python"])
 
-    r = await seeded_kernel.send(xid, {"type": "boot"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert isinstance(r, dict) and "error" in r, f"boot reported silent success: {r!r}"
     assert "not allowlisted" in r["error"] and "/nowhere/bin/python" in r["error"]
-    jobs = (await seeded_kernel.send(xid, {"type": "status"}))["jobs"]
+    jobs = (
+        (await seeded_kernel.send([{"target": xid, "payload": {"type": "status"}}]))[0][
+            "result"
+        ]
+    )["jobs"]
     assert len(jobs) == 1, f"a refused boot must spawn nothing: {jobs!r}"
 
 
@@ -233,19 +317,34 @@ async def test_an_unowned_verb_is_mail_for_a_live_job(seeded_kernel):
     the delivery, so re-emitting would double every message."""
     xid = await _wired(seeded_kernel, id="xb_mail", shim="python", code=_ECHO)
     await asyncio.sleep(0.4)
-    assert await seeded_kernel.send(xid, {"type": "tick", "v": 1}) == {"queued": True}
+    assert (
+        await seeded_kernel.send([{"target": xid, "payload": {"type": "tick", "v": 1}}])
+    )[0]["result"] == {"queued": True}
     q = _watch(seeded_kernel, xid)
-    await seeded_kernel.send(xid, {"type": "send", "text": "mailed", "client_id": "c"})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {"type": "send", "text": "mailed", "client_id": "c"},
+                }
+            ]
+        )
+    )[0]["result"]
     says = await _collect_says(q, "mailed")
     assert len(says) == 1 and says[0]["client_id"] == "c", f"got {says!r}"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
     """A script that only DEFINES something exits before its first turn arrives. Silent
     acceptance would look like delivery to a program that is not there."""
     xid = await _wired(seeded_kernel)
-    r = await seeded_kernel.send(xid, {"type": "tick"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "tick"}}]))[0][
+        "result"
+    ]
     assert "error" in r and "'tick'" in r["error"]
     assert "no running job" in r["error"]
 
@@ -256,14 +355,27 @@ async def test_a_restart_does_not_double_deliver(seeded_kernel):
     also not evict its own replacement (the bug `c2a4297` fixed)."""
     xid = await _wired(seeded_kernel, id="xb_restart", shim="python", code=_ECHO)
     await asyncio.sleep(0.4)  # first (boot) job registered on_message
-    r = await seeded_kernel.send(xid, {"type": "start"})  # durable restart → 2nd job
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "start"}}]))[0][
+        "result"
+    ]  # durable restart → 2nd job
     assert r["status"] == "running"
     await asyncio.sleep(0.4)  # 2nd job supersedes the inbox subscription
     q = _watch(seeded_kernel, xid)
-    await seeded_kernel.send(xid, {"type": "send", "text": "once", "client_id": "c"})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {"type": "send", "text": "once", "client_id": "c"},
+                }
+            ]
+        )
+    )[0]["result"]
     says = await _collect_says(q, "once")
     assert len(says) == 1, f"expected exactly one echo after restart, got {len(says)}"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 # ─── the kernel TASK TABLE: cancel REAPS the OS process ─────────
@@ -274,18 +386,35 @@ async def test_a_job_holds_a_row_in_the_kernel_task_table(seeded_kernel):
     the kernel loses sight of the subprocess the moment `start` replies, and an
     unreachable subprocess is an orphan waiting to happen."""
     xid = await _wired(seeded_kernel)
-    r = await seeded_kernel.send(
-        xid, {"type": "start", "code": "import time\ntime.sleep(30)"}
-    )
-    snap = (await seeded_kernel.send(xid, {"type": "status", "job_id": r["job_id"]}))[
-        "jobs"
-    ][0]
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {"type": "start", "code": "import time\ntime.sleep(30)"},
+                }
+            ]
+        )
+    )[0]["result"]
+    snap = (
+        (
+            await seeded_kernel.send(
+                [{"target": xid, "payload": {"type": "status", "job_id": r["job_id"]}}]
+            )
+        )[0]["result"]
+    )["jobs"][0]
     task_id = snap["task_id"]
     assert task_id and task_id.startswith(xid + ":")
-    rows = (await seeded_kernel.send("kernel", {"type": "ps"}))["tasks"]
+    rows = (
+        (await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[
+            0
+        ]["result"]
+    )["tasks"]
     row = next(t for t in rows if t["id"] == task_id)
     assert row["agent"] == xid and row["verb"] == "start"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 async def test_cancel_really_reaps_the_os_subprocess(seeded_kernel):
@@ -293,16 +422,30 @@ async def test_cancel_really_reaps_the_os_subprocess(seeded_kernel):
     does, and the kernel awaits it BEFORE aborting the task. Assert the PROCESS is gone
     (`os.kill` raises), not merely that the task object was cancelled."""
     xid = await _wired(seeded_kernel)
-    r = await seeded_kernel.send(
-        xid, {"type": "start", "code": "import time\nwhile True: time.sleep(1)"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": "import time\nwhile True: time.sleep(1)",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     jid = r["job_id"]
     process = xb._jobs[jid]["proc"]
     os_pid = process.pid
     assert process.returncode is None  # the child is really running
     task_id = xb._jobs[jid]["task_id"]
 
-    got = await seeded_kernel.send("kernel", {"type": "cancel", "task_id": task_id})
+    got = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": task_id}}]
+        )
+    )[0]["result"]
     assert got == {"cancelled": True, "killed": [task_id]}
 
     assert await _dead(process), f"pid {os_pid} survived cancel — ORPHANED"
@@ -310,9 +453,19 @@ async def test_cancel_really_reaps_the_os_subprocess(seeded_kernel):
     with pytest.raises(ProcessLookupError):
         os.kill(os_pid, 0)
 
-    rows = (await seeded_kernel.send("kernel", {"type": "ps"}))["tasks"]
+    rows = (
+        (await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[
+            0
+        ]["result"]
+    )["tasks"]
     assert task_id not in {t["id"] for t in rows}
-    snap = (await seeded_kernel.send(xid, {"type": "status", "job_id": jid}))["jobs"][0]
+    snap = (
+        (
+            await seeded_kernel.send(
+                [{"target": xid, "payload": {"type": "status", "job_id": jid}}]
+            )
+        )[0]["result"]
+    )["jobs"][0]
     assert snap["status"] == "stopped", "no row may be left stuck `running`"
 
 
@@ -320,11 +473,25 @@ async def test_deleting_the_agent_reaps_its_running_jobs(seeded_kernel):
     """`on_delete` is a cascade for REAL resources: dropping the record while a job runs
     would leave a process nothing can address."""
     xid = await _wired(seeded_kernel)
-    r = await seeded_kernel.send(
-        xid, {"type": "start", "code": "import time\nwhile True: time.sleep(1)"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": "import time\nwhile True: time.sleep(1)",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     process = xb._jobs[r["job_id"]]["proc"]
-    d = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": xid})
+    d = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": xid}}]
+        )
+    )[0]["result"]
     assert d.get("deleted") is True
     assert await _dead(process), "delete_agent orphaned the subprocess"
 

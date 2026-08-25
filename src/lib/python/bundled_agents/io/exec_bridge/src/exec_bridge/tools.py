@@ -236,10 +236,13 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 continue
             op = m.get("op")
             if op == "send":
-                try:
-                    data = await kernel.send(m.get("target"), m.get("payload") or {})
-                except Exception as e:  # never let a target fault kill the relay
-                    data = {"error": f"exec_bridge.connector: {e}"}
+                # A target fault settles as a failed outcome (error in result);
+                # send never raises into the relay loop.
+                data = (
+                    await kernel.send(
+                        [{"target": m.get("target"), "payload": m.get("payload") or {}}]
+                    )
+                )[0]["result"]
                 push({"op": "reply", "rid": m.get("rid"), "data": data})
                 await writer.drain()
             elif op == "emit":

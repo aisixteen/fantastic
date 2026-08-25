@@ -53,21 +53,51 @@ async def test_seed_readme_degrades_quietly(kernel):
 
 async def test_reflect_omits_readme_by_default(seeded_kernel):
     """Plain reflect never carries `readme` — it stays lean."""
-    rec = await seeded_kernel.send(
-        "kernel_state", {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
-    r = await seeded_kernel.send(rec["id"], {"type": "reflect"})
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (
+        await seeded_kernel.send(
+            [{"target": rec["id"], "payload": {"type": "reflect"}}]
+        )
+    )[0]["result"]
     assert "readme" not in r
 
 
 async def test_reflect_readme_attaches_content(seeded_kernel):
     """reflect with `readme: true` → reply carries the agent's
     readme.md content (seeded by the loader on persist)."""
-    rec = await seeded_kernel.send(
-        "kernel_state", {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     persist(seeded_kernel)
-    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "readme": True})
+    r = (
+        await seeded_kernel.send(
+            [{"target": rec["id"], "payload": {"type": "reflect", "readme": True}}]
+        )
+    )[0]["result"]
     assert "readme" in r
     assert isinstance(r["readme"], str)
     assert "file" in r["readme"].lower()
@@ -76,11 +106,26 @@ async def test_reflect_readme_attaches_content(seeded_kernel):
 async def test_reflect_readme_null_when_absent(seeded_kernel):
     """An agent with no readme.md on disk → `readme` is null (not a
     missing key, not a crash)."""
-    rec = await seeded_kernel.send(
-        "kernel_state", {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # No persist → no readme on disk for this agent.
-    r = await seeded_kernel.send(rec["id"], {"type": "reflect", "readme": True})
+    r = (
+        await seeded_kernel.send(
+            [{"target": rec["id"], "payload": {"type": "reflect", "readme": True}}]
+        )
+    )[0]["result"]
     assert r["readme"] is None
 
 
@@ -88,7 +133,11 @@ async def test_kernel_reflect_readme_is_root_readme(kernel):
     """`reflect kernel readme=true` → the root's readme
     (`.fantastic/readme.md`), the bootstrap doc. The root is an
     `kernel_state` agent, so the bootstrap seeds kernel_state's readme there."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": True})
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "readme": True}}]
+        )
+    )[0]["result"]
     assert isinstance(r["readme"], str)
     assert "Fantastic kernel" in r["readme"]
     # The readme documents the reflect surface (the bootstrap doc).

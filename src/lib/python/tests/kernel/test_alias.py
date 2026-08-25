@@ -16,14 +16,18 @@ async def test_alias_resolves_to_agent(kernel):
     # wired into well_known on register
     assert kernel.ctx.well_known.get("store") == "store_x"
     # send by alias reaches the agent
-    r = await kernel.send("store", {"type": "reflect"})
+    r = (await kernel.send([{"target": "store", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["id"] == "store_x"
 
 
 async def test_literal_id_unaffected_by_aliases(kernel):
     kernel.create("file_bridge.tools", id="real", alias="real_alias")
     # a literal id that is NOT an alias resolves to itself
-    r = await kernel.send("real", {"type": "reflect"})
+    r = (await kernel.send([{"target": "real", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["id"] == "real"
 
 
@@ -33,7 +37,9 @@ async def test_alias_cleared_on_delete(kernel):
     await kernel.delete("a1")
     assert "myalias" not in kernel.ctx.well_known
     # a dangling alias errors cleanly (resolves to itself → no such agent)
-    r = await kernel.send("myalias", {"type": "reflect"})
+    r = (await kernel.send([{"target": "myalias", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert "error" in r
 
 

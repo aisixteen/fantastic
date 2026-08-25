@@ -1,0 +1,50 @@
+# Test spec for `configs/engine_smoke.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: engine_smoke.yaml
+
+name: engine_smoke
+description: >
+  An engine fixture, not a scenario. A healthy four-agent roster wired so that
+  each of the two gate halves refuses at least once — enough shape, reachability
+  and reboot surface to keep hydrate/dehydrate/reach honest on their own.
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: worker
+  edges:
+    - name: the declared worker→memory edge is usable
+      from: worker
+      to: memory
+      send: {type: set, key: probe, value: 1}
+      allow: true
+    - name: a loader reaches its own child on the structural baseline
+      from: static_loader
+      to: memory
+      send: {type: reflect}
+      allow: true
+    - name: a verb outside the grant is refused by the sender's own egress
+      from: worker
+      to: memory
+      send: {type: delete, key: probe}
+      allow: false
+      side: egress
+    - name: can_call without callable_by is refused BY THE CALLEE
+      from: worker
+      to: quiet
+      send: {type: list, path: ""}
+      allow: false
+      side: ingress
+    - name: an undeclared lateral edge never leaves the sender
+      from: worker
+      to: island
+      send: {type: list, path: ""}
+      allow: false
+      side: egress
+    - name: a granted edge is one-way — the reverse was never declared
+      from: memory
+      to: worker
+      send: {type: list, path: ""}
+      allow: false
+      side: egress

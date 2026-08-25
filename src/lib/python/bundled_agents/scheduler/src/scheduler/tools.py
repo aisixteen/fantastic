@@ -19,7 +19,7 @@ Verbs:
   tick_now     args: schedule_id                        -> fire immediately
   history      args: limit?, schedule_id?              -> {history: [...]}
 
-A schedule fires by `kernel.send(target, payload)`. After firing, scheduler
+A schedule fires by `kernel.send([{"target": target, "payload": payload}])`. After firing, scheduler
 emits `{type:"schedule_fired", ...}` to its OWN inbox only — the target gets
 the PAYLOAD, which is the tick; echoing telemetry at it doubled every delivery.
 """
@@ -56,9 +56,16 @@ async def _file_read(sid: str, kernel, name: str) -> str | None:
     # Persist from ABOVE — sidecar I/O through the loader is operator bookkeeping
     # (a side effect of the scheduler's own authorized verb), not a lateral call.
     with operator_context():
-        r = await kernel.send(
-            "kernel_state", {"type": "load_blob", "agent_id": sid, "name": name}
-        )
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {"type": "load_blob", "agent_id": sid, "name": name},
+                    }
+                ]
+            )
+        )[0]["result"]
     return r.get("content") if isinstance(r, dict) else None
 
 
@@ -68,10 +75,21 @@ async def _file_write(sid: str, kernel, name: str, content: str) -> dict | None:
     with (
         operator_context()
     ):  # persist from above — operator bookkeeping (see _file_read)
-        w = await kernel.send(
-            "kernel_state",
-            {"type": "persist_blob", "agent_id": sid, "name": name, "content": content},
-        )
+        w = (
+            await kernel.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "persist_blob",
+                            "agent_id": sid,
+                            "name": name,
+                            "content": content,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     if isinstance(w, dict) and w.get("error"):
         out = {"error": w["error"]}
         if w.get("reason"):
@@ -173,7 +191,9 @@ async def _fire(sid: str, sch: dict, kernel) -> None:
     result = None
     error = None
     try:
-        result = await kernel.send(target, payload)
+        result = (await kernel.send([{"target": target, "payload": payload}]))[0][
+            "result"
+        ]
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 

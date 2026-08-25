@@ -59,9 +59,19 @@ async def test_docs_seeded_via_store(seeded_kernel, store_agent):
     """When a persistence provider is wired, the docs tree seeds THROUGH it too
     (copy-if-missing) — a freshly created keyed-doc agent gets its own tree."""
     persist(seeded_kernel)
-    got = await seeded_kernel.send(
-        store_agent, {"type": "read_stream", "path": "docs/self-extension.md"}
-    )
+    got = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": store_agent,
+                    "payload": {
+                        "type": "read_stream",
+                        "path": "docs/self-extension.md",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert isinstance(got.get("bytes"), (bytes, bytearray))
     assert b"author" in bytes(got["bytes"]).lower()
 
@@ -72,7 +82,11 @@ async def test_docs_seeded_via_store(seeded_kernel, store_agent):
 async def test_readme_true_is_short_orientation(kernel):
     """`readme=true` is the SHORT orientation, NOT the old monolith: it teaches
     the keyed doc tree and no longer inlines the demoted manual sections."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": True})
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "readme": True}}]
+        )
+    )[0]["result"]
     body = r["readme"]
     assert isinstance(body, str)
     assert "Fantastic kernel" in body
@@ -90,7 +104,11 @@ async def test_readme_true_is_short_orientation(kernel):
 async def test_readme_index_shape_and_nesting(kernel):
     """`readme=index` → `{index:[{key,desc,tokens,children?}]}`; entries carry NO
     body; nesting is preserved (frontend → panel-recipe/routing)."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": "index"})
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "readme": "index"}}]
+        )
+    )[0]["result"]
     idx = r["readme"]["index"]
     assert isinstance(idx, list) and idx
     by_key = {e["key"]: e for e in idx}
@@ -110,14 +128,27 @@ async def test_readme_index_shape_and_nesting(kernel):
 
 async def test_readme_key_returns_body_and_children(kernel):
     """`readme=<key>` → the topic body + its immediate sub-docs' index."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": "self-extension"})
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "self-extension"},
+                }
+            ]
+        )
+    )[0]["result"]
     doc = r["readme"]
     assert doc["key"] == "self-extension"
     assert "author" in doc["body"].lower()
     assert doc["tokens"] == Agent._est_tokens(doc["body"])
     assert "children" not in doc  # a leaf topic
 
-    parent = await kernel.send("kernel", {"type": "reflect", "readme": "frontend"})
+    parent = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "readme": "frontend"}}]
+        )
+    )[0]["result"]
     assert {c["key"] for c in parent["readme"]["children"]} == {
         "frontend/panel-recipe",
         "frontend/routing",
@@ -132,9 +163,18 @@ async def test_no_doc_desc_is_truncated_mid_sentence(kernel):
     self-extension's descriptor, and the index started advertising "…whose persisted
     `code` is a". The reader is documented as one-line; the doc has to hold up its end,
     and this test is cheaper than remembering that."""
-    idx = (await kernel.send("kernel", {"type": "reflect", "readme": "index"}))[
-        "readme"
-    ]
+    idx = (
+        (
+            await kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {"type": "reflect", "readme": "index"},
+                    }
+                ]
+            )
+        )[0]["result"]
+    )["readme"]
 
     def walk(entries):
         for e in entries:
@@ -163,7 +203,16 @@ async def test_self_extension_DOC_states_the_execution_model(kernel):
 
     The reflect string is for the model that never reads the manual; this is for the
     one that does. Both have to say it."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": "self-extension"})
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "self-extension"},
+                }
+            ]
+        )
+    )[0]["result"]
     body = r["readme"]["body"].lower()
     assert "top to bottom" in body, "the doc must state HOW the code runs"
     assert "def " in body, "the doc must warn that a bare def does nothing"
@@ -172,9 +221,16 @@ async def test_self_extension_DOC_states_the_execution_model(kernel):
 
 async def test_readme_nested_key_reachable(kernel):
     """A sub-doc is fetchable by its slashed key."""
-    r = await kernel.send(
-        "kernel", {"type": "reflect", "readme": "frontend/panel-recipe"}
-    )
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "frontend/panel-recipe"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["readme"]["key"] == "frontend/panel-recipe"
     assert "panel" in r["readme"]["body"].lower()
 
@@ -182,7 +238,16 @@ async def test_readme_nested_key_reachable(kernel):
 async def test_readme_unknown_key_is_wellformed_error(kernel):
     """Unknown key → `{error, keys}` (never a crash / null); keys lists what IS
     available so the caller can recover."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": "no-such-topic"})
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "no-such-topic"},
+                }
+            ]
+        )
+    )[0]["result"]
     doc = r["readme"]
     assert "error" in doc
     assert "self-extension" in doc["keys"]
@@ -191,7 +256,16 @@ async def test_readme_unknown_key_is_wellformed_error(kernel):
 
 async def test_readme_key_cannot_escape_docs_dir(kernel):
     """A `..`-escaping key is refused (clamped), not served."""
-    r = await kernel.send("kernel", {"type": "reflect", "readme": "../readme"})
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "readme": "../readme"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r["readme"]
 
 
@@ -201,7 +275,11 @@ async def test_readme_key_cannot_escape_docs_dir(kernel):
 async def test_root_reflect_full_carries_readmes_and_docs(kernel):
     """`detail='full'` carries `readmes` (the index) + a `docs` one-liner — the
     orientation document, asked for explicitly."""
-    r = await kernel.send("kernel", {"type": "reflect", "detail": "full"})
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
     assert isinstance(r["readmes"], list) and r["readmes"]
     keys = {e["key"] for e in r["readmes"]}
     assert "self-extension" in keys
@@ -239,7 +317,9 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     this right; gemma never opened it and had only this string. A fact the readme owns
     is a fact weak models do not have — so an affordance whose CONTRACT you do not
     know is not usable, and the execution model stays here too."""
-    r = await kernel.send("kernel", {"type": "reflect"})
+    r = (await kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     # the bulk frame is still gone — the diet holds
     assert "readmes" not in r and "docs" not in r
 
@@ -300,7 +380,11 @@ async def test_full_reflect_advertises_only_installed_executors(kernel):
     handler_module` — assert the property (named ⇔ installed), never the name."""
     from kernel_state.tools import _EXECUTORS
 
-    r = await kernel.send("kernel", {"type": "reflect", "detail": "full"})
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
     se = r["self_extension"]
     installed = {b["handler_module"] for b in Agent._available_bundles()}
 
@@ -321,16 +405,41 @@ async def test_non_root_bundle_no_frame_but_keyed(seeded_kernel):
     """A non-root bundle carries neither `readmes` nor `docs` (root-only), but IS
     keyed-fetchable: `readme=true` → its single readme; a keyless bundle's
     `readme=index` → empty; an unknown key → `{error, keys:[]}`."""
-    rec = await seeded_kernel.send(
-        "kernel", {"type": "create_agent", "handler_module": "file_bridge.tools"}
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     fid = rec["id"]
     persist(seeded_kernel)
-    r = await seeded_kernel.send(fid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": fid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert "readmes" not in r and "docs" not in r
-    full = await seeded_kernel.send(fid, {"type": "reflect", "readme": True})
+    full = (
+        await seeded_kernel.send(
+            [{"target": fid, "payload": {"type": "reflect", "readme": True}}]
+        )
+    )[0]["result"]
     assert isinstance(full["readme"], str) and full["readme"]
-    idx = await seeded_kernel.send(fid, {"type": "reflect", "readme": "index"})
+    idx = (
+        await seeded_kernel.send(
+            [{"target": fid, "payload": {"type": "reflect", "readme": "index"}}]
+        )
+    )[0]["result"]
     assert idx["readme"] == {"index": []}  # no docs/ tree
-    miss = await seeded_kernel.send(fid, {"type": "reflect", "readme": "streams"})
+    miss = (
+        await seeded_kernel.send(
+            [{"target": fid, "payload": {"type": "reflect", "readme": "streams"}}]
+        )
+    )[0]["result"]
     assert miss["readme"]["error"] and miss["readme"]["keys"] == []

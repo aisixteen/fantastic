@@ -1,0 +1,48 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/namespacing.yaml`.
+
+
+loaders:
+  - id: wing_a
+    file: wing_a.yaml
+    manifest:
+      agents:
+        # The persistence provider, DISCOVERED by match: a file_bridge whose
+        # root resolves to the loader's own `.fantastic` dir
+        # (kernel_state/tools.py `_find_store`, which walks the subtree).
+        - id: store
+          handler_module: file_bridge.tools
+          root: .fantastic
+          ingress_rule: allow_all_ingress
+        # The one grant in this roster, and it is here to be INSUFFICIENT.
+        # `persist_blob` names the namespace it writes to in its PAYLOAD
+        # (`agent_id`, kernel_state/tools.py:788), so an agent that can reach the
+        # loader's byte store can ask for any sidecar it likes. notes_a is handed
+        # exactly that egress — and the write still cannot land, because the root
+        # accepts `$children` (its DIRECT children: store, wing_a, wing_b) and a
+        # grandchild is not one of them. The defence is position, not a check of
+        # the claimed id.
+        - id: notes_a
+          handler_module: yaml_state.tools
+          mode: data
+          can_call:
+            kernel_state: [persist_blob]
+        - id: space_a
+          handler_module: file_bridge.tools
+          root: rooms/a
+          ingress_rule: allow_all_ingress
+
+  # The mirror image of wing_a, one directory over. Nothing wires the two: no
+  # `can_call` names anything across the wings, so every cross-wing probe below
+  # is refused by the sender's own egress — the roster IS the boundary.
+  - id: wing_b
+    file: wing_b.yaml
+    manifest:
+      agents:
+        - id: notes_b
+          handler_module: yaml_state.tools
+          mode: data
+        - id: space_b
+          handler_module: file_bridge.tools
+          root: rooms/b
+          ingress_rule: allow_all_ingress

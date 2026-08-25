@@ -54,14 +54,21 @@ async def seeded_kernel(kernel):
 async def file_bridge(seeded_kernel):
     """A real file_bridge agent rooted at cwd, OPENED (the fs edge is sealed by
     default) — a GENERIC file surface (file_bridge's own tests use it directly)."""
-    rec = await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "file_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, f"file_bridge agent creation failed: {rec!r}"
     return rec["id"]
 
@@ -75,14 +82,21 @@ async def store_agent(seeded_kernel):
     agent.json (one shared store, no nest). Tests just need this fixture present so the
     loader has a store. (The ai backends still wire `file_bridge_id` to it directly — their
     migration is separate.)"""
-    rec = await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "root": ".fantastic",
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "file_bridge.tools",
+                        "root": ".fantastic",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, f"store agent creation failed: {rec!r}"
     return rec["id"]

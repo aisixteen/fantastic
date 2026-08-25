@@ -64,10 +64,20 @@ async def _load(agent) -> dict[str, Any]:
     # the loader is operator bookkeeping (a side effect of your authorized verb),
     # not a lateral call — so it runs ungated, like create_agent's child-boot.
     with operator_context():
-        r = await agent.send(
-            "kernel_state",
-            {"type": "load_blob", "agent_id": agent.id, "name": "state.yaml"},
-        )
+        r = (
+            await agent.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "load_blob",
+                            "agent_id": agent.id,
+                            "name": "state.yaml",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     content = r.get("content") if isinstance(r, dict) else None
     if not content:
         return {}
@@ -83,15 +93,21 @@ async def _persist(agent, doc: dict[str, Any], verb: str) -> dict | None:
     denied/failed/no-store write as an error (no silent loss). Returns an error dict,
     or None on success."""
     with operator_context():  # persist from above — operator bookkeeping (see _load)
-        w = await agent.send(
-            "kernel_state",
-            {
-                "type": "persist_blob",
-                "agent_id": agent.id,
-                "name": "state.yaml",
-                "content": _emit_yaml(doc),
-            },
-        )
+        w = (
+            await agent.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "persist_blob",
+                            "agent_id": agent.id,
+                            "name": "state.yaml",
+                            "content": _emit_yaml(doc),
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     if not isinstance(w, dict):
         return {"error": f"yaml_state.{verb}: loader gave no reply"}
     if w.get("error"):

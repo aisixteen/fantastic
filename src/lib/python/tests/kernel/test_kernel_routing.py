@@ -12,7 +12,9 @@ async def test_send_to_missing_agent_returns_error(kernel):
     """The error names the LIVE ids, because a bare `no agent 'x'` teaches the caller
     nothing. Reading the flat index is a dict lookup, not a reflect — see
     `Kernel.unknown_agent`."""
-    r = await kernel.send("nope", {"type": "reflect"})
+    r = (await kernel.send([{"target": "nope", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["error"] == "no agent 'nope'"
     assert r["agents"] == sorted(kernel.ctx.agents)
     assert r["agent_count"] == len(kernel.ctx.agents)
@@ -23,7 +25,9 @@ async def test_placeholder_id_is_called_out_as_a_placeholder(kernel):
     """Measured 2026-08-04: a model copied `<id>` out of the prompt's own example and
     got `no agent '<id>'` thirty-four times without ever correcting. Angle brackets
     are structurally a SLOT — no id this kernel mints can contain them."""
-    r = await kernel.send("<id>", {"type": "reflect"})
+    r = (await kernel.send([{"target": "<id>", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["error"] == "no agent '<id>'"
     assert "PLACEHOLDER" in r["hint"]
     assert "agents" in r
@@ -31,7 +35,9 @@ async def test_placeholder_id_is_called_out_as_a_placeholder(kernel):
 
 async def test_send_with_bad_handler_module_returns_error(kernel):
     kernel.create("nonexistent.module.path", id="broken")
-    r = await kernel.send("broken", {"type": "reflect"})
+    r = (await kernel.send([{"target": "broken", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert "error" in r
     assert "import" in r["error"].lower() or "no module" in r["error"].lower()
 
@@ -39,7 +45,11 @@ async def test_send_with_bad_handler_module_returns_error(kernel):
 async def test_send_system_verb_answered_natively(seeded_kernel):
     """`list_agents` is a system verb every Agent answers natively
     (used to live on the `kernel_state` bundle). Returns flat all-records."""
-    r = await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
+        )
+    )[0]["result"]
     assert "agents" in r
     ids = {a["id"] for a in r["agents"]}
     assert "kernel_state" in ids
@@ -75,7 +85,11 @@ async def test_unwatch_stops_routing(kernel):
 async def test_send_also_fanouts_to_inbox(seeded_kernel):
     """`send` fans the payload out (drops on inbox) before invoking
     the handler — so watchers / state subscribers see traffic events."""
-    await seeded_kernel.send("kernel_state", {"type": "list_agents"})
+    (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
+        )
+    )[0]["result"]
     q = seeded_kernel.ctx.inboxes["kernel_state"]
     msg = q.get_nowait()
     assert msg["type"] == "list_agents"

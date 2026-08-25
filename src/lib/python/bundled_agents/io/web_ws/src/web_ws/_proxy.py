@@ -174,12 +174,13 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 data["see"] = decision.see
             await _send_envelope({"type": "reply", "id": fid, "data": data})
             return
-        try:
-            with sender_context(web_agent_id):
-                reply = await kernel.send(target, payload)
-            await _send_envelope({"type": "reply", "id": fid, "data": reply})
-        except Exception as e:
-            await _send_envelope({"type": "error", "id": fid, "error": str(e)})
+        # A handler raise settles as a failed outcome (`{"error": ..., "raised":
+        # True}` in result) — send never leaks it, so the old except net is dead.
+        with sender_context(web_agent_id):
+            reply = (await kernel.send([{"target": target, "payload": payload}]))[0][
+                "result"
+            ]
+        await _send_envelope({"type": "reply", "id": fid, "data": reply})
 
     async def _on_emit(frame):
         if not _gate("emit", frame).allowed:

@@ -65,14 +65,14 @@ pkill -9 -f "fantastic" 2>/dev/null
 mkdir -p /tmp/kb_test_a /tmp/kb_test_b
 
 (cd /tmp/kb_test_a && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
-  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic kernel_state create_agent handler_module=web.tools port=$PORT_A) >/dev/null
+  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT_A) >/dev/null
 (cd /tmp/kb_test_a && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
   python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic) \
   > /tmp/kb_a.log 2>&1 &
 SPID_A=$!
 
 (cd /tmp/kb_test_b && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
-  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic kernel_state create_agent handler_module=web.tools port=$PORT_B) >/dev/null
+  python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT_B) >/dev/null
 (cd /tmp/kb_test_b && uv run --project /Users/oleksandr/Projects/fantastic_canvas/python \
   python /Users/oleksandr/Projects/fantastic_canvas/python/fantastic) \
   > /tmp/kb_b.log 2>&1 &

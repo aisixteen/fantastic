@@ -34,6 +34,7 @@ def make_provider(id, kernel):
     from anthropic_backend.provider import (
         DEFAULT_ENDPOINT,
         DEFAULT_MODEL,
+        MAX_TOKENS,
         AnthropicProvider,
     )
 
@@ -41,6 +42,11 @@ def make_provider(id, kernel):
     return AnthropicProvider(
         endpoint=rec.get("endpoint", DEFAULT_ENDPOINT),
         model=rec.get("model", DEFAULT_MODEL),
+        # `tool_use: true` declares the one `send` tool and translates the blocks
+        # back into the taught envelope. A record edit, like every other backend
+        # choice — `ai_core` is unchanged either way.
+        tool_use=bool(rec.get("tool_use", False)),
+        max_tokens=int(rec.get("max_tokens") or MAX_TOKENS),
     )
 
 

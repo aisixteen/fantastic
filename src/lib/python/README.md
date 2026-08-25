@@ -163,7 +163,7 @@ with a `pyproject.toml` are auto-picked up on the next `uv sync`.
 fantastic                                            # boot all + REPL (tty) + daemon (if web is persisted)
 fantastic <id> <verb> [k=v ...]                      # one-shot RPC
 fantastic reflect [<id>]                             # shorthand: <id> reflect (default kernel)
-fantastic kernel_state create_agent handler_module=web.tools port=8888    # persist web (one-shot; then `fantastic` daemonizes)
+fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=8888    # persist web (one-shot; then `fantastic` daemonizes)
 # Equivalent direct invocation: `python main.py [args]`
 # main.py bootstraps: Kernel() -> kernel_state.read_tree('.fantastic') -> kernel.load(records).
 # Web composition is explicit — no --port flag. The kernel blocks only
@@ -194,10 +194,10 @@ These call legs are **io_bridge derivations: SEALED by default** — a freshly-c
 `web_ws`/`web_rest` denies every inbound frame (`{reason:"unauthorized"}`, REST `403`)
 until you open it. Compose them per project, opening each consciously:
 ```bash
-fantastic kernel_state create_agent handler_module=web.tools port=8888
+fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=8888
 # open the WS leg wide for local dev (or `ingress_rule=password_ingress` for a group token):
-fantastic kernel_state create_agent handler_module=web_ws.tools parent_id=<web_id> ingress_rule=allow_all_ingress
-fantastic kernel_state create_agent handler_module=web_rest.tools parent_id=<web_id> ingress_rule=allow_all_ingress
+fantastic kernel create_agent parent_id=kernel_state handler_module=web_ws.tools parent_id=<web_id> ingress_rule=allow_all_ingress
+fantastic kernel create_agent parent_id=kernel_state handler_module=web_rest.tools parent_id=<web_id> ingress_rule=allow_all_ingress
 ```
 
 After `fantastic`:
@@ -241,7 +241,7 @@ plugins.
 
 Add a bundle by dropping its package under `bundled_agents/` (or
 `installed_agents/`) and running `uv sync` — its entry point registers on
-the next start, and you can `create_agent handler_module=<bundle>.tools`
+the next start, and you can `create_agent parent_id=<owner> handler_module=<bundle>.tools`
 from any agent (creates as a child of that agent).
 
 ## Tests
