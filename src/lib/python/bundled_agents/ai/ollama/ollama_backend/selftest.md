@@ -33,9 +33,9 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18911
 pkill -9 -f "fantastic" 2>/dev/null; sleep 0.3
-uv run --active python fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active python fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active python fantastic > /tmp/s.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/s.log 2>/dev/null && break; sleep 0.5; done
@@ -72,7 +72,7 @@ per-client history auto-mounts as a `chat` yaml_state persisted THROUGH
 the loader (the AI writes no disk itself).
 
 ```bash
-OB=$(call kernel_state '{"type":"create_agent","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+OB=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"ollama_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $OB '{"type":"send","text":"reply with the single word: ready"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
 Expected: a `final` reply containing "ready" — no file_bridge wiring needed.

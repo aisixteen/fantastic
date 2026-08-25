@@ -83,7 +83,11 @@ async def _read_api_key(self_id: str, kernel) -> str | None:
     fid = _file_bridge_id(self_id, kernel)
     if not fid:
         return None
-    r = await kernel.send(fid, {"type": "read", "path": _key_path(self_id)})
+    r = (
+        await kernel.send(
+            [{"target": fid, "payload": {"type": "read", "path": _key_path(self_id)}}]
+        )
+    )[0]["result"]
     if not r or "content" not in r:
         return None
     key = (r.get("content") or "").strip()
@@ -180,10 +184,20 @@ async def _set_api_key(id, payload, kernel):
     if not isinstance(key, str) or not key.strip():
         return {"error": "set_api_key: api_key must be a non-empty string"}
     fid = _file_bridge_id(id, kernel)
-    r = await kernel.send(
-        fid,
-        {"type": "write", "path": _key_path(id), "content": key.strip()},
-    )
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": fid,
+                    "payload": {
+                        "type": "write",
+                        "path": _key_path(id),
+                        "content": key.strip(),
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     if r and r.get("error"):
         return {"error": f"set_api_key: file write failed: {r['error']}"}
     _providers.pop(id, None)
@@ -195,7 +209,11 @@ async def _clear_api_key(id, payload, kernel):
     if not _file_bridge_id(id, kernel):
         return {"error": "nvidia_nim_backend: file_bridge_id required"}
     fid = _file_bridge_id(id, kernel)
-    r = await kernel.send(fid, {"type": "delete", "path": _key_path(id)})
+    r = (
+        await kernel.send(
+            [{"target": fid, "payload": {"type": "delete", "path": _key_path(id)}}]
+        )
+    )[0]["result"]
     _providers.pop(id, None)
     return {"ok": True, "deleted": bool((r or {}).get("deleted", False))}
 

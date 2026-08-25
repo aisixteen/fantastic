@@ -28,15 +28,22 @@ async def _init_loader(kernel, manifest: str = MANIFEST) -> str:
     """Write the manifest into cwd (the kernel fixture chdir'd here) and seed a
     static_loader whose create boots it → it hydrates the roster."""
     Path("fantastic.yaml").write_text(manifest)
-    rec = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "static_loader.tools",
-            "id": "static_loader",
-            "manifest": "fantastic.yaml",
-        },
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "static_loader.tools",
+                        "id": "static_loader",
+                        "manifest": "fantastic.yaml",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, rec
     return rec["id"]
 
@@ -68,19 +75,42 @@ async def test_roster_is_closed_a_child_cannot_create_more(seeded_kernel):
     # deny-all: a roster agent is not granted `create_agent` on anyone → the set
     # of agents is FIXED by the manifest.
     with sender_context("worker"):
-        r = await seeded_kernel.send(
-            "kernel_state",
-            {"type": "create_agent", "handler_module": "file_bridge.tools"},
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "file_bridge.tools",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     assert r.get("reason") == "unauthorized"
 
 
 async def test_worker_may_use_its_declared_edge_but_not_others(seeded_kernel):
     await _init_loader(seeded_kernel)
     with sender_context("worker"):
-        ok = await seeded_kernel.send("memory", {"type": "set", "key": "k", "value": 1})
+        ok = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "memory",
+                        "payload": {"type": "set", "key": "k", "value": 1},
+                    }
+                ]
+            )
+        )[0]["result"]
         # `delete` on memory was never granted → denied.
-        no = await seeded_kernel.send("memory", {"type": "delete", "key": "k"})
+        no = (
+            await seeded_kernel.send(
+                [{"target": "memory", "payload": {"type": "delete", "key": "k"}}]
+            )
+        )[0]["result"]
     assert ok.get("reason") != "unauthorized"
     assert no.get("reason") == "unauthorized"
 
@@ -89,21 +119,32 @@ async def test_boot_is_idempotent_by_id(seeded_kernel):
     loader = await _init_loader(seeded_kernel)
     before = set(seeded_kernel.ctx.agents)
     # Re-boot the loader: the manifest ids already exist → all skipped, no dup error.
-    r = await seeded_kernel.send(loader, {"type": "boot"})
+    r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"]
     assert r["booted"] is True
     assert set(r["skipped"]) == {"memory", "worker"} and r["created"] == []
     assert set(seeded_kernel.ctx.agents) == before
 
 
 async def test_missing_manifest_reports_not_crashes(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "static_loader.tools",
-            "id": "sl2",
-            "manifest": "nope.yaml",
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "static_loader.tools",
+                        "id": "sl2",
+                        "manifest": "nope.yaml",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # create_agent's validate_meta refuses an unreadable manifest at write time.
-    assert rec.get("created") is False and "not readable" in rec.get("error", "")
+    assert rec.get("reason") == "invalid_meta" and "not readable" in rec.get(
+        "error", ""
+    )

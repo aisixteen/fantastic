@@ -27,10 +27,21 @@ def _real_python() -> str:
 
 
 async def _make(kernel, **meta) -> str:
-    rec = await kernel.send(
-        kernel.id,
-        {"type": "create_agent", "handler_module": "exec_bridge.tools", **meta},
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "exec_bridge.tools",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, f"exec_bridge creation failed: {rec!r}"
     return rec["id"]
 
@@ -47,7 +58,11 @@ async def test_every_verb_but_reflect_denies_on_a_sealed_leg(seeded_kernel):
     xid = await _make(seeded_kernel)  # NO ingress_rule — the seal
     assert UNGATED == {"reflect"}, "only discovery may answer through the seal"
     for verb in sorted(set(VERBS) - UNGATED):
-        r = await seeded_kernel.send(xid, {"type": verb, "code": "print(1)"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": xid, "payload": {"type": verb, "code": "print(1)"}}]
+            )
+        )[0]["result"]
         assert r["reason"] == "unauthorized", f"{verb} answered on a sealed leg: {r!r}"
         assert "error" in r
         assert "ingress_rule" in r["hint"], "the denial must teach how to open"
@@ -58,7 +73,9 @@ async def test_a_sealed_leg_still_reflects(seeded_kernel):
     """Discovery must work through the seal — otherwise a denied caller cannot learn
     what the leg is, what it would run, or how to open it, and dead-ends."""
     xid = await _make(seeded_kernel, interpreters=[_real_python()])
-    r = await seeded_kernel.send(xid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r["sealed"] is True
     assert "verbs" in r
     assert r["interpreters"] == [_real_python()], "the allowlist is advertised sealed"
@@ -71,20 +88,30 @@ async def test_allow_all_opens_the_leg(seeded_kernel):
     xid = await _make(
         seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
-    assert await seeded_kernel.send(xid, {"type": "status"}) == {"jobs": []}
-    assert await seeded_kernel.send(xid, {"type": "clear"}) == {"cleared": 0}
-    assert await seeded_kernel.send(xid, {"type": "stop"}) == {"killed": 0}
+    assert (await seeded_kernel.send([{"target": xid, "payload": {"type": "status"}}]))[
+        0
+    ]["result"] == {"jobs": []}
+    assert (await seeded_kernel.send([{"target": xid, "payload": {"type": "clear"}}]))[
+        0
+    ]["result"] == {"cleared": 0}
+    assert (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[
+        0
+    ]["result"] == {"killed": 0}
 
 
 async def test_reflect_surfaces_the_posture_both_ways(seeded_kernel):
     """`reflect` is how an operator reads which legs are open — keyed by the field you
     SET, so `ingress_rule: deny_ingress` is opened with `ingress_rule: allow_all_ingress`."""
     sealed = await _make(seeded_kernel)
-    r = await seeded_kernel.send(sealed, {"type": "reflect"})
+    r = (
+        await seeded_kernel.send([{"target": sealed, "payload": {"type": "reflect"}}])
+    )[0]["result"]
     assert r["ingress_rule"] == "deny_ingress" and r["sealed"] is True
 
     opened = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
-    r = await seeded_kernel.send(opened, {"type": "reflect"})
+    r = (
+        await seeded_kernel.send([{"target": opened, "payload": {"type": "reflect"}}])
+    )[0]["result"]
     assert r["ingress_rule"] == "allow_all_ingress" and r["sealed"] is False
 
 
@@ -93,7 +120,9 @@ async def test_reflect_never_raises_on_an_unwired_leg(seeded_kernel):
     it is where a caller goes to find out that the wiring is broken. A leg with
     nothing allowlisted reports an empty set instead of raising or inventing one."""
     xid = await _make(seeded_kernel)
-    r = await seeded_kernel.send(xid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r["interpreters"] == []
     assert r["running"] == 0
     assert r["cwd"] == "<process default>"
@@ -105,23 +134,40 @@ async def test_an_unimplementable_ingress_rule_is_refused_at_the_write(seeded_ke
     the leg boots believing it has a posture it does not have. Refuse at create AND
     update, naming the legal values (measured 2026-08-06: gemma-4-12B recovered on its
     next turn from exactly this message)."""
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "exec_bridge.tools",
-            "ingress_rule": "deny_all",
-        },
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "exec_bridge.tools",
+                        "ingress_rule": "deny_all",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "legal values" in r["error"]
-    assert r.get("created") is False and "id" not in r
+    assert r.get("reason") == "invalid_meta" and "id" not in r
 
     good = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
-    u = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "update_agent", "id": good, "ingress_rule": "deny_all"},
-    )
-    assert u.get("updated") is False and "legal values" in u["error"]
+    u = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": good,
+                        "ingress_rule": "deny_all",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert u.get("reason") == "invalid_meta" and "legal values" in u["error"]
 
 
 # ─── (b) the allowlist, refused at the WRITE ────────────────────
@@ -132,21 +178,28 @@ async def test_a_non_allowlisted_interpreter_is_refused_at_CREATE(seeded_kernel)
     leg does not allow would look created, fail to spawn, and be indistinguishable
     from a program that ran and did nothing. The write is where it must fail."""
     py = _real_python()
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "exec_bridge.tools",
-            "ingress_rule": "allow_all_ingress",
-            "interpreters": [py],
-            "interpreter": "/nowhere/bin/python",
-            "code": "print('must never run')",
-        },
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "exec_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        "interpreters": [py],
+                        "interpreter": "/nowhere/bin/python",
+                        "code": "print('must never run')",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r, f"a non-allowlisted interpreter must refuse, got {r!r}"
     assert "not allowlisted" in r["error"]
     assert py in r["error"], "the refusal must NAME the allowed set"
-    assert r.get("created") is False and "id" not in r, "nothing may be created"
+    assert r.get("reason") == "invalid_meta" and "id" not in r, "nothing may be created"
 
 
 async def test_a_non_allowlisted_interpreter_is_refused_at_UPDATE(seeded_kernel):
@@ -163,16 +216,22 @@ async def test_a_non_allowlisted_interpreter_is_refused_at_UPDATE(seeded_kernel)
         interpreters=[py],
         interpreter=py,
     )
-    u = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "update_agent",
-            "id": xid,
-            "interpreters": [py],
-            "interpreter": "/nowhere/bin/python",
-        },
-    )
-    assert u.get("updated") is False, f"update must refuse, got {u!r}"
+    u = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": xid,
+                        "interpreters": [py],
+                        "interpreter": "/nowhere/bin/python",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert u.get("reason") == "invalid_meta", f"update must refuse, got {u!r}"
     assert "not allowlisted" in u["error"] and py in u["error"]
     # and the refused patch did not half-apply
     assert (seeded_kernel.get(xid) or {})["interpreter"] == py
@@ -188,7 +247,9 @@ async def test_an_allowlisted_interpreter_still_writes(seeded_kernel):
         interpreters=[py],
         interpreter=py,
     )
-    r = await seeded_kernel.send(xid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r["interpreters"] == [py] and r["sealed"] is False
 
 
@@ -196,21 +257,30 @@ async def test_interpreters_must_be_a_list_of_paths(seeded_kernel):
     """A malformed allowlist must be refused at the write, or `reflect` (which reads
     it on every call) is the thing that breaks, far from the mistake."""
     for bad in (5, {"a": 1}, ["/usr/bin/python3", "  "]):
-        r = await seeded_kernel.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "exec_bridge.tools",
-                "interpreters": bad,
-            },
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "exec_bridge.tools",
+                            "interpreters": bad,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert "error" in r, f"interpreters={bad!r} was accepted: {r!r}"
         assert "list of interpreter paths" in r["error"]
-        assert r.get("created") is False
+        assert r.get("reason") == "invalid_meta"
 
     # …and the shape an operator actually types — one interpreter, written bare.
     xid = await _make(seeded_kernel, interpreters=_real_python())
-    got = await seeded_kernel.send(xid, {"type": "reflect"})
+    got = (await seeded_kernel.send([{"target": xid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert got["interpreters"] == [_real_python()]
 
 
@@ -223,12 +293,18 @@ async def test_an_empty_allowlist_refuses_start_and_names_the_operator(seeded_ke
         than guess an interpreter (the guess has no honest answer)."""
     for meta in ({}, {"interpreters": []}):
         xid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", **meta)
-        r = await seeded_kernel.send(xid, {"type": "start", "code": "print(1)"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": xid, "payload": {"type": "start", "code": "print(1)"}}]
+            )
+        )[0]["result"]
         assert "error" in r, f"interpreters={meta} spawned something: {r!r}"
         assert "no interpreters are allowlisted" in r["error"]
         assert "operator must set" in r["error"]
         assert "job_id" not in r, "nothing may be spawned"
-        assert await seeded_kernel.send(xid, {"type": "status"}) == {"jobs": []}
+        assert (
+            await seeded_kernel.send([{"target": xid, "payload": {"type": "status"}}])
+        )[0]["result"] == {"jobs": []}
 
 
 async def test_one_allowlisted_interpreter_may_be_left_unnamed_on_start(seeded_kernel):
@@ -237,11 +313,20 @@ async def test_one_allowlisted_interpreter_may_be_left_unnamed_on_start(seeded_k
     xid = await _make(
         seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
-    r = await seeded_kernel.send(
-        xid, {"type": "start", "code": "import time\ntime.sleep(30)"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {"type": "start", "code": "import time\ntime.sleep(30)"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["status"] == "running" and r["job_id"], f"start refused: {r!r}"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 async def test_two_allowlisted_interpreters_must_be_named_on_start(
@@ -255,23 +340,35 @@ async def test_two_allowlisted_interpreters_must_be_named_on_start(
     xid = await _make(
         seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[py, other]
     )
-    r = await seeded_kernel.send(xid, {"type": "start", "code": "print(1)"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": xid, "payload": {"type": "start", "code": "print(1)"}}]
+        )
+    )[0]["result"]
     assert "error" in r, f"an ambiguous start was served: {r!r}"
     assert "name one" in r["error"]
     assert py in r["error"] and other in r["error"]
     assert "job_id" not in r
 
     # naming one of them runs it
-    ok = await seeded_kernel.send(
-        xid,
-        {
-            "type": "start",
-            "code": "import time\ntime.sleep(30)",
-            "interpreter": py,
-        },
-    )
+    ok = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": "import time\ntime.sleep(30)",
+                        "interpreter": py,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert ok["status"] == "running" and ok["job_id"], f"named start refused: {ok!r}"
-    await seeded_kernel.send(xid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 async def test_a_per_call_interpreter_cannot_leave_the_allowlist(seeded_kernel):
@@ -281,10 +378,20 @@ async def test_a_per_call_interpreter_cannot_leave_the_allowlist(seeded_kernel):
     xid = await _make(
         seeded_kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()]
     )
-    r = await seeded_kernel.send(
-        xid,
-        {"type": "start", "code": "print(1)", "interpreter": "/bin/sh"},
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": "print(1)",
+                        "interpreter": "/bin/sh",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "not allowlisted" in r["error"]
     assert _real_python() in r["error"]
     assert "job_id" not in r

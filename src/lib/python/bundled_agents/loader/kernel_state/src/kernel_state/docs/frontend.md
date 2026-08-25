@@ -6,7 +6,7 @@ This is the HOST kernel (Python, `*.tools` bundles). A second kernel — a
 browser FRONTEND (`ts/`, `*.ts` bundles) — federates over the SAME WS and
 renders all UI. The `handler_module` SUFFIX says where an agent runs:
 
-- `*.tools` → HERE. `create_agent handler_module=<x>.tools` on the host tree.
+- `*.tools` → HERE. `create_agent parent_id=<owner> handler_module=<x>.tools` on the host tree.
 - `*.ts`    → the FRONTEND. Do NOT `create_agent` these here (the host
   weak-loads `*.ts` → inert). You SPAWN one by `persist_record`-ing its
   record into the frontend store `web_loader`; the browser hydrates + runs it.

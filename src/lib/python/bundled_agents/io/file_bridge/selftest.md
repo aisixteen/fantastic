@@ -25,7 +25,7 @@ cd /tmp/fa_test
 ### Test 0: sealed by default — verbs deny until the edge is opened
 
 ```bash
-SEALED=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=fa_root | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+SEALED=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=fa_root | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $SEALED read path=anything.txt
 fantastic $SEALED reflect | python -m json.tool | grep -F '"sealed": true'
 fantastic kernel_state delete_agent id=$SEALED
@@ -36,7 +36,7 @@ reflect still answers (discovery is ungated) and shows `sealed: true`.
 ### Test 1: write + read round-trip (opened leg)
 
 ```bash
-FA=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=fa_root ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=fa_root ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $FA write path=hello.txt content="hi there"
 fantastic $FA read path=hello.txt | python -m json.tool | grep -F '"content": "hi there"'
 ```
@@ -69,7 +69,7 @@ Expected: `{"error":"…escape…"}`.
 ### Test 5: the running-dir law — a root outside cwd refuses
 
 ```bash
-ESC=$(fantastic kernel_state create_agent handler_module=file_bridge.tools root=../escape ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ESC=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=../escape ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $ESC list path=""
 fantastic $ESC reflect | python -m json.tool | grep -F '"root_error"'
 fantastic kernel_state delete_agent id=$ESC

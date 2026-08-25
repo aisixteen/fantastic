@@ -59,15 +59,22 @@ async def _make_ollama(kernel, grants=None):
     # default client) → grant that listener; `grants` adds any PEER the model in a
     # given test routes to (a `send`/`send_to` to another agent is lateral egress).
     can_call = {"cli": "*", **(grants or {})}
-    rec = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ollama_backend.tools",
-            "context_window": 32768,
-            "can_call": can_call,
-        },
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ollama_backend.tools",
+                        "context_window": 32768,
+                        "can_call": can_call,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     # Two-sided deny-all: every granted egress needs the callee's reciprocal
     # `callable_by` (the backend streams its turn to `cli` and routes to peers).
@@ -82,9 +89,20 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     tgt = kernel.ctx.agents.get(target)
     cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
     cb[caller] = verbs
-    await kernel.send(
-        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": target,
+                        "callable_by": cb,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 async def _until_calls(fp, n: int, timeout: float = 5.0) -> bool:
@@ -106,7 +124,11 @@ async def test_no_call_means_one_pass(seeded_kernel, store_agent):
     fp = _FakeProvider([["the answer"], ["must never run"]])
     ot._providers[oid] = fp
     try:
-        r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
         assert r["final"] == "the answer"
         await asyncio.sleep(0.3)
         assert fp.calls == 1, f"no call must end the turn, got {fp.calls} passes"
@@ -121,20 +143,29 @@ async def test_model_call_is_dispatched_and_the_result_returns(
     seeded_kernel, store_agent
 ):
     """The model emits a send; it really runs; its REPLY comes back as the next turn,
-    tagged so the model can tell it from a human's message."""
+    tagged so the model can tell it from a human's message.
+
+    THREE passes since the no-call nudge: the prose answer to a chain turn gets
+    one runtime "nothing was dispatched" reminder, and answering THAT with prose
+    ends the chain (a nudge is never nudged)."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider(
         [
             [_call("kernel_state", {"type": "list_agents"})],
             ["done looking"],
+            ["still done"],
         ]
     )
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "what is here?"})
-        assert await _until_calls(fp, 2), "the call's reply never came back"
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "what is here?"}}]
+            )
+        )[0]["result"]
+        assert await _until_calls(fp, 3), "the call's reply never came back"
         await asyncio.sleep(0.2)
-        assert fp.calls == 2, "one call = one follow-up turn, then it stopped"
+        assert fp.calls == 3, "call turn + nudged turn, then it stopped"
         turn2 = str(fp.requests[1])
         assert "· kernel_state list_agents]" in turn2, f"untagged reply: {turn2[-400:]}"
         assert "agents" in turn2, "the real list_agents result must be in the turn"
@@ -152,14 +183,19 @@ async def test_self_chain_does_not_deadlock(seeded_kernel, store_agent):
             [_call("kernel_state", {"type": "list_agents"})],
             [_call("kernel_state", {"type": "list_agents"})],
             ["enough"],
+            ["really enough"],  # answers the no-call nudge; ends the chain
         ]
     )
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
-        assert await _until_calls(fp, 3), f"chain stalled at {fp.calls} passes"
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
+        assert await _until_calls(fp, 4), f"chain stalled at {fp.calls} passes"
         await asyncio.sleep(0.3)
-        assert fp.calls == 3, f"expected 3 passes, got {fp.calls}"
+        assert fp.calls == 4, f"expected 4 passes (incl. the nudge), got {fp.calls}"
     finally:
         ot._providers.pop(oid, None)
 
@@ -179,7 +215,11 @@ async def test_reply_to_omitted_defaults_to_self(seeded_kernel, store_agent):
     ot._providers[oid] = fp
     ot._providers[other] = fo
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fo, 1), "the send itself must still happen"
         assert await _until_calls(fp, 2), "an omitted reply_to must come back to self"
         assert "[reply to " in str(fp.requests[1]), "and arrive tagged as a reply"
@@ -201,7 +241,11 @@ async def test_discarding_a_reply_must_be_said_explicitly(seeded_kernel, store_a
     ot._providers[oid] = fp
     ot._providers[other] = fo
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fo, 1), "the send itself must still happen"
         await asyncio.sleep(0.3)
         assert fp.calls == 1, "an explicit null must mean no follow-up turn"
@@ -217,7 +261,11 @@ async def test_failed_call_comes_back_to_the_model(seeded_kernel, store_agent):
     fp = _FakeProvider([[_call("no_such_agent", {"type": "reflect"})], ["ok"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "the failure never reached the model"
         turn2 = str(fp.requests[1]).lower()
         assert "no_such_agent" in turn2
@@ -233,7 +281,11 @@ async def test_malformed_call_is_reported_not_swallowed(seeded_kernel, store_age
     fp = _FakeProvider([[bad], ["ok"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "malformed call was swallowed"
         assert "no target_id" in str(fp.requests[1])
     finally:
@@ -250,7 +302,11 @@ async def test_a_send_with_no_payload_names_what_is_missing(seeded_kernel, store
     fp = _FakeProvider([[bad], ["ok"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "the payload-less send was swallowed"
         turn2 = str(fp.requests[1])
         assert "no payload" in turn2, turn2[-300:]
@@ -274,7 +330,11 @@ async def test_an_unparseable_call_reaches_the_model_as_an_error(
     fp = _FakeProvider([[broken], ["ok"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "the malformed call produced no next turn"
         turn2 = str(fp.requests[1])
         assert "NOT dispatched" in turn2, turn2[-400:]
@@ -292,7 +352,11 @@ async def test_a_verb_named_tool_reaches_the_agent(seeded_kernel, store_agent):
     fp = _FakeProvider([[call], ["ok"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "the reflect never came back"
         turn2 = str(fp.requests[1])
         assert "· totals reflect]" in turn2, turn2[-300:]
@@ -314,9 +378,21 @@ async def test_caller_send_to_hands_off_once(seeded_kernel, store_agent):
     ot._providers[a] = fa
     ot._providers[b] = fb
     try:
-        await seeded_kernel.send(
-            a, {"type": "send", "text": "go", "client_id": "probe", "send_to": b}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": a,
+                        "payload": {
+                            "type": "send",
+                            "text": "go",
+                            "client_id": "probe",
+                            "send_to": b,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert await _until_calls(fb, 1), "the peer never received the reply"
         await asyncio.sleep(0.3)
         assert "the answer from a" in str(fb.requests[0])
@@ -341,9 +417,20 @@ async def test_error_reply_does_not_route(seeded_kernel, store_agent):
     ot._providers[oid] = _Boom()
     try:
         try:
-            await seeded_kernel.send(
-                oid, {"type": "send", "text": "go", "client_id": "probe"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": oid,
+                            "payload": {
+                                "type": "send",
+                                "text": "go",
+                                "client_id": "probe",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         except RuntimeError:
             pass
         await asyncio.sleep(0.3)
@@ -416,16 +503,31 @@ async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
     mod.VERBS = {}
     sys.modules["raiser.tools"] = mod
 
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "raiser.tools", "id": "raiser"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "raiser.tools",
+                        "id": "raiser",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # oid needs egress to raiser (and _make_ollama opens raiser's reciprocal ingress).
     oid = await _make_ollama(seeded_kernel, grants={"raiser": ["reflect"]})
     fp = _FakeProvider([[_call(rec["id"], {"type": "reflect"})], ["saw it"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), (
             "the raise killed the chain instead of routing"
         )
@@ -464,7 +566,11 @@ async def test_thinking_is_parsed_but_not_persisted(seeded_kernel, store_agent):
     fp = _FakeProvider([[raw], ["done"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "go"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "go"}}]
+            )
+        )[0]["result"]
         assert await _until_calls(fp, 2), "a call inside thinking must still dispatch"
         assert "· kernel_state list_agents]" in str(fp.requests[1])
     finally:

@@ -55,7 +55,9 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
     """Pull `get_routes` from one child and mount the returned routes
     onto the live FastAPI app. No-op if the child doesn't answer."""
     try:
-        r = await kernel.send(child_id, {"type": "get_routes"})
+        r = (
+            await kernel.send([{"target": child_id, "payload": {"type": "get_routes"}}])
+        )[0]["result"]
     except Exception as e:
         logger.warning("web: get_routes failed for %s: %s", child_id, e)
         return
@@ -313,7 +315,16 @@ async def _boot(id, payload, kernel):
         f"listening on http://127.0.0.1:{handle.port}/"
         " · rest/ws are children (reflect kernel for ids)"
     )
-    reply = await kernel.send("cli", {"type": "say", "source": "web", "text": line})
+    reply = (
+        await kernel.send(
+            [
+                {
+                    "target": "cli",
+                    "payload": {"type": "say", "source": "web", "text": line},
+                }
+            ]
+        )
+    )[0]["result"]
     if reply is not None:
         print(
             f"  [web] {id} listening on http://localhost:{handle.port}/",

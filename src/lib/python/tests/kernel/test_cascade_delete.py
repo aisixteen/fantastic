@@ -69,7 +69,16 @@ async def test_cascade_emits_agent_deleted(seeded_kernel):
     seeded_kernel.create("file_bridge.tools", id="X")
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(events.append)
-    await seeded_kernel.send(seeded_kernel.id, {"type": "delete_agent", "id": "X"})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {"type": "delete_agent", "id": "X"},
+                }
+            ]
+        )
+    )[0]["result"]
     # `removed` lifecycle event for X (always fires).
     assert any(e.get("kind") == "removed" and e.get("agent_id") == "X" for e in events)
     # `agent_deleted` emit on root's inbox (verb-level).
@@ -88,21 +97,48 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
     """Real domain case: a terminal_backend nested under a parent agent.
     Delete the parent → cascade reaches terminal_backend's on_delete FIRST
     (kills PTY in real life), then both records vanish."""
-    parent = await seeded_kernel.send(
-        seeded_kernel.id,
-        {"type": "create_agent", "handler_module": "file_bridge.tools"},
-    )
+    parent = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     parent_id = parent["id"]
-    backend = await seeded_kernel.send(
-        parent_id,
-        {"type": "create_agent", "handler_module": "terminal_backend.tools"},
-    )
+    backend = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": parent_id,
+                        "handler_module": "terminal_backend.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     backend_id = backend["id"]
     assert backend_id in seeded_kernel.ctx.agents
 
-    r = await seeded_kernel.send(
-        seeded_kernel.id, {"type": "delete_agent", "id": parent_id}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {"type": "delete_agent", "id": parent_id},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["deleted"] is True
     assert parent_id not in seeded_kernel.ctx.agents
     assert backend_id not in seeded_kernel.ctx.agents

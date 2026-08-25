@@ -4,15 +4,22 @@ from __future__ import annotations
 
 
 async def _open(kernel, **meta):
-    r = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "ingress_rule": "allow_all_ingress",
-            **meta,
-        },
-    )
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     return r["id"]
 
 
@@ -26,15 +33,21 @@ async def test_write_stream_then_read_stream_round_trips(
     off = 0
     for i, start in enumerate(range(0, len(blob), 4096)):
         chunk = blob[start : start + 4096]
-        r = await seeded_kernel.send(
-            fid,
-            {
-                "type": "write_stream",
-                "path": "x.bin",
-                "bytes": chunk,
-                "truncate": i == 0,
-            },
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": fid,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": "x.bin",
+                            "bytes": chunk,
+                            "truncate": i == 0,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r["written"] == len(chunk)
         off = r["size"]
     assert off == len(blob)
@@ -42,10 +55,21 @@ async def test_write_stream_then_read_stream_round_trips(
     got = b""
     offset = 0
     while True:
-        r = await seeded_kernel.send(
-            fid,
-            {"type": "read_stream", "path": "x.bin", "offset": offset, "length": 3000},
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": fid,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": "x.bin",
+                            "offset": offset,
+                            "length": 3000,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert isinstance(r["bytes"], (bytes, bytearray))
         got += r["bytes"]
         offset = r["next_offset"]
@@ -58,12 +82,27 @@ async def test_write_stream_then_read_stream_round_trips(
 async def test_stream_verbs_sealed_by_default(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # NO ingress_rule → sealed; read_stream must be denied + taught
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools", "root": "s"},
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "root": "s",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     fid = r["id"]
-    d = await seeded_kernel.send(fid, {"type": "read_stream", "path": "x"})
+    d = (
+        await seeded_kernel.send(
+            [{"target": fid, "payload": {"type": "read_stream", "path": "x"}}]
+        )
+    )[0]["result"]
     assert d["reason"] == "unauthorized" and "ingress_rule" in d.get("hint", "")
 
 
@@ -80,34 +119,64 @@ async def test_pump_copies_between_bridges(seeded_kernel, tmp_path, monkeypatch)
     src_agent = seeded_kernel.ctx.agents.get(src)
     cb = dict(src_agent._meta.get("callable_by") or {})
     cb[dst] = ["read_stream"]
-    await seeded_kernel.send(
-        "kernel_state", {"type": "update_agent", "id": src, "callable_by": cb}
-    )
-    await seeded_kernel.send(
-        src,
-        {
-            "type": "write_stream",
-            "path": "a.bin",
-            "bytes": blob,
-            "truncate": True,
-        },
-    )
-    r = await seeded_kernel.send(
-        dst,
-        {
-            "type": "pump",
-            "source": src,
-            "source_path": "a.bin",
-            "sink_path": "b.bin",
-            "chunk": 4096,
-        },
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": src, "callable_by": cb},
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": src,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": "a.bin",
+                        "bytes": blob,
+                        "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": dst,
+                    "payload": {
+                        "type": "pump",
+                        "source": src,
+                        "source_path": "a.bin",
+                        "sink_path": "b.bin",
+                        "chunk": 4096,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("bytes") == len(blob) and r.get("chunks") >= 3, r
     got, off = b"", 0
     while True:
-        c = await seeded_kernel.send(
-            dst, {"type": "read_stream", "path": "b.bin", "offset": off}
-        )
+        c = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": dst,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": "b.bin",
+                            "offset": off,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         got += c["bytes"]
         off = c["next_offset"]
         if c["eof"]:
@@ -120,20 +189,37 @@ async def test_pump_refused_by_sealed_source(seeded_kernel, tmp_path, monkeypatc
     pump's read, so the pump fails (it never touches bytes itself)."""
     monkeypatch.chdir(tmp_path)
     dst = await _open(seeded_kernel, root="dst")
-    r = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "file_bridge.tools", "root": "src"},
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "root": "src",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     sealed_src = r["id"]  # NO ingress_rule → sealed
     (tmp_path / "src").mkdir(parents=True, exist_ok=True)
     (tmp_path / "src" / "a.bin").write_bytes(b"hello")
-    res = await seeded_kernel.send(
-        dst,
-        {
-            "type": "pump",
-            "source": sealed_src,
-            "source_path": "a.bin",
-            "sink_path": "b.bin",
-        },
-    )
+    res = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": dst,
+                    "payload": {
+                        "type": "pump",
+                        "source": sealed_src,
+                        "source_path": "a.bin",
+                        "sink_path": "b.bin",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in res and "read from" in res["error"]

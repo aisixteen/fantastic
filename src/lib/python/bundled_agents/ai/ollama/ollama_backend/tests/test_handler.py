@@ -36,7 +36,20 @@ async def _make_ollama(kernel, file_bridge_id=None):
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
         can_call[file_bridge_id] = "*"
-    rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     aid = rec["id"]
     # Two-sided deny-all: open the callee's reciprocal `callable_by` for each edge.
     for target in can_call:
@@ -49,16 +62,29 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     tgt = kernel.ctx.agents.get(target)
     cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
     cb[caller] = verbs
-    await kernel.send(
-        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": target,
+                        "callable_by": cb,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 async def test_reflect_includes_file_bridge_id_and_no_history(
     seeded_kernel, store_agent
 ):
     oid = await _make_ollama(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(oid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r["file_bridge_id"] == store_agent
     assert "send" in r["verbs"]
 
@@ -70,7 +96,11 @@ async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
     fp = _FakeProvider([["ok"]])
     ot._providers[oid] = fp
     try:
-        r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
         assert r["final"] == "ok"
     finally:
         ot._providers.pop(oid, None)
@@ -78,7 +108,9 @@ async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel)
-    r = await seeded_kernel.send(oid, {"type": "history"})
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
+        0
+    ]["result"]
     assert r["messages"] == [] and r["client_id"] == "cli"
 
 
@@ -87,10 +119,16 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
     fp = _FakeProvider([["hello"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
-    r = await seeded_kernel.send(oid, {"type": "history"})
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
+        0
+    ]["result"]
     assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
     assert r["client_id"] == "cli"
 
@@ -101,16 +139,46 @@ async def test_history_per_client(seeded_kernel, store_agent):
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi from alice", "client_id": "alice"}
-        )
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi from bob", "client_id": "bob"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi from alice",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi from bob",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
-    a = await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"})
-    b = await seeded_kernel.send(oid, {"type": "history", "client_id": "bob"})
+    a = (
+        await seeded_kernel.send(
+            [{"target": oid, "payload": {"type": "history", "client_id": "alice"}}]
+        )
+    )[0]["result"]
+    b = (
+        await seeded_kernel.send(
+            [{"target": oid, "payload": {"type": "history", "client_id": "bob"}}]
+        )
+    )[0]["result"]
     assert a["messages"][-1]["content"] == "A-reply"
     assert b["messages"][-1]["content"] == "B-reply"
     assert a["client_id"] == "alice" and b["client_id"] == "bob"
@@ -121,7 +189,11 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
     fp = _FakeProvider([["Hello! ", "How are you?"]])
     ot._providers[oid] = fp
     try:
-        r = await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
         assert r["final"] == "Hello! How are you?"
         assert fp.calls == 1
     finally:
@@ -153,9 +225,20 @@ async def test_system_prompt_override_replaces_auto_prompt(seeded_kernel, store_
     rp = _RecordProvider([["ok"]])
     ot._providers[oid] = rp
     try:
-        r = await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi", "system_prompt": "ROLE-XYZ"}
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi",
+                            "system_prompt": "ROLE-XYZ",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r["final"] == "ok"
         assert rp.last_messages[0]["role"] == "system"
         assert rp.last_messages[0]["content"] == "ROLE-XYZ"
@@ -170,18 +253,24 @@ async def test_stateless_messages_override_needs_no_file_bridge(seeded_kernel):
     rp = _RecordProvider([["leaf-answer"]])
     ot._providers[oid] = rp
     try:
-        r = await seeded_kernel.send(
-            oid,
-            {
-                "type": "send",
-                "text": "now",
-                "system_prompt": "S",
-                "messages": [
-                    {"role": "user", "content": "earlier"},
-                    {"role": "assistant", "content": "prior"},
-                ],
-            },
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "now",
+                            "system_prompt": "S",
+                            "messages": [
+                                {"role": "user", "content": "earlier"},
+                                {"role": "assistant", "content": "prior"},
+                            ],
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r["final"] == "leaf-answer"
         assert rp.last_messages[0]["content"] == "S"
         assert rp.last_messages[1]["content"] == "earlier"
@@ -193,9 +282,16 @@ async def test_stateless_messages_override_needs_no_file_bridge(seeded_kernel):
 async def test_send_refuses_cycle(seeded_kernel, store_agent):
     """_call_stack containing self → immediate cycle refusal (before the lock)."""
     oid = await _make_ollama(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(
-        oid, {"type": "send", "text": "hi", "_call_stack": [oid]}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": oid,
+                    "payload": {"type": "send", "text": "hi", "_call_stack": [oid]},
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "cycle" in r["error"]
 
 
@@ -203,9 +299,16 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
     """_call_stack at/over MAX_CALL_DEPTH → depth refusal (before the lock)."""
     oid = await _make_ollama(seeded_kernel, store_agent)
     deep = [f"x{i}" for i in range(ot.MAX_CALL_DEPTH)]
-    r = await seeded_kernel.send(
-        oid, {"type": "send", "text": "hi", "_call_stack": deep}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": oid,
+                    "payload": {"type": "send", "text": "hi", "_call_stack": deep},
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "depth" in r["error"]
 
 
@@ -215,10 +318,18 @@ async def test_run_persists_history(seeded_kernel, store_agent):
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
-    data = (await seeded_kernel.send(oid, {"type": "history"}))["messages"]
+    data = (
+        (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
+            0
+        ]["result"]
+    )["messages"]
     assert data[-2] == {"role": "user", "content": "hi"}
     assert data[-1] == {"role": "assistant", "content": "reply"}
     # System prompt is NEVER persisted — rebuilt fresh each turn from the live menu.
@@ -231,33 +342,61 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi A", "client_id": "alice"}
-        )
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi B", "client_id": "bob"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi A",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {"type": "send", "text": "hi B", "client_id": "bob"},
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
-    a = (await seeded_kernel.send(oid, {"type": "history", "client_id": "alice"}))[
-        "messages"
-    ]
-    b = (await seeded_kernel.send(oid, {"type": "history", "client_id": "bob"}))[
-        "messages"
-    ]
+    a = (
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "history", "client_id": "alice"}}]
+            )
+        )[0]["result"]
+    )["messages"]
+    b = (
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "history", "client_id": "bob"}}]
+            )
+        )[0]["result"]
+    )["messages"]
     assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
     assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(oid, {"type": "garbage"})
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "garbage"}}]))[
+        0
+    ]["result"]
     assert "error" in r
 
 
 async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
     """Default caller (client_id='cli') has events dispatched via
-    kernel.send('cli', …) so cli's stdout handler runs. No leak to the
+    kernel.send([{"target": 'cli', "payload": …}]) so cli's stdout handler runs. No leak to the
     backend's own inbox (which would broadcast to unrelated WS subscribers).
     """
     oid = await _make_ollama(seeded_kernel, store_agent)
@@ -266,7 +405,11 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        await seeded_kernel.send(oid, {"type": "send", "text": "hi"})
+        (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
         sends = [
             (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "send"
         ]
@@ -309,9 +452,20 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(events.append)
     try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hi", "client_id": "web_xyz"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi",
+                            "client_id": "web_xyz",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         sends = [
             (e["agent_id"], e["payload"]) for e in events if e.get("kind") == "send"
         ]
@@ -368,16 +522,35 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "first", "client_id": "alice"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "first",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.sleep(0.05)  # let t1 acquire the lock
         t2 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "second", "client_id": "bob"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "second",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
             )
         )
-        r1, r2 = await asyncio.gather(t1, t2)
+        (o1,), (o2,) = await asyncio.gather(t1, t2)
+        r1, r2 = o1["result"], o2["result"]
         captured = [
             (e["kind"], e["agent_id"], e["payload"])
             for e in events
@@ -455,16 +628,27 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
     try:
         results = await asyncio.gather(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "first", "client_id": "a"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {"type": "send", "text": "first", "client_id": "a"},
+                    }
+                ]
             ),
             seeded_kernel.send(
-                oid, {"type": "send", "text": "second", "client_id": "b"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {"type": "send", "text": "second", "client_id": "b"},
+                    }
+                ]
             ),
         )
         assert max_in_flight == 1, f"saw {max_in_flight} concurrent generations"
         assert order == ["first", "second"], f"FIFO order broke: {order}"
-        assert all(r["final"] == "ok" for r in results)
-        assert {r["client_id"] for r in results} == {"a", "b"}
+        replies = [outs[0]["result"] for outs in results]
+        assert all(r["final"] == "ok" for r in replies)
+        assert {r["client_id"] for r in replies} == {"a", "b"}
     finally:
         ot._providers.pop(oid, None)
 
@@ -516,9 +700,20 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                oid, {"type": "send", "text": "hi", "client_id": "alice"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": oid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         statuses = [p for _, p in emits if p.get("type") == "status"]
         phases = [s["phase"] for s in statuses]
         assert phases == ["thinking", "streaming", "done"], phases
@@ -552,13 +747,31 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "first", "client_id": "alice"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "first",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.sleep(0.05)
         t2 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "second", "client_id": "bob"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "second",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.gather(t1, t2)
@@ -575,7 +788,11 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
 
 async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(oid, {"type": "status", "client_id": "alice"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": oid, "payload": {"type": "status", "client_id": "alice"}}]
+        )
+    )[0]["result"]
     assert r["generating"] is False
     assert r["current"] is None
     assert r["mine_pending"] == []
@@ -591,15 +808,35 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
 
     class _SlowProvider:
         async def chat(self, messages):
-            r = await seeded_kernel.send(oid, {"type": "status", "client_id": "alice"})
+            r = (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": oid,
+                            "payload": {"type": "status", "client_id": "alice"},
+                        }
+                    ]
+                )
+            )[0]["result"]
             captured_status.append(r)
             yield "ok"
 
     ot._providers[oid] = _SlowProvider()
     try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "hello there", "client_id": "alice"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hello there",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
 
@@ -627,25 +864,57 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
             if self.calls == 1:
                 # bob runs first; alice gets queued behind him
                 await asyncio.sleep(0.15)
-                snapshots["alice"] = await seeded_kernel.send(
-                    oid, {"type": "status", "client_id": "alice"}
-                )
-                snapshots["bob"] = await seeded_kernel.send(
-                    oid, {"type": "status", "client_id": "bob"}
-                )
+                snapshots["alice"] = (
+                    await seeded_kernel.send(
+                        [
+                            {
+                                "target": oid,
+                                "payload": {"type": "status", "client_id": "alice"},
+                            }
+                        ]
+                    )
+                )[0]["result"]
+                snapshots["bob"] = (
+                    await seeded_kernel.send(
+                        [
+                            {
+                                "target": oid,
+                                "payload": {"type": "status", "client_id": "bob"},
+                            }
+                        ]
+                    )
+                )[0]["result"]
             yield "ok"
 
     ot._providers[oid] = _PrivacyProvider()
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "bob secret", "client_id": "bob"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "bob secret",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.sleep(0.05)
         t2 = asyncio.create_task(
             seeded_kernel.send(
-                oid, {"type": "send", "text": "alice secret", "client_id": "alice"}
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "alice secret",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.gather(t1, t2)
@@ -674,14 +943,31 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
 
     class _RedactProvider:
         async def chat(self, messages):
-            snap_holder.append(await seeded_kernel.send(oid, {"type": "status"}))
+            snap_holder.append(
+                (
+                    await seeded_kernel.send(
+                        [{"target": oid, "payload": {"type": "status"}}]
+                    )
+                )[0]["result"]
+            )
             yield "ok"
 
     ot._providers[oid] = _RedactProvider()
     try:
-        await seeded_kernel.send(
-            oid, {"type": "send", "text": "private text", "client_id": "alice"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "private text",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
 
@@ -713,13 +999,26 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
         with ctx:
             send_task = asyncio.create_task(
                 seeded_kernel.send(
-                    oid, {"type": "send", "text": "stop me", "client_id": "alice"}
+                    [
+                        {
+                            "target": oid,
+                            "payload": {
+                                "type": "send",
+                                "text": "stop me",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
                 )
             )
             await asyncio.sleep(0.10)
 
             # Discover the generation in the live task table…
-            table = await seeded_kernel.send("kernel", {"type": "ps"})
+            table = (
+                await seeded_kernel.send(
+                    [{"target": "kernel", "payload": {"type": "ps"}}]
+                )
+            )[0]["result"]
             rows = [
                 t for t in table["tasks"] if t["agent"] == oid and t["verb"] == "send"
             ]
@@ -727,13 +1026,22 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
             task_id = rows[0]["id"]
 
             # …and kill it with the universal system verb.
-            r = await seeded_kernel.send(
-                "kernel", {"type": "cancel", "task_id": task_id}
-            )
+            r = (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": "kernel",
+                            "payload": {"type": "cancel", "task_id": task_id},
+                        }
+                    ]
+                )
+            )[0]["result"]
             assert r == {"cancelled": True, "killed": [task_id]}
 
             # The blocked caller's send resolves — cancellation never raises out.
-            assert await send_task == {"cancelled": True}
+            out = (await send_task)[0]
+            assert out["status"] == "cancelled"
+            assert out["result"] == {"cancelled": True}
 
         # The `on_cancel` hook closed the turn out: status(done, cancelled) + done.
         done_status = [
@@ -748,17 +1056,28 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
         )
 
         # …and the backend no longer reports a phantom generation.
-        snap = await seeded_kernel.send(oid, {"type": "status"})
+        snap = (
+            await seeded_kernel.send([{"target": oid, "payload": {"type": "status"}}])
+        )[0]["result"]
         assert snap["generating"] is False
         assert snap["current"] is None
-        rr = await seeded_kernel.send(oid, {"type": "reflect"})
+        rr = (
+            await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}])
+        )[0]["result"]
         assert rr["generating"] is False
         assert "interrupt" not in rr["verbs"]
         # The FIFO lock was released with the aborted dispatch — the next send runs.
         ot._providers[oid] = _FakeProvider([["after"]])
-        assert (await seeded_kernel.send(oid, {"type": "send", "text": "again"}))[
-            "final"
-        ] == "after"
+        assert (
+            (
+                (
+                    await seeded_kernel.send(
+                        [{"target": oid, "payload": {"type": "send", "text": "again"}}]
+                    )
+                )[0]["result"]
+            )["final"]
+            == "after"
+        )
     finally:
         ot._providers.pop(oid, None)
 
@@ -804,9 +1123,20 @@ async def test_status_done_emits_with_reason_timeout(
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            r = await seeded_kernel.send(
-                oid, {"type": "send", "text": "slow", "client_id": "alice"}
-            )
+            r = (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": oid,
+                            "payload": {
+                                "type": "send",
+                                "text": "slow",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         assert "timeout" in r.get("error", "")
         done_status = [
             p
@@ -827,9 +1157,20 @@ async def test_status_event_includes_send_id(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                oid, {"type": "send", "text": "hi", "client_id": "alice"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": oid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         statuses = [p for _, p in emits if p.get("type") == "status"]
         for s in statuses:
             assert "send_id" in s["detail"], s

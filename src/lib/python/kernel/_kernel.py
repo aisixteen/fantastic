@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from kernel._refusal import UNKNOWN_AGENT, refusal
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -69,6 +70,38 @@ _current_task: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+# WHO CALLED THIS DISPATCH. `_current_sender` is rewritten to the TARGET's id
+# the moment a handler runs (`Agent._dispatch`), so a handler cannot see its
+# caller — the gate is the only place that identity has ever existed. That is
+# fine while every authorization decision is `(sender, target, verb)`, which the
+# gate owns. It is NOT fine when a verb's PAYLOAD names a resource: `persist_blob`
+# takes the namespace to write as `agent_id`, so without the caller the loader
+# cannot tell "persist my own memory" from "overwrite someone else's".
+#
+# Measured 2026-08-23: an agent holding exactly
+# `can_call: {kernel_state: [persist_blob]}` wrote another agent's `state.yaml`,
+# and the victim read the forged content back as its own memory. The believed
+# defence was POSITION (the root accepts `$children`, a grandchild is not one) —
+# but every agent an operator creates at the root IS a direct child.
+#
+# `None` means OPERATOR ORIGIN, which an agent cannot forge: the CLI, the cold
+# bootstrap, a loader at boot, or a verb completing its own side effect under
+# `operator_context`.
+_current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_origin", default=None
+)
+
+
+def current_origin() -> str | None:
+    """The id that ORIGINATED this dispatch, or None for an operator send.
+
+    Read it when a verb's payload names a resource the caller might not own.
+    Do NOT use it for `(sender, target, verb)` decisions — that is the gate's
+    job, it runs first, and duplicating it here would be a second truth.
+    """
+    return _current_origin.get()
+
+
 def current_task() -> str | None:
     """The TASK id of the dispatch running right now (`"<agent_id>:<token>"`), or
     None outside any dispatch.
@@ -80,6 +113,48 @@ def current_task() -> str | None:
     kernel is killing some other dispatch on the same agent" (a `history`, a
     `reflect`). Bundles never touch the contextvar itself."""
     return _current_task.get()
+
+
+def page(items: list, payload: dict, *, key=None) -> tuple[list, str | None]:
+    """Apply `limit` + `after` to one list reply. Returns `(page, next_cursor)`.
+
+    UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Measured
+    2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what
+    forced `dedupe_stale_reads`, the reflect stub and the point-of-use
+    distillation nudge in `ai_core` — every one of those shrinks what is
+    RETAINED because nothing could shrink what is SENT. Paging attacks the cause.
+
+    The cursor is OPAQUE by construction: it is the last item's identity, not an
+    offset, so a caller cannot compute the next one or skip ahead by arithmetic.
+    That also makes it stable under mutation in the one way that matters — a page
+    resumes AFTER a named item, so items inserted before it are simply not
+    revisited, and items appended after it are picked up. It is NOT a snapshot:
+    over a live tree a cursor may miss an item deleted mid-walk and may re-show
+    one that moved. This is the kernel, not a database; that is stated rather
+    than papered over with a snapshot nobody asked to pay for.
+
+    Absent `limit` ⇒ everything, `next: None`. So a caller that never learned
+    about paging gets exactly what it always got — the default is unchanged, and
+    the field is inert until asked for.
+    """
+    ident = key or (lambda x: x)
+    after = payload.get("after")
+    if isinstance(after, str) and after:
+        for i, item in enumerate(items):
+            if str(ident(item)) == after:
+                items = items[i + 1 :]
+                break
+        else:
+            # A cursor naming something that is gone: the caller is walking a tree
+            # that moved under it. Give it the tail rather than silently the WHOLE
+            # list, which would look like a successful restart from the top.
+            return [], None
+    limit = payload.get("limit")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        return list(items), None
+    head = list(items[:limit])
+    nxt = str(ident(head[-1])) if head and len(items) > limit else None
+    return head, nxt
 
 
 @contextlib.contextmanager
@@ -111,6 +186,37 @@ def sender_context(sender_id: str):
         yield
     finally:
         _current_sender.reset(token)
+
+
+# ─── dispatch outcomes ──────────────────────────────────────────
+#
+# The terminal states of ONE batch item, as `send` reports them. The task table
+# itself stays LIVE-ONLY (an entry is forgotten the moment its task ends); an
+# outcome is returned to the caller and retained nowhere.
+#
+#   completed — the target's handler ran and returned; `result` is its reply
+#               VERBATIM. May be None; may be a domain {"error": ...} — the
+#               kernel does not introspect domain replies.
+#   failed    — no handler answer exists: the kernel refused before dispatch
+#               (gate denial, unknown agent, malformed item) or the handler
+#               raised ({"error": f"{type}: {e}", "raised": True}).
+#   cancelled — the dispatch was killed via `cancel` while the batch awaited
+#               it; `result` is {"cancelled": True}.
+#   timed_out — the item's own deadline expired and the kernel killed it
+#               through the front door (`cancel_task`, so `on_cancel` hooks
+#               ran); `result` is a refusal(TIMEOUT, ...).
+#
+# Invariant: `pid is None` ⟺ nothing was ever in the task table (refusals,
+# malformed items, the kernel-reflect fast path).
+COMPLETED = "completed"
+FAILED = "failed"
+CANCELLED = "cancelled"
+TIMED_OUT = "timed_out"
+
+
+def outcome(pid: str | None, status: str, result: dict | None) -> dict:
+    """The one shape a batch item settles to: {pid, status, result}."""
+    return {"pid": pid, "status": status, "result": result}
 
 
 def _summarize_payload(payload: Any) -> str:
@@ -401,15 +507,21 @@ class Kernel:
 
     # ─── tree management (front-door API) ──────────────────────
 
-    async def send(self, target_id: str, payload: dict) -> dict | None:
-        """Flat global send from outside any handler. Delegates to the
-        root Agent's `send` so all of `Agent.send`'s behavior — the
-        `kernel` primer alias, the readme reflect post-process
-        — applies uniformly whether you call through `Kernel` or an
-        `Agent`."""
+    async def send(self, items: list[dict]) -> list[dict]:
+        """ARRAY-ONLY batch send from outside any handler:
+        [{target, payload, timeout?}, ...] -> [{pid, status, result}].
+        Delegates to the root Agent's `send` so all of its behavior — the
+        `kernel` primer alias, the call gate, the readme reflect
+        post-process — applies uniformly whether you call through `Kernel`
+        or an `Agent`. Single call = `(await send([{...}]))[0]`."""
         if self.root is None:
-            return {"error": "kernel: no root agent registered"}
-        return await self.root.send(target_id, payload)
+            if not isinstance(items, list):
+                raise TypeError(
+                    "send takes a LIST of {target, payload, timeout?} items"
+                )
+            err = {"error": "kernel: no root agent registered"}
+            return [outcome(None, FAILED, dict(err)) for _ in items]
+        return await self.root.send(items)
 
     def create(
         self,
@@ -447,8 +559,12 @@ class Kernel:
         by the one path. It just says what the legal ids are on the way out.
         """
         ids = sorted(self.agents)
-        reply = {"error": f"no agent {agent_id!r}", "agent_count": len(ids)}
-        reply["agents"] = ids[: self.UNKNOWN_AGENT_IDS_MAX]
+        reply = refusal(
+            UNKNOWN_AGENT,
+            f"no agent {agent_id!r}",
+            agent_count=len(ids),
+            agents=ids[: self.UNKNOWN_AGENT_IDS_MAX],
+        )
         # An id wrapped in angle brackets is structurally a SLOT, not a name — no id
         # this kernel mints can contain them (`{bundle}_{hex6}` or a bundle name), so
         # this costs no guessing.
@@ -504,7 +620,25 @@ class Kernel:
         `Kernel::save`). Ephemeral agents are skipped — per-process
         composition, never round-tripped. Sorted by id for deterministic
         output. Pure read, no I/O — a loader agent turns this into bytes."""
-        records = [a.record for a in self.agents.values() if not type(a).ephemeral]
+        # The ephemeral SUBTREE, not just the ephemeral agent. Filtering
+        # per-agent emitted any child of an ephemeral with a `parent_id` naming
+        # an agent that is not in the document — and `Kernel.load` then refuses
+        # it: "agent 'x' parent 'cli' not in snapshot". A `save()` whose output
+        # its own `load()` rejects is a checkpoint that cannot be restored, and
+        # nothing reported it at write time.
+        dropped = {a.id for a in self.agents.values() if type(a).ephemeral}
+        while True:
+            more = {
+                a.id
+                for a in self.agents.values()
+                if a.id not in dropped
+                and a.parent is not None
+                and a.parent.id in dropped
+            }
+            if not more:
+                break
+            dropped |= more
+        records = [a.record for a in self.agents.values() if a.id not in dropped]
         records.sort(key=lambda r: r["id"])
         return {"version": CURRENT_VERSION, "records": records}
 

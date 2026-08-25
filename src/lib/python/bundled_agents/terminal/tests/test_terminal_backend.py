@@ -10,14 +10,21 @@ import pytest
 
 
 async def _make_terminal(kernel, command="/bin/sh"):
-    rec = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "terminal_backend.tools",
-            "command": command,
-        },
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "terminal_backend.tools",
+                        "command": command,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # kernel_state auto-boots; give the PTY a moment to spawn
     await asyncio.sleep(0.3)
     return rec["id"]
@@ -28,12 +35,14 @@ async def terminal(seeded_kernel):
     tid = await _make_terminal(seeded_kernel)
     yield seeded_kernel, tid
     # cleanup
-    await seeded_kernel.send(tid, {"type": "stop"})
+    (await seeded_kernel.send([{"target": tid, "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
 
 
 async def test_reflect(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "reflect"})
+    r = (await k.send([{"target": tid, "payload": {"type": "reflect"}}]))[0]["result"]
     assert r["sentence"].startswith("PTY")
     assert r["running"] is True
     assert r["cols"] >= 40
@@ -42,7 +51,11 @@ async def test_reflect(terminal):
 async def test_shell_done_token_fast_command(terminal):
     k, tid = terminal
     t0 = time.time()
-    r = await k.send(tid, {"type": "shell", "cmd": "echo hello-world"})
+    r = (
+        await k.send(
+            [{"target": tid, "payload": {"type": "shell", "cmd": "echo hello-world"}}]
+        )
+    )[0]["result"]
     elapsed = time.time() - t0
     assert r["completed"] is True
     assert "hello-world" in r["output"]
@@ -53,7 +66,16 @@ async def test_shell_done_token_fast_command(terminal):
 async def test_shell_timeout(terminal):
     k, tid = terminal
     t0 = time.time()
-    r = await k.send(tid, {"type": "shell", "cmd": "sleep 60", "timeout": 1.0})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {"type": "shell", "cmd": "sleep 60", "timeout": 1.0},
+                }
+            ]
+        )
+    )[0]["result"]
     elapsed = time.time() - t0
     assert r["completed"] is False
     assert r["error"] == "timeout"
@@ -62,9 +84,22 @@ async def test_shell_timeout(terminal):
 
 async def test_shell_recovers_after_timeout(terminal):
     k, tid = terminal
-    await k.send(tid, {"type": "shell", "cmd": "sleep 60", "timeout": 0.5})
+    (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {"type": "shell", "cmd": "sleep 60", "timeout": 0.5},
+                }
+            ]
+        )
+    )[0]["result"]
     # next shell call should work — Ctrl-C was sent on timeout
-    r = await k.send(tid, {"type": "shell", "cmd": "echo recovered"})
+    r = (
+        await k.send(
+            [{"target": tid, "payload": {"type": "shell", "cmd": "echo recovered"}}]
+        )
+    )[0]["result"]
     assert r["completed"] is True
     assert "recovered" in r["output"]
 
@@ -73,23 +108,45 @@ async def test_shell_silently_ignores_unknown_args(terminal):
     """Failfast on parameters we explicitly reject is overkill — kwargs
     we don't read are just ignored."""
     k, tid = terminal
-    r = await k.send(tid, {"type": "shell", "cmd": "echo silently_ok", "wait": 999})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "shell",
+                        "cmd": "echo silently_ok",
+                        "wait": 999,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["completed"] is True
     assert "silently_ok" in r["output"]
 
 
 async def test_shell_requires_cmd(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "shell"})
+    r = (await k.send([{"target": tid, "payload": {"type": "shell"}}]))[0]["result"]
     assert "error" in r
 
 
 async def test_write_delivers_bytes(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "write", "data": "echo hi-via-write\n"})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {"type": "write", "data": "echo hi-via-write\n"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r["written"] > 0
     await asyncio.sleep(0.4)
-    out = await k.send(tid, {"type": "output"})
+    out = (await k.send([{"target": tid, "payload": {"type": "output"}}]))[0]["result"]
     assert "hi-via-write" in out["output"]
 
 
@@ -104,12 +161,14 @@ async def test_write_large_paste_not_truncated(terminal):
     # 64 KB — well past a typical PTY input buffer (a few KB).
     body = "".join(f"L{i:05d}" for i in range(8000))  # ~64000 chars
     payload = "echo START_" + body + "_END\n"
-    r = await k.send(tid, {"type": "write", "data": payload})
+    r = (
+        await k.send([{"target": tid, "payload": {"type": "write", "data": payload}}])
+    )[0]["result"]
     assert r["written"] == len(payload.encode("utf-8")), (
         f"short write: {r['written']} of {len(payload.encode('utf-8'))}"
     )
     await asyncio.sleep(1.0)
-    out = await k.send(tid, {"type": "output"})
+    out = (await k.send([{"target": tid, "payload": {"type": "output"}}]))[0]["result"]
     # Both ends echo → nothing was dropped mid-stream.
     assert "START_L00000" in out["output"]
     assert "L07999_END" in out["output"]
@@ -127,14 +186,25 @@ async def test_flow_control_pauses_and_resumes(terminal):
     # Flood the PTY with well over HIGH_WATERMARK (100K) chars of
     # output. `head -c` caps it so the child exits cleanly even if we
     # never resumed; the pipe stalls behind backpressure meanwhile.
-    await k.send(
-        tid,
-        {"type": "write", "data": "yes FANTASTIC_FLOW_CONTROL | head -c 400000\n"},
-    )
+    (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "write",
+                        "data": "yes FANTASTIC_FLOW_CONTROL | head -c 400000\n",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     refl = None
     for _ in range(60):
         await asyncio.sleep(0.05)
-        refl = await k.send(tid, {"type": "reflect"})
+        refl = (await k.send([{"target": tid, "payload": {"type": "reflect"}}]))[0][
+            "result"
+        ]
         if refl["paused"]:
             break
     assert refl["paused"] is True, "reader must pause once unacked > HIGH_WATERMARK"
@@ -142,7 +212,9 @@ async def test_flow_control_pauses_and_resumes(terminal):
     # Ack the backlog down — the reader must re-attach and keep draining.
     r = None
     for _ in range(200):
-        r = await k.send(tid, {"type": "ack", "chars": 5000})
+        r = (
+            await k.send([{"target": tid, "payload": {"type": "ack", "chars": 5000}}])
+        )[0]["result"]
         if not r["paused"]:
             break
     assert r["paused"] is False, "reader must re-attach once unacked < LOW_WATERMARK"
@@ -153,7 +225,9 @@ async def test_ack_on_unpaused_terminal_is_harmless(terminal):
     """An ack from a streamer that never hit the watermark just floors
     the counter at zero — no negative drift, stays unpaused."""
     k, tid = terminal
-    r = await k.send(tid, {"type": "ack", "chars": 999999})
+    r = (await k.send([{"target": tid, "payload": {"type": "ack", "chars": 999999}}]))[
+        0
+    ]["result"]
     assert r["unacked"] == 0
     assert r["paused"] is False
 
@@ -174,9 +248,20 @@ async def test_paste_image_writes_file_and_injects_path(terminal):
     into the PTY — mimics a file drag-drop, the path-injection
     pattern Claude Code recognizes."""
     k, tid = terminal
-    r = await k.send(
-        tid, {"type": "paste_image", "data": _TINY_PNG, "mime": "image/png"}
-    )
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "paste_image",
+                        "data": _TINY_PNG,
+                        "mime": "image/png",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" not in r, r
     assert r["bytes"] == len(_TINY_PNG)
     assert r["path"].endswith(".png")
@@ -185,14 +270,27 @@ async def test_paste_image_writes_file_and_injects_path(terminal):
         assert f.read() == _TINY_PNG
     # And the path was typed into the PTY (the shell echoes stdin).
     await asyncio.sleep(0.4)
-    out = await k.send(tid, {"type": "output"})
+    out = (await k.send([{"target": tid, "payload": {"type": "output"}}]))[0]["result"]
     assert r["path"] in out["output"]
 
 
 async def test_paste_image_rejects_unsupported_type(terminal):
     """Only the formats Claude Code accepts (png/jpeg/gif/webp)."""
     k, tid = terminal
-    r = await k.send(tid, {"type": "paste_image", "data": b"BM..", "mime": "image/bmp"})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "paste_image",
+                        "data": b"BM..",
+                        "mime": "image/bmp",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r
 
 
@@ -200,14 +298,31 @@ async def test_paste_image_rejects_oversize(terminal):
     """Claude Code's 5 MB per-image cap is enforced backend-side."""
     k, tid = terminal
     big = b"\x00" * (5 * 1024 * 1024 + 1)
-    r = await k.send(tid, {"type": "paste_image", "data": big, "mime": "image/png"})
+    r = (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "paste_image",
+                        "data": big,
+                        "mime": "image/png",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r
     assert "5 MB" in r["error"]
 
 
 async def test_paste_image_requires_bytes(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "paste_image", "data": "not-bytes"})
+    r = (
+        await k.send(
+            [{"target": tid, "payload": {"type": "paste_image", "data": "not-bytes"}}]
+        )
+    )[0]["result"]
     assert "error" in r
 
 
@@ -228,9 +343,23 @@ async def test_multibyte_not_corrupted_across_read_chunks(terminal):
     # (~12 KB — spans 3+ os.read chunks) so nothing is truncated
     # mid-char by the test itself. 4096 % 3 != 0, so a chunk boundary
     # is still guaranteed to land mid-char inside the stream.
-    await k.send(tid, {"type": "write", "data": f"yes '{line}' | head -n 250\n"})
+    (
+        await k.send(
+            [
+                {
+                    "target": tid,
+                    "payload": {
+                        "type": "write",
+                        "data": f"yes '{line}' | head -n 250\n",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     await asyncio.sleep(0.8)
-    out = (await k.send(tid, {"type": "output"}))["output"]
+    out = (
+        (await k.send([{"target": tid, "payload": {"type": "output"}}]))[0]["result"]
+    )["output"]
     assert "�" not in out, "a multibyte char split across a read chunk → U+FFFD"
     assert out.count(line) > 200, (
         "box-drawing lines must survive the chunk reads intact"
@@ -239,28 +368,50 @@ async def test_multibyte_not_corrupted_across_read_chunks(terminal):
 
 async def test_resize(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "resize", "cols": 100, "rows": 30})
+    r = (
+        await k.send(
+            [{"target": tid, "payload": {"type": "resize", "cols": 100, "rows": 30}}]
+        )
+    )[0]["result"]
     assert r["resized"] is True
-    refl = await k.send(tid, {"type": "reflect"})
+    refl = (await k.send([{"target": tid, "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert refl["cols"] == 100
     assert refl["rows"] == 30
 
 
 async def test_shell_without_boot_errors(seeded_kernel):
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "terminal_backend.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "terminal_backend.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # kernel_state auto-boots, so manually stop first
-    await seeded_kernel.send(rec["id"], {"type": "stop"})
-    r = await seeded_kernel.send(rec["id"], {"type": "shell", "cmd": "echo x"})
+    (await seeded_kernel.send([{"target": rec["id"], "payload": {"type": "stop"}}]))[0][
+        "result"
+    ]
+    r = (
+        await seeded_kernel.send(
+            [{"target": rec["id"], "payload": {"type": "shell", "cmd": "echo x"}}]
+        )
+    )[0]["result"]
     assert "error" in r
     assert "not running" in r["error"]
 
 
 async def test_unknown_verb_errors(terminal):
     k, tid = terminal
-    r = await k.send(tid, {"type": "garbage"})
+    r = (await k.send([{"target": tid, "payload": {"type": "garbage"}}]))[0]["result"]
     assert "error" in r
 
 
@@ -283,15 +434,29 @@ async def test_shutdown_kills_pty_via_delete_agent(seeded_kernel):
 
     from terminal_backend.tools import _procs
 
-    rec = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "create_agent", "handler_module": "terminal_backend.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "terminal_backend.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     tid = rec["id"]
     state = _procs.get(tid)
     assert state and state.get("pid"), "boot should spawn a PTY"
     pid = state["pid"]
-    r = await seeded_kernel.send("kernel_state", {"type": "delete_agent", "id": tid})
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": tid}}]
+        )
+    )[0]["result"]
     assert r.get("deleted") is True
     assert tid not in _procs, "shutdown must drop the _procs entry"
     # Reap the child. waitpid returns (pid, status) once the child

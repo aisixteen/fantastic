@@ -1,0 +1,14 @@
+# Test spec for `configs/engine_smoke_unreadable_manifest.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: engine_smoke_unreadable_manifest.yaml
+
+name: engine_smoke_unreadable_manifest
+description: >
+  An engine fixture, not a scenario. The ONE refusal `static_loader` makes at
+  write time: `validate_meta` reads the manifest path through the cwd clamp, so
+  a path that is missing (or escapes the running dir) never becomes a record.
+
+expect:
+  hydration: refused_at_write
+  error_contains: "is not readable"

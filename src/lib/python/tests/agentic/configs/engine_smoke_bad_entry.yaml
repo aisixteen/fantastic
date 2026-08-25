@@ -1,0 +1,21 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/engine_smoke_bad_entry.yaml`.
+
+
+loaders:
+  - id: half_loader
+    file: fantastic_half.yaml
+    manifest:
+      agents:
+        - id: good
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+        # A BARE stem. Rule names are manifold-scoped now; the child bundle
+        # refuses this at its own write time, and `_boot` returns on the first
+        # failed create.
+        - id: bogus
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all
+        - id: never
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress

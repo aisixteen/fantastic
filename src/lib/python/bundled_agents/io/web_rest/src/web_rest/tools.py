@@ -93,7 +93,9 @@ def _make_post_endpoint(self_id: str, kernel):
         # originate visually from this sprite. Without this an external
         # HTTP caller has no agent context and rays drop.
         with sender_context(self_id):
-            reply = await kernel.send(target_id, payload)
+            reply = (await kernel.send([{"target": target_id, "payload": payload}]))[0][
+                "result"
+            ]
         if reply is None:
             return Response(status_code=204)
         return JSONResponse(reply)
@@ -129,7 +131,9 @@ def _make_reflect_get(self_id: str, kernel):
         if not decision.allowed:
             return _deny(decision)
         with sender_context(self_id):
-            reply = await kernel.send(target_id, payload)
+            reply = (await kernel.send([{"target": target_id, "payload": payload}]))[0][
+                "result"
+            ]
         if reply is None:
             return Response(status_code=404)
         return JSONResponse(reply)
@@ -144,7 +148,9 @@ def _make_reflect_root(self_id: str, kernel):
         if not decision.allowed:
             return _deny(decision)
         with sender_context(self_id):
-            reply = await kernel.send("kernel", payload)
+            reply = (await kernel.send([{"target": "kernel", "payload": payload}]))[0][
+                "result"
+            ]
         if reply is None:
             return Response(status_code=404)
         return JSONResponse(reply)

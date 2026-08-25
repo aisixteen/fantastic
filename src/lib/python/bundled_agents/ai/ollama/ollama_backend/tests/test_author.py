@@ -41,14 +41,21 @@ class _FakeProvider:
 async def _make_ai(kernel):
     # No grants needed: the author routes every structural mutation through its
     # OWN id, so authored tools are its children — fork + $children are baseline.
-    rec = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ollama_backend.tools",
-            "context_window": 32768,
-        },
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ollama_backend.tools",
+                        "context_window": 32768,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     return rec["id"]
 
 
@@ -126,9 +133,20 @@ async def test_final_is_refused_until_the_tool_is_observed_answering(
     )
     ot._providers[aid] = fp
     try:
-        r = await seeded_kernel.send(
-            aid, {"type": "author", "goal": "echo the text back", "steps": 5}
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "author",
+                            "goal": "echo the text back",
+                            "steps": 5,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r.get("id") == "echo_tool", r
         assert "on_message" in r.get("code", ""), r
         assert r.get("message") == "built the echo tool"
@@ -152,9 +170,20 @@ async def test_a_deaf_tool_is_pushed_back_as_deaf_and_the_loop_gives_up(
     )
     ot._providers[aid] = fp
     try:
-        r = await seeded_kernel.send(
-            aid, {"type": "author", "goal": "echo the text back", "steps": 3}
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "author",
+                            "goal": "echo the text back",
+                            "steps": 3,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert "gave up" in r.get("error", ""), r
         assert "deaf" in r["error"], r
         # The pushback told the model WHAT the loop observed.
@@ -179,9 +208,20 @@ async def test_a_crash_reaches_the_model_verbatim(seeded_kernel, store_agent):
     )
     ot._providers[aid] = fp
     try:
-        r = await seeded_kernel.send(
-            aid, {"type": "author", "goal": "echo the text back", "steps": 3}
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "author",
+                            "goal": "echo the text back",
+                            "steps": 3,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert "error" in r, r
         joined = " ".join(str(x) for x in fp.requests)
         assert "KeyError" in joined and "payload" in joined, (
@@ -204,9 +244,20 @@ async def test_unparseable_reply_earns_a_nudge_and_the_loop_survives(
     )
     ot._providers[aid] = fp
     try:
-        r = await seeded_kernel.send(
-            aid, {"type": "author", "goal": "echo the text back", "steps": 5}
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "author",
+                            "goal": "echo the text back",
+                            "steps": 5,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r.get("id") == "echo2", r
         turn2 = str(fp.requests[1])
         assert "not ONE complete JSON object" in turn2
@@ -226,15 +277,21 @@ async def test_the_probe_is_never_readable_by_the_model(seeded_kernel, store_age
     )
     ot._providers[aid] = fp
     try:
-        r = await seeded_kernel.send(
-            aid,
-            {
-                "type": "author",
-                "goal": "echo the text back",
-                "steps": 4,
-                "probe": "XYZZY_SECRET_PROBE",
-            },
-        )
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "author",
+                            "goal": "echo the text back",
+                            "steps": 4,
+                            "probe": "XYZZY_SECRET_PROBE",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert r.get("id") == "echo3", r
         joined = " ".join(str(x) for x in fp.requests)
         assert "XYZZY_SECRET_PROBE" not in joined, "the probe leaked to the model"
@@ -244,5 +301,7 @@ async def test_the_probe_is_never_readable_by_the_model(seeded_kernel, store_age
 
 async def test_author_requires_a_goal(seeded_kernel, store_agent):
     aid = await _make_ai(seeded_kernel)
-    r = await seeded_kernel.send(aid, {"type": "author"})
+    r = (await seeded_kernel.send([{"target": aid, "payload": {"type": "author"}}]))[0][
+        "result"
+    ]
     assert "goal" in r.get("error", "")

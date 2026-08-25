@@ -1,0 +1,82 @@
+# Test spec for `configs/two_sided_gate.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: two_sided_gate.yaml
+
+name: two_sided_gate
+description: >
+  An edge exists only if BOTH halves grant it — the SENDER's `can_call` (egress)
+  and the TARGET's `callable_by` (ingress) — and a denial names the half that
+  refused. The roster is a TRUTH TABLE over those two halves: one `caller`, and
+  one callee per quadrant, named for which half the manifest declares (the
+  denial then names the OTHER one). Everything is a `file_bridge` opened at its
+  own io leg, so the call gate is the only gate that can refuse: a sealed leg
+  denies with the same `reason: unauthorized` and NO `side`, which would make a
+  seal indistinguishable from an egress refusal.
+
+requirements: [TSG-1, TSG-2, TSG-3, TSG-4, TSG-5, TSG-6]
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: caller
+  edges:
+    - name: both halves declared — the edge exists
+      from: caller
+      to: both_grant
+      send: {type: list, path: ""}
+      allow: true
+
+    - name: the caller's half alone is refused BY THE CALLEE
+      from: caller
+      to: only_caller_grants
+      send: {type: list, path: ""}
+      allow: false
+      side: ingress
+
+    - name: the callee's half alone never leaves the SENDER
+      from: caller
+      to: only_callee_grants
+      send: {type: list, path: ""}
+      allow: false
+      side: egress
+
+    - name: neither half — egress is decided first
+      from: caller
+      to: neither_grants
+      send: {type: list, path: ""}
+      allow: false
+      side: egress
+
+    - name: a verb the caller was not granted dies on the caller's half
+      from: caller
+      to: both_grant
+      send: {type: mkdir, path: refused_at_egress}
+      allow: false
+      side: egress
+
+    - name: a verb the callee does not accept dies on the callee's half
+      from: caller
+      to: callee_narrows_verbs
+      send: {type: mkdir, path: refused_at_ingress}
+      allow: false
+      side: ingress
+
+    - name: the verb BOTH halves name still crosses the narrowed edge
+      from: caller
+      to: callee_narrows_verbs
+      send: {type: list, path: ""}
+      allow: true
+
+    - name: the edge is one-way — the reverse direction was never declared
+      from: both_grant
+      to: caller
+      send: {type: list, path: ""}
+      allow: false
+      side: egress
+
+    - name: a roster agent reaches its loader on the structural baseline
+      from: caller
+      to: gate_loader
+      send: {type: reflect}
+      allow: true

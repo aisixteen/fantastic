@@ -267,13 +267,28 @@ class _Run:
         self.dep_verbs_used = []
         # Revive a stopped durable tool for observation.
         rec = self.kernel.get(tool) or {}
-        refl = await self.kernel.send(tool, {"type": "reflect"})
+        refl = (
+            await self.kernel.send([{"target": tool, "payload": {"type": "reflect"}}])
+        )[0]["result"]
         if isinstance(refl, dict) and refl.get("running") == 0 and rec.get("code"):
-            await self.kernel.send(tool, {"type": "start"})
+            (await self.kernel.send([{"target": tool, "payload": {"type": "start"}}]))[
+                0
+            ]["result"]
             await asyncio.sleep(BOOT_BEAT)
-        await self.kernel.send(
-            tool, {"type": "send", "text": self.probe, "client_id": "author"}
-        )
+        (
+            await self.kernel.send(
+                [
+                    {
+                        "target": tool,
+                        "payload": {
+                            "type": "send",
+                            "text": self.probe,
+                            "client_id": "author",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         deadline = time.monotonic() + PROBE_WAIT
         extended = False
         while True:
@@ -290,12 +305,20 @@ class _Run:
         ok = self.observe() or bool(self.said)
         self.probing = False
         if not ok and self.crash is None:
-            st = await self.kernel.send(tool, {"type": "status"})
+            st = (
+                await self.kernel.send(
+                    [{"target": tool, "payload": {"type": "status"}}]
+                )
+            )[0]["result"]
             jobs = st.get("jobs") if isinstance(st, dict) else None
             failed = [j for j in jobs or [] if j.get("status") == "failed"]
             if failed:
                 jid = failed[-1].get("job_id", "")
-                full = await self.kernel.send(tool, {"type": "status", "job_id": jid})
+                full = (
+                    await self.kernel.send(
+                        [{"target": tool, "payload": {"type": "status", "job_id": jid}}]
+                    )
+                )[0]["result"]
                 j = (full.get("jobs") or [{}])[0] if isinstance(full, dict) else {}
                 self.crash = (
                     str(j.get("stderr") or failed[-1].get("last_line") or "") or None
@@ -310,7 +333,11 @@ class _Run:
         used = [v for v in self.dep_verbs_used if v not in ("say", "done")]
         if not used:
             return None
-        refl = await self.kernel.send(self.must_call, {"type": "reflect"})
+        refl = (
+            await self.kernel.send(
+                [{"target": self.must_call, "payload": {"type": "reflect"}}]
+            )
+        )[0]["result"]
         have = list((refl.get("verbs") or {}).keys()) if isinstance(refl, dict) else []
         shown = " and ".join(f"{{type:'{v}'}}" for v in have)
         used_s = " and ".join(f"{{type:'{v}'}}" for v in sorted(set(used)))
@@ -372,18 +399,26 @@ async def author(self_id: str, payload: dict, kernel) -> dict:
 
     try:
         for _step in range(steps):
-            await _emit_progress(kernel, self_id, "authoring", turn[:160])
-            reply = await kernel.send(
-                self_id,
-                {
-                    "type": "send",
-                    "text": run.scrub(turn, expect),
-                    "system_prompt": LEAN_SYSTEM,
-                    "messages": history
-                    + [{"role": "user", "content": run.scrub(turn, expect)}],
-                    "client_id": "author",
-                },
-            )
+            await _emit_progress(kernel, self_id, "authoring", turn)
+            reply = (
+                await kernel.send(
+                    [
+                        {
+                            "target": self_id,
+                            "payload": {
+                                "type": "send",
+                                "text": run.scrub(turn, expect),
+                                "system_prompt": LEAN_SYSTEM,
+                                "messages": history
+                                + [
+                                    {"role": "user", "content": run.scrub(turn, expect)}
+                                ],
+                                "client_id": "author",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
             response = (
                 (reply or {}).get("response", "") if isinstance(reply, dict) else ""
             )
@@ -429,13 +464,17 @@ async def author(self_id: str, payload: dict, kernel) -> dict:
                         )
                         continue
                     if run.crash:
-                        last_state = f"it CRASHED: {run.crash.splitlines()[-1][:120]}"
+                        last_state = f"it CRASHED: {run.crash.splitlines()[-1]}"
                         turn = _compose(_crash_pushback(tool, run.crash), None)
                         run.crash = None
                         continue
                     note = await run.dep_verdict()
-                    refl = await kernel.send(tool, {"type": "reflect"})
-                    state = json.dumps(refl, default=str)[:1200]
+                    refl = (
+                        await kernel.send(
+                            [{"target": tool, "payload": {"type": "reflect"}}]
+                        )
+                    )[0]["result"]
+                    state = json.dumps(refl, default=str)
                     last_state = "it started but emitted no say/done (deaf)"
                     turn = (
                         "You replied final, but I have NOT observed your tool "
@@ -476,9 +515,16 @@ async def author(self_id: str, payload: dict, kernel) -> dict:
             # and the tools are owned + cleaned up with the author. Under deny-all
             # an agent could not reach a tool parented elsewhere anyway.
             if verb in _AUTHOR_MUTATIONS:
-                target = self_id
+                # Kernel-owned verbs go to `kernel`; the author's OWN id rides as
+                # `parent_id` so a tool it authors is still its child. Same
+                # placement as when addressing self did the work implicitly.
+                if verb == "create_agent":
+                    act_payload = {**act_payload, "parent_id": self_id}
+                target = "kernel"
             try:
-                result = await kernel.send(target, act_payload)
+                result = (
+                    await kernel.send([{"target": target, "payload": act_payload}])
+                )[0]["result"]
             except Exception as exc:  # noqa: BLE001 — an exception is a result too
                 result = {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -519,13 +565,17 @@ async def author(self_id: str, payload: dict, kernel) -> dict:
                     turn = _compose(_echo_pushback(str(must_call)), None)
                     continue
                 if run.crash:
-                    last_state = f"it CRASHED: {run.crash.splitlines()[-1][:120]}"
+                    last_state = f"it CRASHED: {run.crash.splitlines()[-1]}"
                     turn += "\n\n" + _crash_pushback(tool, run.crash)
                     run.crash = None
                     continue
                 note = await run.dep_verdict()
-                refl = await kernel.send(tool, {"type": "reflect"})
-                state = json.dumps(refl, default=str)[:1200]
+                refl = (
+                    await kernel.send(
+                        [{"target": tool, "payload": {"type": "reflect"}}]
+                    )
+                )[0]["result"]
+                state = json.dumps(refl, default=str)
                 last_state = "it started but emitted no say/done (deaf)"
                 turn += "\n\n" + _compose(_deaf_pushback(tool, state), note)
 

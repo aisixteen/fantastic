@@ -55,15 +55,22 @@ def two_kernels(tmp_path, monkeypatch):
 
 
 async def _make_bridge(kernel, peer_id: str, transport: str = "memory") -> str:
-    rec = await kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": transport,
-            "peer_id": peer_id,
-        },
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": transport,
+                        "peer_id": peer_id,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     return rec["id"]
 
 
@@ -79,28 +86,42 @@ async def _wire_memory_pair(ka, kb_kern):
     a real WS.
     """
     # Allocate ids first so each can know its peer.
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "PLACEHOLDER",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "PLACEHOLDER",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
-    rec_b = await kb_kern.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": a_id,
-            # B is the SERVING leg: its read_loop dispatches the call A forwards.
-            # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted.
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
+    rec_b = (
+        await kb_kern.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": a_id,
+                        # B is the SERVING leg: its read_loop dispatches the call A forwards.
+                        # Sealed-by-default ⇒ open it explicitly so inbound dispatch is permitted.
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     b_id = rec_b["id"]
     # Patch a_id's record with the real peer_id now that we know it.
     ka.update(a_id, peer_id=b_id)
@@ -109,8 +130,10 @@ async def _wire_memory_pair(ka, kb_kern):
     kb._test_transport_inject[a_id] = mt_a
     kb._test_transport_inject[b_id] = mt_b
 
-    r_a = await ka.send(a_id, {"type": "boot"})
-    r_b = await kb_kern.send(b_id, {"type": "boot"})
+    r_a = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
+    r_b = (await kb_kern.send([{"target": b_id, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert r_a.get("booted") is True, r_a
     assert r_b.get("booted") is True, r_b
     return a_id, b_id
@@ -122,7 +145,7 @@ async def _wire_memory_pair(ka, kb_kern):
 async def test_reflect_lists_verbs(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="ignored", transport="memory")
-    r = await ka.send(bid, {"type": "reflect"})
+    r = (await ka.send([{"target": bid, "payload": {"type": "reflect"}}]))[0]["result"]
     for v in (
         "reflect",
         "boot",
@@ -143,14 +166,20 @@ async def test_memory_transport_pair_round_trip(two_kernels):
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
 
     # forward(target='kernel_state', payload={type:'reflect'}) over the bridge
-    r = await ka.send(
-        a_id,
-        {
-            "type": "forward",
-            "target": "kernel_state",
-            "payload": {"type": "reflect"},
-        },
-    )
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "kernel_state",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # The reply is what kernel B's root returns for reflect — the
     # uniform identity + tree (transports moved to the readme).
     assert isinstance(r, dict), f"non-dict reply: {r!r}"
@@ -162,10 +191,20 @@ async def test_memory_transport_pair_round_trip(two_kernels):
 async def test_forward_before_boot_errors(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="x", transport="memory")
-    r = await ka.send(
-        bid,
-        {"type": "forward", "target": "kernel_state", "payload": {"type": "reflect"}},
-    )
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": bid,
+                    "payload": {
+                        "type": "forward",
+                        "target": "kernel_state",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in r and "not connected" in r["error"]
 
 
@@ -211,7 +250,16 @@ async def test_on_delete_via_cascade(two_kernels):
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
     assert kb._state(a_id).transport is not None
-    r = await ka.send("kernel_state", {"type": "delete_agent", "id": a_id})
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "delete_agent", "id": a_id},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("deleted") is True
     # State left in re-bootable shape.
     assert kb._state(a_id).transport is None
@@ -229,19 +277,26 @@ async def test_inbound_call_to_unknown_target_replies_error(two_kernels):
     the queue.
     """
     ka, _ = two_kernels
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "test_peer",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "test_peer",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_test = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    r = await ka.send(a_id, {"type": "boot"})
+    r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
     frame = {
@@ -263,6 +318,7 @@ async def _boot_solo_bridge(kernel, *, auth=None):
     test_inbound_call_to_unknown_target_replies_error; `auth` sets both legs' rules."""
     meta = {
         "type": "create_agent",
+        "parent_id": kernel.id,
         "handler_module": "ws_bridge.tools",
         "transport": "memory",
         "peer_id": "test_peer",
@@ -283,11 +339,15 @@ async def _boot_solo_bridge(kernel, *, auth=None):
 
         meta["ingress_rule"] = _scope(auth, "_ingress")
         meta["egress_rule"] = _scope(auth, "_egress")
-    rec = await kernel.send("kernel_state", meta)
+    rec = (await kernel.send([{"target": "kernel_state", "payload": meta}]))[0][
+        "result"
+    ]
     a_id = rec["id"]
     mt_a, mt_test = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    r = await kernel.send(a_id, {"type": "boot"})
+    r = (await kernel.send([{"target": a_id, "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert r.get("booted") is True, r
     return a_id, mt_test
 
@@ -383,8 +443,16 @@ async def test_password_attaches_group_token_on_forward(two_kernels, monkeypatch
     a_id, mt_test = await _boot_solo_bridge(ka, auth=_PASSWORD_AUTH)
     fwd = asyncio.create_task(
         ka.send(
-            a_id,
-            {"type": "forward", "target": "remote", "payload": {"type": "reflect"}},
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "remote",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
         )
     )
     frame = await asyncio.wait_for(mt_test.recv(), timeout=2.0)
@@ -392,7 +460,7 @@ async def test_password_attaches_group_token_on_forward(two_kernels, monkeypatch
     assert frame.get("auth_token") == "s3cret"  # the leg presents its group token
     # complete the forward so the task doesn't dangle
     await mt_test.send({"type": "reply", "id": frame["id"], "data": {"ok": True}})
-    assert (await asyncio.wait_for(fwd, timeout=2.0)) == {"ok": True}
+    assert (await asyncio.wait_for(fwd, timeout=2.0))[0]["result"] == {"ok": True}
 
 
 async def test_non_password_leg_attaches_no_token_on_forward(two_kernels):
@@ -405,8 +473,16 @@ async def test_non_password_leg_attaches_no_token_on_forward(two_kernels):
     a_id, mt_test = await _boot_solo_bridge(ka)
     fwd = asyncio.create_task(
         ka.send(
-            a_id,
-            {"type": "forward", "target": "remote", "payload": {"type": "reflect"}},
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "remote",
+                        "payload": {"type": "reflect"},
+                    },
+                }
+            ]
         )
     )
     frame = await asyncio.wait_for(mt_test.recv(), timeout=2.0)
@@ -423,31 +499,42 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
     for the cross-runtime error-frame gap (rust handled it; py/swift
     didn't)."""
     ka, _ = two_kernels
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "stand_in",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "stand_in",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    await ka.send(a_id, {"type": "boot"})
+    (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
 
     # Fire a forward with a long timeout; if the error frame isn't
     # handled, this would hang ~30s. The test's wait_for(2s) guards.
     fwd = asyncio.create_task(
         ka.send(
-            a_id,
-            {
-                "type": "forward",
-                "target": "whatever",
-                "payload": {"type": "reflect"},
-                "timeout": 30.0,
-            },
+            [
+                {
+                    "target": a_id,
+                    "payload": {
+                        "type": "forward",
+                        "target": "whatever",
+                        "payload": {"type": "reflect"},
+                        "timeout": 30.0,
+                    },
+                }
+            ]
         )
     )
     # Read A's outbound call frame to learn the corr id, then echo an
@@ -456,21 +543,21 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
     assert call["type"] == "call"
     await mt_peer.send({"type": "error", "id": call["id"], "error": "boom"})
 
-    reply = await asyncio.wait_for(fwd, timeout=2.0)
+    reply = (await asyncio.wait_for(fwd, timeout=2.0))[0]["result"]
     assert "error" in reply and "boom" in reply["error"], reply
 
 
 async def test_unknown_verb_errors(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="x", transport="memory")
-    r = await ka.send(bid, {"type": "garbage"})
+    r = (await ka.send([{"target": bid, "payload": {"type": "garbage"}}]))[0]["result"]
     assert "error" in r and "unknown type" in r["error"]
 
 
 async def test_boot_idempotent(two_kernels):
     ka, kb_kern = two_kernels
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
-    r = await ka.send(a_id, {"type": "boot"})
+    r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("already") is True
 
 
@@ -480,7 +567,7 @@ async def test_boot_memory_without_injection_errors(two_kernels):
     than silently succeed."""
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="x", transport="memory")
-    r = await ka.send(bid, {"type": "boot"})
+    r = (await ka.send([{"target": bid, "payload": {"type": "boot"}}]))[0]["result"]
     assert "error" in r and "memory transport" in r["error"]
 
 
@@ -492,22 +579,38 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
     transport. The remote-side (in tests: a raw MemoryTransport peer
     standing in for web_ws) receives the frame as the next-out item."""
     ka, _ = two_kernels
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "stand_in",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "stand_in",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    r = await ka.send(a_id, {"type": "boot"})
+    r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
-    r = await ka.send(a_id, {"type": "watch_remote", "target": "remote_core"})
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {"type": "watch_remote", "target": "remote_core"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r == {"ok": True, "watching": "remote_core"}
 
     frame = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
@@ -519,19 +622,26 @@ async def test_event_frame_re_emits_on_bridge_inbox(two_kernels):
     read loop re-emits `payload` on the bridge agent's own inbox so
     local watchers see remote streams via `kernel.watch(<bridge>, ...)`."""
     ka, _ = two_kernels
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "stand_in",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "stand_in",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    r = await ka.send(a_id, {"type": "boot"})
+    r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True
 
     # Attach a synthetic watcher to the bridge BEFORE the event
@@ -560,40 +670,70 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
     a_id, b_id = await _wire_memory_pair(ka, kb_kern)
 
     # B hosts the SOURCE: an OPEN file_bridge holding a multi-chunk blob.
-    rec = await kb_kern.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "root": "bfiles",
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
+    rec = (
+        await kb_kern.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "root": "bfiles",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     fb = rec["id"]
     # Deny-all: the receiving bridge relays the inbound call to `fb` AS ITSELF, so
     # its local reach is an explicit grant (ingress_rule says WHO may call in; the
     # bridge's can_call says WHERE into this kernel those calls may land).
-    await kb_kern.send(
-        "kernel_state",
-        {"type": "update_agent", "id": b_id, "can_call": {fb: "*"}},
-    )
+    (
+        await kb_kern.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": b_id,
+                        "can_call": {fb: "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # Two-sided deny-all: `fb` must reciprocally ACCEPT the bridge's relayed calls.
     fb_agent = kb_kern.ctx.agents.get(fb)
     cb = dict(fb_agent._meta.get("callable_by") or {})
     cb[b_id] = "*"
-    await kb_kern.send(
-        "kernel_state", {"type": "update_agent", "id": fb, "callable_by": cb}
-    )
+    (
+        await kb_kern.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": fb, "callable_by": cb},
+                }
+            ]
+        )
+    )[0]["result"]
     blob = bytes(range(256)) * 50  # 12800 bytes, binary
-    w = await kb_kern.send(
-        fb,
-        {
-            "type": "write_stream",
-            "path": "x.bin",
-            "bytes": blob,
-            "truncate": True,
-        },
-    )
+    w = (
+        await kb_kern.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": "x.bin",
+                        "bytes": blob,
+                        "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert w["size"] == len(blob)
 
     # A pulls it over the bridge, threading the cursor across forwards. The chunk is
@@ -601,19 +741,25 @@ async def test_forward_read_stream_cursor_round_trips(two_kernels):
     # WSTransport it rides the shared binary frame); never base64.
     got, offset, frames = b"", 0, 0
     while True:
-        r = await ka.send(
-            a_id,
-            {
-                "type": "forward",
-                "target": fb,
-                "payload": {
-                    "type": "read_stream",
-                    "path": "x.bin",
-                    "offset": offset,
-                    "length": 4096,
-                },
-            },
-        )
+        r = (
+            await ka.send(
+                [
+                    {
+                        "target": a_id,
+                        "payload": {
+                            "type": "forward",
+                            "target": fb,
+                            "payload": {
+                                "type": "read_stream",
+                                "path": "x.bin",
+                                "offset": offset,
+                                "length": 4096,
+                            },
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert isinstance(r, dict) and isinstance(r.get("bytes"), (bytes, bytearray)), r
         got += r["bytes"]
         offset = r["next_offset"]
@@ -630,24 +776,49 @@ async def test_unwatch_remote_sends_unwatch_frame(two_kernels):
     """unwatch_remote sends `{type:'unwatch', src:<target>}` so the
     remote stops pushing events for that subscription."""
     ka, _ = two_kernels
-    rec_a = await ka.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "ws_bridge.tools",
-            "transport": "memory",
-            "peer_id": "stand_in",
-        },
-    )
+    rec_a = (
+        await ka.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "ws_bridge.tools",
+                        "transport": "memory",
+                        "peer_id": "stand_in",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     a_id = rec_a["id"]
     mt_a, mt_peer = MemoryTransport.pair()
     kb._test_transport_inject[a_id] = mt_a
-    await ka.send(a_id, {"type": "boot"})
+    (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
 
-    await ka.send(a_id, {"type": "watch_remote", "target": "remote_core"})
+    (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {"type": "watch_remote", "target": "remote_core"},
+                }
+            ]
+        )
+    )[0]["result"]
     _watch = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
 
-    r = await ka.send(a_id, {"type": "unwatch_remote", "target": "remote_core"})
+    r = (
+        await ka.send(
+            [
+                {
+                    "target": a_id,
+                    "payload": {"type": "unwatch_remote", "target": "remote_core"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r == {"ok": True, "unwatched": "remote_core"}
     frame = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
     assert frame == {"type": "unwatch", "src": "remote_core"}

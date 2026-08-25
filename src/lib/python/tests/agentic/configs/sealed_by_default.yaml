@@ -1,0 +1,46 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/sealed_by_default.yaml`.
+
+
+# NO store declared, deliberately: `memory` below has no persistence and must SAY
+# SO rather than fall back to RAM. That failfast is one of the C23 forms this
+# scenario pins.
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    manifest:
+      agents:
+        # THREE legs over ONE directory. Posture is a property of the LEG, not
+        # of the bytes: `sealed_fs` and `rw` serve the same `data/` and reach it
+        # differently, so the sibling leg is a witness that nothing moved.
+        - id: sealed_fs
+          handler_module: file_bridge.tools
+          root: data
+          # no ingress_rule — SEALED BY DEFAULT, the subject of this scenario
+        - id: denied_fs
+          handler_module: file_bridge.tools
+          root: data
+          ingress_rule: deny_ingress # the same seal, said out loud
+        - id: ro
+          handler_module: file_bridge.tools
+          root: data
+          ingress_rule: allow_all_ingress
+          readonly: true
+        - id: rw
+          handler_module: file_bridge.tools
+          root: data
+          ingress_rule: allow_all_ingress
+        # A DIFFERENT root: what one leg writes another cannot see or reach.
+        - id: vault
+          handler_module: file_bridge.tools
+          root: vault
+          ingress_rule: allow_all_ingress
+        # The PROCESS edge of the same io family — sealed by the same default,
+        # to show the seal belongs to io_bridge and not to file_bridge.
+        - id: sealed_proc
+          handler_module: exec_bridge.tools
+        # Persistence is a capability nobody wired (see the note above).
+        - id: memory
+          handler_module: yaml_state.tools
+          mode: data

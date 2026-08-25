@@ -33,16 +33,22 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
     assert not k1.record.get("guid")  # nothing minted yet — no boot has run
 
     # Boot the root → the mint fires once.
-    await k1.send("kernel_state", {"type": "boot"})
+    (await k1.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     minted = k1.record.get("guid")
     assert _is_guid(minted), minted
 
     # Root reflect carries the SAME guid top-level (persistence-scoped).
-    r = await k1.send("kernel", {"type": "reflect"})
+    r = (await k1.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["guid"] == minted
 
     # A second boot is idempotent — the guid is NOT regenerated.
-    await k1.send("kernel_state", {"type": "boot"})
+    (await k1.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert k1.record.get("guid") == minted
 
     # Materialize to disk and confirm the on-disk root record carries it.
@@ -56,7 +62,9 @@ async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
     read back verbatim from disk, never re-minted."""
     monkeypatch.chdir(tmp_path)
     k1 = boot_root()
-    await k1.send("kernel_state", {"type": "boot"})
+    (await k1.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     minted = k1.record.get("guid")
     assert _is_guid(minted)
     persist(k1)
@@ -67,9 +75,13 @@ async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
     assert k2.record.get("guid") == minted  # hydrated from disk
 
     # Re-booting the rehydrated root does NOT mint a new one.
-    await k2.send("kernel_state", {"type": "boot"})
+    (await k2.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert k2.record.get("guid") == minted
-    r = await k2.send("kernel", {"type": "reflect"})
+    r = (await k2.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["guid"] == minted
 
 
@@ -90,9 +102,13 @@ async def test_explicit_guid_wins(tmp_path, monkeypatch):
         )
     )
     k = boot_root()
-    await k.send("kernel_state", {"type": "boot"})
+    (await k.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     assert k.record.get("guid") == "deadbeef" * 4
-    r = await k.send("kernel", {"type": "reflect"})
+    r = (await k.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert r["guid"] == "deadbeef" * 4
 
 
@@ -105,12 +121,16 @@ async def test_fresh_dir_mints_a_different_guid(tmp_path, monkeypatch):
 
     monkeypatch.chdir(a)
     ka = boot_root()
-    await ka.send("kernel_state", {"type": "boot"})
+    (await ka.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     guid_a = ka.record.get("guid")
 
     monkeypatch.chdir(b)
     kb = boot_root()
-    await kb.send("kernel_state", {"type": "boot"})
+    (await kb.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
     guid_b = kb.record.get("guid")
 
     assert _is_guid(guid_a) and _is_guid(guid_b)
@@ -122,6 +142,10 @@ async def test_in_memory_boot_mints_ephemeral_guid(tmp_path, monkeypatch):
     (just not persisted), so root reflect ALWAYS carries one."""
     monkeypatch.chdir(tmp_path)
     k = boot_root()
-    await k.send("kernel_state", {"type": "boot"})
-    r = await k.send("kernel", {"type": "reflect"})
+    (await k.send([{"target": "kernel_state", "payload": {"type": "boot"}}]))[0][
+        "result"
+    ]
+    r = (await k.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
+        "result"
+    ]
     assert _is_guid(r["guid"])

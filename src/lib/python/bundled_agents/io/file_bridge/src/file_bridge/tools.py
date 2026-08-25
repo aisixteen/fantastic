@@ -366,24 +366,41 @@ async def _pump(id, payload, kernel):
     length = int(payload.get("chunk", 65536) or 65536)
     offset, first, chunks = 0, True, 0
     while True:
-        r = await kernel.send(
-            src,
-            {"type": "read_stream", "path": spath, "offset": offset, "length": length},
-        )
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": src,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": spath,
+                            "offset": offset,
+                            "length": length,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         if not isinstance(r, dict) or not isinstance(
             r.get("bytes"), (bytes, bytearray)
         ):
             return {"error": f"pump: read from {src!r} failed: {r}"}
-        w = await kernel.send(
-            sink,
-            {
-                "type": "write_stream",
-                "path": dpath,
-                "bytes": r["bytes"],
-                "offset": offset,
-                "truncate": first,
-            },
-        )
+        w = (
+            await kernel.send(
+                [
+                    {
+                        "target": sink,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": dpath,
+                            "bytes": r["bytes"],
+                            "offset": offset,
+                            "truncate": first,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         if not isinstance(w, dict) or w.get("error"):
             return {"error": f"pump: write to {sink!r} failed: {w}"}
         first, chunks = False, chunks + 1

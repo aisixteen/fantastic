@@ -35,9 +35,20 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     tgt = kernel.ctx.agents.get(target)
     cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
     cb[caller] = verbs
-    await kernel.send(
-        "kernel_state", {"type": "update_agent", "id": target, "callable_by": cb}
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": target,
+                        "callable_by": cb,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None):
@@ -56,20 +67,39 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
     if file_bridge_id is not None:
         meta["file_bridge_id"] = file_bridge_id
         can_call[file_bridge_id] = "*"
-    rec = await kernel.send("kernel_state", {"type": "create_agent", **meta})
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     nid = rec["id"]
     # Two-sided deny-all: open each callee's reciprocal `callable_by`.
     for target in can_call:
         await _accept(kernel, target, nid)
     if with_key and file_bridge_id is not None:
-        await kernel.send(
-            file_bridge_id,
-            {
-                "type": "write",
-                "path": f"agents/{nid}/api_key",
-                "content": with_key,
-            },
-        )
+        (
+            await kernel.send(
+                [
+                    {
+                        "target": file_bridge_id,
+                        "payload": {
+                            "type": "write",
+                            "path": f"agents/{nid}/api_key",
+                            "content": with_key,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     return nid
 
 
@@ -80,7 +110,9 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
     seeded_kernel, store_agent
 ):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "reflect"})
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r["file_bridge_id"] == store_agent
     assert "send" in r["verbs"]
     assert "set_api_key" in r["verbs"]
@@ -90,15 +122,29 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
 async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
     """has_api_key reports the boolean — never the key value itself."""
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r0 = await seeded_kernel.send(nid, {"type": "reflect"})
+    r0 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r0["has_api_key"] is False
     blob0 = json.dumps(r0)
     assert "nvapi-" not in blob0
 
-    await seeded_kernel.send(
-        nid, {"type": "set_api_key", "api_key": "nvapi-secret-xxxxxxxxxxxx"}
-    )
-    r1 = await seeded_kernel.send(nid, {"type": "reflect"})
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": nid,
+                    "payload": {
+                        "type": "set_api_key",
+                        "api_key": "nvapi-secret-xxxxxxxxxxxx",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r1 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r1["has_api_key"] is True
     blob1 = json.dumps(r1)
     # Reflect must never leak the key value.
@@ -109,27 +155,39 @@ async def test_send_without_provider_failfasts(seeded_kernel):
     # No file_bridge_id ⇒ no api_key sidecar ⇒ make_provider returns None ⇒ send failfasts
     # (chat history no longer needs file_bridge_id — it's a mounted chat yaml_state).
     nid = await _make_nvidia(seeded_kernel)
-    r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+        )
+    )[0]["result"]
     assert "error" in r
 
 
 async def test_send_requires_api_key(seeded_kernel, store_agent):
     """No api_key sidecar → send failfasts before touching the network."""
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+        )
+    )[0]["result"]
     assert "error" in r
     assert "api_key" in r["error"]
 
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "history"})
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
+        0
+    ]["result"]
     assert r["messages"] == []
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "garbage"})
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "garbage"}}]))[
+        0
+    ]["result"]
     assert "error" in r
 
 
@@ -138,7 +196,16 @@ async def test_unknown_verb_errors(seeded_kernel, store_agent):
 
 async def test_set_api_key_writes_via_file_bridge(seeded_kernel, store_agent, tmp_path):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": "nvapi-abc"})
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": nid,
+                    "payload": {"type": "set_api_key", "api_key": "nvapi-abc"},
+                }
+            ]
+        )
+    )[0]["result"]
     assert r == {"ok": True}
     key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
     assert key_path.exists()
@@ -147,9 +214,19 @@ async def test_set_api_key_writes_via_file_bridge(seeded_kernel, store_agent, tm
 
 async def test_set_api_key_strips_whitespace(seeded_kernel, store_agent, tmp_path):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    await seeded_kernel.send(
-        nid, {"type": "set_api_key", "api_key": "   nvapi-padded  \n"}
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": nid,
+                    "payload": {
+                        "type": "set_api_key",
+                        "api_key": "   nvapi-padded  \n",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
     assert key_path.read_text() == "nvapi-padded"
 
@@ -159,7 +236,16 @@ async def test_set_api_key_invalidates_cached_provider(seeded_kernel, store_agen
     sentinel = object()
     nt._providers[nid] = sentinel
     try:
-        await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": "nvapi-new"})
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {"type": "set_api_key", "api_key": "nvapi-new"},
+                    }
+                ]
+            )
+        )[0]["result"]
         assert nt._providers.get(nid) is not sentinel
     finally:
         nt._providers.pop(nid, None)
@@ -167,7 +253,11 @@ async def test_set_api_key_invalidates_cached_provider(seeded_kernel, store_agen
 
 async def test_set_api_key_failfast_without_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
-    r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": "nvapi-x"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "set_api_key", "api_key": "nvapi-x"}}]
+        )
+    )[0]["result"]
     assert "error" in r
     assert "file_bridge_id" in r["error"]
 
@@ -175,7 +265,11 @@ async def test_set_api_key_failfast_without_file_bridge_id(seeded_kernel):
 async def test_set_api_key_rejects_empty(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent)
     for bad in ("", "   ", None, 42):
-        r = await seeded_kernel.send(nid, {"type": "set_api_key", "api_key": bad})
+        r = (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "set_api_key", "api_key": bad}}]
+            )
+        )[0]["result"]
         assert "error" in r, f"unexpected ok for api_key={bad!r}"
 
 
@@ -183,19 +277,33 @@ async def test_clear_api_key_deletes_file(seeded_kernel, store_agent, tmp_path):
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
     assert key_path.exists()
-    r = await seeded_kernel.send(nid, {"type": "clear_api_key"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "clear_api_key"}}]
+        )
+    )[0]["result"]
     assert r["ok"] is True
     assert not key_path.exists()
     # Now reflect reports no key, send refuses.
-    r2 = await seeded_kernel.send(nid, {"type": "reflect"})
+    r2 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
     assert r2["has_api_key"] is False
-    r3 = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+    r3 = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+        )
+    )[0]["result"]
     assert "api_key" in r3.get("error", "")
 
 
 async def test_clear_api_key_failfast_without_file_bridge_id(seeded_kernel):
     nid = await _make_nvidia(seeded_kernel)
-    r = await seeded_kernel.send(nid, {"type": "clear_api_key"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "clear_api_key"}}]
+        )
+    )[0]["result"]
     assert "error" in r
 
 
@@ -207,10 +315,16 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
     fp = _FakeProvider([["hello"]])
     nt._providers[nid] = fp
     try:
-        await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
-    r = await seeded_kernel.send(nid, {"type": "history"})
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
+        0
+    ]["result"]
     assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
     assert r["client_id"] == "cli"
 
@@ -220,16 +334,46 @@ async def test_history_per_client(seeded_kernel, store_agent):
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     nt._providers[nid] = fp
     try:
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "hi from alice", "client_id": "alice"}
-        )
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "hi from bob", "client_id": "bob"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi from alice",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi from bob",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
-    a = await seeded_kernel.send(nid, {"type": "history", "client_id": "alice"})
-    b = await seeded_kernel.send(nid, {"type": "history", "client_id": "bob"})
+    a = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "history", "client_id": "alice"}}]
+        )
+    )[0]["result"]
+    b = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "history", "client_id": "bob"}}]
+        )
+    )[0]["result"]
     assert a["messages"][-1]["content"] == "A-reply"
     assert b["messages"][-1]["content"] == "B-reply"
 
@@ -242,7 +386,11 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
     fp = _FakeProvider([["Hello! ", "How are you?"]])
     nt._providers[nid] = fp
     try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
         assert r["final"] == "Hello! How are you?"
         assert fp.calls == 1
     finally:
@@ -256,10 +404,18 @@ async def test_run_persists_history(seeded_kernel, store_agent):
     fp = _FakeProvider([["reply"]])
     nt._providers[nid] = fp
     try:
-        await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
-    data = (await seeded_kernel.send(nid, {"type": "history"}))["messages"]
+    data = (
+        (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
+            0
+        ]["result"]
+    )["messages"]
     assert data[-2] == {"role": "user", "content": "hi"}
     assert data[-1] == {"role": "assistant", "content": "reply"}
 
@@ -269,20 +425,46 @@ async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     nt._providers[nid] = fp
     try:
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "hi A", "client_id": "alice"}
-        )
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "hi B", "client_id": "bob"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hi A",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {"type": "send", "text": "hi B", "client_id": "bob"},
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
-    a = (await seeded_kernel.send(nid, {"type": "history", "client_id": "alice"}))[
-        "messages"
-    ]
-    b = (await seeded_kernel.send(nid, {"type": "history", "client_id": "bob"}))[
-        "messages"
-    ]
+    a = (
+        (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "history", "client_id": "alice"}}]
+            )
+        )[0]["result"]
+    )["messages"]
+    b = (
+        (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "history", "client_id": "bob"}}]
+            )
+        )[0]["result"]
+    )["messages"]
     assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
     assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
 
@@ -294,7 +476,11 @@ async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+            (
+                await seeded_kernel.send(
+                    [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+                )
+            )[0]["result"]
 
         cli_tokens = [p for t, p in sends if t == "cli" and p.get("type") == "token"]
         cli_done = [
@@ -324,9 +510,20 @@ async def test_browser_caller_routes_to_own_inbox_only(seeded_kernel, store_agen
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                nid, {"type": "send", "text": "hi", "client_id": "web_xyz"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "web_xyz",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
 
         own_tokens = [p for t, p in emits if t == nid and p.get("type") == "token"]
         own_done = [
@@ -372,16 +569,35 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
         with ctx:
             t1 = asyncio.create_task(
                 seeded_kernel.send(
-                    nid, {"type": "send", "text": "first", "client_id": "alice"}
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "first",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
                 )
             )
             await asyncio.sleep(0.05)
             t2 = asyncio.create_task(
                 seeded_kernel.send(
-                    nid, {"type": "send", "text": "second", "client_id": "bob"}
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "second",
+                                "client_id": "bob",
+                            },
+                        }
+                    ]
                 )
             )
-            r1, r2 = await asyncio.gather(t1, t2)
+            (o1,), (o2,) = await asyncio.gather(t1, t2)
+            r1, r2 = o1["result"], o2["result"]
 
         assert r1["final"] == "ok" and r2["final"] == "ok"
 
@@ -431,15 +647,25 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
     try:
         results = await asyncio.gather(
             seeded_kernel.send(
-                nid, {"type": "send", "text": "first", "client_id": "a"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {"type": "send", "text": "first", "client_id": "a"},
+                    }
+                ]
             ),
             seeded_kernel.send(
-                nid, {"type": "send", "text": "second", "client_id": "b"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {"type": "send", "text": "second", "client_id": "b"},
+                    }
+                ]
             ),
         )
         assert max_in_flight == 1
         assert order == ["first", "second"]
-        assert all(r["final"] == "ok" for r in results)
+        assert all(outs[0]["result"]["final"] == "ok" for outs in results)
     finally:
         nt._providers.pop(nid, None)
 
@@ -492,7 +718,11 @@ async def test_send_retries_once_on_rate_limit(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+            r = (
+                await seeded_kernel.send(
+                    [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+                )
+            )[0]["result"]
         assert r["final"] == "ok"
         assert fp.calls == 2  # initial + retry
         # status(thinking, waiting_on='rate_limit') surfaced the wait to
@@ -528,7 +758,11 @@ async def test_send_surfaces_error_after_repeated_rate_limit(
     fp = _AlwaysRateLimited()
     nt._providers[nid] = fp
     try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
 
@@ -555,7 +789,11 @@ async def test_send_does_not_retry_on_non_429_http_error(seeded_kernel, store_ag
     fp = _ServerError()
     nt._providers[nid] = fp
     try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
 
@@ -582,7 +820,11 @@ async def test_mid_stream_429_propagates_without_retry(seeded_kernel, store_agen
     fp = _MidStream429()
     nt._providers[nid] = fp
     try:
-        r = await seeded_kernel.send(nid, {"type": "send", "text": "hi"})
+        r = (
+            await seeded_kernel.send(
+                [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
 
@@ -635,9 +877,20 @@ async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                nid, {"type": "send", "text": "hi", "client_id": "alice"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         statuses = [p for _, p in emits if p.get("type") == "status"]
         phases = [s["phase"] for s in statuses]
         assert phases == ["thinking", "streaming", "done"], phases
@@ -668,13 +921,31 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
-                nid, {"type": "send", "text": "first", "client_id": "alice"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "first",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.sleep(0.05)
         t2 = asyncio.create_task(
             seeded_kernel.send(
-                nid, {"type": "send", "text": "second", "client_id": "bob"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "second",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.gather(t1, t2)
@@ -688,7 +959,11 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
 
 async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = await seeded_kernel.send(nid, {"type": "status", "client_id": "alice"})
+    r = (
+        await seeded_kernel.send(
+            [{"target": nid, "payload": {"type": "status", "client_id": "alice"}}]
+        )
+    )[0]["result"]
     assert r["generating"] is False
     assert r["current"] is None
     assert r["mine_pending"] == []
@@ -703,15 +978,35 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
     class _SlowProvider:
         async def chat(self, messages, tools=None):
             captured.append(
-                await seeded_kernel.send(nid, {"type": "status", "client_id": "alice"})
+                (
+                    await seeded_kernel.send(
+                        [
+                            {
+                                "target": nid,
+                                "payload": {"type": "status", "client_id": "alice"},
+                            }
+                        ]
+                    )
+                )[0]["result"]
             )
             yield "ok"
 
     nt._providers[nid] = _SlowProvider()
     try:
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "hello there", "client_id": "alice"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "hello there",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
 
@@ -734,25 +1029,57 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.15)
-                snapshots["alice"] = await seeded_kernel.send(
-                    nid, {"type": "status", "client_id": "alice"}
-                )
-                snapshots["bob"] = await seeded_kernel.send(
-                    nid, {"type": "status", "client_id": "bob"}
-                )
+                snapshots["alice"] = (
+                    await seeded_kernel.send(
+                        [
+                            {
+                                "target": nid,
+                                "payload": {"type": "status", "client_id": "alice"},
+                            }
+                        ]
+                    )
+                )[0]["result"]
+                snapshots["bob"] = (
+                    await seeded_kernel.send(
+                        [
+                            {
+                                "target": nid,
+                                "payload": {"type": "status", "client_id": "bob"},
+                            }
+                        ]
+                    )
+                )[0]["result"]
             yield "ok"
 
     nt._providers[nid] = _PrivacyProvider()
     try:
         t1 = asyncio.create_task(
             seeded_kernel.send(
-                nid, {"type": "send", "text": "bob secret", "client_id": "bob"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "bob secret",
+                            "client_id": "bob",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.sleep(0.05)
         t2 = asyncio.create_task(
             seeded_kernel.send(
-                nid, {"type": "send", "text": "alice secret", "client_id": "alice"}
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "alice secret",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
             )
         )
         await asyncio.gather(t1, t2)
@@ -779,14 +1106,31 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
 
     class _RedactProvider:
         async def chat(self, messages, tools=None):
-            holder.append(await seeded_kernel.send(nid, {"type": "status"}))
+            holder.append(
+                (
+                    await seeded_kernel.send(
+                        [{"target": nid, "payload": {"type": "status"}}]
+                    )
+                )[0]["result"]
+            )
             yield "ok"
 
     nt._providers[nid] = _RedactProvider()
     try:
-        await seeded_kernel.send(
-            nid, {"type": "send", "text": "private", "client_id": "alice"}
-        )
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": nid,
+                        "payload": {
+                            "type": "send",
+                            "text": "private",
+                            "client_id": "alice",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
 
@@ -815,21 +1159,43 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
         with ctx:
             send_task = asyncio.create_task(
                 seeded_kernel.send(
-                    nid, {"type": "send", "text": "stop me", "client_id": "alice"}
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "stop me",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
                 )
             )
             await asyncio.sleep(0.10)
-            table = await seeded_kernel.send("kernel", {"type": "ps"})
+            table = (
+                await seeded_kernel.send(
+                    [{"target": "kernel", "payload": {"type": "ps"}}]
+                )
+            )[0]["result"]
             rows = [
                 t for t in table["tasks"] if t["agent"] == nid and t["verb"] == "send"
             ]
             assert len(rows) == 1, table["tasks"]
             task_id = rows[0]["id"]
-            r = await seeded_kernel.send(
-                "kernel", {"type": "cancel", "task_id": task_id}
-            )
+            r = (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": "kernel",
+                            "payload": {"type": "cancel", "task_id": task_id},
+                        }
+                    ]
+                )
+            )[0]["result"]
             assert r == {"cancelled": True, "killed": [task_id]}
-            assert await send_task == {"cancelled": True}
+            out = (await send_task)[0]
+            assert out["status"] == "cancelled"
+            assert out["result"] == {"cancelled": True}
 
         done_status = [
             p
@@ -842,9 +1208,13 @@ async def test_kernel_cancel_kills_an_in_flight_send(seeded_kernel, store_agent)
             (p.get("type") == "status" and p.get("phase") == "done") for _, p in emits
         )
 
-        snap = await seeded_kernel.send(nid, {"type": "status"})
+        snap = (
+            await seeded_kernel.send([{"target": nid, "payload": {"type": "status"}}])
+        )[0]["result"]
         assert snap["generating"] is False
-        rr = await seeded_kernel.send(nid, {"type": "reflect"})
+        rr = (
+            await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}])
+        )[0]["result"]
         assert rr["generating"] is False
         assert "interrupt" not in rr["verbs"]
     finally:
@@ -866,9 +1236,20 @@ async def test_status_done_emits_with_reason_timeout(
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            r = await seeded_kernel.send(
-                nid, {"type": "send", "text": "slow", "client_id": "alice"}
-            )
+            r = (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "slow",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         assert "timeout" in r.get("error", "")
         done_status = [
             p
@@ -887,9 +1268,20 @@ async def test_status_event_includes_send_id(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                nid, {"type": "send", "text": "hi", "client_id": "alice"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         statuses = [p for _, p in emits if p.get("type") == "status"]
         for s in statuses:
             assert "send_id" in s["detail"], s
@@ -917,9 +1309,20 @@ async def test_status_thinking_during_429_wait(seeded_kernel, store_agent):
     sends, emits, ctx = _capture(seeded_kernel)
     try:
         with ctx:
-            await seeded_kernel.send(
-                nid, {"type": "send", "text": "hi", "client_id": "alice"}
-            )
+            (
+                await seeded_kernel.send(
+                    [
+                        {
+                            "target": nid,
+                            "payload": {
+                                "type": "send",
+                                "text": "hi",
+                                "client_id": "alice",
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         rate_limit_status = [
             p
             for _, p in emits

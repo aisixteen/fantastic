@@ -13,12 +13,12 @@ cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
-uv run --active fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
 # WS verb channel + REST surface as children of web. Call create_agent
 # on the web agent (not kernel_state) so the new agents land under web's dir.
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
-uv run --active fantastic $WEB_ID create_agent handler_module=web_rest.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_rest.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active fantastic > /tmp/serve.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/serve.log 2>/dev/null && break; sleep 0.5; done

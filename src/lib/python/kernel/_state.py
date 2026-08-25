@@ -19,12 +19,28 @@ class SnapshotError(ValueError):
     roots, dangling parent_id, duplicate id)."""
 
 
+# Constructor parameters of `Agent.__init__` that a record key would collide
+# with. Not meta, and never writable from a document.
+RESERVED_RECORD_KEYS = frozenset({"root_path", "ctx", "parent"})
+
+
 def validate_records(records: list[dict], *, version: int = CURRENT_VERSION) -> str:
     """Validate a flat record list; return the single root id.
 
     Raises SnapshotError on: version > CURRENT, missing/duplicate id, not
-    exactly one root (`parent_id` null/absent), or a `parent_id` that
-    doesn't resolve within the set. Mirrors Rust `Kernel::load`'s checks.
+    exactly one root (`parent_id` null/absent), a `parent_id` that doesn't
+    resolve within the set, or a RESERVED key. Mirrors Rust `Kernel::load`'s
+    checks.
+
+    RESERVED KEYS. Every non-structural record key becomes `**meta` on
+    `Agent.__init__`, so a record carrying `root_path` / `ctx` / `parent`
+    collides with a real parameter. Measured: `Kernel.load` CLEARS THE TREE and
+    only then raises `TypeError: Agent() got multiple values for keyword
+    argument 'root_path'` — leaving `agents == {}` and `root is None`, a kernel
+    bricked by a half-destroyed tree, from a document a human hand-authored.
+    `root_path` is exactly the key someone writing a "where does this tree live"
+    file would invent, so this is a likely typo rather than a theoretical one.
+    It has to be caught HERE, because this runs before the teardown.
     """
     if version > CURRENT_VERSION:
         raise SnapshotError(
@@ -36,6 +52,13 @@ def validate_records(records: list[dict], *, version: int = CURRENT_VERSION) -> 
         rid = r.get("id")
         if not rid:
             raise SnapshotError("snapshot record missing id")
+        reserved = RESERVED_RECORD_KEYS & set(r)
+        if reserved:
+            raise SnapshotError(
+                f"record {rid!r} carries reserved key(s) {sorted(reserved)} —"
+                " these are Agent constructor parameters, not meta; the tree"
+                " lives where its document lives and is never named in a record"
+            )
         if rid in ids:
             raise SnapshotError(f"duplicate agent id {rid!r} in snapshot")
         ids.add(rid)

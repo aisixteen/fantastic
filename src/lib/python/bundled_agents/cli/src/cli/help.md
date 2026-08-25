@@ -28,9 +28,9 @@ go through that daemon's web surface instead (a `web` agent's
 
 There is no `--port` flag. Persist a web agent first, then boot:
 
-    fantastic kernel_state create_agent handler_module=web.tools port=8888
-    fantastic <web_id> create_agent handler_module=web_ws.tools
-    fantastic <web_id> create_agent handler_module=web_rest.tools
+    fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=8888
+    fantastic kernel create_agent parent_id=<web_id> handler_module=web_ws.tools
+    fantastic kernel create_agent parent_id=<web_id> handler_module=web_rest.tools
     fantastic                          # rehydrates + serves
 
 Start with `fantastic reflect readme=true` — it tells you

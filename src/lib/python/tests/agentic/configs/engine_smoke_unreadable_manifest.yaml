@@ -1,0 +1,9 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/engine_smoke_unreadable_manifest.yaml`.
+
+
+loaders:
+  - id: absent_loader
+    file: nope.yaml
+    # Nothing is written to disk — the loader points at a path that is not there.
+    missing_manifest: true

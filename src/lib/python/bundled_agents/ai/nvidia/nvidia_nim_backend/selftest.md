@@ -29,9 +29,9 @@ cd new_codebase
 rm -rf .fantastic
 PORT=18904
 pkill -9 -f "fantastic" 2>/dev/null
-uv run --active python fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active python fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT >/dev/null
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active python fantastic > /tmp/n.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/n.log 2>/dev/null && break; sleep 0.5; done
@@ -53,7 +53,7 @@ asyncio.run(main())
 PY
 }
 
-FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":".fantastic","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"file_bridge.tools","root":".fantastic","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 NB=$(call kernel_state "{\"type\":\"create_agent\",\"handler_module\":\"nvidia_nim_backend.tools\",\"file_bridge_id\":\"$FA\"}" \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 ```
@@ -73,7 +73,7 @@ rides `file_bridge_id` — with none wired there is no key, so send
 failfasts on the missing provider before any network call.
 
 ```bash
-NB2=$(call kernel_state '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+NB2=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"nvidia_nim_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call $NB2 '{"type":"send","text":"hi"}' | python -m json.tool
 ```
 Expected: `{"error":"nvidia_nim_backend: api_key not set; call set_api_key first", ...}`.
@@ -215,7 +215,7 @@ send/history/status. The backend surface is covered by Tests
 ```bash
 # A NIM backend on the host; the TS ai_view (frontend) fronts it by id
 # over the bridge and renders the chat inline.
-NB2=$(call kernel_state '{"type":"create_agent","handler_module":"nvidia_nim_backend.tools","provider":"nvidia_nim"}' \
+NB2=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"nvidia_nim_backend.tools","provider":"nvidia_nim"}' \
   | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 call kernel_state "{\"type\":\"update_agent\",\"id\":\"$NB2\",\"file_bridge_id\":\"$FA\"}"
 call $NB2 "{\"type\":\"set_api_key\",\"api_key\":\"$NVAPI_KEY\"}"

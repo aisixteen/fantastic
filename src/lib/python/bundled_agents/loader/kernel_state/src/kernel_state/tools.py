@@ -42,6 +42,7 @@ from typing import Any
 from file_bridge import fs
 
 from kernel import CURRENT_VERSION, operator_context
+from kernel import current_origin
 
 # ─── disk I/O via `fs` (the ONE disk surface) — bootstrap cold primitives ──
 # These run before any agent exists, so they call `fs`'s functions directly (not the
@@ -258,18 +259,36 @@ def _resolve_path(agent, record: dict) -> Path:
 
 
 def _find_store(agent) -> str | None:
-    """DISCOVER the persistence provider: the first `file_bridge` CHILD of the loader
+    """DISCOVER the persistence provider: a `file_bridge` in this loader's SUBTREE
     whose root resolves to the loader's own `.fantastic` dir. Bound by MATCH, not a
     fixed id and not kernel-composed — an operator/LLM creates it (see the keystone
     readme example), the loader finds it. Returns its id, or None when none is wired
-    — in which case the flush does NOTHING (state stays in RAM). No fallback."""
+    — in which case the flush does NOTHING (state stays in RAM). No fallback.
+
+    SUBTREE, not direct children. It scanned one level for a long time, and the
+    consequence was invisible: a provider declared through a `static_loader`
+    manifest lands as a GRANDCHILD (child of the roster loader, not of the root),
+    was never discovered, and `aflush` then no-ops with no error anywhere — the
+    tree just silently stays in RAM. Declaring it was never the problem; finding
+    it was. Breadth-first so the shallowest match still wins, which keeps the
+    previous behaviour whenever a direct child matches.
+    """
     kernel = agent.ctx
     try:
         want = _root(agent).resolve()
     except (OSError, ValueError):
         return None
     base = Path.cwd().resolve()
-    for cid in agent.child_ids():
+    queue: list[str] = list(agent.child_ids())
+    seen: set[str] = set()
+    while queue:
+        cid = queue.pop(0)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        child = kernel.agents.get(cid)
+        if child is not None:
+            queue.extend(child.child_ids())
         rec = kernel.get(cid) or {}
         if rec.get("handler_module") != "file_bridge.tools":
             continue
@@ -306,7 +325,11 @@ async def _persist_via_store(
     reldir = _store_reldir(agent, abs_path)
     af = f"{reldir}/agent.json" if reldir else "agent.json"
     existing: dict = {}
-    got = await kernel.send(store_id, {"type": "read_stream", "path": af})
+    got = (
+        await kernel.send(
+            [{"target": store_id, "payload": {"type": "read_stream", "path": af}}]
+        )
+    )[0]["result"]
     if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
         try:
             parsed = json.loads(bytes(got["bytes"]))
@@ -317,26 +340,38 @@ async def _persist_via_store(
     meta, code = _split_code(record)
     existing.update(meta)
     body = json.dumps(existing, indent=2).encode("utf-8")
-    await kernel.send(
-        store_id,
-        {
-            "type": "write_stream",
-            "path": af,
-            "bytes": body,
-            "truncate": True,
-        },
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": store_id,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": af,
+                        "bytes": body,
+                        "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     if code is not None:
         cf = f"{reldir}/{CODE_FILE}" if reldir else CODE_FILE
-        await kernel.send(
-            store_id,
-            {
-                "type": "write_stream",
-                "path": cf,
-                "bytes": code.encode("utf-8"),
-                "truncate": True,
-            },
-        )
+        (
+            await kernel.send(
+                [
+                    {
+                        "target": store_id,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": cf,
+                            "bytes": code.encode("utf-8"),
+                            "truncate": True,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     await _seed_readme_via_store(agent, store_id, reldir, record.get("handler_module"))
 
 
@@ -365,18 +400,28 @@ async def _seed_doc_via_store(kernel, store_id: str, src, path: str) -> None:
     """Copy one `.md` file THROUGH the provider, copy-if-missing (never clobber)."""
     if not src.is_file():
         return
-    got = await kernel.send(store_id, {"type": "read_stream", "path": path})
+    got = (
+        await kernel.send(
+            [{"target": store_id, "payload": {"type": "read_stream", "path": path}}]
+        )
+    )[0]["result"]
     if isinstance(got, dict) and isinstance(got.get("bytes"), (bytes, bytearray)):
         return
-    await kernel.send(
-        store_id,
-        {
-            "type": "write_stream",
-            "path": path,
-            "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
-            "truncate": True,
-        },
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target": store_id,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": path,
+                        "bytes": src.read_text(encoding="utf-8").encode("utf-8"),
+                        "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 async def _seed_docs_via_store(kernel, store_id: str, src_dir, rel: str) -> None:
@@ -399,9 +444,16 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
     reldir = _store_reldir(agent, abs_path)
     if not reldir:
         return  # never remove the root
-    await agent.ctx.send(
-        store_id, {"type": "delete", "path": reldir, "recursive": True}
-    )
+    (
+        await agent.ctx.send(
+            [
+                {
+                    "target": store_id,
+                    "payload": {"type": "delete", "path": reldir, "recursive": True},
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 # ─── the auto-flush loop (the root subscribes the live tree) ────────
@@ -570,17 +622,17 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # CONTRACT you do not know is not usable. Both cost a whole run. Prose stays
         # behind `readme:'self-extension'`; these facts do not.
         base["self_extension"] = (
-            "You can author your own durable tools as script agents: send 'kernel' "
-            f"{{type:'create_agent', handler_module:'{_executor_for_example(agent)}', "
-            "id:'<name>', "
+            "Author your own durable tools as script agents: send 'kernel' "
+            f"{{type:'create_agent', parent_id:'<yours — the OWNER>', "
+            f"handler_module:'{_executor_for_example(agent)}', id:'<name>', "
             "code:'<program>', interpreters:['<allowlisted path>'], shim:'python', "
-            "ingress_rule:'allow_all_ingress'} — the `code` is a SCRIPT: it runs top to "
+            "ingress_rule:'allow_all_ingress'} — `code` is a SCRIPT: it runs top to "
             "bottom when created and again on reboot. A bare `def` only defines and "
-            "exits — put the work at module level. To handle later sends, call "
-            "kernel.on_message(cb) and keep running. Neither field defaults: reflect "
-            "an existing executor agent for its `interpreters` allowlist; with no "
-            "`ingress_rule` the agent is sealed and never runs. Read "
-            "{type:'reflect', readme:'self-extension'} BEFORE writing `code`."
+            "exits — put the work at module level; to take later sends call "
+            "kernel.on_message(cb) and keep running. No field defaults: reflect an "
+            "executor for its `interpreters`; with no `ingress_rule` the agent is "
+            "sealed and never runs. Read {type:'reflect', readme:'self-extension'} "
+            "BEFORE writing `code`."
         )
         return base
     return {
@@ -598,6 +650,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         "self_extension": (
             "You can extend yourself: author your own durable tools as script "
             "agents. ADD - send 'kernel' {type:'create_agent', "
+            "parent_id:'<your own id — the new agent becomes YOUR child>', "
             "handler_module:'<an executor below>', id:'<name>', code:'<your "
             "program as one JSON string>', interpreters:['<an allowlisted "
             "interpreter>'], shim:'python', ingress_rule:'allow_all_ingress'}; the `code` is "
@@ -785,6 +838,35 @@ def _blob_reldir(agent, agent_id: str) -> str:
     return _store_reldir(agent, abs_dir)
 
 
+def _guard_blob_owner(aid: str) -> str | None:
+    """Refuse a blob verb that names SOMEONE ELSE'S namespace.
+
+    `agent_id` is the namespace, and it arrives in the PAYLOAD — so without this
+    any agent granted `persist_blob` on the loader could write any other agent's
+    sidecar. Measured 2026-08-23: an agent holding exactly
+    `can_call: {kernel_state: [persist_blob]}` overwrote another agent's
+    `state.yaml`, and the victim read the forged content back as its own memory.
+
+    The defence was believed to be POSITION — the root accepts `$children`, and a
+    grandchild is not one — but a DIRECT child passes that check, and every agent
+    an operator creates at the root is a direct child. Position bounds who can
+    reach the verb; it says nothing about which namespace they may name.
+
+    An OPERATOR send (`sender` is None: the loader's own flush, `yaml_state`
+    persisting itself under `operator_context`, the CLI) is the bookkeeping this
+    verb exists for and stays ungated — that is the origin root of trust, and an
+    agent cannot forge it. An AGENT may only name ITSELF.
+    """
+    caller = current_origin()
+    if caller is None or caller == aid:
+        return None
+    return (
+        f"{caller!r} may not use another agent's namespace {aid!r} —"
+        " an agent's blob verbs are scoped to itself; only an operator may name"
+        " a namespace it does not own"
+    )
+
+
 async def _persist_blob(id, payload, agent):
     """args: agent_id:str (req), name:str (req), content:str (req). Persist an
     agent's sidecar (e.g. state.yaml) THROUGH the loader's DISCOVERED store — a
@@ -798,6 +880,8 @@ async def _persist_blob(id, payload, agent):
         return {"error": "persist_blob: agent_id (str) required"}
     if err := _guard_blob_name(name):
         return {"error": f"persist_blob: {err}"}
+    if err := _guard_blob_owner(aid):
+        return {"error": f"persist_blob: {err}", "reason": "unauthorized"}
     if not isinstance(content, str):
         return {"error": "persist_blob: content (str) required"}
     store_id = _find_store(agent)
@@ -809,15 +893,21 @@ async def _persist_blob(id, payload, agent):
     # a side effect of this already-authorized verb, not the loader reaching out
     # as an agent — so it runs with operator authority (like create_agent's boot).
     with operator_context():
-        reply = await agent.ctx.send(
-            store_id,
-            {
-                "type": "write_stream",
-                "path": path,
-                "bytes": content.encode("utf-8"),
-                "truncate": True,
-            },
-        )
+        reply = (
+            await agent.ctx.send(
+                [
+                    {
+                        "target": store_id,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": path,
+                            "bytes": content.encode("utf-8"),
+                            "truncate": True,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     if isinstance(reply, dict) and reply.get("error"):
         out = {"error": f"persist_blob: {reply['error']}"}
         if reply.get("reason"):
@@ -843,18 +933,61 @@ async def _load_blob(id, payload, agent):
         return {"error": "load_blob: agent_id (str) required"}
     if err := _guard_blob_name(name):
         return {"error": f"load_blob: {err}"}
+    if err := _guard_blob_owner(aid):
+        return {"error": f"load_blob: {err}", "reason": "unauthorized"}
     store_id = _find_store(agent)
     if store_id is None:
         return {"error": "load_blob: no store wired — persistence not available"}
     reldir = _blob_reldir(agent, aid)
     path = f"{reldir}/{name}" if reldir else name
+    # PUMP TO EOF. `read_stream` is a CHUNK verb — `file_bridge` caps a chunk at
+    # 65536 bytes — so a single call returns a PREFIX of any larger sidecar, and
+    # this used to return that prefix as if it were the file. Measured: a 100_000
+    # byte `state.yaml` round-tripped as 65_536 bytes, silently, with no error on
+    # any channel. A memory agent's whole point is that what it wrote is what it
+    # reads back, so a truncating read is data loss dressed as a successful load.
+    chunks: list[bytes] = []
+    offset = 0
     with operator_context():  # loader reading its own store — see _persist_blob
-        reply = await agent.ctx.send(store_id, {"type": "read_stream", "path": path})
-    if isinstance(reply, dict) and isinstance(reply.get("bytes"), (bytes, bytearray)):
-        return {
-            "name": name,
-            "content": bytes(reply["bytes"]).decode("utf-8", "replace"),
-        }
+        while True:
+            reply = (
+                await agent.ctx.send(
+                    [
+                        {
+                            "target": store_id,
+                            "payload": {
+                                "type": "read_stream",
+                                "path": path,
+                                "offset": offset,
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
+            if not isinstance(reply, dict) or not isinstance(
+                reply.get("bytes"), (bytes, bytearray)
+            ):
+                break
+            chunks.append(bytes(reply["bytes"]))
+            if reply.get("eof"):
+                return {
+                    "name": name,
+                    "content": b"".join(chunks).decode("utf-8", "replace"),
+                }
+            nxt = reply.get("next_offset")
+            if not isinstance(nxt, int) or nxt <= offset:
+                # No forward progress: stop rather than spin. Returning what we
+                # have would be the truncation this loop exists to prevent, so
+                # say so instead.
+                return {
+                    "error": f"load_blob: {name} stalled at offset {offset}"
+                    " — the store returned no forward progress",
+                    "name": name,
+                    "content": None,
+                }
+            offset = nxt
+    if chunks:
+        return {"name": name, "content": b"".join(chunks).decode("utf-8", "replace")}
     if isinstance(reply, dict) and reply.get("reason") == "unauthorized":
         out = {
             "error": f"load_blob: {reply.get('error', 'unauthorized')}",

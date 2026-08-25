@@ -5,11 +5,11 @@ A connector agent on kernel A dials the relay (`../fantastic_relay`) at
 subprotocol) and reaches a partner kernel B — which runs its OWN connector — by
 B's GUID. A local agent reaches a remote agent exactly as with `ws_bridge`:
 
-    await kernel.send(local_connector_id, {
+    (await kernel.send([{"target": local_connector_id, "payload": {
         "type": "forward",
         "target": "<remote_agent_id>",
         "payload": {"type": "reflect"},
-    })
+    }}]))[0]["result"]
 
 The relay routes by `target` and delivers peer→peer as ONE-WAY
 `{type:"event", source, payload}` (no relay-level reply). So the connector

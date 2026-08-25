@@ -87,7 +87,11 @@ while True:
 async def _wait_ready(kernel, pid, job_id, timeout=8.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        r = await kernel.send(pid, {"type": "status", "job_id": job_id})
+        r = (
+            await kernel.send(
+                [{"target": pid, "payload": {"type": "status", "job_id": job_id}}]
+            )
+        )[0]["result"]
         j = r["jobs"][0]
         if "READY" in j.get("stdout", "") or j.get("last_line") == "READY":
             return
@@ -103,17 +107,24 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
     k = seeded_kernel
     # A bare, context-managed backend with a deterministic provider (no network).
     ai = (
-        await k.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "ollama_backend.tools",
-                "id": "the_ai",
-                "file_bridge_id": store_agent,
-                # Two-sided deny-all: accept the mind that drives it (ingress).
-                "callable_by": {"the_mind": "*"},
-            },
-        )
+        (
+            await k.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "ollama_backend.tools",
+                            "id": "the_ai",
+                            "file_bridge_id": store_agent,
+                            # Two-sided deny-all: accept the mind that drives it (ingress).
+                            "callable_by": {"the_mind": "*"},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     )["id"]
     fp = _FakeProvider(
         [["CALL kernel_state list_agents"], ["FINAL: the kernel is populated"]]
@@ -121,21 +132,32 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
     ot._providers[ai] = fp
     try:
         mind = (
-            await k.send(
-                "kernel_state",
-                {
-                    "type": "create_agent",
-                    "handler_module": "exec_bridge.tools",
-                    "id": "the_mind",
-                    "interpreters": [sys.executable],
-                    "shim": "python",
-                    "ingress_rule": "allow_all_ingress",
-                    # Deny-all: the mind drives the AI — an explicit lateral grant.
-                    "can_call": {"the_ai": "*"},
-                },
-            )
+            (
+                await k.send(
+                    [
+                        {
+                            "target": "kernel_state",
+                            "payload": {
+                                "type": "create_agent",
+                                "parent_id": "kernel_state",
+                                "handler_module": "exec_bridge.tools",
+                                "id": "the_mind",
+                                "interpreters": [sys.executable],
+                                "shim": "python",
+                                "ingress_rule": "allow_all_ingress",
+                                # Deny-all: the mind drives the AI — an explicit lateral grant.
+                                "can_call": {"the_ai": "*"},
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
         )["id"]
-        r = await k.send(mind, {"type": "start", "code": MIND_CODE})
+        r = (
+            await k.send(
+                [{"target": mind, "payload": {"type": "start", "code": MIND_CODE}}]
+            )
+        )[0]["result"]
         jid = r["job_id"]
         await _wait_ready(k, mind, jid)
 
@@ -143,9 +165,20 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
         # Address the mind like any agent: an unknown verb is queued to its running
         # job's inbox with a `{queued:true}` ack (the addressable-inbox parity path),
         # delivered to the mind via `on_message`.
-        ack = await k.send(
-            mind, {"type": "send", "text": "what lives here?", "client_id": "probe"}
-        )
+        ack = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "send",
+                            "text": "what lives here?",
+                            "client_id": "probe",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert ack.get("queued") is True, ack
 
         say = None
@@ -163,7 +196,16 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
                 done = True
 
         if not done:
-            st = await k.send(mind, {"type": "status", "job_id": jid, "full": True})
+            st = (
+                await k.send(
+                    [
+                        {
+                            "target": mind,
+                            "payload": {"type": "status", "job_id": jid, "full": True},
+                        }
+                    ]
+                )
+            )[0]["result"]
             raise AssertionError(
                 "the mind must finish the turn with a done event; job="
                 + repr(st.get("jobs", [{}])[0])
@@ -277,36 +319,54 @@ async def _spawn_plan_mind(k, store_agent, scripts):
     """Create the `the_ai` AI agent (deterministic `_FakeProvider`) + the plan/execute
     mind; return (mind_id, fake_provider). Caller pops `ot._providers` in a finally."""
     ai = (
-        await k.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "ollama_backend.tools",
-                "id": "the_ai",
-                "file_bridge_id": store_agent,
-                # Two-sided deny-all: accept the mind that drives it (ingress).
-                "callable_by": {"the_mind": "*"},
-            },
-        )
+        (
+            await k.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "ollama_backend.tools",
+                            "id": "the_ai",
+                            "file_bridge_id": store_agent,
+                            # Two-sided deny-all: accept the mind that drives it (ingress).
+                            "callable_by": {"the_mind": "*"},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     )["id"]
     fp = _FakeProvider(scripts)
     ot._providers[ai] = fp
     mind = (
-        await k.send(
-            "kernel_state",
-            {
-                "type": "create_agent",
-                "handler_module": "exec_bridge.tools",
-                "id": "the_mind",
-                "interpreters": [sys.executable],
-                "shim": "python",
-                "ingress_rule": "allow_all_ingress",
-                # Deny-all: the mind drives the AI — an explicit lateral grant.
-                "can_call": {"the_ai": "*"},
-            },
-        )
+        (
+            await k.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "exec_bridge.tools",
+                            "id": "the_mind",
+                            "interpreters": [sys.executable],
+                            "shim": "python",
+                            "ingress_rule": "allow_all_ingress",
+                            # Deny-all: the mind drives the AI — an explicit lateral grant.
+                            "can_call": {"the_ai": "*"},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
     )["id"]
-    r = await k.send(mind, {"type": "start", "code": PLAN_MIND_CODE})
+    r = (
+        await k.send(
+            [{"target": mind, "payload": {"type": "start", "code": PLAN_MIND_CODE}}]
+        )
+    )[0]["result"]
     await _wait_ready(k, mind, r["job_id"])
     return mind, fp
 
@@ -331,9 +391,20 @@ async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
     )
     try:
         q = _watch(k, mind)
-        ack = await k.send(
-            mind, {"type": "send", "text": "set it up", "client_id": "c"}
-        )
+        ack = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "send",
+                            "text": "set it up",
+                            "client_id": "c",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert ack.get("queued") is True, ack
 
         qev, before = await _collect(q, "question")
@@ -346,10 +417,21 @@ async def test_mind_plans_executes_and_asks_single(seeded_kernel, store_agent):
         )
 
         rid = qev["request_id"]
-        a = await k.send(
-            mind,
-            {"type": "answer", "request_id": rid, "action": "accept", "value": "yes"},
-        )
+        a = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "answer",
+                            "request_id": rid,
+                            "action": "accept",
+                            "value": "yes",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert a.get("queued") is True, a
 
         done_ev, rest = await _collect(q, "done")
@@ -382,9 +464,20 @@ async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
     )
     try:
         q = _watch(k, mind)
-        ack = await k.send(
-            mind, {"type": "send", "text": "configure", "client_id": "c"}
-        )
+        ack = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "send",
+                            "text": "configure",
+                            "client_id": "c",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert ack.get("queued") is True, ack
 
         qev, before = await _collect(q, "question")
@@ -394,15 +487,21 @@ async def test_mind_plans_executes_and_asks_multi(seeded_kernel, store_agent):
         )
 
         rid = qev["request_id"]
-        a = await k.send(
-            mind,
-            {
-                "type": "answer",
-                "request_id": rid,
-                "action": "accept",
-                "value": ["cache", "sso"],
-            },
-        )
+        a = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "answer",
+                            "request_id": rid,
+                            "action": "accept",
+                            "value": ["cache", "sso"],
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert a.get("queued") is True, a
 
         done_ev, rest = await _collect(q, "done")
@@ -431,16 +530,40 @@ async def test_mind_ask_declined(seeded_kernel, store_agent):
     )
     try:
         q = _watch(k, mind)
-        ack = await k.send(mind, {"type": "send", "text": "clean up", "client_id": "c"})
+        ack = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "send",
+                            "text": "clean up",
+                            "client_id": "c",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert ack.get("queued") is True, ack
 
         qev, before = await _collect(q, "question")
         assert qev is not None and qev["kind"] == "confirm", (qev, before)
 
         rid = qev["request_id"]
-        a = await k.send(
-            mind, {"type": "answer", "request_id": rid, "action": "decline"}
-        )
+        a = (
+            await k.send(
+                [
+                    {
+                        "target": mind,
+                        "payload": {
+                            "type": "answer",
+                            "request_id": rid,
+                            "action": "decline",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         assert a.get("queued") is True, a
 
         done_ev, rest = await _collect(q, "done")

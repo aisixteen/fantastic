@@ -619,10 +619,20 @@ def malformed_calls(text: str) -> list[dict]:
                     + _HINTS[envelope]
                 ),
                 "envelope": envelope,
-                # Enough to locate the break, bounded so a huge program body
-                # cannot itself blow the context it is being explained in, and
-                # DEFANGED so quoting this error cannot arm the scanner again.
-                "your_block": _defang(block.strip()[:400]),
+                # BOTH ENDS, never just the head. A flat 400-char cap hid the
+                # fault: the break in a long payload is almost never in the first
+                # 400 — an unterminated string or a bad escape sits at the END. A
+                # `create_agent` carrying 1.5k of `code` showed the model a prefix
+                # that looked fine, so it could not see what to fix and re-sent the
+                # same broken envelope. Measured 2026-08-24 (`live_build`): three
+                # identical unparseable retries, run ended by the tripwire with the
+                # artifact built but never run.
+                #
+                # A real program is now shown WHOLE; only a runaway is elided, and
+                # then from the MIDDLE so the tail survives. Bounded still, because
+                # a 40k body would otherwise blow the context it is being explained
+                # in. DEFANGED so quoting it cannot arm the scanner again.
+                "your_block": _defang(block.strip()),
             }
         )
     return out

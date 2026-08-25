@@ -15,10 +15,21 @@ async def web_agent(seeded_kernel):
     apply. It therefore needs egress (`can_call`) on whatever it serves, exactly
     like any other caller — the browser inherits the web host's authority, not the
     operator's."""
-    rec = await seeded_kernel.send(
-        seeded_kernel.id,
-        {"type": "create_agent", "id": "test_web", "handler_module": "web.tools"},
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": "test_web",
+                        "handler_module": "web.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     return rec["id"]
 
 
@@ -28,14 +39,21 @@ async def _grant_serving(kernel, web_id: str, target_id: str) -> None:
     `"*"` wildcard KEY (only a wildcard grant VALUE), so each served agent is
     named — which is the intent: what the browser can reach is an explicit list."""
     cur = kernel.ctx.agents[web_id].record.get("can_call") or {}
-    await kernel.send(  # operator origin: authority is conferred from above
-        kernel.id,
-        {
-            "type": "update_agent",
-            "id": web_id,
-            "can_call": {**cur, target_id: ["read_stream"]},
-        },
-    )
+    (
+        await kernel.send(
+            [
+                {
+                    "target":  # operator origin: authority is conferred from above
+                    kernel.id,
+                    "payload": {
+                        "type": "update_agent",
+                        "id": web_id,
+                        "can_call": {**cur, target_id: ["read_stream"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
 
 @pytest.fixture
@@ -44,15 +62,22 @@ async def served_bridge(seeded_kernel, web_agent):
     AND the web host admitted (`callable_by`). Both are required — opening only the
     leg leaves it unreachable BY THE BROWSER while still readable in-kernel, which
     is the whole point of the two-sided gate."""
-    rec = await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {web_agent: ["read_stream"]},
-        },
-    )
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "file_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        "callable_by": {web_agent: ["read_stream"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     await _grant_serving(seeded_kernel, web_agent, rec["id"])
     return rec["id"]
 
@@ -175,14 +200,20 @@ async def test_file_proxy_sealed_agent_404(
     )  # no rule → sealed
     # Grant the serving edge so the SEAL is what denies, not a missing grant —
     # otherwise this passes for the wrong reason and stops testing the io gate.
-    await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "update_agent",
-            "id": "sealed_fb",
-            "callable_by": {web_agent: ["read_stream"]},
-        },
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "update_agent",
+                        "id": "sealed_fb",
+                        "callable_by": {web_agent: ["read_stream"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     (tmp_path / "secret.txt").write_text("nope")
     app = make_app(web_agent, seeded_kernel)
     with TestClient(app) as c:
@@ -207,16 +238,23 @@ async def test_private_but_internally_readable_is_expressible(
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "chat.txt").write_text("private chat history")
-    reader = await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "create_agent",
-            "id": "in_kernel_reader",
-            "handler_module": "file_bridge.tools",
-            "root": ".",
-            "can_call": {"transcripts": ["read"]},
-        },
-    )
+    reader = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": "in_kernel_reader",
+                        "handler_module": "file_bridge.tools",
+                        "root": ".",
+                        "can_call": {"transcripts": ["read"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # Leg OPEN, but only the in-kernel reader is admitted — `web` is NOT.
     seeded_kernel.create(
         "file_bridge.tools",
@@ -237,9 +275,16 @@ async def test_private_but_internally_readable_is_expressible(
 
     token = _current_sender.set(reader["id"])
     try:
-        got = await seeded_kernel.ctx.agents[reader["id"]].send(
-            "transcripts", {"type": "read", "path": "chat.txt"}
-        )
+        got = (
+            await seeded_kernel.ctx.agents[reader["id"]].send(
+                [
+                    {
+                        "target": "transcripts",
+                        "payload": {"type": "read", "path": "chat.txt"},
+                    }
+                ]
+            )
+        )[0]["result"]
     finally:
         _current_sender.reset(token)
     assert got.get("reason") != "unauthorized", f"in-kernel read was denied: {got!r}"
@@ -301,14 +346,27 @@ async def test_browser_reachable_tracks_the_property_not_any_single_field(
     (tmp_path / "f.txt").write_text("bytes")
 
     async def posture(**meta):
-        await seeded_kernel.send(seeded_kernel.id, {"type": "delete_agent", "id": "g"})
+        (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {"type": "delete_agent", "id": "g"},
+                    }
+                ]
+            )
+        )[0]["result"]
         seeded_kernel.create("file_bridge.tools", id="g", root=".", **meta)
         await _grant_serving(seeded_kernel, web_agent, "g")  # egress always granted
         listed = (
             "g"
-            in (await seeded_kernel.send(web_agent, {"type": "reflect"}))[
-                "browser_reachable"
-            ]
+            in (
+                (
+                    await seeded_kernel.send(
+                        [{"target": web_agent, "payload": {"type": "reflect"}}]
+                    )
+                )[0]["result"]
+            )["browser_reachable"]
         )
         app = make_app(web_agent, seeded_kernel)
         with TestClient(app) as c:
@@ -329,6 +387,10 @@ async def test_browser_reachable_tracks_the_property_not_any_single_field(
     assert await posture() is False
 
     # And the bridge the fixture wired correctly is listed.
-    rec = await seeded_kernel.send(web_agent, {"type": "reflect"})
+    rec = (
+        await seeded_kernel.send(
+            [{"target": web_agent, "payload": {"type": "reflect"}}]
+        )
+    )[0]["result"]
     assert served_bridge in rec["browser_reachable"]
     assert "callable_by" in rec["routes"]["GET /<agent_id>/file/<path>"]

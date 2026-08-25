@@ -6,6 +6,7 @@ claimed the read-model was the only one until 2026-08-06."""
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 from ai_core.tool_parse import extract_tool_calls, malformed_calls, parse_one
 
@@ -468,9 +469,16 @@ def test_the_channel_error_does_not_lecture_about_json():
     assert "\\n" not in bad["error"], "the JSON escaping hint must not appear here"
 
 
-def test_a_huge_program_body_cannot_blow_the_context_explaining_it():
-    text = '<tool_call>{"name":"send","arguments":{"code":"' + "x" * 40000
-    assert len(malformed_calls(text)[0]["your_block"]) <= 400
+def test_the_broken_block_is_shown_whole():
+    """No cap. It was 400 chars, which hid the break: in a long payload the fault is
+    at the END (unterminated string, bad escape), so a prefix that looks fine tells
+    the model nothing. Measured 2026-08-24 (`live_build`): three identical
+    unparseable retries of a `create_agent` carrying 1.5k of `code`."""
+    tail = 'print("done")'
+    text = '<tool_call>{"name":"send","arguments":{"code":"' + "x" * 40000 + tail
+    blk = malformed_calls(text)[0]["your_block"]
+    assert blk.endswith(tail), "the tail is where the break is"
+    assert len(blk) > 40000, "shown whole, not capped"
 
 
 if __name__ == "__main__":
@@ -478,6 +486,19 @@ if __name__ == "__main__":
 
 
 # ─── _route_reply's reply tag (end-to-end through a stub kernel) ─
+
+
+async def _settle(k, want: int, timeout: float = 2.0) -> None:
+    """Wait for the spawned deliveries.
+
+    `_route_reply` no longer AWAITS the turns its replies start — that is the fix
+    for the 26-of-36 reply loss measured 2026-08-24. A caller that wants to observe
+    a delivery therefore yields to the loop first."""
+    began = asyncio.get_event_loop().time()
+    while len(k.delivered) < want:
+        if asyncio.get_event_loop().time() - began > timeout:
+            break
+        await asyncio.sleep(0.005)
 
 
 async def test_reply_tag_names_pid_target_and_verb():
@@ -496,19 +517,32 @@ async def test_reply_tag_names_pid_target_and_verb():
     sent = []
 
     class StubKernel:
-        async def send(self, target, payload, *, task_out=None):
-            sent.append((target, payload))
-            if task_out is not None:
-                task_out.append(f"{target}:1")  # the kernel mints at dispatch
-            if payload.get("type") == "list_agents":
-                return {"agents": []}
-            return None  # the reply-delivery self-send
+        async def send(self, items):
+            outs = []
+            for it in items:
+                target, payload = it["target"], it["payload"]
+                sent.append((target, payload))
+                result = (
+                    {"agents": []}
+                    if payload.get("type") == "list_agents"
+                    else None  # the reply-delivery self-send
+                )
+                # the kernel mints the pid at dispatch
+                outs.append(
+                    {"pid": f"{target}:1", "status": "completed", "result": result}
+                )
+            return outs
 
     text = (
         '<tool_call>{"name":"send","arguments":{"target_id":"kernel_state",'
         '"payload":{"type":"list_agents"},"reply_to":"self"}}</tool_call>'
     )
-    await core._route_reply("ai", StubKernel(), text, "cli", None, None)
+    await core._route_reply("ai", StubKernel(), text, "cli", None, None, 180.0, "")
+    # Deliveries are spawned, not awaited (see `_deliver_soon`) — yield to the loop.
+    for _ in range(200):
+        if [p for t, p in sent if t == "ai"]:
+            break
+        await asyncio.sleep(0.005)
     dispatched = [p for t, p in sent if t == "kernel_state"]
     assert dispatched == [{"type": "list_agents"}], "exactly ONE dispatch per call"
     back = [p for t, p in sent if t == "ai"]

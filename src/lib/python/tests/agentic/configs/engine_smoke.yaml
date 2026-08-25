@@ -1,0 +1,35 @@
+# Kernel config — the SYSTEM SHAPE only. Deployable as-is; carries no test
+# metadata. What is asserted about it lives in `specs/engine_smoke.yaml`.
+
+
+loaders:
+  - id: static_loader
+    file: fantastic.yaml
+    manifest:
+      agents:
+        # The persistence provider, DISCOVERED by match: a file_bridge whose
+        # root resolves to the loader's own `.fantastic` dir
+        # (kernel_state/tools.py `_find_store`, which walks the subtree).
+        - id: store
+          handler_module: file_bridge.tools
+          root: .fantastic
+          ingress_rule: allow_all_ingress
+        - id: memory
+          handler_module: yaml_state.tools
+          mode: data
+          callable_by:
+            worker: [set, read]
+        - id: worker
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+          can_call:
+            memory: [set, read]
+            quiet: [list]
+        # `quiet` is reachable-looking and unreachable: worker's can_call names
+        # it, quiet's callable_by does not name worker back.
+        - id: quiet
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress
+        - id: island
+          handler_module: file_bridge.tools
+          ingress_rule: allow_all_ingress

@@ -12,41 +12,80 @@ import pytest
 
 async def _mk_target(kernel, mode="mem"):
     """A live child agent to own the sidecars (yaml_state is the real consumer)."""
-    rec = await kernel.send(
-        kernel.id,
-        {"type": "create_agent", "handler_module": "yaml_state.tools", "mode": mode},
-    )
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "yaml_state.tools",
+                        "mode": mode,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in rec, rec
     return rec["id"]
 
 
 async def test_persist_then_load_round_trips(seeded_kernel, store_agent):
     aid = await _mk_target(seeded_kernel)
-    w = await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "persist_blob",
-            "agent_id": aid,
-            "name": "state.yaml",
-            "content": "user.name: Ada\n",
-        },
-    )
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "persist_blob",
+                        "agent_id": aid,
+                        "name": "state.yaml",
+                        "content": "user.name: Ada\n",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert w.get("ok") is True, w
     # Lands on disk store-relative, next to the agent's record dir.
     on_disk = Path(f".fantastic/agents/{aid}/state.yaml")
     assert on_disk.exists(), "blob must land under .fantastic/agents/<id>/"
     assert "Ada" in on_disk.read_text()
-    r = await seeded_kernel.send(
-        "kernel_state", {"type": "load_blob", "agent_id": aid, "name": "state.yaml"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "load_blob",
+                        "agent_id": aid,
+                        "name": "state.yaml",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("content") == "user.name: Ada\n"
 
 
 async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
     aid = await _mk_target(seeded_kernel)
-    r = await seeded_kernel.send(
-        "kernel_state", {"type": "load_blob", "agent_id": aid, "name": "missing.yaml"}
-    )
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "load_blob",
+                        "agent_id": aid,
+                        "name": "missing.yaml",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert r.get("content") is None  # never-written sidecar reads empty
     assert "error" not in r
 
@@ -56,39 +95,79 @@ async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
 )
 async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
     aid = await _mk_target(seeded_kernel)
-    w = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "persist_blob", "agent_id": aid, "name": bad, "content": "x"},
-    )
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "persist_blob",
+                        "agent_id": aid,
+                        "name": bad,
+                        "content": "x",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in w, f"guard must reject {bad!r}: {w!r}"
 
 
 async def test_no_store_failfasts_no_ram(seeded_kernel):
     # No file_bridge rooted at .fantastic ⇒ no store discovered ⇒ error (no RAM).
     aid = await _mk_target(seeded_kernel)
-    w = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "persist_blob", "agent_id": aid, "name": "state.yaml", "content": "x"},
-    )
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "persist_blob",
+                        "agent_id": aid,
+                        "name": "state.yaml",
+                        "content": "x",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in w and "no store" in w["error"], w
 
 
 async def test_sealed_store_surfaces_denied_write(seeded_kernel):
     # A store rooted at .fantastic but SEALED (no ingress_rule) is still discovered;
     # the denied write is SURFACED, not silently dropped (no fallback).
-    sealed = await seeded_kernel.send(
-        seeded_kernel.id,
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "root": ".fantastic",
-        },
-    )
+    sealed = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "file_bridge.tools",
+                        "root": ".fantastic",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "id" in sealed, sealed
     aid = await _mk_target(seeded_kernel)
-    w = await seeded_kernel.send(
-        "kernel_state",
-        {"type": "persist_blob", "agent_id": aid, "name": "state.yaml", "content": "x"},
-    )
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "persist_blob",
+                        "agent_id": aid,
+                        "name": "state.yaml",
+                        "content": "x",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert "error" in w, w
     assert w.get("reason") == "unauthorized", w

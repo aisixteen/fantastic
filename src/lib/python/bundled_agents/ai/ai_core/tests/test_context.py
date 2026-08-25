@@ -56,9 +56,12 @@ class _FakeKernel:
         self.sent: list[tuple] = []
         self.emitted: list[tuple] = []
 
-    async def send(self, target, payload):
-        self.sent.append((target, payload))
-        return {}
+    async def send(self, items):
+        outs = []
+        for it in items:
+            self.sent.append((it["target"], it["payload"]))
+            outs.append({"pid": None, "status": "completed", "result": {}})
+        return outs
 
     async def emit(self, target, payload):
         self.emitted.append((target, payload))
@@ -330,9 +333,13 @@ async def test_recall_filters_paginates_and_caps(monkeypatch):
     r3 = await core._recall("ai", {"before": 2}, None)
     assert {m["index"] for m in r3["messages"]} == {0, 1}
 
-    # the bulky turn is content-capped in the reply (never the store)
+    # A recalled turn comes back WHOLE. It was capped at 2000 chars "so paging back
+    # cannot blow the window" — but recall exists to hand the model a detail it no
+    # longer has, and a capped turn silently drops the part it went looking for.
+    # `limit` is the bound that belongs here: the caller says how many turns it
+    # wants, and each one arrives intact.
     rbig = await core._recall("ai", {"query": "xxxx"}, None)
-    assert len(rbig["messages"][0]["content"]) <= 2000
+    assert len(rbig["messages"][0]["content"]) == 5000, "recall returns the turn whole"
 
 
 async def test_recall_resolves_the_calling_conversations_client(monkeypatch):
@@ -569,3 +576,49 @@ def test_the_distillation_instruction_rides_on_the_reflect_reply_itself():
     # And the policy paragraph must NOT re-state the format — two copies drift, and
     # the system-block copy is the one that measured 0/10.
     assert "SEEN" not in core._SEND_TO_HOWTO, "the format lives at point of use only"
+
+
+def test_a_combined_turn_trims_per_block_never_whole():
+    """A batch arrives as ONE turn holding several `[reply to …]` blocks. Both
+    trimmers work per BLOCK: a distilled reflect block drops alone, its sibling
+    replies stay; a superseded whole-state block dedupes alone. Treating the
+    turn as one reply either deleted siblings (drop_answered_reflects replaced
+    the WHOLE content) or trimmed nothing (a count guard skipped every
+    multi-reply turn — tried 2026-08-25, superseded same day)."""
+    combined = (
+        "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n"
+        + "TREE" * 500
+        + "\n\n[reply to tot:b1 · totals read · 2 of 2 in batch ab12]\n"
+        + "reading_1 = 41"
+    )
+    body = [
+        _turn("user", combined),
+        _turn("assistant", "SEEN kernel_state — the root; verbs create/list."),
+        _turn("user", "[reply to ks:a2 · kernel_state reflect]\nNEW TREE"),
+    ]
+    out = core.drop_answered_reflects(body)
+    assert "TREE" * 5 not in out[0]["content"], "distilled reflect block drops"
+    assert "reading_1 = 41" in out[0]["content"], "sibling block must SURVIVE"
+
+    out2 = core.dedupe_stale_reads(body)
+    first = out2[0]["content"]
+    assert "TREE" * 5 not in first, "older whole-state block is superseded"
+    assert "reading_1 = 41" in first, "parameterised sibling must survive"
+    assert any("NEW TREE" in m["content"] for m in out2)
+
+
+def test_a_turn_whose_every_block_is_superseded_drops_entirely():
+    body = [
+        _turn(
+            "user",
+            "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch cd34]\nOLD"
+            "\n\n[reply to k:a2 · kernel ps · 2 of 2 in batch cd34]\nOLD ROWS",
+        ),
+        _turn("assistant", "noted"),
+        _turn("user", "[reply to ks:a3 · kernel_state reflect]\nNEW"),
+        _turn("user", "[reply to k:a4 · kernel ps]\nNEW ROWS"),
+    ]
+    out = core.dedupe_stale_reads(body)
+    contents = [m["content"] for m in out]
+    assert not any("OLD" in c for c in contents)
+    assert len(out) == 3, "the emptied turn leaves no husk behind"

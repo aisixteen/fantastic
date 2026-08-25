@@ -89,7 +89,7 @@ for" that surfaces top-level in every reflect (and in each tree node).
 
 ```bash
 rm -rf .fantastic
-ID=$(fantastic kernel_state create_agent handler_module=file_bridge.tools description="x" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ID=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools description="x" | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $ID reflect | python -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -113,7 +113,7 @@ disk. Non-tty invocations (pipes, scripted) see only `kernel_state`.
 ### Test 3: create_agent + auto-boot
 
 ```bash
-fantastic kernel_state create_agent handler_module=file_bridge.tools
+fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools
 ```
 Expected: `{"id":"file_bridge_<hex6>", "handler_module":"file_bridge.tools",
 "parent_id":"kernel_state"}`. File check:
@@ -150,7 +150,7 @@ exits.
 
 ```bash
 rm -rf .fantastic
-ID=$(fantastic kernel_state create_agent handler_module=file_bridge.tools delete_lock=true | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ID=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools delete_lock=true | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # Locked → refused, response carries explicit `locked:true` and the
 # `blocked_by` id (the deepest descendant with delete_lock — for a
 # leaf, that's the agent itself).
@@ -189,7 +189,7 @@ ws_bridge cancels its read loop).
 
 ```bash
 rm -rf .fantastic
-ID=$(fantastic kernel_state create_agent handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ID=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # file_bridge.tools has no on_delete — the loader rmtrees the dir on `removed`.
 fantastic kernel_state delete_agent id=$ID | python -c "
 import json, sys
@@ -205,8 +205,8 @@ Expected: `default-on-delete: PASS` and `record removed: OK`.
 ```bash
 rm -rf .fantastic
 # Spawn a file_bridge agent, then create a terminal_backend child under it.
-PARENT=$(fantastic kernel_state create_agent handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-CHILD=$(fantastic $PARENT create_agent handler_module=terminal_backend.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+PARENT=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+CHILD=$(fantastic kernel create_agent parent_id=$PARENT handler_module=terminal_backend.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # Verify the child exists on disk under parent's agents/ dir.
 test -d .fantastic/agents/$PARENT/agents && echo "  child dir present: OK"
 # Cascade-delete the parent.
@@ -267,7 +267,7 @@ the bootstrap's root-readme seed not wired, or `kernel_state` ships no
 
 ```bash
 rm -rf .fantastic
-ID=$(fantastic kernel_state create_agent handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ID=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 test -f .fantastic/agents/$ID/readme.md && echo "  agent readme seeded: OK"
 grep -qiF "file" .fantastic/agents/$ID/readme.md && echo "  is the file bundle's readme: OK"
 rm -rf .fantastic
@@ -281,7 +281,7 @@ The flag is `readme=true`.
 
 ```bash
 rm -rf .fantastic
-ID=$(fantastic kernel_state create_agent handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ID=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # Default reflect: no readme key.
 fantastic $ID reflect | python -c "
 import json,sys; d=json.load(sys.stdin)

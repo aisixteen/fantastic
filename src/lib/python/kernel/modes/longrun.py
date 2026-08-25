@@ -44,14 +44,20 @@ async def _default(kernel) -> None:
         # stays decoupled and just sends it a verb (the cli agent exists only
         # when stdin is a tty, composed in main._bootstrap).
         if has_repl:
-            await kernel.send("cli", {"type": "intro_booting"})
+            (
+                await kernel.send(
+                    [{"target": "cli", "payload": {"type": "intro_booting"}}]
+                )
+            )[0]["result"]
         await _boot_all_agents(kernel)
         # Second PTY push: the "all booted" close. Each agent already announced
         # its OWN endpoints to cli during its boot (e.g. web sent its listening
         # URL) — the kernel does NOT gather them. Non-tty (the container daemon)
         # keeps the plain one-line marker so logs / smoke greps are unchanged.
         if has_repl:
-            await kernel.send("cli", {"type": "booted"})
+            (await kernel.send([{"target": "cli", "payload": {"type": "booted"}}]))[0][
+                "result"
+            ]
         else:
             print("[kernel] up", flush=True)
 
@@ -166,7 +172,9 @@ async def _repl_loop(kernel) -> None:
                     meta[k2] = _coerce(v)
             r = kernel.create(handler_module, **meta)
             if isinstance(r, dict) and "id" in r:
-                await kernel.send(r["id"], {"type": "boot"})
+                (await kernel.send([{"target": r["id"], "payload": {"type": "boot"}}]))[
+                    0
+                ]["result"]
             await _print_result(r)
             continue
         if line.startswith("delete "):
@@ -178,7 +186,7 @@ async def _repl_loop(kernel) -> None:
             if not target:
                 print("  usage: @<id> <text> | @<id> <verb> k=v ...")
                 continue
-            r = await kernel.send(target, body)
+            r = (await kernel.send([{"target": target, "payload": body}]))[0]["result"]
             await _print_result(r)
             continue
         print(
@@ -193,6 +201,8 @@ async def _boot_all_agents(kernel) -> None:
     Order: registration order (Python dict order, root first)."""
     for a in list(kernel.agents.values()):
         try:
-            await kernel.send(a.id, {"type": "boot"})
+            (await kernel.send([{"target": a.id, "payload": {"type": "boot"}}]))[0][
+                "result"
+            ]
         except Exception as e:
             print(f"  [kernel] boot {a.id!r} raised: {e}", file=sys.stderr)

@@ -78,28 +78,41 @@ async def test_the_provider_write_path_splits_too(tmp_path, monkeypatch):
     Both write paths must split, or a program's home depends on which one ran."""
     monkeypatch.chdir(tmp_path)
     root = boot_root()
-    await root.send(
-        root.id,
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "id": "kernel_store",
-            "root": ".fantastic",
-            "ingress_rule": "allow_all_ingress",
-        },
-    )
-    await root.send(
-        root.id,
-        {
-            "type": "persist_record",
-            "record": {
-                "id": "warm_tool",
-                "handler_module": "exec_bridge.tools",
-                "parent_id": root.id,
-                "code": PROG,
-            },
-        },
-    )
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "kernel_store",
+                        "root": ".fantastic",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "persist_record",
+                        "record": {
+                            "id": "warm_tool",
+                            "handler_module": "exec_bridge.tools",
+                            "parent_id": root.id,
+                            "code": PROG,
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     d = tmp_path / ".fantastic" / "agents" / "warm_tool"
     assert (d / "main.py").read_text() == PROG
     assert "code" not in json.loads((d / "agent.json").read_text())

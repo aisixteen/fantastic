@@ -24,7 +24,11 @@ async def test_no_subscribers_zero_overhead(seeded_kernel):
 async def test_subscriber_receives_send_events(seeded_kernel):
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    await seeded_kernel.send("cli", {"type": "token", "text": "x"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "x"}}]
+        )
+    )[0]["result"]
     sends = [e for e in events if e["kind"] == "send"]
     assert sends, f"expected at least one send event, got {events}"
     e = sends[0]
@@ -70,29 +74,47 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
 
     # A real sender agent, granted to call `cli` — deny-all denies a phantom
     # sender, and this test is about the telemetry `sender` tag, not authz.
-    await seeded_kernel.send(
-        "kernel_state",
-        {
-            "type": "create_agent",
-            "handler_module": "file_bridge.tools",
-            "id": "alice_xxx",
-            "can_call": {"cli": ["token"]},
-        },
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "file_bridge.tools",
+                        "id": "alice_xxx",
+                        "can_call": {"cli": ["token"]},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # Two-sided deny-all: open cli's reciprocal ingress for alice's `token`.
     cli = seeded_kernel.ctx.agents.get("cli")
     cb = dict(cli._meta.get("callable_by") or {})
     cb["alice_xxx"] = ["token"]
-    await seeded_kernel.send(
-        "kernel_state", {"type": "update_agent", "id": "cli", "callable_by": cb}
-    )
+    (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": "cli", "callable_by": cb},
+                }
+            ]
+        )
+    )[0]["result"]
 
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
 
     token = _current_sender.set("alice_xxx")
     try:
-        await seeded_kernel.send("cli", {"type": "token", "text": "x"})
+        (
+            await seeded_kernel.send(
+                [{"target": "cli", "payload": {"type": "token", "text": "x"}}]
+            )
+        )[0]["result"]
         await seeded_kernel.emit("cli", {"type": "noop"})
     finally:
         _current_sender.reset(token)
@@ -114,10 +136,18 @@ async def test_state_event_sender_resets_after_handler_returns(seeded_kernel):
     # The handler doesn't make nested calls, so we can't observe that
     # directly here — but after it returns, the contextvar should
     # restore to its pre-call value (None).
-    await seeded_kernel.send("cli", {"type": "token", "text": "first"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "first"}}]
+        )
+    )[0]["result"]
     events.clear()
     # Second external call: sender should be None (contextvar reset).
-    await seeded_kernel.send("cli", {"type": "token", "text": "second"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "second"}}]
+        )
+    )[0]["result"]
     sends = [e for e in events if e["kind"] == "send" and e["agent_id"] == "cli"]
     assert sends and sends[0]["sender"] is None, "contextvar leaked across calls"
 
@@ -139,7 +169,9 @@ async def test_subscriber_sees_real_agent_watcher_fanout(seeded_kernel):
     seeded_kernel.watch("cli", "kernel_state")  # kernel_state watches cli
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    await seeded_kernel.send("cli", {"type": "noop"})
+    (await seeded_kernel.send([{"target": "cli", "payload": {"type": "noop"}}]))[0][
+        "result"
+    ]
     targets = {e["agent_id"] for e in events if e["kind"] == "send"}
     assert "cli" in targets
     assert "kernel_state" in targets, (
@@ -157,7 +189,9 @@ async def test_non_agent_watcher_does_not_emit_state_events(seeded_kernel):
     seeded_kernel.watch("cli", fake_ws)
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    await seeded_kernel.send("cli", {"type": "noop"})
+    (await seeded_kernel.send([{"target": "cli", "payload": {"type": "noop"}}]))[0][
+        "result"
+    ]
     leaked = [e for e in events if e["agent_id"] == fake_ws]
     assert leaked == [], (
         f"non-agent watcher leaked {len(leaked)} state events: {leaked}"
@@ -233,7 +267,11 @@ async def test_no_recursion_when_callback_calls_send(seeded_kernel):
             )
 
     seeded_kernel.add_state_subscriber(cb)
-    await seeded_kernel.send("cli", {"type": "token", "text": "boot"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "boot"}}]
+        )
+    )[0]["result"]
     # Drain any scheduled tasks.
     for _ in range(5):
         await asyncio.sleep(0.01)
@@ -248,7 +286,11 @@ async def test_send_emits_drain_after_handler_returns(seeded_kernel):
     'drain' event (count down, no blip) once the handler completes."""
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    await seeded_kernel.send("cli", {"type": "token", "text": "x"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "x"}}]
+        )
+    )[0]["result"]
     sends = [e for e in events if e["kind"] == "send"]
     drains = [e for e in events if e["kind"] == "drain"]
     assert len(sends) >= 1 and len(drains) >= 1
@@ -272,7 +314,11 @@ async def test_in_flight_bumps_during_handler(seeded_kernel):
         seen_in_flight.append(_cli_in_flight())
 
     async def caller():
-        await seeded_kernel.send("cli", {"type": "token", "text": "x"})
+        (
+            await seeded_kernel.send(
+                [{"target": "cli", "payload": {"type": "token", "text": "x"}}]
+            )
+        )[0]["result"]
 
     async def observer():
         # Sample while the send is mid-flight.
@@ -367,7 +413,11 @@ async def test_lifecycle_does_not_fire_for_traffic(seeded_kernel):
     """send/emit only produce 'send'/'emit' events, never lifecycle ones."""
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
-    await seeded_kernel.send("cli", {"type": "token", "text": "x"})
+    (
+        await seeded_kernel.send(
+            [{"target": "cli", "payload": {"type": "token", "text": "x"}}]
+        )
+    )[0]["result"]
     await seeded_kernel.emit("cli", {"type": "noop"})
     lifecycle = [e for e in events if e["kind"] in ("added", "removed", "updated")]
     assert lifecycle == [], f"traffic must not produce lifecycle events: {lifecycle}"

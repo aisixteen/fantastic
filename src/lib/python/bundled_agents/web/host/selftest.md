@@ -17,12 +17,12 @@ cd new_codebase
 rm -rf .fantastic
 pkill -9 -f "fantastic" 2>/dev/null
 PORT=18901
-uv run --active fantastic kernel_state create_agent handler_module=web.tools port=$PORT >/dev/null
+uv run --active fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT >/dev/null
 # Spawn web_ws as a child of web so the `call` helper below (which
-# uses WS) works end-to-end. Call create_agent on the web agent
+# uses WS) works end-to-end. create_agent with the web agent as parent_id
 # itself — the new agent lands under <web_id>/agents/.
 WEB_ID=$(ls .fantastic/agents | grep '^web_' | head -1)
-uv run --active fantastic $WEB_ID create_agent handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
+uv run --active fantastic kernel create_agent parent_id=$WEB_ID handler_module=web_ws.tools ingress_rule=allow_all_ingress >/dev/null
 uv run --active fantastic > /tmp/serve.log 2>&1 &
 SPID=$!
 for i in $(seq 1 20); do grep -q "kernel up" /tmp/serve.log 2>/dev/null && break; sleep 0.5; done
@@ -121,7 +121,7 @@ Expected: `HTTP/1.1 404 Not Found`.
 ### Test 5: GET /<backend_id>/ (no UI) → 404
 
 ```bash
-TB=$(call kernel_state '{"type":"create_agent","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+TB=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"terminal_backend.tools"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 curl -s -i "http://localhost:$PORT/$TB/" | head -1
 ```
 Expected: `HTTP/1.1 404 Not Found` (terminal_backend has no webapp/index.html).
@@ -185,7 +185,7 @@ test -f .fantastic/lock.json && echo "  lock survived SIGKILL: OK"
 
 # Spin up a fresh serve on a different port — should overwrite.
 PORT2=18902
-uv run --active fantastic kernel_state create_agent handler_module=web.tools port=$PORT2 >/dev/null
+uv run --active fantastic kernel create_agent parent_id=kernel_state handler_module=web.tools port=$PORT2 >/dev/null
 uv run --active fantastic > /tmp/serve2.log 2>&1 &
 WRAPPER2=$!
 for i in $(seq 1 30); do grep -q "kernel up" /tmp/serve2.log 2>/dev/null && break; sleep 0.3; done
@@ -230,7 +230,7 @@ and relays the bus.
 # RELATIVE root — file_bridge clamps every root inside the running dir,
 # and the leg is sealed by default → open it with ingress_rule=allow_all_ingress.
 mkdir -p wfp && echo "hello bytes" > wfp/foo.txt
-FA=$(call kernel_state '{"type":"create_agent","handler_module":"file_bridge.tools","root":"wfp","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
+FA=$(call kernel '{"type":"create_agent","parent_id":"kernel_state","handler_module":"file_bridge.tools","root":"wfp","ingress_rule":"allow_all_ingress"}' | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 # text content
 out=$(curl -s -i "http://localhost:$PORT/$FA/file/foo.txt")
 echo "$out" | grep -qF "hello bytes" && echo "  text body: OK" || echo "  FAIL"
