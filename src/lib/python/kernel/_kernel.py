@@ -346,6 +346,17 @@ class Kernel:
     # the process lifetime: an id is never reused, so a stale id cancels
     # nothing rather than killing an innocent task.
     task_seq: dict[str, int] = field(default_factory=dict)
+
+    # THE EXECUTION LEDGER — caller-NAMED executions (a batch item's `id`).
+    # `send([{.., id:"job-42"}])` means ENSURE that execution exists (the same
+    # semantics `create_agent` gives a supplied agent id): unknown id ⇒ dispatch
+    # and record; id in flight ⇒ JOIN it (no second run — C10); id settled ⇒ the
+    # recorded outcome returns and no handler runs (C9/C11 idempotency). The id
+    # is the SAME identifier `ps`/`cancel`/reply tags carry — one id space.
+    # Entry: {"target": <resolved agent id>, "fut": Future[outcome]}.
+    # Retention: session lifetime, unbounded — a durable ledger (C9 across
+    # restart, C12 dead-letter) is the later increment on this dict.
+    executions: dict[str, dict] = field(default_factory=dict)
     # Per-kernel salt so the opaque task token cannot be predicted or replayed
     # across kernels (see `mint_task_id`). Random per process, never persisted.
     _task_salt: bytes = field(default_factory=lambda: secrets.token_bytes(16))
