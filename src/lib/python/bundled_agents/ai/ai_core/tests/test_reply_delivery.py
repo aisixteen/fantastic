@@ -167,6 +167,40 @@ async def test_the_layer_default_timeout_rides_every_item():
     assert seen == [("kernel", 42.0), ("slowpoke", 5)]
 
 
+async def test_the_models_execution_id_rides_the_item(monkeypatch=None):
+    """`id` in the envelope names the execution at the KERNEL — the model's
+    handle on the ledger (dedup, join, recorded outcomes). Passed through
+    verbatim; the kernel validates."""
+    seen: list[tuple[str, object]] = []
+
+    class _K(_Kernel):
+        async def send(self, items):
+            for it in items:
+                if it["payload"].get("type") != "send":
+                    seen.append((it["target"], it.get("id")))
+            return await super().send(items)
+
+    k = _K()
+    named = (
+        "<tool_call>"
+        + json.dumps(
+            {
+                "name": "send",
+                "arguments": {
+                    "target_id": "vault",
+                    "payload": {"type": "withdraw"},
+                    "reply_to": "self",
+                    "id": "job-alpha",
+                },
+            }
+        )
+        + "</tool_call>"
+    )
+    await _route_reply("ai", k, _call("kernel") + named, "cli", None, None, 42.0, "")
+    await _settle(k, 1)
+    assert seen == [("kernel", None), ("vault", "job-alpha")]
+
+
 async def test_a_failed_outcome_is_rendered_not_hidden():
     """A call that failed or timed out occupies its slot in M with its error
     body — a partial batch is the one thing the model must never see."""

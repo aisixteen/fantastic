@@ -164,10 +164,18 @@ class _Dispatched:
 
     index: int
     pid: str | None
-    task: "asyncio.Task"
+    task: "asyncio.Task | None"
     timeout: float | None
     target: "Agent"
     payload: dict
+    # Caller-NAMED execution (the item's `id`): `exec_fut` is the ledger future
+    # the owner settles; a JOINER has `task=None` and only awaits it. A joiner's
+    # timeout bounds its own wait, never the execution it does not own.
+    exec_fut: "asyncio.Future | None" = None
+    joined: bool = False
+    # The kernel-reflect fast path applies reflect flags INSIDE its task; settle
+    # must not apply them twice when such an execution is caller-named.
+    flags_done: bool = False
 
 
 class Agent:
@@ -458,6 +466,14 @@ class Agent:
         in a synchronous launch phase, so the whole batch is visible in `ps`
         before the first await.
 
+        `id` (optional) NAMES the execution — ensure-semantics, like a supplied
+        `create_agent` id: unknown ⇒ dispatch and ledger it; in flight ⇒ JOIN
+        (no second run); settled ⇒ the recorded outcome returns and no handler
+        runs. Idempotency and once-only execution in one field, and it is the
+        SAME id `ps`/`cancel`/reply tags carry. Caller ids may not contain ":"
+        (the minted-pid namespace); an id is BOUND to its first execution's
+        target. Retention: session lifetime.
+
         `timeout` is per-item seconds. The kernel NEVER defaults it:
         absent/None = wait forever. On expiry the item is killed through the
         front door (`cancel_task`), so every bundle's `on_cancel` hook runs
@@ -543,6 +559,94 @@ class Agent:
         # telemetry, no table row), applied AFTER the gate so it is authorized
         # like any other reflect. Async (reflect flags nest dispatches), so it
         # rides the settle phase as a pid-less task.
+        exec_id = item.get("id")
+        if exec_id is not None:
+            # A caller-NAMED execution — "ensure it exists", the same semantics
+            # a supplied `create_agent` id has. One id space: minted pids carry
+            # `<agent>:<hex>`, so a caller id may not contain ":" and the two
+            # can never collide.
+            if not isinstance(exec_id, str) or not exec_id:
+                return outcome(
+                    None,
+                    FAILED,
+                    refusal(
+                        BAD_ARG,
+                        f"send: id must be a non-empty string, got {exec_id!r}",
+                        arg="id",
+                    ),
+                )
+            if ":" in exec_id:
+                return outcome(
+                    None,
+                    FAILED,
+                    refusal(
+                        BAD_ARG,
+                        f"send: id {exec_id!r} may not contain ':' — that is the "
+                        "kernel-minted pid namespace",
+                        arg="id",
+                    ),
+                )
+            entry = self.ctx.executions.get(exec_id)
+            if entry is not None:
+                # The id is BOUND to its first execution's target — returning an
+                # unrelated agent's outcome would be silent corruption.
+                if entry["target"] != target.id:
+                    return outcome(
+                        None,
+                        FAILED,
+                        refusal(
+                            BAD_ARG,
+                            f"send: id {exec_id!r} already names an execution on "
+                            f"{entry['target']!r}, not {target.id!r} — an id is "
+                            "bound to its first execution; a retry aimed "
+                            "elsewhere needs a new id",
+                            arg="id",
+                        ),
+                    )
+                # JOIN — settled or in flight, the ledger future carries the one
+                # true outcome; no second execution ever starts (C9/C10/C11).
+                dispatched.append(
+                    _Dispatched(
+                        index,
+                        exec_id,
+                        None,
+                        timeout,
+                        target,
+                        payload,
+                        exec_fut=entry["fut"],
+                        joined=True,
+                    )
+                )
+                return None
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            self.ctx.executions[exec_id] = {"target": target.id, "fut": fut}
+            if target_id == "kernel" and verb == "reflect":
+                # The identity-read fast path, caller-named: still no table row
+                # (nothing to cancel in a pure read), but the ledger applies —
+                # dedup and join work, and the outcome records under this id.
+                task = asyncio.create_task(
+                    self._apply_reflect_flags(
+                        target, payload, target._reflect_identity()
+                    )
+                )
+                dispatched.append(
+                    _Dispatched(
+                        index,
+                        exec_id,
+                        task,
+                        timeout,
+                        target,
+                        payload,
+                        exec_fut=fut,
+                        flags_done=True,
+                    )
+                )
+                return None
+            pid, task = self._spawn_dispatch(target, payload, task_id=exec_id)
+            dispatched.append(
+                _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
+            )
+            return None
         if target_id == "kernel" and verb == "reflect":
             task = asyncio.create_task(
                 self._apply_reflect_flags(target, payload, target._reflect_identity())
@@ -554,13 +658,13 @@ class Agent:
         return None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict
+        self, target: "Agent", payload: dict, task_id: str | None = None
     ) -> tuple[str, "asyncio.Task"]:
         """Mint the pid and start ONE dispatch as a registered asyncio.Task —
         the unit of the task table. Synchronous: the pid exists before any
         await, which is what lets a batch report every pid up front."""
         ctx = self.ctx
-        task_id = ctx.mint_task_id(target.id)
+        task_id = task_id or ctx.mint_task_id(target.id)
         # Captured HERE, before the dispatch rewrites `_current_sender` to the
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
@@ -583,7 +687,39 @@ class Agent:
         `await d.task` with our OWN cancelling() == 0 means the CHILD was
         killed (→ outcome cancelled); cancelling() > 0 means WE are being
         killed (→ take the child down, re-raise; gather propagates out of
-        `send` — the one thing that does)."""
+        `send` — the one thing that does).
+
+        A JOINER (caller-named execution already known to the ledger) never
+        touches the task: it awaits the ledger FUTURE the owner settles, so the
+        outcome — reflect flags included — is computed exactly once. Its own
+        `timeout` bounds only its wait; it does not own the execution, so
+        expiry settles the joiner `timed_out` and leaves the execution alone."""
+        if d.joined:
+            try:
+                if d.timeout is not None:
+                    done, _pending = await asyncio.wait(
+                        {asyncio.ensure_future(asyncio.shield(d.exec_fut))},
+                        timeout=d.timeout,
+                    )
+                    if not done:
+                        return outcome(
+                            d.pid,
+                            TIMED_OUT,
+                            refusal(
+                                TIMEOUT,
+                                f"send: joined execution {d.pid!r} did not settle "
+                                f"within this caller's {d.timeout}s wait; the "
+                                "execution itself keeps running",
+                                task_id=d.pid,
+                            ),
+                        )
+                recorded = await asyncio.shield(d.exec_fut)
+            except asyncio.CancelledError:
+                cur = asyncio.current_task()
+                if cur is not None and cur.cancelling() > 0:
+                    raise  # we were killed; the execution is not ours to kill
+                return outcome(d.pid, CANCELLED, {"cancelled": True})
+            return dict(recorded)
         try:
             if d.timeout is not None:
                 done, pending = await asyncio.wait({d.task}, timeout=d.timeout)
@@ -608,15 +744,18 @@ class Agent:
                         cur = asyncio.current_task()
                         if cur is not None and cur.cancelling() > 0:
                             raise  # we were killed mid-timeout-handling
-                        return outcome(
-                            d.pid,
-                            TIMED_OUT,
-                            refusal(
-                                TIMEOUT,
-                                f"send: {d.target.id} "
-                                f"{d.payload.get('type')!r} exceeded its "
-                                f"{d.timeout}s timeout; task cancelled",
-                                task_id=d.pid or "-",
+                        return self._record(
+                            d,
+                            outcome(
+                                d.pid,
+                                TIMED_OUT,
+                                refusal(
+                                    TIMEOUT,
+                                    f"send: {d.target.id} "
+                                    f"{d.payload.get('type')!r} exceeded its "
+                                    f"{d.timeout}s timeout; task cancelled",
+                                    task_id=d.pid or "-",
+                                ),
                             ),
                         )
                     # else: the handler finished during the SIGTERM grace —
@@ -624,21 +763,39 @@ class Agent:
             reply = await d.task  # instant when already done
             if d.pid is None:  # fast path already ran _apply_reflect_flags
                 return outcome(None, COMPLETED, reply)
-            reply = await self._apply_reflect_flags(d.target, d.payload, reply)
-            return outcome(d.pid, COMPLETED, reply)
+            if not d.flags_done:
+                reply = await self._apply_reflect_flags(d.target, d.payload, reply)
+            return self._record(d, outcome(d.pid, COMPLETED, reply))
         except asyncio.CancelledError:
             cur = asyncio.current_task()
             if cur is not None and cur.cancelling() > 0:
                 if not d.task.done():
                     d.task.cancel()  # caller cancelled: child dies with us
+                # The OWNER dying must still settle the ledger, or every joiner
+                # (and every future re-send of this id) hangs on a dead future.
+                self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
                 raise
             if d.task.cancelled():
-                return outcome(d.pid, CANCELLED, {"cancelled": True})
+                return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
             raise
         except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
-            return outcome(
-                d.pid, FAILED, {"error": f"{type(e).__name__}: {e}", "raised": True}
+            return self._record(
+                d,
+                outcome(
+                    d.pid,
+                    FAILED,
+                    {"error": f"{type(e).__name__}: {e}", "raised": True},
+                ),
             )
+
+    @staticmethod
+    def _record(d: "_Dispatched", out: dict) -> dict:
+        """Settle the ledger future of a caller-named execution — the ONE place
+        an owned execution's outcome is recorded. Unnamed executions have no
+        future and pass through untouched."""
+        if d.exec_fut is not None and not d.exec_fut.done():
+            d.exec_fut.set_result(out)
+        return out
 
     def _loader_id(self) -> str | None:
         """The id `$loader` resolves to in a grant — the persistence root."""

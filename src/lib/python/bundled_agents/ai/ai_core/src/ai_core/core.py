@@ -539,6 +539,11 @@ literally:
 - Each call may carry `timeout: <seconds>` in its arguments to bound that call;
   otherwise a generous default applies. A call that exceeds it is CANCELLED and
   its block reports the timeout.
+- A call may carry `id: "<name>"` in its arguments — that NAMES the execution.
+  Re-sending the SAME id NEVER runs the work twice: you get the first run's
+  recorded outcome back, byte for byte (even if it failed). Use it for any call
+  you must not double-fire (a write, a payment, a create) and to safely re-fetch
+  a reply; a genuinely NEW attempt needs a NEW id. Ids may not contain ':'.
 - `reply_to:null` means the call still runs but its answer is discarded — it is
   not in M and nothing comes back. `reply_to:<someone else>` hands that block to
   THEM instead of you.
@@ -1018,6 +1023,11 @@ async def _route_reply(
         item = {"target": target, "payload": payload, "timeout": send_timeout}
         if "timeout" in args:
             item["timeout"] = args.get("timeout")
+        # The model's execution id rides through untouched — the kernel owns the
+        # ledger semantics AND the validation (a bad id settles as a refusal the
+        # model can read).
+        if "id" in args:
+            item["id"] = args.get("id")
         items.append(item)
         if reply_to:
             units.append(
