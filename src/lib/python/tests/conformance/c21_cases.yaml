@@ -41,3 +41,16 @@
   target: kernel
   payload: {type: reflect}
   expect: {id: kernel_state}
+# `pairwise: false` — the reply is checked for SHAPE on every transport but not
+# byte-diffed: `ledger` is origin-scoped by design (each leg sees the executions
+# IT originated) and history accumulates between legs. The first ledger-all run
+# proved it: the ws leg's view diverged from the operator's, correctly.
+- name: ledger-answers-everywhere
+  target: kernel
+  payload: {type: ledger}
+  expect_keys: [executions, next]
+  pairwise: false
+- name: no-verb-at-all
+  target: c21_probe
+  payload: {}
+  expect: {reason: unhandled}

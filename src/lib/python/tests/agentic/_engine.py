@@ -103,15 +103,29 @@ _ROWS: tuple[tuple[str, str, str], ...] = (
     # canonical-assertion table of `tmp/agentic_development.md`, so a gap in the
     # sequence is a checkpoint nobody has claimed rather than a missing row. This
     # suite closes C14–C18, C20 and C23 out of that table's "built but unasserted"
-    # bucket; C21 (one semantics, many execution modes) and C24 (stream ordering)
-    # are the two left in it, and both want a scenario the manifest cannot yet
-    # declare — several transports, and a streaming subscriber.
+    # bucket. C21 and C24 wanted scenarios this manifest cannot declare and are
+    # asserted in `tests/conformance/` instead (2026-08-26): C21 =
+    # test_c21_transport_symmetry (five transports, one envelope, byte-diffed);
+    # C24 = test_stream_semantics (in-proc order/terminal/multi-subscriber) +
+    # test_c24_stream_transport (the streaming subscriber ACROSS a transport).
+    # Rows kept here so the registry stays the one index of the canonical 26.
+    (
+        "C1",
+        "MUST",
+        "resume after suspension continues the run — script minds: test_mind_plumbed ASK; AI chains: tests/conformance/test_c1_suspend_resume",
+    ),
     ("C14", "MUST", "cancel stops a live dispatch before its next step, observably"),
     ("C15", "MUST", "a terminal task and a deleted agent both absorb further calls"),
     ("C16", "MUST", "unknown id / malformed / unknown verb / denial stay distinct"),
     ("C17", "MUST", "a refused mutation mutates nothing and says which half refused"),
     ("C18", "MUST", "delete removes the whole owned roster and spares its neighbours"),
     ("C20", "MUST", "child state is namespaced by position, not by convention"),
+    ("C21", "MUST", "one semantics, many transports — see tests/conformance/"),
+    (
+        "C24",
+        "MUST",
+        "stream order/terminal/fan-out — see tests/conformance/ + test_stream_semantics",
+    ),
     (
         "C23",
         "MUST",

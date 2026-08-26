@@ -380,12 +380,22 @@ async def test_every_transport_gives_the_same_reply(wired):
         ref = replies[ref_name][i]
         # per-case expectations — a wrong answer fails even if every transport
         # agrees on it
-        for key in case.get("expect_keys", []):
-            if not (isinstance(ref, dict) and key in ref):
-                failures.append(f"{case['name']}: reference missing key {key!r}: {ref}")
-        if "expect" in case and not _subset(case["expect"], ref):
-            failures.append(f"{case['name']}: expect {case['expect']} ⊄ {ref}")
-        # the C21 core: pairwise identity against the in-proc reference
+        for name in LEGS:
+            got = replies[name][i]
+            for key in case.get("expect_keys", []):
+                if not (isinstance(got, dict) and key in got):
+                    failures.append(
+                        f"{case['name']}: {name} missing key {key!r}: {got}"
+                    )
+            if "expect" in case and not _subset(case["expect"], got):
+                failures.append(
+                    f"{case['name']}: {name}: expect {case['expect']} ⊄ {got}"
+                )
+        # the C21 core: pairwise identity against the in-proc reference —
+        # except cases marked `pairwise: false` (a viewer-DEPENDENT reply, like
+        # the origin-scoped ledger, is checked for shape on every leg instead)
+        if case.get("pairwise") is False:
+            continue
         for name in LEGS:
             if name == ref_name:
                 continue
