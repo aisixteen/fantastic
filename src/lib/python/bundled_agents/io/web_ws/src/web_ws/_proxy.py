@@ -176,10 +176,17 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             return
         # A handler raise settles as a failed outcome (`{"error": ..., "raised":
         # True}` in result) — send never leaks it, so the old except net is dead.
+        #
+        # ONE ID SPACE, wire included: the frame `id` correlates the reply AND
+        # names the execution (the ledger's dedup/join/retry key). Reusing an
+        # id DECLARES "same intent" — the recorded outcome returns, nothing
+        # re-fires (double-click, racing tabs, retries). Mint a fresh id per
+        # intent; ":" is refused (minted namespace).
+        item = {"target": target, "payload": payload}
+        if isinstance(fid, str) and fid:
+            item["id"] = fid
         with sender_context(web_agent_id):
-            reply = (await kernel.send([{"target": target, "payload": payload}]))[0][
-                "result"
-            ]
+            reply = (await kernel.send([item]))[0]["result"]
         await _send_envelope({"type": "reply", "id": fid, "data": reply})
 
     async def _on_emit(frame):

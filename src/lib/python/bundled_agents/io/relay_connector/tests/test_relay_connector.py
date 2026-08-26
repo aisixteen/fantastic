@@ -17,7 +17,7 @@ import json
 import pytest
 
 from _testkit import boot_root, persist
-from io_bridge import ConnectionClosed, decode_frame, encode_frame
+from io_bridge import ConnectionClosed
 from relay_connector import _relay as rc_relay
 from relay_connector import tools as rc
 from relay_connector._relay import RelayTransport
