@@ -156,7 +156,11 @@ def _state(id: str) -> _BridgeState:
 
 def _next_corr(id: str, st: _BridgeState) -> str:
     st.corr_counter += 1
-    return f"{id}:{st.corr_counter}"
+    # DASH, not colon: since the wire's frame id IS the execution id, a ":"
+    # here would land in the kernel-minted pid namespace and be refused on
+    # the serving side. Bridge-minted correlators are caller-chosen ids like
+    # any other — fresh per forward, so each forward is its own intent.
+    return f"{id}-{st.corr_counter}"
 
 
 async def _read_loop(id: str, kernel: Any) -> None:
@@ -203,9 +207,19 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 else:
                     # A handler raise settles as a failed outcome — the error
                     # rides in `result`, so the wire keeps its `data` shape.
-                    reply = (
-                        await kernel.send([{"target": target, "payload": payload}])
-                    )[0]["result"]
+                    #
+                    # ONE ID SPACE, wire included: the frame's `id` correlates
+                    # the reply AND names the execution in the ledger. Reusing
+                    # an id DECLARES "same intent" — the recorded outcome
+                    # returns and nothing re-fires (double-click, racing tabs,
+                    # retries). Mint a fresh id per intent; ":" is refused (the
+                    # minted namespace); a reused id aimed elsewhere refuses
+                    # loudly naming the bound target.
+                    item = {"target": target, "payload": payload}
+                    fid = frame.get("id")
+                    if isinstance(fid, str) and fid:
+                        item["id"] = fid
+                    reply = (await kernel.send([item]))[0]["result"]
                 await transport.send(
                     {"type": "reply", "id": frame.get("id"), "data": reply}
                 )

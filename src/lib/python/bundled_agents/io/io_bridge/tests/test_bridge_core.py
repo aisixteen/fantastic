@@ -38,9 +38,9 @@ def test_next_corr_namespaces_by_agent_id():
     core._bridges.clear()
     sa = core._state("a")
     sb = core._state("b")
-    assert core._next_corr("a", sa) == "a:1"
-    assert core._next_corr("a", sa) == "a:2"
-    assert core._next_corr("b", sb) == "b:1"  # independent counter per agent
+    assert core._next_corr("a", sa) == "a-1"
+    assert core._next_corr("a", sa) == "a-2"
+    assert core._next_corr("b", sb) == "b-1"  # independent counter per agent
     core._bridges.clear()
 
 

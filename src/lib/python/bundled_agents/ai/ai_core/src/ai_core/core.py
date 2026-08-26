@@ -526,9 +526,10 @@ whether you are allowed to stop is not worth a turn — if the task is finished,
 and stop; if it is not, make the next call.
 
 NEEDING A HUMAN IS ALSO NORMAL. When you cannot proceed without an answer, ask and
-stop: put the question in your message — structured, so a UI can render it:
-`{type:'question', request_id:'<yours>', kind:'text'|'single'|'multi'|'confirm',
-question:'...', options?:[...]}` on its own line — then emit no call. The chain
+stop: put the question in your message — STRICT JSON on its own line, so a UI
+can parse and render it:
+`{"type":"question", "request_id":"<yours>", "kind":"text|single|multi|confirm",
+"question":"...", "options":[...]}` — then emit no call. The chain
 ends; the ANSWER arrives as your next turn (name your request_id to correlate),
 with your full history intact — continue exactly where you stopped. Nothing you
 completed before asking will re-run.
@@ -547,7 +548,9 @@ literally:
 - Each call may carry `timeout: <seconds>` in its arguments to bound that call;
   otherwise a generous default applies. A call that exceeds it is CANCELLED and
   its block reports the timeout.
-- A call may carry `id: "<name>"` in its arguments — that NAMES the execution.
+- A call may carry `id: "<name>"` in its arguments — BESIDE `payload`, never
+  inside it: `{"name":"send","arguments":{"target_id":"x","payload":{...},
+  "id":"job-1"}}`. That NAMES the execution.
   Re-sending the SAME id NEVER runs the work twice: you get the first run's
   recorded outcome back, byte for byte (even if it failed). Use it for any call
   you must not double-fire (a write, a payment, a create) and to safely re-fetch

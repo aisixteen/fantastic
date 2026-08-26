@@ -220,8 +220,10 @@ async def test_corr_id_namespacing_no_collision(two_kernels):
     c1 = kb._next_corr(a_id, sa)
     c2 = kb._next_corr(b_id, sb)
     assert c1 != c2
-    assert c1 == f"{a_id}:42"
-    assert c2 == f"{b_id}:42"
+    # DASH since the frame id became the execution id — ":" would land the
+    # correlator in the kernel-minted pid namespace and be refused remotely.
+    assert c1 == f"{a_id}-42"
+    assert c2 == f"{b_id}-42"
 
 
 async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
