@@ -51,6 +51,12 @@ async def _handler(id, payload, kernel):
     if verb == "boom":
         _runs.append(id)
         raise RuntimeError("kaput")
+    if verb == "flaky":
+        # fails until the Nth run — the retry engine's canonical target
+        _runs.append(id)
+        if len(_runs) < payload.get("succeed_on", 3):
+            raise RuntimeError(f"flaky miss {len(_runs)}")
+        return {"made_it": len(_runs)}
     return {"error": f"unknown verb {verb!r}"}
 
 
@@ -273,3 +279,563 @@ async def test_a_named_kernel_reflect_is_ledgered_not_ignored(seeded_kernel):
     )[0]
     assert o1["pid"] == "kr1" and o1["status"] == "completed"
     assert o2 == o1
+
+
+# ─── the retry engine (C12's machinery, caller-declared budget) ──
+
+
+async def test_retries_rerun_a_failing_body_until_it_succeeds(seeded_kernel):
+    """`retries: N` on a NAMED item: a terminal failed attempt re-dispatches
+    under the SAME id until the budget is spent — the caller sees ONE outcome,
+    the final one, with `attempts` telling the truth."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_flaky")
+    out = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "flaky", "succeed_on": 3},
+                    "id": "fl1",
+                    "retries": 5,
+                }
+            ]
+        )
+    )[0]
+    assert out["status"] == "completed", out
+    assert out["result"] == {"made_it": 3}
+    assert out["attempts"] == 3
+    assert len(_runs) == 3
+
+
+async def test_a_spent_budget_settles_as_the_last_failure(seeded_kernel):
+    """Budget spent ⇒ the row parks with its final failure — THE dead letter.
+    Nothing retries it again: a re-send of the id returns the recorded outcome."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_dl")
+    out = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "boom"}, "id": "dl1", "retries": 1}]
+        )
+    )[0]
+    assert out["status"] == "failed" and out["attempts"] == 2
+    assert len(_runs) == 2
+    again = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "boom"}, "id": "dl1", "retries": 9}]
+        )
+    )[0]
+    assert again["status"] == "failed" and len(_runs) == 2, (
+        "a parked dead letter must never fire again"
+    )
+
+
+async def test_no_retries_means_exactly_todays_behavior(seeded_kernel):
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_r0")
+    out = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "boom"}, "id": "r0"}]
+        )
+    )[0]
+    assert out["status"] == "failed" and out["attempts"] == 1
+    assert len(_runs) == 1
+
+
+async def test_completed_never_retries(seeded_kernel):
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_c1")
+    out = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": "c1", "retries": 3}]
+        )
+    )[0]
+    assert out["status"] == "completed" and out["attempts"] == 1
+    assert len(_runs) == 1
+
+
+async def test_cancel_is_absorbing_and_stops_the_retry_loop(seeded_kernel):
+    """A cancel is a HUMAN decision, not a transient — the loop must not spend
+    its budget resurrecting what an operator just killed."""
+    a = await _mk(seeded_kernel, "lp_cxr")
+    batch = asyncio.create_task(
+        seeded_kernel.send(
+            [{"target": a, "payload": {"type": "slow"}, "id": "cxr", "retries": 5}]
+        )
+    )
+    await asyncio.wait_for(_flag(a).wait(), timeout=2)
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": "cxr"}}]
+        )
+    )[0]["result"]
+    assert r["cancelled"] is True
+    (out,) = await asyncio.wait_for(batch, timeout=2)
+    assert out["status"] == "cancelled" and out["attempts"] == 1
+    assert all(t["id"] != "cxr" for t in await _rows(seeded_kernel))
+
+
+async def test_retries_ride_unnamed_items_too(seeded_kernel):
+    """Ledger-all: every execution has a row, so `retries` needs no name — the
+    minted pid is the row key. Bad values still refuse."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_noid")
+    out = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "flaky", "succeed_on": 2},
+                    "retries": 3,
+                }
+            ]
+        )
+    )[0]
+    assert out["status"] == "completed" and out["attempts"] == 2
+    assert len(_runs) == 2
+    for bad in (-1, True, "3"):
+        out = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": a,
+                        "payload": {"type": "work"},
+                        "id": f"b{bad}",
+                        "retries": bad,
+                    }
+                ]
+            )
+        )[0]
+        assert out["status"] == "failed" and out["result"]["reason"] == "bad_arg"
+
+
+# ─── the `ledger` verb: the read surface / dead-letter queue ─────
+
+
+async def test_ledger_lists_named_executions_with_outcomes(seeded_kernel):
+    """`ps` is work in flight; `ledger` is what named work BECAME. Terminal
+    non-completed rows are the dead-letter queue — inspectable, outcome
+    attached, never silently retried."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_lv")
+    outs = await seeded_kernel.send(
+        [
+            {"target": a, "payload": {"type": "work"}, "id": "lv_ok"},
+            {"target": a, "payload": {"type": "boom"}, "id": "lv_dead", "retries": 1},
+            {"target": a, "payload": {"type": "work"}},  # unnamed: listed under pid
+        ]
+    )
+    led = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}])
+    )[0]["result"]
+    rows = {r["id"]: r for r in led["executions"]}
+    minted = outs[2]["pid"]
+    assert {"lv_ok", "lv_dead", minted} <= set(rows), "LEDGER-ALL: unnamed too"
+    assert rows[minted]["named"] is False and rows["lv_ok"]["named"] is True
+    assert rows["lv_ok"]["status"] == "completed"
+    dead = rows["lv_dead"]
+    assert dead["status"] == "failed" and dead["attempts"] == 2
+    assert dead["retries"] == 1
+    assert dead["outcome"]["result"]["raised"] is True, "the WHY travels with it"
+
+
+async def test_ledger_shows_in_flight_and_pages(seeded_kernel):
+    a = await _mk(seeded_kernel, "lp_lp")
+    batch = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "slow"}, "id": "lp_run"}])
+    )
+    await asyncio.wait_for(_flag(a).wait(), timeout=2)
+    await seeded_kernel.send(
+        [{"target": a, "payload": {"type": "work"}, "id": "lp_done"}]
+    )
+    led = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "ledger", "limit": 1}}]
+        )
+    )[0]["result"]
+    assert len(led["executions"]) == 1 and led["next"], "paged like every listing"
+    rows = {}
+    payload = {"type": "ledger"}
+    while True:
+        led = (await seeded_kernel.send([{"target": "kernel", "payload": payload}]))[0][
+            "result"
+        ]
+        rows.update({r["id"]: r for r in led["executions"]})
+        if not led["next"]:
+            break
+        payload = {"type": "ledger", "after": led["next"]}
+    assert rows["lp_run"]["status"] == "in_flight"
+    assert "outcome" not in rows["lp_run"]
+    assert rows["lp_done"]["status"] == "completed"
+    await seeded_kernel.send(
+        [{"target": "kernel", "payload": {"type": "cancel", "task_id": "lp_run"}}]
+    )
+    await asyncio.wait_for(batch, timeout=2)
+
+
+# ─── ledger-ALL: one id space, one engine ────────────────────────
+
+
+async def test_a_minted_pid_is_referencable_for_refetch(seeded_kernel):
+    """A colon id NAMES an existing minted execution — re-fetch its recorded
+    outcome; it never creates one (the kernel is the only allocator there)."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_ref")
+    first = (await seeded_kernel.send([{"target": a, "payload": {"type": "work"}}]))[0]
+    pid = first["pid"]
+    assert ":" in pid
+    again = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": pid}]
+        )
+    )[0]
+    assert len(_runs) == 1, "the re-fetch must not re-run"
+    assert again["result"] == first["result"]
+    ghost = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": "no:such"}]
+        )
+    )[0]
+    assert ghost["status"] == "failed"
+    assert ghost["result"]["reason"] == "bad_arg"
+    assert len(_runs) == 1
+
+
+async def test_the_ring_evicts_oldest_settled_unnamed_first(seeded_kernel):
+    """`ledger_cap` bounds history: oldest SETTLED unnamed rows go first; named
+    rows (a dedup contract) survive them; in-flight rows are never evicted."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_ring")
+    seeded_kernel.ctx.ledger_cap = 3
+    try:
+        named = (
+            await seeded_kernel.send(
+                [{"target": a, "payload": {"type": "work"}, "id": "keepme"}]
+            )
+        )[0]
+        pids = []
+        for _ in range(4):
+            o = (
+                await seeded_kernel.send([{"target": a, "payload": {"type": "work"}}])
+            )[0]
+            pids.append(o["pid"])
+        led = seeded_kernel.ctx.executions
+        assert "keepme" in led, "a named row must outlive unnamed churn"
+        assert len(led) == 3
+        assert pids[0] not in led and pids[1] not in led, "oldest evicted"
+        assert pids[-1] in led
+        # named dedup still holds after the churn
+        again = (
+            await seeded_kernel.send(
+                [{"target": a, "payload": {"type": "work"}, "id": "keepme"}]
+            )
+        )[0]
+        assert again == named or again["result"] == named["result"]
+    finally:
+        seeded_kernel.ctx.ledger_cap = 1_000_000
+
+
+async def test_ledger_view_is_origin_scoped(seeded_kernel):
+    """The ledger carries RESULT BODIES — an unscoped read is a side-channel
+    around `callable_by`. An agent sees only what IT originated; the operator
+    sees everything."""
+    from kernel._kernel import sender_context
+
+    a = await _mk(seeded_kernel, "lp_scope")
+    b = await _mk(seeded_kernel, "lp_spy")
+    # grant the spy the verb itself + a target of its own
+    await seeded_kernel.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "update_agent",
+                    "id": b,
+                    "can_call": {
+                        "$self": "*",
+                        "$parent": "*",
+                        "$children": "*",
+                        "kernel_state": ["ledger"],
+                        a: "*",
+                    },
+                },
+            },
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "update_agent",
+                    "id": a,
+                    "callable_by": {
+                        "$self": "*",
+                        "$parent": "*",
+                        "$children": "*",
+                        b: "*",
+                    },
+                },
+            },
+        ]
+    )
+    # operator-run work — the secret the spy must not see
+    await seeded_kernel.send(
+        [{"target": a, "payload": {"type": "work"}, "id": "op_secret"}]
+    )
+    # spy-run work — what the spy MAY see
+    with sender_context(b):
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": "spy_own"}]
+        )
+        led = (
+            await seeded_kernel.send(
+                [{"target": "kernel", "payload": {"type": "ledger"}}]
+            )
+        )[0]["result"]
+    seen = {r["id"] for r in led["executions"]}
+    assert "spy_own" in seen
+    assert "op_secret" not in seen, "another origin's results leaked"
+    op = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}])
+    )[0]["result"]
+    assert {"op_secret", "spy_own"} <= {r["id"] for r in op["executions"]}
+
+
+# ─── C9 ACROSS RESTART: the durable half ────────────────────────
+
+
+async def _wire_store(kernel):
+    """The loader persists ONLY through a discovered store — wire one."""
+    await kernel.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": kernel.id,
+                    "handler_module": "file_bridge.tools",
+                    "id": "kernel_store",
+                    "root": ".fantastic",
+                    "ingress_rule": "allow_all_ingress",
+                },
+            }
+        ]
+    )
+
+
+async def test_a_completed_execution_survives_reboot(tmp_path, monkeypatch):
+    """C9, the full property: a completed step is NEVER re-executed — not even
+    by a fresh process. The settled row rehydrates with its outcome; a re-send
+    of the id returns it and the handler does not run."""
+    from _testkit import boot_root, persist
+    from kernel_state.tools import flush_ledger_now
+
+    monkeypatch.chdir(tmp_path)
+    _runs.clear()
+    k1 = boot_root()
+    await _wire_store(k1)
+    a = await _mk(k1, "lp_reboot")
+    first = (
+        await k1.send([{"target": a, "payload": {"type": "work"}, "id": "boot-1"}])
+    )[0]
+    assert first["status"] == "completed" and len(_runs) == 1
+    persist(k1)
+    await flush_ledger_now(k1)
+
+    del k1
+    k2 = boot_root()
+    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    again = (
+        await k2.send([{"target": a, "payload": {"type": "work"}, "id": "boot-1"}])
+    )[0]
+    assert len(_runs) == 1, "REBOOT re-executed a completed step — C9 broken"
+    assert again["result"] == first["result"]
+    assert again["attempts"] == 1
+
+
+async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatch):
+    from _testkit import boot_root, persist
+    from kernel_state.tools import flush_ledger_now
+
+    monkeypatch.chdir(tmp_path)
+    _runs.clear()
+    k1 = boot_root()
+    await _wire_store(k1)
+    a = await _mk(k1, "lp_rdead")
+    dead = (
+        await k1.send(
+            [{"target": a, "payload": {"type": "boom"}, "id": "dead-1", "retries": 1}]
+        )
+    )[0]
+    assert dead["status"] == "failed" and dead["attempts"] == 2
+    persist(k1)
+    await flush_ledger_now(k1)
+
+    del k1
+    k2 = boot_root()
+    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
+        "result"
+    ]
+    rows = {r["id"]: r for r in led["executions"]}
+    assert rows["dead-1"]["status"] == "failed" and rows["dead-1"]["attempts"] == 2
+    again = (
+        await k2.send(
+            [{"target": a, "payload": {"type": "boom"}, "id": "dead-1", "retries": 5}]
+        )
+    )[0]
+    assert again["status"] == "failed" and len(_runs) == 2, (
+        "a parked dead letter fired again after reboot"
+    )
+
+
+async def test_in_flight_work_does_not_survive_a_crash(tmp_path, monkeypatch):
+    """Only SETTLED rows persist. Work in flight at the crash never completed;
+    a re-send after reboot RE-EXECUTING it is the truth, not a loss."""
+    import asyncio as _a
+
+    from _testkit import boot_root, persist
+    from kernel_state.tools import flush_ledger_now
+
+    monkeypatch.chdir(tmp_path)
+    _runs.clear()
+    k1 = boot_root()
+    await _wire_store(k1)
+    a = await _mk(k1, "lp_crash")
+    batch = _a.create_task(
+        k1.send([{"target": a, "payload": {"type": "slow"}, "id": "mid-1"}])
+    )
+    await _a.wait_for(_flag(a).wait(), timeout=2)
+    persist(k1)
+    await flush_ledger_now(k1)  # the "crash" happens with mid-1 unsettled
+    batch.cancel()
+    try:
+        await batch
+    except _a.CancelledError:
+        pass
+
+    del k1
+    k2 = boot_root()
+    await k2.send([{"target": k2.id, "payload": {"type": "boot"}}])
+    led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
+        "result"
+    ]
+    assert all(r["id"] != "mid-1" for r in led["executions"])
+
+
+async def test_no_store_means_ram_only_and_no_error(tmp_path, monkeypatch):
+    """The auto-flush law: no discovered store ⇒ the ledger lives in RAM,
+    nothing errors, nothing is written."""
+    from _testkit import boot_root
+    from kernel_state.tools import flush_ledger_now
+
+    monkeypatch.chdir(tmp_path)
+    k1 = boot_root()
+    a = await _mk(k1, "lp_ram")
+    out = (await k1.send([{"target": a, "payload": {"type": "work"}, "id": "ram-1"}]))[
+        0
+    ]
+    assert out["status"] == "completed"
+    r = await flush_ledger_now(k1)
+    assert r == {"skipped": "no store wired"}
+    assert not (tmp_path / ".fantastic" / "agents").exists() or not list(
+        (tmp_path / ".fantastic" / "agents").rglob("ledger.json")
+    )
+
+
+# ─── uncovered branches of the EXISTING engine (no new code) ─────
+
+
+async def test_an_in_flight_minted_pid_can_be_joined(seeded_kernel):
+    """The colon reference works on LIVE executions too: a second caller who
+    learned a minted pid joins the one run instead of racing it."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_livejoin")
+    b1 = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "work", "secs": 0.3}}])
+    )
+    await asyncio.sleep(0.05)
+    pid = next(t["id"] for t in await _rows(seeded_kernel) if t["agent"] == a)
+    assert ":" in pid
+    joined = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": pid}]
+        )
+    )[0]
+    (owner,) = await b1
+    assert len(_runs) == 1, "the join must not have raced a second run"
+    assert joined["result"] == owner["result"] and joined["pid"] == pid
+
+
+async def test_timed_out_attempts_also_spend_the_retry_budget(seeded_kernel):
+    """`retries` covers timeouts, not only raises: each attempt gets a fresh
+    clock, each expiry goes through the front door, and the final outcome is
+    `timed_out` with the true attempt count."""
+    a = await _mk(seeded_kernel, "lp_tor")
+    out = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "slow"},
+                    "id": "tor1",
+                    "timeout": 0.15,
+                    "retries": 2,
+                }
+            ]
+        )
+    )[0]
+    assert out["status"] == "timed_out"
+    assert out["attempts"] == 3
+    assert out["result"]["reason"] == "timeout"
+    assert all(t["id"] != "tor1" for t in await _rows(seeded_kernel))
+
+
+async def test_cancel_reaches_the_joiner_too(seeded_kernel):
+    """One execution, two waiters: `cancel <id>` settles BOTH with the same
+    cancelled outcome — a joiner is never left hanging on a killed run."""
+    a = await _mk(seeded_kernel, "lp_cj")
+    owner = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "slow"}, "id": "cj1"}])
+    )
+    await asyncio.wait_for(_flag(a).wait(), timeout=2)
+    joiner = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "slow"}, "id": "cj1"}])
+    )
+    await asyncio.sleep(0.05)
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": "cj1"}}]
+        )
+    )[0]["result"]
+    assert r["cancelled"] is True
+    (o1,), (o2,) = await asyncio.gather(owner, joiner)
+    assert o1["status"] == "cancelled" and o2["status"] == "cancelled"
+    assert o1["result"] == {"cancelled": True} and o2["result"] == o1["result"]
+
+
+async def test_a_joiner_during_the_retry_loop_sees_only_the_final_outcome(
+    seeded_kernel,
+):
+    """Intermediate attempts are invisible to everyone: a caller joining while
+    attempt 1 is failing receives the eventual success, attempts included."""
+    _runs.clear()
+    a = await _mk(seeded_kernel, "lp_jr")
+    owner = asyncio.create_task(
+        seeded_kernel.send(
+            [
+                {
+                    "target": a,
+                    "payload": {"type": "flaky", "succeed_on": 3, "secs": 0.2},
+                    "id": "jr1",
+                    "retries": 5,
+                }
+            ]
+        )
+    )
+    await asyncio.sleep(0.05)  # inside an early (failing) attempt
+    joiner = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "flaky"}, "id": "jr1"}]
+        )
+    )[0]
+    (o1,) = await owner
+    assert o1["status"] == "completed" and o1["attempts"] == 3
+    assert joiner == o1, "the joiner saw an intermediate attempt"
