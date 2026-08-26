@@ -13,7 +13,6 @@ text, and a turn answering the nudge is never nudged again.
 from __future__ import annotations
 
 import asyncio
-import json
 
 from ai_core.core import _NO_CALL_NUDGE, _route_reply
 

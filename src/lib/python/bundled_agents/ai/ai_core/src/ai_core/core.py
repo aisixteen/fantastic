@@ -525,6 +525,14 @@ Stopping is normal and costs nothing: emit no call when the work is done. Decidi
 whether you are allowed to stop is not worth a turn — if the task is finished, say so
 and stop; if it is not, make the next call.
 
+NEEDING A HUMAN IS ALSO NORMAL. When you cannot proceed without an answer, ask and
+stop: put the question in your message — structured, so a UI can render it:
+`{type:'question', request_id:'<yours>', kind:'text'|'single'|'multi'|'confirm',
+question:'...', options?:[...]}` on its own line — then emit no call. The chain
+ends; the ANSWER arrives as your next turn (name your request_id to correlate),
+with your full history intact — continue exactly where you stopped. Nothing you
+completed before asking will re-run.
+
 HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
 literally:
@@ -544,6 +552,11 @@ literally:
   recorded outcome back, byte for byte (even if it failed). Use it for any call
   you must not double-fire (a write, a payment, a create) and to safely re-fetch
   a reply; a genuinely NEW attempt needs a NEW id. Ids may not contain ':'.
+  Add `retries: N` and the KERNEL re-runs a failing or timing-out call up to N
+  more times before answering — you send once and receive the final outcome
+  (`attempts` says how many runs it took). Work that stays failed is parked:
+  `send 'kernel' {type:'ledger'}` lists your executions and what became of
+  them, outcomes included — inspect there instead of re-firing blind.
 - `reply_to:null` means the call still runs but its answer is discarded — it is
   not in M and nothing comes back. `reply_to:<someone else>` hands that block to
   THEM instead of you.
@@ -1028,6 +1041,8 @@ async def _route_reply(
         # model can read).
         if "id" in args:
             item["id"] = args.get("id")
+        if "retries" in args:
+            item["retries"] = args.get("retries")
         items.append(item)
         if reply_to:
             units.append(
@@ -1311,6 +1326,12 @@ async def _project_context(
                 "detail": {
                     "context_window": resolve_context_window(rec),
                     "system_tokens": sys_tokens,
+                    # NAME THE KILLER. Measured 2026-08-26 (`live_subai_graph`,
+                    # 131k window): this fired needing a single >126k-token turn
+                    # and recorded nothing about it — the run's tempdir was gone
+                    # before anyone could ask WHICH message was that big.
+                    "last_turn_tokens": estimate_one(body[-1]),
+                    "last_turn_head": str(body[-1].get("content"))[:200],
                     "hint": hint,
                 },
             },
