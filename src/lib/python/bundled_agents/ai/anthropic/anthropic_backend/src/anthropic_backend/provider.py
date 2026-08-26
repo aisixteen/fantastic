@@ -173,7 +173,15 @@ class AnthropicProvider:
                 f"tools={len(body.get('tools', []))} msgs={len(anth_messages)}",
                 flush=True,
             )
-        timeout = httpx.Timeout(120.0, connect=15.0)
+        # NO READ CLOCK ON THE STREAM. 120s of read-silence used to abort turns
+        # that were merely QUEUED behind other sessions — measured 2026-08-25
+        # (10 harnesses on 7 slots, keyless endpoint): the two heavy probes died
+        # on ReadTimeout mid-run while the model was legitimately generating.
+        # The turn already has exactly one owned bound (FANTASTIC_AI_SEND_TIMEOUT
+        # around the whole generation); a second, lower, transport-level clock
+        # was redundant and had become the binding constraint. Connect stays
+        # finite — a dead endpoint should fail fast, a slow one should not.
+        timeout = httpx.Timeout(None, connect=15.0)
         async with httpx.AsyncClient(
             timeout=timeout, transport=self._transport
         ) as client:

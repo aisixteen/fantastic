@@ -177,7 +177,7 @@ async def test_the_models_execution_id_rides_the_item(monkeypatch=None):
         async def send(self, items):
             for it in items:
                 if it["payload"].get("type") != "send":
-                    seen.append((it["target"], it.get("id")))
+                    seen.append((it["target"], it.get("id"), it.get("retries")))
             return await super().send(items)
 
     k = _K()
@@ -191,6 +191,7 @@ async def test_the_models_execution_id_rides_the_item(monkeypatch=None):
                     "payload": {"type": "withdraw"},
                     "reply_to": "self",
                     "id": "job-alpha",
+                    "retries": 2,
                 },
             }
         )
@@ -198,7 +199,7 @@ async def test_the_models_execution_id_rides_the_item(monkeypatch=None):
     )
     await _route_reply("ai", k, _call("kernel") + named, "cli", None, None, 42.0, "")
     await _settle(k, 1)
-    assert seen == [("kernel", None), ("vault", "job-alpha")]
+    assert seen == [("kernel", None, None), ("vault", "job-alpha", 2)]
 
 
 async def test_a_failed_outcome_is_rendered_not_hidden():
