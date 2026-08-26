@@ -99,6 +99,11 @@ _SYSTEM_VERBS = frozenset(
         # faces. Plain verbs — an AGENT can call them on another agent.
         "ps",
         "cancel",
+        # The EXECUTION LEDGER's read surface — named executions, live and
+        # settled, outcomes included. `ps` is work in flight; `ledger` is what
+        # named work BECAME. Terminal non-completed rows ARE the dead-letter
+        # queue: parked, inspectable, never silently retried.
+        "ledger",
         # Root-only control verb — gated inside its handler to the tree
         # root (a non-root agent answers with an error). Stops the whole
         # kernel process gracefully; see `_verb_shutdown_kernel`.
@@ -144,6 +149,12 @@ _SYSTEM_VERB_DOCS = {
     "ps": (
         "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
         "verb, started_at}]}, one row per in-flight dispatch. Paged."
+    ),
+    "ledger": (
+        "No args. NAMED executions and what they became — {executions:[{id, "
+        "target, status, attempts, retries, outcome?}]}, paged. Failed/timed_out/"
+        "cancelled rows are the dead-letter queue: inspect, then retry with a "
+        "NEW id if you choose — nothing is retried silently."
     ),
     "cancel": (
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
@@ -576,16 +587,21 @@ class Agent:
                     ),
                 )
             if ":" in exec_id:
-                return outcome(
-                    None,
-                    FAILED,
-                    refusal(
-                        BAD_ARG,
-                        f"send: id {exec_id!r} may not contain ':' — that is the "
-                        "kernel-minted pid namespace",
-                        arg="id",
-                    ),
-                )
+                # The minted namespace: a colon id NAMES an existing execution
+                # (re-fetch / join by pid) and never CREATES one — the kernel is
+                # the only allocator there.
+                if exec_id not in self.ctx.executions:
+                    return outcome(
+                        None,
+                        FAILED,
+                        refusal(
+                            BAD_ARG,
+                            f"send: id {exec_id!r} is in the kernel-minted pid "
+                            "namespace (':') and names no known execution — "
+                            "minted ids can be referenced, never created",
+                            arg="id",
+                        ),
+                    )
             entry = self.ctx.executions.get(exec_id)
             if entry is not None:
                 # The id is BOUND to its first execution's target — returning an
@@ -618,8 +634,11 @@ class Agent:
                     )
                 )
                 return None
-            fut: asyncio.Future = asyncio.get_event_loop().create_future()
-            self.ctx.executions[exec_id] = {"target": target.id, "fut": fut}
+            fut, bad = self._ledger_open(
+                exec_id, target, payload, timeout, item, named=True
+            )
+            if bad is not None:
+                return bad
             if target_id == "kernel" and verb == "reflect":
                 # The identity-read fast path, caller-named: still no table row
                 # (nothing to cancel in a pure read), but the ledger applies —
@@ -653,9 +672,49 @@ class Agent:
             )
             dispatched.append(_Dispatched(index, None, task, timeout, target, payload))
             return None
+        # UNNAMED work is ledgered too — under its minted pid. Same row, same
+        # engine: re-fetchable/joinable by pid, retryable, dead-letterable; the
+        # ring (Kernel.ledger_cap) bounds what history costs.
         pid, task = self._spawn_dispatch(target, payload)
-        dispatched.append(_Dispatched(index, pid, task, timeout, target, payload))
+        fut, bad = self._ledger_open(pid, target, payload, timeout, item, named=False)
+        if bad is not None:
+            return bad
+        dispatched.append(
+            _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
+        )
         return None
+
+    def _ledger_open(self, exec_id, target, payload, timeout, item, *, named):
+        """Validate `retries` and open one ledger row. Returns (fut, refusal?)."""
+        retries = item.get("retries", 0)
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            return None, outcome(
+                None,
+                FAILED,
+                refusal(
+                    BAD_ARG,
+                    f"send: retries must be a non-negative int, got {retries!r}",
+                    arg="retries",
+                ),
+            )
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        # The row is the WHOLE engine: dedup and join key on it, retry re-issues
+        # against it, dead-letter is reading it. `attempts` counts real runs;
+        # `origin` scopes who may see the row through the `ledger` verb.
+        self.ctx.ledger_put(
+            exec_id,
+            {
+                "target": target.id,
+                "fut": fut,
+                "payload": payload,
+                "timeout": timeout,
+                "retries": retries,
+                "attempts": 1,
+                "named": named,
+                "origin": _current_sender.get(),
+            },
+        )
+        return fut, None
 
     def _spawn_dispatch(
         self, target: "Agent", payload: dict, task_id: str | None = None
@@ -694,6 +753,19 @@ class Agent:
         outcome — reflect flags included — is computed exactly once. Its own
         `timeout` bounds only its wait; it does not own the execution, so
         expiry settles the joiner `timed_out` and leaves the execution alone."""
+        while True:
+            out = await self._settle_once(d)
+            if not out.pop("retrying", False):
+                return out
+            row = self.ctx.executions[d.pid]
+            row["attempts"] += 1
+            # forget_task has already dropped the previous attempt's row, so the
+            # SAME task id is free to register again — one id, one `cancel`
+            # handle, attempt after attempt.
+            _pid, task = self._spawn_dispatch(d.target, d.payload, task_id=d.pid)
+            d.task = task
+
+    async def _settle_once(self, d: "_Dispatched") -> dict:
         if d.joined:
             try:
                 if d.timeout is not None:
@@ -773,7 +845,12 @@ class Agent:
                     d.task.cancel()  # caller cancelled: child dies with us
                 # The OWNER dying must still settle the ledger, or every joiner
                 # (and every future re-send of this id) hangs on a dead future.
-                self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
+                # Settled DIRECTLY — cancel is absorbing, no retry consideration.
+                if d.exec_fut is not None and not d.exec_fut.done():
+                    d.exec_fut.set_result(
+                        outcome(d.pid, CANCELLED, {"cancelled": True})
+                    )
+                    self.ctx.ledger_settled()
                 raise
             if d.task.cancelled():
                 return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
@@ -788,13 +865,34 @@ class Agent:
                 ),
             )
 
-    @staticmethod
-    def _record(d: "_Dispatched", out: dict) -> dict:
+    def _record(self, d: "_Dispatched", out: dict) -> dict:
         """Settle the ledger future of a caller-named execution — the ONE place
         an owned execution's outcome is recorded. Unnamed executions have no
-        future and pass through untouched."""
-        if d.exec_fut is not None and not d.exec_fut.done():
+        future and pass through untouched.
+
+        THE RETRY ENGINE IS FOUR LINES HERE. A terminal `failed`/`timed_out`
+        with budget left marks the row for another attempt instead of settling;
+        the settle loop re-dispatches under the SAME id (same `ps`/`cancel`
+        handle — cancelling the id kills the current attempt AND the loop).
+        `completed` never retries; `cancelled` never retries — a cancel is an
+        absorbing human decision, not a transient. Joiners and re-senders only
+        ever see the FINAL outcome: the future settles once, at the end."""
+        if d.exec_fut is None:
+            return out
+        row = self.ctx.executions.get(d.pid)
+        if (
+            row is not None
+            and out["status"] in (FAILED, TIMED_OUT)
+            and row["attempts"] <= row["retries"]
+        ):
+            out["retrying"] = True  # the settle loop reads this, callers never do
+            return out
+        if not d.exec_fut.done():
+            if row is not None:
+                out = dict(out)
+                out["attempts"] = row["attempts"]
             d.exec_fut.set_result(out)
+            self.ctx.ledger_settled()
         return out
 
     def _loader_id(self) -> str | None:
@@ -1520,6 +1618,8 @@ class Agent:
             return await self._verb_delete_agent(payload)
         if verb == "ps":
             return self._verb_ps(payload)
+        if verb == "ledger":
+            return self._verb_ledger(payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
         if verb == "shutdown_kernel":
@@ -1534,6 +1634,41 @@ class Agent:
         too — it is itself a dispatch."""
         tasks, nxt = page(self.ctx.task_rows(), payload, key=lambda r: r["id"])
         return {"tasks": tasks, "next": nxt}
+
+    def _verb_ledger(self, payload: dict) -> dict:
+        """No args. NAMED executions — {executions:[{id, target, status,
+        attempts, retries, outcome?}]}, paged. `status` is 'in_flight' until the
+        row settles, then the outcome's own status; `outcome` appears only once
+        settled. Rows whose status is failed/timed_out/cancelled are the
+        DEAD-LETTER QUEUE: terminal, inspectable, never silently retried — a
+        retry is a caller's explicit new id. Unnamed sends never appear here
+        (their history is deliberately not kept)."""
+        # ORIGIN-SCOPED. The ledger carries other agents' RESULT BODIES; an
+        # unscoped read would be a side-channel around `callable_by` (read any
+        # agent's replies without its ingress ever saying yes). An agent sees
+        # the executions IT originated; the operator (sender=None) sees all.
+        viewer = _current_origin.get()
+        rows = []
+        for eid, row in self.ctx.executions.items():
+            if viewer is not None and row.get("origin") != viewer:
+                continue
+            fut = row["fut"]
+            entry = {
+                "id": eid,
+                "target": row["target"],
+                "attempts": row["attempts"],
+                "retries": row["retries"],
+                "named": row["named"],
+            }
+            if fut.done():
+                out = fut.result()
+                entry["status"] = out["status"]
+                entry["outcome"] = out
+            else:
+                entry["status"] = "in_flight"
+            rows.append(entry)
+        page_rows, nxt = page(rows, payload, key=lambda r: r["id"])
+        return {"executions": page_rows, "next": nxt}
 
     async def _verb_cancel(self, payload: dict) -> dict:
         """args: task_id:str — kill that task AND ITS SUBTREE (children first,

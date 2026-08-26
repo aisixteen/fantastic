@@ -357,6 +357,46 @@ class Kernel:
     # Retention: session lifetime, unbounded — a durable ledger (C9 across
     # restart, C12 dead-letter) is the later increment on this dict.
     executions: dict[str, dict] = field(default_factory=dict)
+
+    # LEDGER RETENTION — a RING: when the ledger exceeds the cap, the OLDEST
+    # SETTLED rows are evicted, unnamed before named (a named row carries a
+    # dedup contract; evicting it silently re-arms a side effect, so named go
+    # last). In-flight rows are never evicted — the cap may overshoot while
+    # work is live. None = unbounded (the operator's explicit choice).
+    # Set at kernel start: `--ledger-cap N|inf` / FANTASTIC_LEDGER_CAP.
+    ledger_cap: int | None = 1_000_000
+
+    # Installed by the ROOT LOADER at boot (kernel_state) — the substrate never
+    # touches disk itself. None = no persistence (no store wired, or a test
+    # kernel): settled outcomes live and die with the process, exactly like the
+    # tree's own auto-flush law. Called (sync, cheap) at every settle.
+    ledger_flusher: "Callable[[], None] | None" = None
+
+    def ledger_settled(self) -> None:
+        if self.ledger_flusher is not None:
+            self.ledger_flusher()
+
+    def ledger_put(self, exec_id: str, row: dict) -> None:
+        """Insert one execution row, then enforce the ring."""
+        self.executions[exec_id] = row
+        cap = self.ledger_cap
+        if cap is None or len(self.executions) <= cap:
+            return
+        # oldest-first (dict preserves insertion order); two passes: settled
+        # unnamed, then settled named. Never the live ones.
+        for named_pass in (False, True):
+            if len(self.executions) <= cap:
+                return
+            for eid in list(self.executions):
+                r = self.executions[eid]
+                if r["named"] is not named_pass:
+                    continue
+                if not r["fut"].done():
+                    continue
+                del self.executions[eid]
+                if len(self.executions) <= cap:
+                    return
+
     # Per-kernel salt so the opaque task token cannot be predicted or replayed
     # across kernels (see `mint_task_id`). Random per process, never persisted.
     _task_salt: bytes = field(default_factory=lambda: secrets.token_bytes(16))

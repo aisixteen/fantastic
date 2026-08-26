@@ -728,6 +728,136 @@ def _executor_for_example(agent) -> str:
     return here[0] if here else next(iter(_EXECUTORS))
 
 
+# ─── the DURABLE execution ledger (C9 across restart) ───────────
+#
+# Settled rows persist as ONE sidecar (`agents/<root>/ledger.json`) through the
+# SAME discovered store the tree flushes through — no store wired ⇒ RAM only,
+# the auto-flush law, not a fallback. Only SETTLED rows persist: work in flight
+# at a crash never completed, so a re-send after reboot re-executing it is the
+# truth, not a loss. Rehydration rebuilds each row with a DONE future, so dedup
+# ("a completed step is never re-executed") holds ACROSS REBOOTS — the dbos
+# `test_recovery_workflow` property, re-keyed to guarded calls.
+
+_LEDGER_BLOB = "ledger.json"
+
+
+_LEDGER_VERSION = 1
+
+
+def _ledger_dump(kernel) -> str:
+    """STRICT serialization — fidelity over completeness (C25). A row whose
+    outcome does not survive an exact JSON round-trip (bytes in a read_stream
+    result, non-string keys) stays RAM-ONLY rather than persisting corrupted:
+    `default=str` used to turn bytes into their repr and rehydrate it as a
+    confidently WRONG recorded outcome — worse than no dedup. A caller that
+    wants durable bytes stores them through `file_bridge`, the one disk
+    surface."""
+    rows = {}
+    for eid, row in kernel.executions.items():
+        if not row["fut"].done():
+            continue
+        outcome = row["fut"].result()
+        try:
+            if json.loads(json.dumps(outcome)) != outcome:
+                continue  # round-trips but not EXACTLY (tuples, int keys)
+        except (TypeError, ValueError):
+            continue  # not JSON-serializable at all (bytes): RAM-only
+        rows[eid] = {
+            "target": row["target"],
+            "retries": row["retries"],
+            "attempts": row["attempts"],
+            "named": row["named"],
+            "origin": row.get("origin"),
+            "outcome": outcome,
+        }
+    return json.dumps({"v": _LEDGER_VERSION, "rows": rows})
+
+
+async def flush_ledger_now(agent) -> dict:
+    """One full write of the settled ledger. Test seam AND the flusher's body."""
+    if _find_store(agent) is None:
+        return {"skipped": "no store wired"}
+    return await _persist_blob(
+        agent.id,
+        {
+            "agent_id": agent.id,
+            "name": _LEDGER_BLOB,
+            "content": _ledger_dump(agent.ctx),
+        },
+        agent,
+    )
+
+
+async def _rehydrate_ledger(agent) -> None:
+    if _find_store(agent) is None:
+        return
+    got = await _load_blob(
+        agent.id, {"agent_id": agent.id, "name": _LEDGER_BLOB}, agent
+    )
+    content = (got or {}).get("content")
+    if not content:
+        return
+    try:
+        doc = json.loads(content)
+    except json.JSONDecodeError as e:
+        print(f"  [ledger] {_LEDGER_BLOB} unreadable, starting empty: {e}")
+        return
+    # THE UPGRADE CONTRACT (C22), from day one: an unknown version starts empty
+    # LOUDLY — never guessed at, never silently reinterpreted. A future format
+    # change adds a migration branch here, keyed on `v`.
+    if doc.get("v") != _LEDGER_VERSION:
+        print(
+            f"  [ledger] {_LEDGER_BLOB} is version {doc.get('v')!r}, this kernel "
+            f"reads {_LEDGER_VERSION} — starting empty (no migration written)"
+        )
+        return
+    rows = doc["rows"]
+    loop = asyncio.get_event_loop()
+    for eid, r in rows.items():
+        fut = loop.create_future()
+        fut.set_result(r["outcome"])
+        agent.ctx.ledger_put(
+            eid,
+            {
+                "target": r["target"],
+                "fut": fut,
+                "payload": None,  # settled: nothing left to re-run
+                "timeout": None,
+                "retries": r["retries"],
+                "attempts": r["attempts"],
+                "named": r["named"],
+                "origin": r.get("origin"),
+            },
+        )
+
+
+def _install_ledger_flusher(agent) -> None:
+    """Debounced write-through: a settle kicks one flush task; settles landing
+    mid-write coalesce into exactly one follow-up pass."""
+    state = {"pending": False, "running": False}
+
+    def kick() -> None:
+        if state["running"]:
+            state["pending"] = True
+            return
+        state["running"] = True
+
+        async def run() -> None:
+            try:
+                while True:
+                    state["pending"] = False
+                    await flush_ledger_now(agent)
+                    if not state["pending"]:
+                        return
+            finally:
+                state["running"] = False
+
+        task = asyncio.create_task(run())
+        agent.ctx.spawn_task(agent.id, "ledger_flush", task)
+
+    agent.ctx.ledger_flusher = kick
+
+
 async def _boot(id, payload, agent):
     """Start the auto-flush loop unless `watch=false` (a loader serving a
     remote kernel only answers verbs). Subscribes AFTER the bootstrap's
@@ -742,6 +872,12 @@ async def _boot(id, payload, agent):
     if root_dir != agent._root_path and not (root_dir / "agent.json").exists():
         write_record(root_dir, agent.record)
     rec = agent.record
+    if agent.parent is None:
+        # The ROOT loader owns the kernel-wide execution ledger. Rehydrate
+        # BEFORE installing the flusher so hydration never rewrites the file
+        # it just read.
+        await _rehydrate_ledger(agent)
+        _install_ledger_flusher(agent)
     if rec.get("watch", True) is False:
         return
     if getattr(agent, "_fs_flush_loop", None) is not None:

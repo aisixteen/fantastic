@@ -60,11 +60,37 @@ def _build_kernel(root_dir: Path = Path(".fantastic")) -> Kernel:
     return kernel
 
 
+def _ledger_cap_from(argv: list[str]) -> tuple[list[str], int | None, bool]:
+    """Strip `--ledger-cap N|inf` from argv; fall back to FANTASTIC_LEDGER_CAP.
+    Returns (argv-without-the-flag, cap, was_set). `inf` = unbounded (None)."""
+    import os
+
+    raw, out, i = None, [], 0
+    while i < len(argv):
+        if argv[i] == "--ledger-cap" and i + 1 < len(argv):
+            raw = argv[i + 1]
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    if raw is None:
+        raw = os.environ.get("FANTASTIC_LEDGER_CAP")
+    if raw is None:
+        return out, None, False
+    if raw == "inf":
+        return out, None, True
+    return out, int(raw), True
+
+
 def main_dispatch() -> None:
     n = _load_dotenv()
     if n:
         print(f"[kernel] loaded {n} var(s) from .env", file=sys.stderr)
+    argv, cap, cap_set = _ledger_cap_from(sys.argv[1:])
+    sys.argv[1:] = argv
     kernel = _build_kernel()
+    if cap_set:
+        kernel.ledger_cap = cap
 
     # atexit safety net for graceful shutdown. The primary path is
     # signal handlers + the `finally` block inside `_default` — those
