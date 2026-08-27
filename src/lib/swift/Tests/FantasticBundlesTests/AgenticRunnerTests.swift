@@ -159,6 +159,8 @@ private func makeKernel(workdir: URL) -> Kernel {
 private struct Hydration {
     var kernel: Kernel
     let workdir: URL
+    /// The manifest fixture under the CWD — removed by the caller.
+    var fixture: URL = URL(fileURLWithPath: "/dev/null")
     var creates: [String: JSON]
     /// The EXPLICIT boot reply per loader. `create_agent` boots its child and
     /// SWALLOWS the exception, so a manifest that parses but cannot build is
@@ -168,7 +170,13 @@ private struct Hydration {
 
 private func hydrate(_ sc: Scenario, workdir: URL) async throws -> Hydration {
     let kernel = makeKernel(workdir: workdir)
-    let fixture = workdir.appendingPathComponent("manifests")
+    // Under the CWD, because the manifest read is clamped to the running dir.
+    // A unique name per scenario keeps parallel suites from colliding, and the
+    // caller removes it — a leaked fixture is a directory that reappears in
+    // `git status` on every run.
+    let fixtureDirName = ".agentic_\(UUID().uuidString.prefix(8))"
+    let fixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(fixtureDirName)
     try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
     var creates: [String: JSON] = [:]
     var boots: [String: JSON] = [:]
@@ -188,17 +196,13 @@ private func hydrate(_ sc: Scenario, workdir: URL) async throws -> Hydration {
         // `missing_manifest: true` writes NOTHING — the loader points at a path
         // that is not there, and refusing that is the assertion.
         //
-        // ABSOLUTE, unlike python's and rust's runners, which pass a path
-        // RELATIVE to the running dir. This runtime's `static_loader` reads the
-        // manifest with `String(contentsOfFile:)` — straight to the filesystem,
-        // resolved against the PROCESS cwd — while python reads through
-        // `fs.read_text(Path.cwd(), path)` and rust through `fantastic-file`'s
-        // fs, both of which clamp to the running dir and REFUSE a path outside
-        // it. Swift's loader therefore has no running-dir clamp at all, and a
-        // manifest anywhere on disk is readable. Recorded rather than papered
-        // over; the runner cannot chdir because sibling suites share the
-        // process.
-        let rel = path.path
+        // RELATIVE, and the manifest lives UNDER THE RUNNING DIR — the same
+        // shape python and rust use. `static_loader` reads through the
+        // running-dir clamp, so a manifest in some unrelated temp dir is
+        // refused, which is the point of the clamp. The runner cannot chdir
+        // (sibling suites share this process), so the file comes to the cwd
+        // instead of the cwd going to it — exactly what rust's loader tests do.
+        let rel = "\(fixtureDirName)/\(file)"
 
         var payload = OrderedDictionary<String, JSON>()
         payload["type"] = .string("create_agent")
@@ -216,7 +220,8 @@ private func hydrate(_ sc: Scenario, workdir: URL) async throws -> Hydration {
             boots[lid] = await kernel.send([Item(AgentId(lid), .object(["type": .string("boot")]))])[0].result
         }
     }
-    return Hydration(kernel: kernel, workdir: workdir, creates: creates, boots: boots)
+    return Hydration(
+        kernel: kernel, workdir: workdir, fixture: fixture, creates: creates, boots: boots)
 }
 
 // ─── the primitives ─────────────────────────────────────────────
@@ -421,7 +426,9 @@ private func runSteps(_ h0: Hydration, _ sc: Scenario, _ pinned: inout [String: 
             for lid in h.creates.keys {
                 _ = await operatorSend(fresh, lid, .object(["type": .string("boot")]))
             }
-            h = Hydration(kernel: fresh, workdir: h.workdir, creates: h.creates, boots: h.boots)
+            h = Hydration(
+                kernel: fresh, workdir: h.workdir, fixture: h.fixture,
+                creates: h.creates, boots: h.boots)
             reply = .object(["rebooted": .bool(true)])
         } else if step.asObject?["assert_tree"] != nil {
             let (ids, _) = dehydrate(h.kernel)
@@ -583,13 +590,35 @@ struct AgenticCorpusTests {
         var ran = 0
 
         for sc in scenarios {
-            let workdir = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("agentic-\(sc.name)-\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: workdir) }
+            // THE WORKDIR IS THE RUNNING DIR, and it has to be.
+            //
+            // A config declares its store as `root: .fantastic`, which resolves
+            // against the cwd, while the kernel's own root path comes from the
+            // storage workdir — so the two only agree when workdir == cwd.
+            // Point the kernel at a temp dir instead and `find_store` matches
+            // nothing, or its writes escape the clamp. rust gets to chdir into
+            // a temp dir because its runner owns the process; this one shares it
+            // with sibling suites, so the work comes to the cwd instead.
+            //
+            // Everything the scenario writes is therefore cleaned up by hand:
+            // snapshot the directory first and remove whatever is new. A
+            // scenario that left `.fantastic` or `rooms/` behind would poison
+            // the next one and show up in `git status` forever.
+            let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            let before = Set(
+                (try? FileManager.default.contentsOfDirectory(atPath: cwd.path)) ?? [])
+            let workdir = cwd
+            defer {
+                let after = Set(
+                    (try? FileManager.default.contentsOfDirectory(atPath: cwd.path)) ?? [])
+                for stray in after.subtracting(before) {
+                    try? FileManager.default.removeItem(at: cwd.appendingPathComponent(stray))
+                }
+            }
 
             let declared = sc.spec["expect"]["hydration"].asString ?? "ok"
             let h = try await hydrate(sc, workdir: workdir)
+            defer { try? FileManager.default.removeItem(at: h.fixture) }
 
             // PC-5 reads BOTH loud channels: `create_agent`'s reply (a
             // write-time refusal — the loader never became an agent) and the

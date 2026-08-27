@@ -12,6 +12,7 @@
 // `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
 // re-reads + skips agents that already exist). Declare explicit ids.
 
+import FantasticFile
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -41,6 +42,44 @@ public struct StaticLoaderBundle: AgentBundle {
         }
     }
 
+    /// Read the manifest THROUGH the running-dir clamp.
+    ///
+    /// A cold bring-up read — before any `file_bridge` agent can exist — but NOT
+    /// exempt from the running-dir law: `fs` is the one disk surface. This read
+    /// went straight to `String(contentsOfFile:)` until 2026-08-28, so a manifest
+    /// anywhere on disk was readable here while python
+    /// (`fs.read_text(Path.cwd(), path)`) and rust (`clamp_root`) both refused a
+    /// path outside the running dir.
+    static func readManifest(_ path: String) -> (text: String?, error: String?) {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let clamped: URL
+        do { clamped = try clampRoot(path, base: cwd) } catch {
+            return (nil, "static_loader: cannot read manifest \(path): \(error)")
+        }
+        guard let text = try? String(contentsOf: clamped, encoding: .utf8) else {
+            return (nil, "static_loader: cannot read manifest \(path)")
+        }
+        return (text, nil)
+    }
+
+    /// Refuse a manifest that is absent or unreadable AT WRITE TIME, so a broken
+    /// roster never becomes a booting record.
+    ///
+    /// Merged view (record + patch), mirroring python's `validate_meta` and
+    /// rust's. A record with no manifest yet is allowed — `boot` reports that.
+    public func validateMeta(
+        _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+    ) -> String? {
+        guard let raw = meta["manifest"] ?? record["manifest"] else { return nil }
+        guard let path = raw.asString, !path.isEmpty else {
+            return "static_loader: manifest must be a non-empty path string"
+        }
+        if Self.readManifest(path).error != nil {
+            return "static_loader: manifest \(path) is not readable"
+        }
+        return nil
+    }
+
     // MARK: - boot: hydrate the declared roster as operator
 
     private func boot(agentId: AgentId, agent: Agent, kernel: Kernel) async -> JSON {
@@ -50,9 +89,10 @@ public struct StaticLoaderBundle: AgentBundle {
                 "booted": .bool(false),
             ])
         }
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        let read = Self.readManifest(path)
+        guard let text = read.text else {
             return .object([
-                "error": .string("static_loader: cannot read manifest \(path)"),
+                "error": .string(read.error ?? "static_loader: cannot read manifest"),
                 "booted": .bool(false),
             ])
         }

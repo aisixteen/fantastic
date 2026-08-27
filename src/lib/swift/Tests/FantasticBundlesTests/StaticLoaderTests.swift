@@ -27,18 +27,31 @@ private func mkKernel() -> Kernel {
     return kernel
 }
 
-private func writeManifest(_ text: String) -> String {
-    let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("static-loader-\(UUID().uuidString)")
+/// A manifest UNDER THE RUNNING DIR, and the RELATIVE path to it.
+///
+/// Under, because the manifest read obeys the running-dir law: `fs` is the one
+/// disk surface and the cold bring-up read is not exempt, so a manifest in the
+/// system temp dir is refused (python and rust behave the same). These tests
+/// cannot chdir — sibling suites share the process — so the file comes to the
+/// cwd instead of the cwd going to it, exactly as rust's loader tests do.
+///
+/// Returned with a cleanup closure: a leaked fixture is a directory that
+/// reappears in `git status` on every run.
+private func writeManifest(_ text: String) -> (path: String, cleanup: () -> Void) {
+    let name = ".sl_fixture_\(UUID().uuidString.prefix(8))"
+    let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(name)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let file = dir.appendingPathComponent("fantastic.yaml")
     try? text.write(to: file, atomically: true, encoding: .utf8)
-    return file.path
+    return ("\(name)/fantastic.yaml", { try? FileManager.default.removeItem(at: dir) })
 }
 
-private func bootLoader(_ text: String) async -> Kernel {
+/// The fixture outlives this call: a test that re-boots the loader needs the
+/// manifest still on disk, so the CALLER owns the cleanup.
+private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let kernel = mkKernel()
-    let path = writeManifest(text)
+    let (path, cleanup) = writeManifest(text)
     // Operator send (top-level → ungated); create_agent auto-boots the loader,
     // which hydrates the roster.
     let rec = await kernel.send([Item("core", [
@@ -49,11 +62,12 @@ private func bootLoader(_ text: String) async -> Kernel {
             "manifest": .string(path),
         ])])[0].result
     #expect(rec["id"].asString == "static_loader", "loader create: \(rec.serialize())")
-    return kernel
+    return (kernel, cleanup)
 }
 
 @Test func rosterIsHydratedAsChildrenOfTheLoader() async {
-    let kernel = await bootLoader(MANIFEST)
+    let (kernel, cleanup) = await bootLoader(MANIFEST)
+    defer { cleanup() }
     #expect(kernel.agent(AgentId("memory")) != nil)
     #expect(kernel.agent(AgentId("worker")) != nil)
     for id in ["memory", "worker"] {
@@ -62,7 +76,8 @@ private func bootLoader(_ text: String) async -> Kernel {
 }
 
 @Test func declaredAgentsCarryBaselinePlusExplicitGrants() async {
-    let kernel = await bootLoader(MANIFEST)
+    let (kernel, cleanup) = await bootLoader(MANIFEST)
+    defer { cleanup() }
     let can = kernel.agent(AgentId("worker"))?.metaValue(forKey: "can_call") ?? .null
     #expect(can["$self"].asString == "*")
     #expect(can["$parent"].asString == "*")
@@ -74,7 +89,8 @@ private func bootLoader(_ text: String) async -> Kernel {
 }
 
 @Test func rosterIsClosedAChildCannotCreateMore() async {
-    let kernel = await bootLoader(MANIFEST)
+    let (kernel, cleanup) = await bootLoader(MANIFEST)
+    defer { cleanup() }
     // deny-all: a roster agent is not granted create_agent on anyone.
     let r = await kernel.sendAs(
         sender: "worker", target: "core",
@@ -83,7 +99,8 @@ private func bootLoader(_ text: String) async -> Kernel {
 }
 
 @Test func bootIsIdempotentById() async {
-    let kernel = await bootLoader(MANIFEST)
+    let (kernel, cleanup) = await bootLoader(MANIFEST)
+    defer { cleanup() }
     let before = kernel.allAgents().count
     let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
     #expect(r["booted"].asBool == true, "\(r.serialize())")
@@ -93,16 +110,25 @@ private func bootLoader(_ text: String) async -> Kernel {
     #expect(kernel.allAgents().count == before)
 }
 
-@Test func missingManifestReportsNotCrashes() async {
+@Test func anUnreadableManifestIsRefusedAtTheWRITE() async {
+    // A broken roster never becomes a booting record: `validateMeta` reads the
+    // manifest at create/update time, so the refusal lands on the WRITE and no
+    // agent is made. This runtime used to accept the record and only complain
+    // at boot — python and rust both refused it here, and the shared agentic
+    // corpus is what surfaced the difference (2026-08-28).
+    //
+    // The path is also outside the running dir, which is a second reason to
+    // refuse it: the manifest read is clamped, cold bring-up included.
     let kernel = mkKernel()
+    let before = kernel.allAgents().count
     let rec = await kernel.send([Item("core", [
             "type": "create_agent",
             "parent_id": "core",
             "handler_module": .string(StaticLoaderBundle.handlerModule),
             "id": "sl2", "manifest": "/no/such/path/nope.yaml",
         ])])[0].result
-    #expect(rec["id"].asString == "sl2", "\(rec.serialize())")
-    let b = await kernel.send([Item("sl2", ["type": "boot"])])[0].result
-    #expect(b["booted"].asBool == false)
-    #expect(b["error"].asString?.contains("cannot read manifest") == true)
+    #expect(rec["reason"].asString == "invalid_meta", "\(rec.serialize())")
+    #expect(rec["error"].asString?.contains("not readable") == true)
+    #expect(kernel.agent("sl2") == nil, "a doomed record was created anyway")
+    #expect(kernel.allAgents().count == before)
 }

@@ -285,7 +285,10 @@ extension Kernel {
         // used to bypass it, so a record could be born with meta its own bundle
         // refuses). Record is empty at create: the merged view IS the patch.
         if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
-            return .object(["error": .string(why), "created": .bool(false)])
+            // THE ONE REFUSAL SHAPE (#27) — the create-side twin of the
+            // `updated: false` flag on update_agent. Both were ad-hoc booleans
+            // #27 declared dropped, and both carried no `reason` at all.
+            return Refusal.make(Refusal.invalidMeta, why)
         }
 
         let rootPath = parent.childrenDir.appendingPathComponent(id)
