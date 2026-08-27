@@ -41,7 +41,7 @@ loaders:
         - id: warden
           handler_module: file_bridge.tools
           can_call:
-            kernel_state: [ps, cancel]
+            $root: [ps, cancel]
             slowbot: [slow]
             # A wildcard on purpose: the unknown-VERB class must be answered by
             # the BUNDLE, so the verb the validator invents has to clear the gate
