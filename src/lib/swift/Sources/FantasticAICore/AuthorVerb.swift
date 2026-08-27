@@ -11,7 +11,7 @@ import FantasticKernel
 import Foundation
 
 let AUTHOR_LEAN_SYSTEM = """
-    You are an agent inside a LIVE agent kernel. Everything here is an agent addressed by a string id. There is ONE primitive: send(target_id, payload) — a JSON payload whose "type" field names the verb; the target replies with JSON.
+    You are an agent inside a LIVE agent kernel. Everything here is an agent addressed by a string id. There is ONE primitive: send([Item(target_id, payload)])[0].result — a JSON payload whose "type" field names the verb; the target replies with JSON.
 
     You act by replying with EXACTLY ONE JSON object and NOTHING else, in one of these two forms:
       {"act": {"target": "<id>", "payload": { ...a verb payload... }}}
@@ -119,19 +119,17 @@ extension AIBackend {
 
         func probeTool(_ tool: String) async -> Bool {
             ear.reset()
-            let refl = await kernel.send(AgentId(tool), .object(["type": .string("reflect")]))
+            let refl = await kernel.send([Item(AgentId(tool), .object(["type": .string("reflect")]))])[0].result
             if refl["running"].asInt == 0,
                 kernel.agent(AgentId(tool))?.metaValue(forKey: "code")?.asString?.isEmpty == false
             {
-                _ = await kernel.send(AgentId(tool), .object(["type": .string("start")]))
+                _ = await kernel.send([Item(AgentId(tool), .object(["type": .string("start")]))])[0].result
                 try? await Task.sleep(nanoseconds: UInt64(bootBeat * 1e9))
             }
-            _ = await kernel.send(
-                AgentId(tool),
-                .object([
+            _ = await kernel.send([Item(AgentId(tool), .object([
                     "type": .string("send"), "text": .string(probe),
                     "client_id": .string("author"),
-                ]))
+                ]))])[0].result
             let deadline = Date().addingTimeInterval(probeWait)
             while Date() < deadline {
                 if ear.answered() || ear.done() { break }
@@ -139,14 +137,12 @@ extension AIBackend {
             }
             if !ear.answered() && ear.takeCrash() == nil {
                 // The ear can miss a create-time crash — the job table cannot.
-                let st = await kernel.send(AgentId(tool), .object(["type": .string("status")]))
+                let st = await kernel.send([Item(AgentId(tool), .object(["type": .string("status")]))])[0].result
                 if let jobs = st["jobs"].asArray,
                     let failed = jobs.last(where: { $0["status"].asString == "failed" })
                 {
                     let jid = failed["job_id"].asString ?? ""
-                    let full = await kernel.send(
-                        AgentId(tool),
-                        .object(["type": .string("status"), "job_id": .string(jid)]))
+                    let full = await kernel.send([Item(AgentId(tool), .object(["type": .string("status"), "job_id": .string(jid)]))])[0].result
                     let text =
                         full["jobs"].asArray?.first?["stderr"].asString
                         ?? failed["last_line"].asString
@@ -176,14 +172,12 @@ extension AIBackend {
             let scrubbed = scrub(turn)
             var msgs = history
             msgs.append(.object(["role": .string("user"), "content": .string(scrubbed)]))
-            let reply = await kernel.send(
-                agent.id,
-                .object([
+            let reply = await kernel.send([Item(agent.id, .object([
                     "type": .string("send"), "text": .string(scrubbed),
                     "system_prompt": .string(AUTHOR_LEAN_SYSTEM),
                     "messages": .array(msgs),
                     "client_id": .string("author"),
-                ]))
+                ]))])[0].result
             let response = reply["response"].asString ?? ""
             history.append(.object(["role": .string("user"), "content": .string(scrubbed)]))
             history.append(
@@ -219,8 +213,7 @@ extension AIBackend {
                             + "create_agent with corrected code). Emit your next act now."
                         continue
                     }
-                    let refl = await kernel.send(
-                        AgentId(t), .object(["type": .string("reflect")]))
+                    let refl = await kernel.send([Item(AgentId(t), .object(["type": .string("reflect")]))])[0].result
                     lastState = "it started but emitted no say/done (deaf)"
                     turn =
                         "You replied final, but I have NOT observed your tool answer the "
@@ -256,7 +249,7 @@ extension AIBackend {
             // tools are owned + cleaned up with the author.
             let actVerb = actPayload["type"].asString ?? ""
             let dispatchTarget = privilegedVerbs.contains(actVerb) ? agent.id : AgentId(target)
-            let result = await kernel.send(dispatchTarget, actPayload)
+            let result = await kernel.send([Item(dispatchTarget, actPayload)])[0].result
             if actPayload["type"].asString == "create_agent",
                 actPayload["handler_module"].asString == "exec_bridge.tools",
                 result["error"].asString == nil,

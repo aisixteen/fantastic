@@ -60,47 +60,54 @@ func makeKernel(withEcho: Bool = true) -> Kernel {
 struct KernelSendTests {
     @Test func sendToBareAgentBoot() async {
         let kernel = makeKernel()
-        let reply = await kernel.send("core", ["type": "boot"])
+        let reply = await kernel.send([Item("core", ["type": "boot"])])[0].result
         // Bare agent's boot returns null per substrate convention.
         #expect(reply.isNull)
     }
 
     @Test func sendToBundleAgentEchoes() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "echo1",
-            ])
-        let reply = await kernel.send("echo1", ["type": "say", "text": "hi"])
+            ])])[0].result
+        let reply = await kernel.send([Item("echo1", ["type": "say", "text": "hi"])])[0].result
         #expect(reply["type"].asString == "echoed")
         #expect(reply["original"]["text"].asString == "hi")
     }
 
-    @Test func sendToMissingAgentReturnsError() async {
+    @Test func sendToMissingAgentNamesTheLegalIds() async {
+        // A bare `no agent 'x'` teaches the caller nothing it can act on.
+        // Measured 2026-08-04: a model copied the literal placeholder `<id>` out
+        // of a prompt example, got the same refusal 34 times in one run, and
+        // never corrected. The call still fails exactly once, by the one path —
+        // it just says what the legal ids are on the way out.
         let kernel = makeKernel()
-        let reply = await kernel.send("ghost", ["type": "anything"])
-        #expect(reply["error"].asString?.contains("no agent ghost") == true)
+        let out = await kernel.send([Item("ghost", ["type": "anything"])])[0]
+        #expect(out.status == .failed)
+        #expect(out.pid == nil, "a refusal never reached the task table")
+        #expect(out.result["error"].asString?.contains("no agent") == true)
+        #expect(out.result["reason"].asString == "unknown_agent")
+        #expect(out.result["agents"].asArray?.contains(.string("core")) == true)
     }
 
     @Test func sendUnknownHandlerModuleReturnsError() async {
         let kernel = makeKernel(withEcho: false)
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "missing.tools",
                 "id": "x",
-            ])
-        let reply = await kernel.send("x", ["type": "say"])
+            ])])[0].result
+        let reply = await kernel.send([Item("x", ["type": "say"])])[0].result
         #expect(reply["error"].asString?.contains("missing.tools") == true)
     }
 
     @Test func kernelAliasResolvesToRoot() async {
         let kernel = makeKernel()
-        let reply = await kernel.send("kernel", ["type": "reflect"])
+        let reply = await kernel.send([Item("kernel", ["type": "reflect"])])[0].result
         #expect(reply["id"].asString == "core")
     }
 }
@@ -135,7 +142,7 @@ struct KernelSubscribeTests {
         let kernel = makeKernel()
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
-        _ = await kernel.send("core", ["type": "list_agents"])
+        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let evs = cap.snapshot()
         let sendEvents = evs.filter { $0["type"].asString == "send" }
         #expect(!sendEvents.isEmpty)
@@ -146,10 +153,10 @@ struct KernelSubscribeTests {
         let kernel = makeKernel()
         let cap = EventCapture()
         let token = kernel.subscribe(cap.handler())
-        _ = await kernel.send("core", ["type": "list_agents"])
+        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let before = cap.snapshot().count
         kernel.unsubscribe(token)
-        _ = await kernel.send("core", ["type": "list_agents"])
+        _ = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let after = cap.snapshot().count
         #expect(after == before)
     }
@@ -160,9 +167,7 @@ struct KernelSubscribeTests {
         // (reflect included), so only a PERMITTED send fires the state event whose
         // sender attribution is under test. A child reflecting its parent is covered
         // by the structural baseline on both ends — no explicit grant needed.
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "echo.tools", "id": "ui"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "ui"])])[0].result
         let cap = EventCapture()
         _ = kernel.subscribe(cap.handler())
         _ = await kernel.sendAs(
@@ -177,7 +182,7 @@ struct KernelSubscribeTests {
 struct SystemVerbTests {
     @Test func listAgents() async {
         let kernel = makeKernel()
-        let reply = await kernel.send("core", ["type": "list_agents"])
+        let reply = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let agents = reply["agents"].asArray ?? []
         #expect(agents.count == 1)
         #expect(agents[0]["id"].asString == "core")
@@ -185,135 +190,119 @@ struct SystemVerbTests {
 
     @Test func createAgent() async {
         let kernel = makeKernel()
-        let reply = await kernel.send(
-            "core",
-            [
+        let reply = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "alpha",
-            ])
+            ])])[0].result
         #expect(reply["id"].asString == "alpha")
         #expect(reply["handler_module"].asString == "echo.tools")
 
-        let listed = await kernel.send("core", ["type": "list_agents"])
+        let listed = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let names = (listed["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(names.contains("alpha"))
     }
 
     @Test func createAgentRequiresHandlerModule() async {
         let kernel = makeKernel()
-        let reply = await kernel.send(
-            "core", ["type": "create_agent", "id": "x"])
+        let reply = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "id": "x"])])[0].result
         #expect(reply["error"].asString?.contains("handler_module") == true)
     }
 
     @Test func createAgentRefusesDuplicate() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "dup",
-            ])
-        let second = await kernel.send(
-            "core",
-            [
+            ])])[0].result
+        let second = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "dup",
-            ])
+            ])])[0].result
         #expect(second["error"].asString?.contains("already exists") == true)
     }
 
     @Test func deleteAgent() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "doomed",
-            ])
-        let reply = await kernel.send(
-            "core", ["type": "delete_agent", "id": "doomed"])
+            ])])[0].result
+        let reply = await kernel.send([Item("core", ["type": "delete_agent", "id": "doomed"])])[0].result
         #expect(reply["deleted"].asBool == true)
-        let listed = await kernel.send("core", ["type": "list_agents"])
+        let listed = await kernel.send([Item("core", ["type": "list_agents"])])[0].result
         let names = (listed["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(!names.contains("doomed"))
     }
 
     @Test func deleteAgentRefusedWhenLocked() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "locked",
                 "delete_lock": true,
-            ])
-        let reply = await kernel.send(
-            "core", ["type": "delete_agent", "id": "locked"])
+            ])])[0].result
+        let reply = await kernel.send([Item("core", ["type": "delete_agent", "id": "locked"])])[0].result
         #expect(reply["locked"].asBool == true)
         #expect(reply["blocked_by"].asString == "locked")
     }
 
     @Test func deleteCascadesToChildren() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "parent",
-            ])
-        _ = await kernel.send(
-            "parent",
-            [
+            ])])[0].result
+        _ = await kernel.send([Item("kernel", [
                 "type": "create_agent",
+                "parent_id": "parent",
                 "handler_module": "echo.tools",
                 "id": "child",
-            ])
-        _ = await kernel.send(
-            "core", ["type": "delete_agent", "id": "parent"])
+            ])])[0].result
+        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "parent"])])[0].result
         #expect(kernel.agent("parent") == nil)
         #expect(kernel.agent("child") == nil)
     }
 
     @Test func updateAgent() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "u1",
                 "display_name": "Original",
-            ])
-        let updated = await kernel.send(
-            "core",
-            [
+            ])])[0].result
+        let updated = await kernel.send([Item("core", [
                 "type": "update_agent",
                 "id": "u1",
                 "display_name": "Renamed",
                 "color": "#ff00ff",
-            ])
+            ])])[0].result
         #expect(updated["display_name"].asString == "Renamed")
         #expect(updated["color"].asString == "#ff00ff")
     }
 
     @Test func getAgentReturnsRecord() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "g1",
-            ])
-        let reply = await kernel.send(
-            "core", ["type": "get", "id": "g1"])
+            ])])[0].result
+        let reply = await kernel.send([Item("core", ["type": "get", "id": "g1"])])[0].result
         #expect(reply["id"].asString == "g1")
         #expect(reply["handler_module"].asString == "echo.tools")
     }

@@ -170,18 +170,19 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         // the store; ollama/NIM expect the operator to set this). Only when
         // absent + a store exists; no store ⇒ history stays RAM-empty.
         if let storeId, kernel.agent(agentId)?.metaValue(forKey: "file_bridge_id") == nil {
-            _ = await kernel.send(
-                agentId,
-                .object([
+            _ = await kernel.send([Item(agentId, .object([
                     "type": .string("update_agent"),
                     "id": .string(agentId.value),
                     "file_bridge_id": .string(storeId),
-                ]))
+                ]))])[0].result
         }
 
         for mode in ["mem", "data"] where !have.contains(mode) {
             var rec: JSON = .object([
                 "type": .string("create_agent"),
+                // ITS OWN subtree: placement is stated by `parent_id`, and the
+                // kernel-owned verb goes to the root.
+                "parent_id": .string(agentId.value),
                 "handler_module": .string("yaml_state.tools"),
                 "mode": .string(mode),
             ])
@@ -198,7 +199,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             // store's reciprocal `callable_by` for each child — exactly the authority
             // an operator has, which a lateral agent send does not.
             let reply = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await kernel.send(agentId, rec)
+                await kernel.send([Item(AgentId("kernel"), rec)])[0].result
             }
             if let storeId, let childId = reply["id"].asString {
                 await openStoreIngress(store: storeId, caller: childId, kernel: kernel)
@@ -217,13 +218,11 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             accept = .object(map)
         }
         _ = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await kernel.send(
-                AgentId("core"),
-                .object([
+            await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("update_agent"),
                     "id": .string(store),
                     "callable_by": accept,
-                ]))
+                ]))])[0].result
         }
     }
 
@@ -253,7 +252,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 kernel.agent($0)?.handlerModule == "yaml_state.tools"
             }
         for memAgentId in memAgentIds {
-            let reply = await kernel.send(memAgentId, .object(["type": .string("state_yaml")]))
+            let reply = await kernel.send([Item(memAgentId, .object(["type": .string("state_yaml")]))])[0].result
             guard let yaml = reply["yaml"].asString, !yaml.isEmpty else { continue }
             let mode = kernel.agent(memAgentId)?.metaValue(forKey: "mode")?.asString ?? "data"
             blocks.append("## Your \(mode) memory (\(memAgentId.value)):\n\(yaml)")

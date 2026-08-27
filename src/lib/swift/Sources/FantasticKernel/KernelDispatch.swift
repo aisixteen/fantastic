@@ -1,6 +1,6 @@
 // `Kernel.send` / `Kernel.emit` + verb routing.
 //
-// Mirrors Rust's `send.rs` — `kernel.send(target, payload)` resolves
+// Mirrors Rust's `send.rs` — `kernel.send([Item(target, payload)])[0].result` resolves
 // the target via the flat agents map, dispatches through the system
 // verb table OR the agent's bundle, publishes a state event, fans
 // the payload out to watchers, returns the reply.
@@ -10,16 +10,7 @@ import Foundation
 import OrderedCollections
 
 extension Kernel {
-    /// Send a verb. Looks up `targetId`, dispatches via system verb
-    /// table OR the agent's bundle. Returns the reply (or an
-    /// `{"error": "..."}` JSON if the target / handler is missing).
-    ///
-    /// Sets `currentSender` task-local to `targetId` for the
-    /// duration of dispatch, so nested sends attribute to their
-    /// target (matches Rust's contextvars-style send.rs).
-    public func send(_ targetId: AgentId, _ payload: JSON) async -> JSON {
-        await sendTraced(targetId, payload, taskOut: nil)
-    }
+
 
     /// `send`, plus the dispatch PID written into `taskOut` at dispatch time.
     ///
@@ -149,7 +140,7 @@ extension Kernel {
     /// `send_json_as` UniFFI helper used by web_ws / proxy_agent.
     public func sendAs(sender: AgentId, target: AgentId, payload: JSON) async -> JSON {
         await KernelTaskLocals.$currentSender.withValue(sender) {
-            await send(target, payload)
+            await send([Item(target, payload)])[0].result
         }
     }
 
@@ -185,6 +176,22 @@ extension Kernel {
         if obj["description"] == nil, let d = target.descriptionMeta {
             obj["description"] = .string(d)
         }
+        // THE CALL GATE on the agent's OWN reflect. A bundle agent builds its own
+        // identity and would otherwise never report its authority, so an agent
+        // could not read what it may call or who may call it — only discover it
+        // by trying. Same two keys the distilled tree nodes carry.
+        for k in ["can_call", "callable_by"] where obj[k] == nil {
+            if let v = target.metaValue(forKey: k) { obj[k] = v }
+        }
+
+        // The KERNEL's own verbs — answered by the ROOT alone (they act on the
+        // TREE and the kernel-wide task table), so they appear in no bundle's
+        // `verbs` map. Advertised on EVERY agent, not just the root: root-only
+        // was tried and reverted — a model that never reflects the root never
+        // learns they exist, guesses, and gives up.
+        obj["kernel_verbs"] = Kernel.kernelVerbsView(
+            full: payload["detail"].asString == "full")
+
         // Kernel runtime identity + deployment context — surfaced on the ROOT
         // reflect so a client that hops to this kernel learns, in one
         // round-trip: which runtime (`runtime`), WHERE it runs (`env` —
@@ -199,12 +206,6 @@ extension Kernel {
             obj["version"] =
                 ProcessInfo.processInfo.environment["FANTASTIC_VERSION"].map { JSON.string($0) }
                 ?? .null
-            // The substrate's OWN verbs — answered natively by EVERY agent, so
-            // they appear in no bundle's `verbs` map. Advertised here (once, on
-            // the root) so the reflect surface stays honest: one round-trip tells
-            // a caller that work in flight is inspectable (`ps`) and killable
-            // (`cancel`), on any agent.
-            obj["system_verbs"] = Kernel.systemVerbDocs()
             // WHICH file_bridge the loader auto-persists records THROUGH (the
             // discovered store), or null = nothing wired (state in RAM). With the
             // provider's posture inline in the tree, a client sees whether
@@ -256,7 +257,13 @@ extension Kernel {
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)
-        case "ids": obj["tree"] = .array(descendantIds(target).map { .string($0) })
+        case "ids":
+            // PAGED — the cheap id tier is the one most likely to be walked by a
+            // caller with a small budget, so it is also the one that most needs
+            // a bound. Same cursor law as `list_agents`/`ps`.
+            let (ids, next) = page(descendantIds(target), payload) { $0 }
+            obj["tree"] = .array(ids.map { .string($0) })
+            obj["tree_next"] = next.map { JSON.string($0) } ?? .null
         default: break  // "none" → omit
         }
         switch payload["bundles"].asString ?? "none" {
@@ -406,8 +413,62 @@ extension Kernel {
     ///     resurrect itself: the `currentKilled` guard below refuses every
     ///     further `send` from a killed task — no new row, no handler — which is
     ///     exactly the point at which Rust would have dropped the future.
+    /// `runDispatch`, classified — and with the ITEM'S OWN DEADLINE enforced.
+    ///
+    /// Expiry kills through the FRONT DOOR (`cancelTask`) so every bundle's
+    /// `onCancel` hook runs BEFORE the abort; dropping the task would strand the
+    /// OS resources those hooks release (a subprocess, a PTY, a socket).
+    ///
+    /// The race is reported honestly: a handler that finishes during the grace
+    /// window COMPLETES — `cancelTask` no-ops on a finished id.
+    func runDispatchOutcome(
+        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
+        timeout: Double?, taskId: TaskId
+    ) async -> (JSON, Status) {
+        guard let secs = timeout else {
+            let r = await runDispatch(
+                target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId)
+            return classify(r)
+        }
+        // Race the dispatch against the deadline. The loser is cancelled by the
+        // group, and the deadline branch kills through the front door first.
+        let killer = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            // Operator authority: the kernel closing out work it was told to
+            // kill, not the batch caller reaching out — so a gated caller never
+            // makes an `onCancel` fail.
+            _ = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await self.cancelTask(taskId)
+            }
+        }
+        let r = await runDispatch(
+            target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId)
+        let fired = killer.isCancelled == false && r["cancelled"].asBool == true
+        killer.cancel()
+        if fired {
+            return (
+                Refusal.make(
+                    Refusal.timeout,
+                    "\(verb) on \(target.id.value) timed out after \(secs)s"),
+                .timedOut
+            )
+        }
+        return classify(r)
+    }
+
+    /// A reply's terminal state. A handler's own `{error:…}` is a COMPLETED
+    /// answer — the kernel does not introspect domain replies; only a THROW
+    /// (`raised`) or a kill is a non-completion.
+    private func classify(_ r: JSON) -> (JSON, Status) {
+        if r["cancelled"].asBool == true { return (r, .cancelled) }
+        if r["raised"].asBool == true { return (r, .failed) }
+        return (r, .completed)
+    }
+
     private func runDispatch(
-        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox? = nil
+        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox? = nil,
+        taskId: TaskId? = nil
     ) async -> JSON {
         // My own task is in a subtree the kernel is killing: register no new work
         // and run no handler. The kernel is INERT to a killed task from the
@@ -419,7 +480,11 @@ extension Kernel {
         // Register BEFORE spawning: the row (and its stop handle) must exist the
         // instant the handler can run, or a nested `send` could claim a parent
         // that isn't in the table yet.
-        let taskId = tasks.mint(target.id)
+        // The pid was minted in the SYNCHRONOUS launch phase and is already the
+        // ledger key for an unnamed execution — minting a second one here would
+        // split the two apart, so the row and the reply would name different
+        // things and a pid could not re-fetch its own outcome.
+        let taskId = taskId ?? tasks.mint(target.id)
         // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists. A
         // caller that wants to correlate the answer needs the id at send time, not
         // after; that is the whole point of the id.
@@ -433,12 +498,19 @@ extension Kernel {
             handle: handle
         )
 
+        // The CALLER, read HERE in the caller's own context — inside the
+        // dispatch `currentSender` becomes the target, so this is the last place
+        // the origin is still visible.
+        let origin = KernelTaskLocals.currentSender
+
         let box = DispatchBox()
         let work = Task {
-            let reply = await KernelTaskLocals.$currentSender.withValue(target.id) {
+            let reply = await KernelTaskLocals.$currentOrigin.withValue(origin) {
+                await KernelTaskLocals.$currentSender.withValue(target.id) {
                 await KernelTaskLocals.$currentTask.withValue(taskId) {
                     await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
-                        await self.dispatch(target: target, payload: payload)
+                            await self.dispatch(target: target, payload: payload)
+                        }
                     }
                 }
             }
@@ -518,6 +590,14 @@ extension Kernel {
         switch verb {
         case "create_agent", "delete_agent", "update_agent", "list_agents", "get":
             return true
+        // NAMED and unnamed executions and what they became. Terminal
+        // non-completed rows ARE the dead-letter queue.
+        case "ledger":
+            return true
+        // THE BLOB CHANNEL — an agent's sidecars, persisted through the store.
+        // The consumer never computes a path and never wires a provider.
+        case "persist_blob", "load_blob":
+            return true
         // The TASK TABLE — work in flight, universal. Baked into the substrate,
         // in no bundle's verb map: cancellation is a property of the one
         // primitive (`send`), so EVERY agent is cancelable and a caller never
@@ -556,16 +636,44 @@ extension Kernel {
         let sParent = senderAgent?.parentId?.value
         let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
 
+        // FORKING YOUR OWN SUBTREE IS BASELINE — and the exemption keys on
+        // PLACEMENT, not on who answers. `create_agent` is privileged, so a
+        // wildcard never covers it; the one documented exception is that growing
+        // your OWN subtree needs no grant, which is what makes self-extension
+        // work with zero wiring.
+        //
+        // While the verb was answered by every agent that fell out for free
+        // (`otherId == holderId`, because you addressed yourself). Now the verb
+        // is kernel-owned and the target is always the root, so that exemption
+        // could never fire again and EVERY agent would need an explicit
+        // `create_agent` grant on the root just to author its own tool. The
+        // property being preserved was never "you addressed yourself" — it is
+        // "the new agent lands in MY subtree", which `parent_id` states outright.
+        let placementIsOwn =
+            verb == "create_agent" && payload["parent_id"].asString == sender.value
+
         // Egress — may the SENDER call the target?
         let d = authorizeCall(
             grant: sCan, verb: verb, otherId: target.id.value,
-            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId)
+            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
+            enforcePrivileged: !placementIsOwn)
         if !d.allowed {
             return .object([
                 "error": .string("\(sender.value) may not call '\(verb)' on \(target.id.value)"),
                 "reason": .string("unauthorized"), "side": .string("egress"),
                 "hint": .string(d.hint),
             ])
+        }
+
+        // INGRESS IS NOT CHECKED FOR A KERNEL VERB AT THE ROOT. `callable_by`
+        // answers "do I accept being acted upon", and the root is not what is
+        // acted upon — the operand is in the payload. Requiring it would make
+        // the operator edit the ROOT's record for every agent that wants to read
+        // the task table. Consequence accepted: an agent granted
+        // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a manifest
+        // could grant before is GONE.
+        if Kernel.isSystemVerb(verb) && target.parentId == nil {
+            return nil
         }
 
         // Ingress — does the TARGET accept the sender? (tokens relative to target;

@@ -81,7 +81,7 @@ struct ToolParseTests {
     @Test func theVerbInTheToolNameBecomesThePayload() {
         // VERBATIM from gemma-4-12B, probe 05 run 3, 2026-08-06. `send` is the
         // only tool, so any other `name` is verb+tool compressed. Untranslated it
-        // dispatched `send("clock", None)` and raised `'NoneType' object has no
+        // dispatched `send([Item("clock", None)])[0].result` and raised `'NoneType' object has no
         // attribute 'get'`.
         let c = extractToolCalls(
             #"<tool_call>{"name":"reflect","arguments":{"target_id":"clock"}}</tool_call>"#)[0]

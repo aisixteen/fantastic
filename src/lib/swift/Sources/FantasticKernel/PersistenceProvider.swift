@@ -35,10 +35,25 @@ extension Kernel {
         // The kernel's running dir = the dir holding `.fantastic` (= cwd in
         // production). Resolve a relative provider root against it.
         let workdir = rootAgent.rootPath.deletingLastPathComponent()
-        for cid in rootAgent.childIds() {
-            guard let child = agent(cid),
-                child.handlerModule == "file_bridge.tools"
-            else { continue }
+        // SUBTREE, not direct children, BREADTH-FIRST.
+        //
+        // One level was scanned for a long time and the consequence was
+        // invisible: a provider declared through a `static_loader` manifest lands
+        // as a GRANDCHILD (a child of the roster loader, not of the root), was
+        // never discovered, and the flush then no-opped with no error anywhere —
+        // the tree silently stayed in RAM. Declaring it was never the problem;
+        // FINDING it was.
+        //
+        // Breadth-first so the shallowest match still wins, which keeps the
+        // previous behaviour whenever a direct child matches.
+        var queue = rootAgent.childIds()
+        var seen = Set<AgentId>()
+        while !queue.isEmpty {
+            let cid = queue.removeFirst()
+            if !seen.insert(cid).inserted { continue }
+            guard let child = agent(cid) else { continue }
+            queue.append(contentsOf: child.childIds())
+            guard child.handlerModule == "file_bridge.tools" else { continue }
             let r = child.metaValue(forKey: "root")?.asString ?? ""
             let candidateURL =
                 r.hasPrefix("/") ? URL(fileURLWithPath: r) : workdir.appendingPathComponent(r)
@@ -66,13 +81,37 @@ extension Kernel {
     /// its OWN discovered store is bookkeeping (like create_agent's child boot),
     /// not an agent reaching out, so it never runs against a grant.
     private func storeSend(_ storeId: AgentId, _ payload: JSON) async -> JSON {
-        await KernelTaskLocals.$currentSender.withValue(nil) { await send(storeId, payload) }
+        await KernelTaskLocals.$currentSender.withValue(nil) { await send([Item(storeId, payload)])[0].result }
     }
 
+    /// Read a store-relative path through the provider, PUMPED TO EOF.
+    ///
+    /// To EOF, not one chunk. The provider's `read` caps at `max_read_chars`
+    /// (16384 by default), so a single read silently TRUNCATED anything larger —
+    /// and for a record that meant the JSON parse failed on the fragment, the
+    /// merge fell back to an empty map, and every non-kernel key already on disk
+    /// was quietly dropped on the next write. A partial read that looks like a
+    /// successful one is the worst shape available.
     private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
-        let got = await storeSend(storeId, .object(["type": .string("read"), "path": .string(path)]))
-        if got["error"].asString != nil { return nil }
-        return got["content"].asString
+        var out = ""
+        var offset = 0
+        while true {
+            let got = await storeSend(
+                storeId,
+                .object([
+                    "type": .string("read"), "path": .string(path),
+                    "offset": .integer(Int64(offset)),
+                ]))
+            if got["error"].asString != nil { return out.isEmpty ? nil : out }
+            out += got["content"].asString ?? ""
+            // A provider that reports neither truncation nor a moving cursor
+            // gets ONE pass — the loop must not spin on a surface that cannot
+            // answer.
+            guard got["truncated"].asBool == true,
+                let next = got["next_offset"].asInt, Int(next) > offset
+            else { return out }
+            offset = Int(next)
+        }
     }
 
     /// Persist an agent's record onto its per-agent `agent.json` THROUGH the

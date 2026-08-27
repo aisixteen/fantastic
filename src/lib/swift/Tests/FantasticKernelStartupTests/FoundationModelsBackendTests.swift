@@ -19,13 +19,12 @@ struct FoundationModelsBackendTests {
 
     @Test func bundleIsRegisteredInDefaultSet() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        let r = await kernel.send(
-            AgentId("core"),
-            .object([
+        let r = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("foundation_models_backend.tools"),
                 "id": .string("fm"),
-            ]))
+            ]))])[0].result
         #expect(
             r["id"].asString == "fm",
             "expected fm agent created, got \(r.serialize())")
@@ -33,7 +32,7 @@ struct FoundationModelsBackendTests {
 
     @Test func reflectReturnsExpectedShape() async throws {
         let kernel = try await freshKernelWithFm()
-        let r = await kernel.send(AgentId("fm"), .object(["type": .string("reflect")]))
+        let r = await kernel.send([Item(AgentId("fm"), .object(["type": .string("reflect")]))])[0].result
         #expect(r["kind"].asString == "foundation_models_backend")
         #expect(r["provider"].asString == "apple_foundation_models")
         #expect(r["verbs"]["send"].asString != nil)
@@ -47,7 +46,7 @@ struct FoundationModelsBackendTests {
 
     @Test func backendStateReportsAvailability() async throws {
         let kernel = try await freshKernelWithFm()
-        let r = await kernel.send(AgentId("fm"), .object(["type": .string("backend_state")]))
+        let r = await kernel.send([Item(AgentId("fm"), .object(["type": .string("backend_state")]))])[0].result
         // Skeleton-level: we only require the keys exist + booleans
         // are present. Their values depend on whether the test host
         // actually has Apple Intelligence enabled.
@@ -65,12 +64,10 @@ struct FoundationModelsBackendTests {
         // send should refuse with `foundation_models_unavailable`.
         // On a fully-enabled macOS 26 host this test would instead
         // observe `queued: true` — both shapes are documented.
-        let r = await kernel.send(
-            AgentId("fm"),
-            .object([
+        let r = await kernel.send([Item(AgentId("fm"), .object([
                 "type": .string("send"),
                 "text": .string("hello"),
-            ]))
+            ]))])[0].result
         if r["queued"].asBool == true {
             #expect(r["stream_id"].asString != nil)
             #expect(r["message_id"].asString != nil)
@@ -82,12 +79,10 @@ struct FoundationModelsBackendTests {
 
     @Test func historyOnFreshAgentIsEmpty() async throws {
         let kernel = try await freshKernelWithFm()
-        let r = await kernel.send(
-            AgentId("fm"),
-            .object([
+        let r = await kernel.send([Item(AgentId("fm"), .object([
                 "type": .string("history"),
                 "client_id": .string("test"),
-            ]))
+            ]))])[0].result
         #expect(r["client_id"].asString == "test")
         #expect((r["messages"].asArray ?? []).isEmpty)
     }
@@ -96,12 +91,11 @@ struct FoundationModelsBackendTests {
 /// Boot a kernel + create an `fm` agent ready for verb dispatch.
 private func freshKernelWithFm() async throws -> Kernel {
     let kernel = try await startKernelInMemory(portHint: 0)
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("foundation_models_backend.tools"),
             "id": .string("fm"),
-        ]))
+        ]))])[0].result
     return kernel
 }

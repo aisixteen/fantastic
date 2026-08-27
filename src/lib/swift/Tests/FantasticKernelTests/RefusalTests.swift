@@ -1,0 +1,74 @@
+// The one refusal shape — the CLOSED code set and the facts each carries.
+
+import FantasticJSON
+import Testing
+
+@testable import FantasticKernel
+
+@Suite("Refusal: one shape, one machine field")
+struct RefusalTests {
+    @Test func everyRefusalCarriesBothFields() {
+        let v = Refusal.make(Refusal.missingArg, "create_agent: parent_id required")
+        #expect(v["error"].asString == "create_agent: parent_id required")
+        #expect(v["reason"].asString == "missing_arg")
+        // Nothing else unless asked for — `hint`/`see` are opt-in.
+        #expect(v.asObject?.count == 2)
+    }
+
+    @Test func missingAndBadNameTheArgument() {
+        let m = Refusal.missing("create_agent", "parent_id")
+        #expect(m["reason"].asString == "missing_arg")
+        #expect(m["arg"].asString == "parent_id")
+
+        let b = Refusal.bad("send", "timeout", "a positive number")
+        #expect(b["reason"].asString == "bad_arg")
+        #expect(b["arg"].asString == "timeout")
+        #expect(b["error"].asString == "send: timeout must be a positive number")
+    }
+
+    @Test func notHerePointsAtTheRoot() {
+        // The operand/target confusion is the whole reason this code exists, so
+        // the FIX rides in the refusal.
+        let v = Refusal.notHere("create_agent", "some_child")
+        #expect(v["reason"].asString == "not_here")
+        let hint = v["hint"].asString ?? ""
+        #expect(hint.contains("kernel"))
+        #expect(hint.contains("OPERAND"))
+    }
+
+    @Test func unknownAgentCarriesTheLiveIndex() {
+        let v = Refusal.unknown("typo", live: ["core", "cli", "file_bridge_ab12"])
+        #expect(v["reason"].asString == "unknown_agent")
+        #expect(v["agent_count"].asInt == 3)
+        // Sorted, so a caller reading them gets a stable list.
+        #expect(v["agents"][0].asString == "cli")
+        #expect(v["agents"][1].asString == "core")
+        #expect(v["hint"] == .null, "a real id needs no placeholder hint")
+    }
+
+    @Test func aPlaceholderIdIsNamedAsOne() {
+        // Measured 2026-08-04: a model copied `<id>` out of an example and got
+        // the same bare refusal 34 times without ever correcting.
+        let v = Refusal.unknown("<id>", live: ["core"])
+        let hint = v["hint"].asString ?? ""
+        #expect(hint.contains("PLACEHOLDER"))
+        #expect(hint.contains("agents"))
+    }
+
+    @Test func theIdIndexIsBounded() {
+        let ids = (0..<200).map { "agent_\($0)" }
+        let v = Refusal.unknown("nope", live: ids)
+        // The count stays honest even though the list is clipped — one typo
+        // must not become a context dump.
+        #expect(v["agent_count"].asInt == 200)
+        #expect(v["agents"].asArray?.count == Refusal.unknownAgentIdsMax)
+    }
+
+    @Test func extraFactsRideAtTheTopLevel() {
+        let v = Refusal.make(
+            Refusal.unauthorized, "a may not call \"b\" on c",
+            extra: [("side", .string("egress"))])
+        #expect(v["side"].asString == "egress")
+        #expect(v["reason"].asString == "unauthorized")
+    }
+}

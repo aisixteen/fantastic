@@ -66,11 +66,9 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(script.calls == 1, "no call must end the turn, got \(script.calls) passes")
@@ -90,15 +88,20 @@ struct RoutingTests {
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("what is here?"),
                 "client_id": .string("c"),
-            ]))
-        #expect(await script.waitForCalls(2), "the call's reply never came back")
+            ]))])[0].result
+        // One call = one follow-up turn. That turn emits NO call, and because
+        // its incoming was a delivered reply it earns exactly ONE nudge — the
+        // cap is structural (the nudge is not itself a reply, so the turn
+        // answering it is never nudged again).
+        #expect(await script.waitForCalls(3), "the call's reply never came back")
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(script.calls == 2, "one call = one follow-up turn, then it stopped")
+        #expect(script.calls == 3, "reply turn + one nudge, then it stopped")
+        #expect(
+            script.requestText(2).contains("no call was dispatched"),
+            "the chain-ending turn was not nudged")
         let turn2 = script.requestText(1)
         #expect(turn2.contains(" · core "), "untagged reply: \(turn2.suffix(400))")
         #expect(turn2.contains("agents"), "the real list_agents result must be in the turn")
@@ -120,20 +123,21 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
-        #expect(await script.waitForCalls(3), "chain stalled at \(script.calls) passes")
+            ]))])[0].result
+        // Three scripted passes, then the last one emits no call and earns its
+        // ONE nudge — four passes in total.
+        #expect(await script.waitForCalls(4), "chain stalled at \(script.calls) passes")
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(script.calls == 3, "expected 3 passes, got \(script.calls)")
+        #expect(script.calls == 4, "expected 4 passes, got \(script.calls)")
         let turn3 = script.requestText(2)
         #expect(turn3.contains("PASS-ONE-SPEAKING"), "pass 3 read a stale history")
         #expect(turn3.contains("PASS-TWO-SPEAKING"))
         // 3 passes = 3 user turns + 3 assistant turns.
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 6)
-        #expect((await historyRows(kernel: kernel, id: id, client: "c")).count == 6)
+        // Four turns now (three scripted + the nudge), two rows each.
+        #expect((await historyRows(kernel: kernel, id: id, client: "c")).count == 8)
     }
 
     @Test func replyToOmittedDefaultsToSelf() async throws {
@@ -157,11 +161,9 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": mine, "peer": theirs]),
             backendIds: ["mock", "peer"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await theirs.waitForCalls(1), "the send itself must still happen")
         #expect(await mine.waitForCalls(2), "an omitted reply_to must come back to self")
         #expect(mine.requestText(1).contains(" · peer "), "and arrive tagged as a reply")
@@ -185,11 +187,9 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": mine, "peer": theirs]),
             backendIds: ["mock", "peer"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await theirs.waitForCalls(1), "the send itself must still happen")
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(mine.calls == 1, "an explicit null must mean no follow-up turn")
@@ -213,11 +213,9 @@ struct RoutingTests {
             ])
             let (kernel, ids, _) = await bootMockKernel(
                 config: scriptedConfig(["mock": mine]), backendIds: ["mock"])
-            _ = await kernel.send(
-                ids["mock"]!,
-                .object([
+            _ = await kernel.send([Item(ids["mock"]!, .object([
                     "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-                ]))
+                ]))])[0].result
             try await Task.sleep(nanoseconds: 300_000_000)
             #expect(mine.calls == 1, "reply_to '\(word)' must discard, got \(mine.calls) passes")
         }
@@ -232,11 +230,9 @@ struct RoutingTests {
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "the failure never reached the model")
         let turn2 = script.requestText(1).lowercased()
         #expect(turn2.contains("no_such_agent"))
@@ -264,11 +260,9 @@ struct RoutingTests {
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(
             await script.waitForCalls(2), "the raise killed the chain instead of routing")
         let turn2 = script.requestText(1)
@@ -289,11 +283,9 @@ struct RoutingTests {
         let script = ProviderScript([[bad], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "malformed call was swallowed")
         #expect(script.requestText(1).contains("no target_id"))
     }
@@ -307,11 +299,9 @@ struct RoutingTests {
         let script = ProviderScript([[bad], ["ok"]])
         let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "the payload-less send was swallowed")
         let turn2 = script.requestText(1)
         #expect(turn2.contains("no payload"), "\(turn2.suffix(300))")
@@ -331,11 +321,9 @@ struct RoutingTests {
         let script = ProviderScript([[broken], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "the malformed call produced no next turn")
         #expect(script.requestText(1).contains("NOT dispatched"))
     }
@@ -353,26 +341,25 @@ struct RoutingTests {
         let script = ProviderScript([[broken + "\n" + good], ["ok"], ["ok again"]])
         let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         // The sibling really dispatched…
         #expect(await recorder.waitForPayloads(1), "the parsed sibling was dropped")
         #expect(recorder.payloads()[0]["type"].asString == "noted")
-        // …and the broken one still produced a report the model can read. Two
-        // deliveries land — the report and the sibling's reply — so exactly two
-        // follow-up passes happen. Which of the two lands first is NOT asserted:
-        // each delivery is its own kernel task racing for the FIFO, so pinning the
-        // order would pin a scheduler, not a contract. What matters is that
-        // neither report nor reply went missing.
-        #expect(await script.waitForCalls(3), "a delivery went missing")
+        // …and the broken one still produced a report the model can read. BOTH
+        // are owed to SELF, so they arrive as ONE delivered turn — that is the
+        // batch contract: the model never sees a partial turn, so it never
+        // re-asks for a missing half. Exactly ONE follow-up pass happens.
+        #expect(await script.waitForCalls(2), "the delivery went missing")
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(script.calls == 3, "expected 3 passes, got \(script.calls)")
-        let followUps = script.requestText(1) + script.requestText(2)
-        #expect(followUps.contains("NOT dispatched"), "the malformed sibling was swallowed")
-        #expect(followUps.contains(" · probe "), "the parsed sibling's reply was lost")
+        #expect(script.calls == 2, "expected 2 passes, got \(script.calls)")
+        let followUp = script.requestText(1)
+        #expect(followUp.contains("NOT dispatched"), "the malformed sibling was swallowed")
+        #expect(followUp.contains(" · probe "), "the parsed sibling's reply was lost")
+        // Both blocks are stamped, so the model can count what it received.
+        #expect(followUp.contains("1 of 2 in batch "), "the batch stamp is missing")
+        #expect(followUp.contains("2 of 2 in batch "))
     }
 
     @Test func theErrorPromptsAreVerbatim() async throws {
@@ -412,11 +399,9 @@ struct RoutingTests {
         let script = ProviderScript([[call], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "the reflect never came back")
         let turn2 = script.requestText(1)
         #expect(turn2.contains(" · probe "), "\(turn2.suffix(300))")
@@ -439,11 +424,9 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(
             await script.waitForCalls(2), "a call inside thinking must still dispatch")
         #expect(script.requestText(1).contains(" · core "))
@@ -463,12 +446,10 @@ struct RoutingTests {
         let b = ProviderScript([["b replied"], ["b must not run again"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": a, "peer": b]), backendIds: ["mock", "peer"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("probe_client"), "send_to": .string("peer"),
-            ]))
+            ]))])[0].result
         #expect(await b.waitForCalls(1), "the peer never received the reply")
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(b.requestText(0).contains("the answer from a"))
@@ -488,12 +469,10 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": mine, "peer": theirs]),
             backendIds: ["mock", "peer"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
                 "send_to": .string("peer"),
-            ]))
+            ]))])[0].result
         #expect(await mine.waitForCalls(2), "the model's own call must still route")
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(theirs.calls == 0, "send_to must not fire when the model routed itself")
@@ -512,12 +491,10 @@ struct RoutingTests {
             .provider(MockProvider(script: script, throwsError: true))
         }
         let (kernel, ids, _) = await bootMockKernel(config: cfg, backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("probe_client"),
-            ]))
+            ]))])[0].result
         try await Task.sleep(nanoseconds: 400_000_000)
         #expect(script.calls == 1)
     }
@@ -538,11 +515,9 @@ struct RoutingTests {
         ])
         let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await recorder.waitForPayloads(1), "the reply never reached reply_to")
         let turn = recorder.payloads()[0]
         #expect(turn["type"].asString == "send")
@@ -569,11 +544,9 @@ struct RoutingTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         var seen: [String] = []
         for _ in 0..<100 {
             seen = await psRows(kernel)
@@ -604,11 +577,9 @@ struct RoutingTests {
         let script = ProviderScript([["hi"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        _ = await kernel.send(
-            ids["mock"]!,
-            .object([
+        _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("hi"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(1))
         let messages = script.request(0) ?? []
         #expect(messages.first?["role"].asString == "system")

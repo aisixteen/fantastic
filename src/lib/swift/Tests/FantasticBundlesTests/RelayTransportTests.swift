@@ -33,9 +33,7 @@ private func makeKernel(withEcho: Bool) async -> Kernel {
     kernel.register(root)
     kernel.setRoot(root)
     if withEcho {
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "echo.tools", "id": "echo"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "echo"])])[0].result
     }
     return kernel
 }
@@ -213,12 +211,10 @@ struct RelayTransportTests {
             let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: dir) }
-            _ = await kernelB.send(
-                "core",
-                [
-                    "type": "create_agent", "handler_module": "file_bridge.tools",
+            _ = await kernelB.send([Item("core", [
+                    "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools",
                     "id": "fs", "root": .string(rel), "ingress_rule": "allow_all_ingress",
-                ])
+                ])])[0].result
 
             let (transportA, transportB) = await pairTransports(kernelA: kernelA, kernelB: kernelB)
 

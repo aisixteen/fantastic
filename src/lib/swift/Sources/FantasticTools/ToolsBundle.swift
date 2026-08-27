@@ -4,7 +4,7 @@
 // process-global registry mapping tool name → {agent_id, verb,
 // description, parameters_schema, sender}. LLM-using bundles read
 // `list_for_llm` before every model call; dispatch routes through
-// `kernel.send(entry.agent_id, ...)` — "send IS the tool call".
+// `kernel.send([Item(entry.agent_id, ...)])[0].result` — "send IS the tool call".
 //
 // Wire shape parity with the Rust bundle:
 //   reflect              → {id, sentence, kind: "tools", tool_count, verbs}
@@ -14,7 +14,7 @@
 //   clear                → {ok: true, removed}
 //   list                 → {tools: [full entries], count}
 //   list_for_llm         → {tools: [{name, description, parameters}]}
-//   dispatch             → reply from kernel.send(entry.agent_id, ...)
+//   dispatch             → reply from kernel.send([Item(entry.agent_id, ...)])[0].result
 
 import FantasticJSON
 import FantasticKernel
@@ -161,7 +161,7 @@ public struct ToolsBundle: AgentBundle {
         return [
             "id": .string(agentId.value),
             "sentence": .string(
-                "Tool registry for LLM tool calling. Maps name → {agent_id, verb, schema, sender}; LLM-using bundles read list_for_llm before every model call. Dispatch is kernel.send(entry.agent_id, ...)."
+                "Tool registry for LLM tool calling. Maps name → {agent_id, verb, schema, sender}; LLM-using bundles read list_for_llm before every model call. Dispatch is kernel.send([Item(entry.agent_id, ...)])[0].result."
             ),
             "kind": .string("tools"),
             "tool_count": .integer(Int64(count())),
@@ -175,7 +175,7 @@ public struct ToolsBundle: AgentBundle {
                 "list": "Returns {tools, count}.",
                 "list_for_llm": "Returns {tools: [{name, description, parameters}]}.",
                 "dispatch":
-                    "args: name, arguments. Routes to kernel.send(entry.agent_id, {type: verb_or_name, ...arguments}).",
+                    "args: name, arguments. Routes the call to the registered agent as {type: verb_or_name, ...arguments}.",
             ] as JSON,
             "emits": [:] as JSON,
         ] as JSON
@@ -309,8 +309,7 @@ public struct ToolsBundle: AgentBundle {
         guard case var .object(args) = argsValue else {
             if argsValue.isNull {
                 let verb = entry.verb ?? entry.name
-                return await kernel.send(
-                    entry.agentId, .object(["type": .string(verb)]))
+                return await kernel.send([Item(entry.agentId, .object(["type": .string(verb)]))])[0].result
             }
             return .object([
                 "error": .string("dispatch arguments must be an object"),
@@ -318,7 +317,7 @@ public struct ToolsBundle: AgentBundle {
             ])
         }
         args["type"] = .string(entry.verb ?? entry.name)
-        return await kernel.send(entry.agentId, .object(args))
+        return await kernel.send([Item(entry.agentId, .object(args))])[0].result
     }
 
     private func coerceSchema(_ v: JSON) -> JSON {

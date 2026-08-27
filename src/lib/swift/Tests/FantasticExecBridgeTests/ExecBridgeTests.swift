@@ -42,6 +42,7 @@
     ) async -> AgentId {
         var payload: OrderedDictionary<String, JSON> = [
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("exec_bridge.tools"),
             "id": .string(id),
             "ingress_rule": .string("allow_all_ingress"),
@@ -51,7 +52,7 @@
             payload["interpreters"] = .array([.string(interp)])
         }
         for (k, v) in meta { payload[k] = v }
-        let r = await kernel.send(AgentId("core"), .object(payload))
+        let r = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
         return AgentId(r["id"].asString ?? id)
     }
 
@@ -67,14 +68,12 @@
 
     /// The `ps` reply's rows — through the VERB, like any caller.
     private func psRows(_ kernel: Kernel) async -> [JSON] {
-        let r = await kernel.send(AgentId("kernel"), .object(["type": .string("ps")]))
+        let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[0].result
         return r["tasks"].asArray ?? []
     }
 
     private func cancelTask(_ kernel: Kernel, _ taskId: String) async -> JSON {
-        await kernel.send(
-            AgentId("kernel"),
-            .object(["type": .string("cancel"), "task_id": .string(taskId)]))
+        await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
     }
 
     /// Poll `ps` until the row shows up (the job's row is inserted concurrently).
@@ -173,13 +172,13 @@
         @Test func reflectAdvertisesOnlyDispatchableVerbs() async throws {
             let kernel = freshKernel()
             let py = await createPy(kernel, id: "py_verbs")
-            let reflect = await kernel.send(py, .object(["type": .string("reflect")]))
+            let reflect = await kernel.send([Item(py, .object(["type": .string("reflect")]))])[0].result
             let verbs = try #require(reflect["verbs"].asObject)
 
             // The stale verb must be GONE from the advertisement...
             #expect(verbs["exec"] == nil, "`exec` is still advertised: \(reflect.serialize())")
             // ...and undispatchable, which is why advertising it was a lie.
-            let exec = await kernel.send(py, .object(["type": .string("exec")]))
+            let exec = await kernel.send([Item(py, .object(["type": .string("exec")]))])[0].result
             #expect(
                 exec["error"].asString?.contains("unknown type") == true, "\(exec.serialize())")
             #expect(
@@ -194,7 +193,7 @@
             // Every advertised verb reaches a real handler. `start` with no `code`
             // answers with its OWN argument error — a dispatch, not a fall-through.
             for verb in verbs.keys {
-                let r = await kernel.send(py, .object(["type": .string(verb)]))
+                let r = await kernel.send([Item(py, .object(["type": .string(verb)]))])[0].result
                 #expect(
                     r["error"].asString?.contains("unknown type") != true,
                     "advertised verb `\(verb)` is not dispatched: \(r.serialize())")
@@ -245,23 +244,21 @@
             defer { try? FileManager.default.removeItem(at: file) }
 
             let call = Task {
-                await kernel.send(
-                    py,
-                    .object([
+                await kernel.send([Item(py, .object([
                         "type": .string("start"), "interpreter": .string(interp),
                         "code": .string(sleepForeverCode(file)),
-                    ]))
+                    ]))])[0].result
             }
             let pid = try await waitForPid(file)
             let row = try await waitForRow(kernel, agent: py.value, verb: "start")
             #expect(row["id"].asString?.hasPrefix(py.value + ":") == true, "\(row.serialize())")
             #expect(row["parent"].isNull, "the start was called from outside any dispatch")
 
-            let reflect = await kernel.send(py, .object(["type": .string("reflect")]))
+            let reflect = await kernel.send([Item(py, .object(["type": .string("reflect")]))])[0].result
             #expect(reflect["running"].asInt == 1, "\(reflect.serialize())")
 
             // `stop` is the signal-precise verb — it SIGKILLs the agent's children.
-            let stopped = await kernel.send(py, .object(["type": .string("stop")]))
+            let stopped = await kernel.send([Item(py, .object(["type": .string("stop")]))])[0].result
             #expect(stopped["killed"].asInt == 1, "\(stopped.serialize())")
             _ = await call.value
             #expect(await waitProcessGone(pid), "pid \(pid) survived `stop`")
@@ -284,12 +281,10 @@
 
             // `start` returns at once; the job outlives the dispatch. That is exactly
             // the orphan class this gate exists for.
-            _ = await kernel.send(
-                py,
-                .object([
+            _ = await kernel.send([Item(py, .object([
                     "type": .string("start"), "interpreter": .string(interp),
                     "code": .string(sleepForeverCode(file)),
-                ]))
+                ]))])[0].result
             let pid = try await waitForPid(file)
             #expect(!processGone(pid), "the child must really be running before we cancel")
 
@@ -308,7 +303,7 @@
             // The row left the table.
             let rows = await psRows(kernel)
             #expect(!rows.contains { $0["id"].asString == taskId }, "the cancelled row is gone")
-            let reflect = await kernel.send(py, .object(["type": .string("reflect")]))
+            let reflect = await kernel.send([Item(py, .object(["type": .string("reflect")]))])[0].result
             #expect(reflect["running"].asInt == 0, "\(reflect.serialize())")
         }
 
@@ -327,23 +322,19 @@
             }
 
             Task {
-                await kernel.send(
-                    py,
-                    .object([
+                await kernel.send([Item(py, .object([
                         "type": .string("start"), "interpreter": .string(interp),
                         "code": .string(sleepForeverCode(fileA)),
-                    ]))
+                    ]))])[0].result
             }
             let pidA = try await waitForPid(fileA)
             // Second job, started only once A's row exists, so the rows are tellable
             // apart by their pid file.
             Task {
-                await kernel.send(
-                    py,
-                    .object([
+                await kernel.send([Item(py, .object([
                         "type": .string("start"), "interpreter": .string(interp),
                         "code": .string(sleepForeverCode(fileB)),
-                    ]))
+                    ]))])[0].result
             }
             let pidB = try await waitForPid(fileB)
             #expect(pidA != pidB)
@@ -366,10 +357,10 @@
 
             // B is untouched — still running, still counted.
             #expect(!processGone(pidB), "cancelling A's task must not kill B's child")
-            let reflect = await kernel.send(py, .object(["type": .string("reflect")]))
+            let reflect = await kernel.send([Item(py, .object(["type": .string("reflect")]))])[0].result
             #expect(reflect["running"].asInt == 1, "\(reflect.serialize())")
 
-            _ = await kernel.send(py, .object(["type": .string("stop")]))
+            _ = await kernel.send([Item(py, .object(["type": .string("stop")]))])[0].result
             #expect(await waitProcessGone(pidB))
         }
 
@@ -384,19 +375,15 @@
             defer { try? FileManager.default.removeItem(at: file) }
 
             let call = Task {
-                await kernel.send(
-                    py,
-                    .object([
+                await kernel.send([Item(py, .object([
                         "type": .string("start"), "interpreter": .string(interp),
                         "code": .string(sleepForeverCode(file)),
-                    ]))
+                    ]))])[0].result
             }
             let pid = try await waitForPid(file)
             _ = try await waitForRow(kernel, agent: py.value, verb: "start")
 
-            _ = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("delete_agent"), "id": .string(py.value)]))
+            _ = await kernel.send([Item(AgentId("core"), .object(["type": .string("delete_agent"), "id": .string(py.value)]))])[0].result
 
             #expect(await waitProcessGone(pid), "pid \(pid) survived delete — ORPHANED")
             _ = await call.value
@@ -420,14 +407,13 @@
             let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
             kernel.register(root)
             kernel.setRoot(root)
-            _ = await kernel.send(
-                AgentId("core"),
-                .object([
+            _ = await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("create_agent"),
+                    "parent_id": .string("core"),
                     "handler_module": .string("exec_bridge.tools"),
                     "id": .string("leg"),
                     "interpreters": .array([.string("/a/bin/python"), .string("/b/bin/python")]),
-                ]))
+                ]))])[0].result
             let agent = kernel.agent(AgentId("leg"))
             do {
                 _ = try Interpreter.resolve(payload: .object([:]), record: agent)
@@ -455,20 +441,18 @@
             let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
             kernel.register(root)
             kernel.setRoot(root)
-            _ = await kernel.send(
-                AgentId("core"),
-                .object([
+            _ = await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("create_agent"),
+                    "parent_id": .string("core"),
                     "handler_module": .string("exec_bridge.tools"),
                     "id": .string("sealed"),
-                ]))
-            let d = await kernel.send(
-                AgentId("sealed"), .object(["type": .string("start"), "code": .string("x")]))
+                ]))])[0].result
+            let d = await kernel.send([Item(AgentId("sealed"), .object(["type": .string("start"), "code": .string("x")]))])[0].result
             #expect(d["reason"].asString == "unauthorized", "\(d.serialize())")
             #expect(
                 d["hint"].asString?.contains("ingress_rule=allow_all_ingress") == true,
                 "the denial must teach how to open: \(d.serialize())")
-            let r = await kernel.send(AgentId("sealed"), .object(["type": .string("reflect")]))
+            let r = await kernel.send([Item(AgentId("sealed"), .object(["type": .string("reflect")]))])[0].result
             #expect(r["sealed"].asBool == true)
             #expect(r["interpreters"].asArray != nil, "discovery must work sealed")
         }
@@ -510,15 +494,13 @@ struct PythonDurableTests {
         let kernel = freshKernel()
         let a = await createPy(kernel, id: "dur_start")
         let t0 = Date()
-        let r = await kernel.send(
-            a,
-            .object([
+        let r = await kernel.send([Item(a, .object([
                 "type": .string("start"), "python": .string(py),
                 "code": .string("import time; time.sleep(30)"),
-            ]))
+            ]))])[0].result
         #expect(r["job_id"].asString != nil, "no job_id: \(r.serialize())")
         #expect(Date().timeIntervalSince(t0) < 5, "start blocked")
-        _ = await kernel.send(a, .object(["type": .string("stop")]))
+        _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
     }
 
     /// The connector round-trip: the program reaches ANOTHER agent by id and reads the
@@ -528,13 +510,11 @@ struct PythonDurableTests {
         let kernel = freshKernel()
         let a = await createPy(kernel, id: "dur_send")
         let stream = kernel.ensureInbox(a)
-        _ = await kernel.send(
-            a,
-            .object([
+        _ = await kernel.send([Item(a, .object([
                 "type": .string("start"), "python": .string(py),
                 "code": .string(
                     "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))"),
-            ]))
+            ]))])[0].result
         let events = await drainUntil(stream, timeout: 25) { $0["type"].asString == "job_done" }
         let done = events.first { $0["type"].asString == "job_done" }
         #expect(
@@ -548,13 +528,11 @@ struct PythonDurableTests {
         let kernel = freshKernel()
         let a = await createPy(kernel, id: "dur_args")
         let stream = kernel.ensureInbox(a)
-        _ = await kernel.send(
-            a,
-            .object([
+        _ = await kernel.send([Item(a, .object([
                 "type": .string("start"), "python": .string(py),
                 "code": .string("print('N', kernel.args['n'] + 1)"),
                 "args": .object(["n": .integer(41)]),
-            ]))
+            ]))])[0].result
         let events = await drainUntil(stream, timeout: 25) { $0["type"].asString == "job_done" }
         let done = events.first { $0["type"].asString == "job_done" }
         #expect(done?["stdout"].asString?.contains("N 42") == true)
@@ -564,7 +542,7 @@ struct PythonDurableTests {
     @Test func anUnknownVerbWithoutAJobErrorsLoudly() async throws {
         let kernel = freshKernel()
         let a = await createPy(kernel, id: "dur_nojob")
-        let r = await kernel.send(a, .object(["type": .string("ping")]))
+        let r = await kernel.send([Item(a, .object(["type": .string("ping")]))])[0].result
         #expect(r["error"].asString?.contains("no running job") == true)
     }
 }

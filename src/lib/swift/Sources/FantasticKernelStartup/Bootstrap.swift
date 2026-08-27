@@ -87,7 +87,7 @@ public enum Bootstrap {
     ) async {
         // Boot every loaded agent.
         for agent in kernel.allAgents() {
-            _ = await kernel.send(agent.id, .object(["type": .string("boot")]))
+            _ = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0].result
         }
 
         FileHandle.standardError.write(
@@ -102,7 +102,7 @@ public enum Bootstrap {
 
         // Reverse order so children stop before parents.
         for agent in kernel.allAgents().reversed() {
-            _ = await kernel.send(agent.id, .object(["type": .string("shutdown")]))
+            _ = await kernel.send([Item(agent.id, .object(["type": .string("shutdown")]))])[0].result
         }
         kernel.shutdown()
         lock.release()

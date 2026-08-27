@@ -104,10 +104,7 @@ struct FantasticCLI {
                 payload.append((key, parseKV(value)))
             }
         }
-        let reply = await kernel.send(
-            AgentId(target),
-            .object(.init(uniqueKeysWithValues: payload))
-        )
+        let reply = await kernel.send([Item(AgentId(target), .object(.init(uniqueKeysWithValues: payload)))])[0].result
         print(reply.serializePretty(indent: 2))
     }
 
@@ -166,10 +163,7 @@ struct FantasticCLI {
                 payload.append((key, parseKV(value)))
             }
         }
-        let reply = await kernel.send(
-            AgentId(id),
-            .object(.init(uniqueKeysWithValues: payload))
-        )
+        let reply = await kernel.send([Item(AgentId(id), .object(.init(uniqueKeysWithValues: payload)))])[0].result
         print(reply.serializePretty(indent: 2))
     }
 }

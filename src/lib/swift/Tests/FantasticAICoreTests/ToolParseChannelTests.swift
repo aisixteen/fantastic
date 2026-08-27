@@ -156,7 +156,7 @@ struct ToolParseChannelTests {
     }
 
     @Test func anUndottedNameWithAnInlineTypeTargetsTheName() {
-        // `call:kernel_state{type:'reflect'}` is `send('kernel_state', {…})`. It
+        // `call:kernel_state{type:'reflect'}` is `send([Item('kernel_state', {…})])[0].result`. It
         // used to arrive with no `target_id` and earn an error for a clear request.
         let call = extractToolCalls("<|tool_call>call:kernel_state{type:'reflect'}<tool_call|>")[0]
         #expect(call.name == "send")

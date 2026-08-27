@@ -11,8 +11,7 @@ import Testing
 struct HTTPServerTests {
     @Test func bootStartsServerOnRandomPort() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        let reply = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        let reply = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         #expect(reply["ok"].asBool == true)
         let port = reply["port"].asInt ?? 0
         #expect(port > 0, "expected non-zero port, got \(port)")
@@ -20,18 +19,15 @@ struct HTTPServerTests {
         #expect(kernelPort == UInt16(port))
 
         // Cleanup.
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("shutdown")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
     }
 
     @Test func servesIndexRoute() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -46,12 +42,10 @@ struct HTTPServerTests {
 
     @Test func servesTransportJS() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -65,12 +59,10 @@ struct HTTPServerTests {
 
     @Test func servesAssetWithImmutableCache() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -85,12 +77,10 @@ struct HTTPServerTests {
 
     @Test func unknownAssetReturns404() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -116,22 +106,19 @@ struct HTTPServerTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         try "<h1>Hello</h1>".write(
             to: tmp.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("file_bridge.tools"),
                 "id": .string("assets"),
                 "root": .string(rel),
                 // The fs edge SEALS by default — open it for the /file/ proxy.
                 "ingress_rule": .string("allow_all_ingress"),
-            ]))
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+            ]))])[0].result
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -148,12 +135,10 @@ struct HTTPServerTests {
         // with Python): POST /<rest_id>/<target> with the verb in the
         // BODY. Seed a web_rest child + mount it, then dispatch.
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
-        let rec = await kernel.send(
-            AgentId("web"),
-            .object([
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
+        let rec = await kernel.send([Item(AgentId("kernel"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("web"),
                 "handler_module": .string("web_rest.tools"),
                 "id": .string("rest"),
                 // The web_rest leg SEALS by default — open it for the POST.
@@ -162,27 +147,22 @@ struct HTTPServerTests {
                 // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
                 // says WHERE into the kernel it lands. This test POSTs to `core`.
                 "can_call": .object(["core": .string("*")]),
-            ]))
+            ]))])[0].result
         let restId = rec["id"].asString ?? "rest"
         // Two-sided deny-all: the relay dispatches into root AS ITSELF, but it is
         // root's GRANDCHILD (child of `web`), so $children:* does not cover it — open
         // root's ingress for the relay (merged with the structural baseline).
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("update_agent"), "id": .string("core"),
                 "callable_by": .object([
                     "$self": .string("*"), "$parent": .string("*"),
                     "$children": .string("*"), restId: .string("*"),
                 ]),
-            ]))
-        _ = await kernel.send(
-            AgentId("web"),
-            .object(["type": .string("mount"), "child_id": .string(restId)]))
+            ]))])[0].result
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(restId)]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()

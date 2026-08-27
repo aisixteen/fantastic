@@ -153,8 +153,7 @@
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send(
-                AgentId("core"), .object(["type": .string("reflect")]))
+            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
 
             // Both must answer with an `id` field. Root ids differ BY
             // DESIGN (python=kernel_state, swift=core), so assert each runtime's
@@ -175,8 +174,7 @@
 
             // Swift side.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send(
-                AgentId("core"), .object(["type": .string("list_agents")]))
+            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
 
             // Top-level shape: both must have an `agents` array.
             #expect(pyReply["agents"].asArray != nil, "python list_agents lacks 'agents'")
@@ -203,8 +201,7 @@
 
             let pyReply = try pythonReflect(binary: binary, workdir: tmp)
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send(
-                AgentId("core"), .object(["type": .string("reflect")]))
+            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
 
             let gone = [
                 "transports", "primitive", "envelope", "universal_verb",
@@ -272,11 +269,9 @@
             // Swift: `startKernel(workdir:)` mints+persists on first boot; a
             // second boot of the same dir rehydrates the same guid from disk.
             let sw1 = try await startKernel(workdir: swDir.path)
-            let swGuid1 = await sw1.send(
-                AgentId("core"), .object(["type": .string("reflect")]))["guid"].asString
+            let swGuid1 = await sw1.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
             let sw2 = try await startKernel(workdir: swDir.path)
-            let swGuid2 = await sw2.send(
-                AgentId("core"), .object(["type": .string("reflect")]))["guid"].asString
+            let swGuid2 = await sw2.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"].asString
 
             // Shape: 32 lowercase-hex on every runtime.
             for (label, g) in [("python", pyGuid1), ("swift", swGuid1)] {
@@ -310,9 +305,7 @@
             let pyIds = try pythonReflect(
                 binary: binary, workdir: tmp, args: ["tree": "ids"])
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swIds = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("reflect"), "tree": .string("ids")]))
+            let swIds = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "tree": .string("ids")]))])[0].result
             for (label, r, root) in [("python", pyIds, "kernel_state"), ("swift", swIds, "core")] {
                 let arr = r["tree"].asArray
                 #expect(arr != nil, "\(label) tree=ids not an array")
@@ -321,9 +314,7 @@
 
             let pyB = try pythonReflect(
                 binary: binary, workdir: tmp, args: ["bundles": "all"])
-            let swB = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("reflect"), "bundles": .string("all")]))
+            let swB = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "bundles": .string("all")]))])[0].result
             for (label, r) in [("python", pyB), ("swift", swB)] {
                 let arr = r["bundles"].asArray
                 #expect(arr != nil && !(arr!.isEmpty), "\(label) bundles=all empty")
@@ -357,9 +348,7 @@
 
             // And Swift's reflect readme=true returns the same bytes.
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send(
-                AgentId("core"),
-                .object(["type": .string("reflect"), "readme": .bool(true)]))
+            let swReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "readme": .bool(true)]))])[0].result
             #expect(
                 swReply["readme"].asString == pyReadme,
                 "Swift reflect readme=true diverged from Python")
@@ -375,9 +364,7 @@
             let pyReply = try pythonReflect(
                 binary: binary, workdir: tmp, agentId: "nonexistent_xyz")
             let kernel = try await startKernelInMemory(portHint: 0)
-            let swReply = await kernel.send(
-                AgentId("nonexistent_xyz"),
-                .object(["type": .string("reflect")]))
+            let swReply = await kernel.send([Item(AgentId("nonexistent_xyz"), .object(["type": .string("reflect")]))])[0].result
 
             #expect(
                 pyReply["error"].asString != nil,

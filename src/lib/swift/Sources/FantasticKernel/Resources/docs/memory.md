@@ -12,13 +12,9 @@ decisions); `data` = current state (UI, hyperparams, selection).
 For an LLM agent, the memory agents mounted under it are auto-loaded into
 its context on boot — you do not fetch memory, it is already present; you
 only `set` what's worth keeping, under a descriptive namespaced key
-(`user.name`, `decision.db`).
+(`user.name`, `decision.db`). Mount one with `create_agent
+handler_module=yaml_state.tools mode=mem|data`; `reflect readme=true` on it
+for the verb guide (read / keys / set / delete / replace / state_yaml).
 
-A `yaml_state` agent owns NO disk of its own: it persists `state.yaml`
-THROUGH the `file_bridge` named by its `file_bridge_id` meta, so mount it
-BOUND to the store — `create_agent handler_module=yaml_state.tools
-mode=mem|data file_bridge_id=store`. Until that's wired, `set` / `delete` /
-`replace` FAILFAST (`file_bridge_id required`) rather than silently dropping
-to RAM. `reflect readme=true` on the agent for its verb guide (read / keys /
-set / delete / replace / state_yaml). Wire the store first —
-`readme=persistence`.
+`yaml_state` persists `state.yaml` THROUGH a gated `file_bridge` referenced
+by `file_bridge_id` — so it needs a wired store (`readme=persistence`).

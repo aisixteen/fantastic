@@ -18,11 +18,8 @@ universal; per-verb signatures come from each agent's reflect `verbs`.
 - binary      — for byte-heavy payloads, a WS binary frame
                 `[4-byte BE uint32 H | H-byte JSON header | M-byte body]`;
                 `_binary_path` names the body field. Skips base64.
-- browser-bus — in a browser, `BroadcastChannel("fantastic")` carries
-                `{type, target_id, source_id, ...}` between iframes,
-                bypassing the kernel entirely (`fantastic_transport().bus`).
 
 `kernel` is an alias for the tree root: send any verb to `kernel` and it
 resolves to the root agent — handy for reflecting the whole tree without
-knowing the root's id. To operate a running daemon's live surface,
-`reflect kernel readme=daemon`.
+knowing the root's id. To operate a running daemon's live surface (find its
+port, POST/WS to it, stop it), `reflect kernel readme=daemon`.

@@ -49,11 +49,44 @@ func withoutThinking(_ text: String) -> String {
         out += text[i..<open.lowerBound]
         guard let close = text.range(of: THINK_CLOSE, range: open.lowerBound..<text.endIndex)
         else {
-            break  // unterminated (stream cut mid-thought) — drop the tail
+            // Unterminated (stream cut mid-thought) — drop the tail, but keep
+            // any envelope it already contained: it was dispatched.
+            out += keptEnvelopes(String(text[open.lowerBound...]))
+            break
         }
+        // KEEP THE ENVELOPES, DROP THE REASONING. A `<tool_call>` is an
+        // INVOCATION wherever it is written, thinking included — it is parsed
+        // out of the full completion and dispatched. Stripping the whole span
+        // meant dispatch read the FULL text while history read the STRIPPED
+        // text, so a call made inside a thought RAN, returned a reply, and left
+        // no record. The model then saw an effect with no cause ("I sent a
+        // reflect to file_bridge but the reply came back from exec_bridge" —
+        // correct, given a record we had silently edited).
+        out += keptEnvelopes(String(text[open.lowerBound..<close.lowerBound]))
         i = close.upperBound
     }
     return out.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// Every complete tool-call envelope inside `span`, in order, one per line.
+///
+/// All three dialects, because the parser dispatches all three: keeping only the
+/// JSON one would re-open the same gap for a model that speaks another.
+private func keptEnvelopes(_ span: String) -> String {
+    var found: [(String.Index, String)] = []
+    for env in TOOL_ENVELOPES {
+        var from = span.startIndex
+        while let open = span.range(of: env.opener, range: from..<span.endIndex) {
+            guard
+                let close = span.range(of: env.closer, range: open.upperBound..<span.endIndex)
+            else { break }
+            found.append((open.lowerBound, String(span[open.lowerBound..<close.upperBound])))
+            from = close.upperBound
+        }
+    }
+    if found.isEmpty { return "" }
+    found.sort { $0.0 < $1.0 }
+    return "\n" + found.map { $0.1 }.joined(separator: "\n") + "\n"
 }
 
 /// Folds one turn's TWO channels (reasoning + content) into the ONE wrapped

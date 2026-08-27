@@ -7,8 +7,12 @@ identity, verbs, and state. `kernel` is an alias for the tree root.
 ## Reflect — the discovery verb
 
 `reflect` returns the ADDRESSED agent uniformly (`{id, sentence,
-display_name, description?, verbs?, ...state}`); the root is NOT special.
-Three flags compose the reply:
+display_name, description?, verbs?, ...state}`). Each reply also carries
+`kernel_verbs` — the verbs the KERNEL answers (`create_agent`,
+`delete_agent`, `update_agent`, `list_agents`, `ps`, `cancel`,
+`shutdown_kernel`). They are advertised on every agent and answered only by
+the root: send them to `kernel` and name the agent you mean in
+`parent_id`/`id`/`task_id`. Three flags compose the reply:
 
 - `tree=all|ids|none` (default `all`) — the subtree: nested / id-list / omitted.
 - `bundles=all|ids|none` (default `none`) — the installable-bundle catalog.

@@ -23,18 +23,14 @@ struct FmMemoryInjectTests {
     /// Wire the `.fantastic` store so the self-mounted memory agents discover a
     /// provider (`findStore`) and persist through it (no own disk surface).
     private func wireStore(_ kernel: Kernel) async {
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
                 "root": ".fantastic", "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
     }
 
     private func mkBackend(_ kernel: Kernel) async -> AgentId {
-        let rec = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "foundation_models_backend.tools"])
+        let rec = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "foundation_models_backend.tools"])])[0].result
         return AgentId(rec["id"].asString ?? "")
     }
 
@@ -44,7 +40,7 @@ struct FmMemoryInjectTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let fmId = await mkBackend(kernel)
-        _ = await kernel.send(fmId, ["type": "boot"])
+        _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
 
         let bundle = FoundationModelsBackendBundle()
         let agents = bundle.memoryAgents(agentId: fmId, kernel: kernel)
@@ -53,7 +49,7 @@ struct FmMemoryInjectTests {
         #expect(modes == ["mem", "data"])
 
         // Idempotent: a second boot does not add more agents.
-        _ = await kernel.send(fmId, ["type": "boot"])
+        _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
         #expect(bundle.memoryAgents(agentId: fmId, kernel: kernel).count == 2)
     }
 
@@ -63,7 +59,7 @@ struct FmMemoryInjectTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let fmId = await mkBackend(kernel)
-        _ = await kernel.send(fmId, ["type": "boot"])
+        _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
 
         let bundle = FoundationModelsBackendBundle()
         // Set a distinctive fact on the mounted `mem` agent.
@@ -71,8 +67,7 @@ struct FmMemoryInjectTests {
             kernel.agent($0)?.metaValue(forKey: "mode")?.asString == "mem"
         }
         #expect(memAgent != nil)
-        _ = await kernel.send(
-            memAgent!, ["type": "set", "key": "user.name", "value": "Ada_Lovelace_42"])
+        _ = await kernel.send([Item(memAgent!, ["type": "set", "key": "user.name", "value": "Ada_Lovelace_42"])])[0].result
 
         // The inject hook must splice the agent's state_yaml into the
         // instructions — distinctive token present grounds the test on

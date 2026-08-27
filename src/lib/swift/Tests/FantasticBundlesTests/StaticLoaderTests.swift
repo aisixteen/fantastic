@@ -41,14 +41,13 @@ private func bootLoader(_ text: String) async -> Kernel {
     let path = writeManifest(text)
     // Operator send (top-level → ungated); create_agent auto-boots the loader,
     // which hydrates the roster.
-    let rec = await kernel.send(
-        "core",
-        [
+    let rec = await kernel.send([Item("core", [
             "type": "create_agent",
+            "parent_id": "core",
             "handler_module": .string(StaticLoaderBundle.handlerModule),
             "id": "static_loader",
             "manifest": .string(path),
-        ])
+        ])])[0].result
     #expect(rec["id"].asString == "static_loader", "loader create: \(rec.serialize())")
     return kernel
 }
@@ -79,14 +78,14 @@ private func bootLoader(_ text: String) async -> Kernel {
     // deny-all: a roster agent is not granted create_agent on anyone.
     let r = await kernel.sendAs(
         sender: "worker", target: "core",
-        payload: ["type": "create_agent", "handler_module": "proxy_agent.tools"])
+        payload: ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools"])
     #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
 }
 
 @Test func bootIsIdempotentById() async {
     let kernel = await bootLoader(MANIFEST)
     let before = kernel.allAgents().count
-    let r = await kernel.send("static_loader", ["type": "boot"])
+    let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
     #expect(r["booted"].asBool == true, "\(r.serialize())")
     let skipped = Set((r["skipped"].asArray ?? []).compactMap { $0.asString })
     #expect(skipped == ["memory", "worker"])
@@ -96,15 +95,14 @@ private func bootLoader(_ text: String) async -> Kernel {
 
 @Test func missingManifestReportsNotCrashes() async {
     let kernel = mkKernel()
-    let rec = await kernel.send(
-        "core",
-        [
+    let rec = await kernel.send([Item("core", [
             "type": "create_agent",
+            "parent_id": "core",
             "handler_module": .string(StaticLoaderBundle.handlerModule),
             "id": "sl2", "manifest": "/no/such/path/nope.yaml",
-        ])
+        ])])[0].result
     #expect(rec["id"].asString == "sl2", "\(rec.serialize())")
-    let b = await kernel.send("sl2", ["type": "boot"])
+    let b = await kernel.send([Item("sl2", ["type": "boot"])])[0].result
     #expect(b["booted"].asBool == false)
     #expect(b["error"].asString?.contains("cannot read manifest") == true)
 }

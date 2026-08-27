@@ -105,7 +105,30 @@ func deliverTurn(
     if let systemPrompt = systemPrompt {
         payload["system_prompt"] = .string(systemPrompt)
     }
-    _ = await kernel.send(AgentId(target), .object(payload))
+    let out = await kernel.send([Item(AgentId(target), .object(payload))])[0]
+
+    // ANNOUNCE A FAILED HANDOFF. If the destination could not take the turn —
+    // it is gated, gone, or its own send answered `{"error": …}` — say so on its
+    // inbox instead of dropping the reply.
+    //
+    // Discarding it made a chain that DIED mid-flight identical to a model that
+    // chose to stop: no error anywhere, the last turn simply never happened.
+    // Only the first send's error was ever visible, i.e. never the ones that
+    // matter. This does NOT throw: the routing dispatch is detached, and
+    // unwinding here would kill sibling branches that are still fine.
+    let failed = !out.isCompleted || out.result["error"].asString != nil
+    if failed {
+        let why = out.result["error"].asString ?? "delivery \(out.status.rawValue)"
+        await kernel.emit(
+            AgentId(target),
+            .object([
+                "type": .string("status"),
+                "phase": .string("done"),
+                "reason": .string("error"),
+                "error": .string(why),
+                "client_id": .string(clientId),
+            ]))
+    }
 }
 
 // ─── the route ──────────────────────────────────────────────────
@@ -113,13 +136,28 @@ func deliverTurn(
 /// Honour where this pass's output goes. Runs in its own task, after the FIFO
 /// guard is released. Mirrors python's `_route_reply` step for step — the ORDER
 /// below is load-bearing throughout.
+/// The runtime reminder a CHAIN turn gets when it emitted no call.
+///
+/// Model-facing PROMPT text, byte-identical across runtimes. Says BOTH halves —
+/// act if unfinished, and stopping is normal — because an earlier version that
+/// only pushed toward acting produced paralysis (a 47k-char turn re-reading the
+/// rule, then four consecutive no-call turns after the task was already done).
+let NO_CALL_NUDGE =
+    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
+    + "NOTHING ran — a call decided in thinking does not execute unless the "
+    + "envelope is written out. If the task is unfinished, emit that call now. "
+    + "If it is finished, say so — a turn without a call ends the chain normally."
+
 func routeReply(
     selfId: AgentId,
     kernel: Kernel,
     text: String,
     clientId: String,
     sendTo: String?,
-    systemPrompt: String?
+    systemPrompt: String?,
+    /// The turn's INCOMING text, so routing can tell a CHAIN turn (answering a
+    /// delivered reply) from a chat turn — only the former is ever nudged.
+    incoming: String = ""
 ) async {
     let calls = extractToolCalls(text)
     // An envelope that OPENED and did not parse gets an error, exactly like a
@@ -128,18 +166,43 @@ func routeReply(
     // intent, and which half was lost is not something it can infer from the
     // replies it got. Goes to SELF: `reply_to` lives inside the body we could not
     // read, and the documented default for an absent `reply_to` is self anyway.
+    // Everything owed to ONE destination, in the order the model wrote it.
+    var blocks: [(String, String)] = []
     for bad in malformedCalls(text) {
-        await deliverTurn(
-            kernel: kernel, target: selfId.value, text: bad.serialize(),
-            clientId: clientId, systemPrompt: systemPrompt)
+        blocks.append((selfId.value, bad.serialize()))
     }
     if calls.isEmpty {
+        // A malformed-only turn still owes its report.
+        if !blocks.isEmpty {
+            await deliverGrouped(
+                kernel: kernel, blocks: blocks, clientId: clientId,
+                systemPrompt: systemPrompt)
+            return
+        }
         // No call of the model's own, so the CALLER's one-shot handoff applies:
         // hand this pass's TEXT to `send_to`, once. It must not propagate — a
         // caller cannot spend the model's turns for it.
         if let sendTo = sendTo {
             await deliverTurn(
                 kernel: kernel, target: sendTo, text: text,
+                clientId: clientId, systemPrompt: systemPrompt)
+            return
+        }
+
+        // THE NO-CALL NUDGE. A CHAIN turn (its incoming text was a delivered
+        // reply) that emits no call gets ONE runtime reminder.
+        //
+        // Measured 2026-08-25 twice: the model wrote its next action INSIDE
+        // thinking — "Let me send {type:'list_agents'} to kernel" — and ended
+        // the completion without the envelope. A no-call turn ends the chain, so
+        // one lapse killed runs whose gate, premise and delivery were clean.
+        //
+        // The cap is STRUCTURAL, not a counter: the nudge IS the next incoming
+        // text, and a turn answering a nudge is not a reply turn, so it is never
+        // nudged again. A chat turn is never nudged at all — stopping is normal.
+        if incoming.trimmingCharacters(in: .whitespaces).hasPrefix("[reply to ") {
+            await deliverTurn(
+                kernel: kernel, target: selfId.value, text: NO_CALL_NUDGE,
                 clientId: clientId, systemPrompt: systemPrompt)
         }
         return
@@ -242,7 +305,8 @@ func routeReply(
             result = .object(obj)
         }
 
-        // Fire-and-forget: it acted, nobody awaits the answer.
+        // Fire-and-forget: it acted, nobody awaits the answer. Deliberately NOT
+        // counted in M — the model is owed a count of what it will receive.
         guard let replyTo = replyTo else { continue }
         // The result — INCLUDING an error — goes back. A call that failed
         // silently is the one thing a model can never debug.
@@ -255,9 +319,60 @@ func routeReply(
         // `ps`/`cancel` use, so a reply names a row the model can act on.
         let verb = payload["type"]?.asString ?? "?"
         let pid = pidBox.value?.value ?? "-"
+        blocks.append(
+            (replyTo, "[reply to \(pid) · \(target) \(verb)]\n" + result.serialize()))
+    }
+
+    // ONE MESSAGE PER DESTINATION. Everything owed to one destination arrives as
+    // ONE delivered turn, each piece its own block, stamped `N of M in batch
+    // <tok>` when that destination is owed more than one.
+    //
+    // Why whole, never split: replies used to land one per turn, so a turn that
+    // fanned out 7 calls spent the next 7 turns collecting its own answers.
+    // Measured 2026-08-25: the model re-asked `list_agents` five times and the
+    // run died with nothing built. The stamp is for CORRELATION and
+    // COMPLETENESS — a model that made 2 calls and got 1 back could not tell
+    // "still running" from "answered the wrong one".
+    await deliverGrouped(
+        kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt)
+}
+
+/// Group blocks by destination and deliver one message each.
+private func deliverGrouped(
+    kernel: Kernel, blocks: [(String, String)], clientId: String, systemPrompt: String?
+) async {
+    guard !blocks.isEmpty else { return }
+    // Destination order = first appearance, so the model reads them in the order
+    // it wrote the calls.
+    var order: [String] = []
+    var byDest: [String: [String]] = [:]
+    for (dest, body) in blocks {
+        if byDest[dest] == nil { order.append(dest) }
+        byDest[dest, default: []].append(body)
+    }
+    // ONE token per TURN, shared across destinations: it names the batch, and a
+    // model reading two destinations' messages can see they came from one turn.
+    // Derived from the batch's own content so it needs no clock and no counter —
+    // both would differ across runtimes and make a byte-diff fail on noise.
+    var h = Hasher()
+    for d in order {
+        h.combine(d)
+        h.combine(byDest[d]?.count ?? 0)
+        for b in byDest[d] ?? [] { h.combine(b.count) }
+    }
+    let token = String(format: "%04x", UInt16(truncatingIfNeeded: h.finalize()))
+
+    for dest in order {
+        let parts = byDest[dest] ?? []
+        let m = parts.count
+        let body =
+            m > 1
+            ? parts.enumerated()
+                .map { "\($0.element)\n[\($0.offset + 1) of \(m) in batch \(token)]" }
+                .joined(separator: "\n\n")
+            : parts.joined(separator: "\n\n")
         await deliverTurn(
-            kernel: kernel, target: replyTo,
-            text: "[reply to \(pid) · \(target) \(verb)]\n" + result.serialize(),
+            kernel: kernel, target: dest, text: body,
             clientId: clientId, systemPrompt: systemPrompt)
     }
 }

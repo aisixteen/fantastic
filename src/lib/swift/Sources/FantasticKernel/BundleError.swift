@@ -19,7 +19,7 @@ public typealias BundleError = Swift.Error
 /// Substrate-level kernel errors. These are the conditions the
 /// kernel surfaces as structured JSON replies on the wire.
 public enum KernelError: Error, Equatable, Sendable {
-    /// `kernel.send(target_id, ...)` resolved to no registered agent.
+    /// `kernel.send([Item(target_id, ...)])[0].result` resolved to no registered agent.
     case noAgent(AgentId)
     /// Target agent has no `handler_module` set + the verb isn't a
     /// substrate-native one (`reflect`, `create_agent`, etc.).

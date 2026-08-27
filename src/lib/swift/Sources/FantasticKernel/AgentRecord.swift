@@ -98,3 +98,10 @@ extension AgentRecord: Codable {
         init?(intValue: Int) { nil }
     }
 }
+
+/// Keys a RECORD may never carry: they name substrate wiring, not agent meta.
+///
+/// A hand-authored `root_path:` once cleared the whole tree and THEN raised —
+/// the kernel was bricked by a field that looked like configuration. Refused at
+/// the door, before any teardown, so a bad document cannot half-apply.
+public let reservedRecordKeys: Set<String> = ["root_path", "ctx", "parent"]

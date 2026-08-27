@@ -15,19 +15,16 @@ struct WebSocketTests {
     /// auto-booted via `startKernelInMemory`, so create the child then
     /// hot-`mount` it onto the live server.
     private func mountWebWS(_ kernel: Kernel) async {
-        let rec = await kernel.send(
-            AgentId("web"),
-            .object([
+        let rec = await kernel.send([Item(AgentId("kernel"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("web"),
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
                 // The web_ws leg SEALS by default — open it for the inbound call.
                 "ingress_rule": .string("allow_all_ingress"),
-            ]))
+            ]))])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
-        _ = await kernel.send(
-            AgentId("web"),
-            .object(["type": .string("mount"), "child_id": .string(wsId)]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
     }
 
     // NOTE: the former frame-unit tests (computeWebSocketAccept / decodeFrame)
@@ -38,13 +35,11 @@ struct WebSocketTests {
 
     @Test func wsCallRoundTripsThroughServer() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel)
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()
@@ -95,13 +90,11 @@ struct WebSocketTests {
         // and verify emits on <other> arrive as `event` frames. This
         // is the path kernel_bridge.watch_remote drives.
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         await mountWebWS(kernel)
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         let port = kernel.httpPort()

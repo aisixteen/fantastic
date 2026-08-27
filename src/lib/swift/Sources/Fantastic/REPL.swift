@@ -73,8 +73,7 @@ enum REPLMode {
     // MARK: - Commands
 
     private static func handleList(kernel: Kernel) async {
-        let reply = await kernel.send(
-            AgentId("core"), .object(["type": .string("list_agents")]))
+        let reply = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         for agent in reply["agents"].asArray ?? [] {
             let id = agent["id"].asString ?? "?"
             let hm = agent["handler_module"].asString ?? "<root>"
@@ -94,6 +93,7 @@ enum REPLMode {
 
         var payload: OrderedDictionary<String, JSON> = [
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string(handlerModule),
         ]
         for p in parts.dropFirst() {
@@ -102,9 +102,9 @@ enum REPLMode {
             let v = String(p[p.index(after: eq)...])
             payload[k] = coerce(v)
         }
-        let reply = await kernel.send(AgentId("core"), .object(payload))
+        let reply = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
         if let id = reply["id"].asString {
-            _ = await kernel.send(AgentId(id), .object(["type": .string("boot")]))
+            _ = await kernel.send([Item(AgentId(id), .object(["type": .string("boot")]))])[0].result
             printLine("  added \(id) (\(handlerModule))")
         } else if let err = reply["error"].asString {
             printLine("  add failed: \(err)")
@@ -118,12 +118,10 @@ enum REPLMode {
             printLine("  usage: delete <id>")
             return
         }
-        let reply = await kernel.send(
-            AgentId("core"),
-            .object([
+        let reply = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("delete_agent"),
                 "id": .string(id),
-            ]))
+            ]))])[0].result
         if let err = reply["error"].asString {
             printLine("  delete failed: \(err)")
         } else {
@@ -238,7 +236,7 @@ enum REPLMode {
     private static func dispatchAndPrint(
         kernel: Kernel, target: String, payload: JSON
     ) async {
-        let reply = await kernel.send(AgentId(target), payload)
+        let reply = await kernel.send([Item(AgentId(target), payload)])[0].result
         // Match Python's `_print_result`: pretty-print non-null
         // replies; suppress null silently.
         if case .null = reply { return }

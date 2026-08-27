@@ -12,7 +12,14 @@ public enum AIContext {
     /// ~chars per token for the estimate.
     public static let charsPerToken = 4
     /// Conservative default window when nothing is configured.
-    public static let defaultContextWindow: Int64 = 4096
+    /// Default window when nothing is configured.
+    ///
+    /// Was 4096, which no longer fit the kernel's OWN system block: budget =
+    /// 4096 − 1024 output reserve = 3072 against a ~3174-token default prompt,
+    /// so every agent created without an explicit `context_window` failfasted
+    /// `too_small` before the model was ever called. The margin had reached zero
+    /// and a ~100-token verb-doc addition took it negative.
+    public static let defaultContextWindow: Int64 = 131_072
     /// Default output headroom reserved out of the window.
     public static let defaultOutputReserve: Int64 = 1024
     /// Never project to a budget below this.

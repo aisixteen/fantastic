@@ -21,24 +21,20 @@ struct YamlStateTests {
     /// Wire the `.fantastic` store (an open file_bridge) — yaml_state persists
     /// THROUGH it (sealed-by-default model; no own disk surface). Idempotent.
     private func wireStore(_ kernel: Kernel) async {
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
                 "root": ".fantastic", "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
     }
 
     private func mkMemoryAgent(_ kernel: Kernel, mode: String) async -> AgentId {
-        let rec = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "yaml_state.tools",
+        let rec = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "yaml_state.tools",
                 "mode": .string(mode), "file_bridge_id": "store",
                 // Two-sided deny-all: yaml_state persists read/write/delete to its
                 // store directly → an explicit egress grant (wiring pairs with granting).
                 "can_call": ["store": "*"],
-            ])
+            ])])[0].result
         let id = rec["id"].asString ?? ""
         // Ingress half: open the store's `callable_by` for this memory agent (merged
         // with the store's structural baseline).
@@ -47,8 +43,7 @@ struct YamlStateTests {
             map[id] = .string("*")
             accept = .object(map)
         }
-        _ = await kernel.send(
-            "core", ["type": "update_agent", "id": "store", "callable_by": accept])
+        _ = await kernel.send([Item("core", ["type": "update_agent", "id": "store", "callable_by": accept])])[0].result
         return AgentId(id)
     }
 
@@ -58,10 +53,10 @@ struct YamlStateTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
-        _ = await kernel.send(cid, ["type": "set", "key": "user.name", "value": "Ada"])
-        let r = await kernel.send(cid, ["type": "read", "key": "user.name"])
+        _ = await kernel.send([Item(cid, ["type": "set", "key": "user.name", "value": "Ada"])])[0].result
+        let r = await kernel.send([Item(cid, ["type": "read", "key": "user.name"])])[0].result
         #expect(r["value"].asString == "Ada")
-        let miss = await kernel.send(cid, ["type": "read", "key": "nope"])
+        let miss = await kernel.send([Item(cid, ["type": "read", "key": "nope"])])[0].result
         #expect(miss["value"].isNull)
     }
 
@@ -71,15 +66,15 @@ struct YamlStateTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
-        _ = await kernel.send(cid, ["type": "set", "key": "z", "value": "hello"])
-        _ = await kernel.send(cid, ["type": "set", "key": "a", "value": .integer(3)])
-        let keys = await kernel.send(cid, ["type": "keys"])
+        _ = await kernel.send([Item(cid, ["type": "set", "key": "z", "value": "hello"])])[0].result
+        _ = await kernel.send([Item(cid, ["type": "set", "key": "a", "value": .integer(3)])])[0].result
+        let keys = await kernel.send([Item(cid, ["type": "keys"])])[0].result
         let names = (keys["keys"].asArray ?? []).compactMap { $0["key"].asString }
         #expect(names == ["a", "z"])
         // delete
-        let del = await kernel.send(cid, ["type": "delete", "key": "a"])
+        let del = await kernel.send([Item(cid, ["type": "delete", "key": "a"])])[0].result
         #expect(del["deleted"].asBool == true)
-        let del2 = await kernel.send(cid, ["type": "delete", "key": "a"])
+        let del2 = await kernel.send([Item(cid, ["type": "delete", "key": "a"])])[0].result
         #expect(del2["deleted"].asBool == false)
     }
 
@@ -89,13 +84,13 @@ struct YamlStateTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "data")
-        _ = await kernel.send(cid, ["type": "set", "key": "old", "value": .integer(1)])
-        _ = await kernel.send(cid, ["type": "replace", "doc": ["new": .integer(2)]])
-        let doc = await kernel.send(cid, ["type": "read"])
+        _ = await kernel.send([Item(cid, ["type": "set", "key": "old", "value": .integer(1)])])[0].result
+        _ = await kernel.send([Item(cid, ["type": "replace", "doc": ["new": .integer(2)]])])[0].result
+        let doc = await kernel.send([Item(cid, ["type": "read"])])[0].result
         #expect(doc["doc"]["new"].asInt == 2)
         #expect(doc["doc"]["old"].isNull)
-        _ = await kernel.send(cid, ["type": "replace", "doc": [:]])
-        #expect((await kernel.send(cid, ["type": "read"]))["doc"].asObject?.isEmpty == true)
+        _ = await kernel.send([Item(cid, ["type": "replace", "doc": [:]])])[0].result
+        #expect((await kernel.send([Item(cid, ["type": "read"])])[0].result)["doc"].asObject?.isEmpty == true)
     }
 
     @Test func stateYamlAndDiskIsTruth() async throws {
@@ -104,13 +99,13 @@ struct YamlStateTests {
         let kernel = try await startKernel(workdir: tmp.path)
         await wireStore(kernel)
         let cid = await mkMemoryAgent(kernel, mode: "mem")
-        _ = await kernel.send(cid, ["type": "set", "key": "user.name", "value": "Ada"])
-        let y = await kernel.send(cid, ["type": "state_yaml"])
+        _ = await kernel.send([Item(cid, ["type": "set", "key": "user.name", "value": "Ada"])])[0].result
+        let y = await kernel.send([Item(cid, ["type": "state_yaml"])])[0].result
         let text = y["yaml"].asString ?? ""
         #expect(text.contains("user.name") && text.contains("Ada"))
         // empty store → empty string
         let empty = await mkMemoryAgent(kernel, mode: "data")
-        #expect((await kernel.send(empty, ["type": "state_yaml"]))["yaml"].asString == "")
+        #expect((await kernel.send([Item(empty, ["type": "state_yaml"])])[0].result)["yaml"].asString == "")
     }
 
     @Test func reflectModeSentence() async throws {
@@ -120,8 +115,8 @@ struct YamlStateTests {
         await wireStore(kernel)
         let mem = await mkMemoryAgent(kernel, mode: "mem")
         let data = await mkMemoryAgent(kernel, mode: "data")
-        let rmem = await kernel.send(mem, ["type": "reflect"])
-        let rdata = await kernel.send(data, ["type": "reflect"])
+        let rmem = await kernel.send([Item(mem, ["type": "reflect"])])[0].result
+        let rdata = await kernel.send([Item(data, ["type": "reflect"])])[0].result
         #expect(rmem["mode"].asString == "mem")
         #expect(rmem["sentence"].asString?.contains("durable memory") == true)
         #expect(rdata["mode"].asString == "data")
@@ -131,30 +126,41 @@ struct YamlStateTests {
         #expect(rmem["file_bridge_id"].asString == "store")
     }
 
-    @Test func mutatorsFailfastWithoutProvider() async throws {
-        // No file_bridge_id wired → set/delete/replace refuse (no silent loss);
-        // reads degrade to empty. Error text matches Python/Rust byte-for-byte.
+    @Test func mutatorsFailWithoutAStore() async throws {
+        // NO STORE WIRED → set/delete/replace REFUSE (no silent loss); reads
+        // degrade to empty. Persistence now goes THROUGH the loader, so the
+        // failure this bundle must surface is "the kernel has no store", not
+        // "my own file_bridge_id is unset" — the consumer no longer names a
+        // provider at all.
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
-        // NOTE: deliberately NO wireStore + NO file_bridge_id on the agent.
-        let rec = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "yaml_state.tools", "mode": "data"])
+        // NOTE: deliberately NO wireStore.
+        let rec = await kernel.send([
+            Item(
+                "core",
+                [
+                    "type": "create_agent", "parent_id": "core",
+                    "handler_module": "yaml_state.tools", "mode": "data",
+                ])
+        ])[0].result
         let cid = AgentId(rec["id"].asString ?? "")
-        let s = await kernel.send(cid, ["type": "set", "key": "k", "value": "v"])
-        #expect(
-            s["error"].asString
-                == "yaml_state.set: file_bridge_id required — wire (and open) a file_bridge to persist"
-        )
-        let d = await kernel.send(cid, ["type": "delete", "key": "k"])
-        #expect(
-            d["error"].asString?.hasPrefix("yaml_state.delete: file_bridge_id required") == true)
-        let rp = await kernel.send(cid, ["type": "replace", "doc": [:]])
-        #expect(
-            rp["error"].asString?.hasPrefix("yaml_state.replace: file_bridge_id required") == true)
+
+        for (verb, payload) in [
+            ("set", ["type": "set", "key": "k", "value": "v"] as JSON),
+            ("delete", ["type": "delete", "key": "k"] as JSON),
+            ("replace", ["type": "replace", "doc": [:]] as JSON),
+        ] {
+            let r = await kernel.send([Item(cid, payload)])[0].result
+            let err = r["error"].asString ?? ""
+            #expect(
+                err.hasPrefix("yaml_state.\(verb):"),
+                "\(verb) must fail in this bundle's own words: \(r)")
+            #expect(err.contains("no store wired"), "\(verb) must name the real cause: \(r)")
+        }
+
         // reads degrade to empty, not error.
-        #expect((await kernel.send(cid, ["type": "read"]))["doc"].asObject?.isEmpty == true)
-        #expect((await kernel.send(cid, ["type": "state_yaml"]))["yaml"].asString == "")
+        let read = await kernel.send([Item(cid, ["type": "read"])])[0].result
+        #expect(read["doc"] == .object([:]))
     }
 }
