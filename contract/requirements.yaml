@@ -1,0 +1,82 @@
+# THE CANONICAL REQUIREMENT REGISTRY — the one index of what this substrate
+# claims, shared by every runtime's agentic runner.
+#
+# `level` decides what a failure DOES: MUST fails the run, SHOULD/MAY report as
+# a soft hole (a2a-tck's mapping). A duplicate id is refused at load: two
+# validators pinning different things under one name would make the coverage
+# matrix read as covered either way.
+#
+# The `C<n>` ids are NOT this suite's invention — they are row numbers in the
+# canonical-assertion table of `tmp/agentic_development.md`, so a gap in the
+# sequence is a checkpoint nobody has claimed rather than a missing row.
+#
+# PC-1..PC-5 are CORE: the general runner pins them on EVERY config, so a spec
+# never declares them. `requirements:` in a spec names only what that scenario's
+# own steps pin.
+
+core: [PC-1, PC-2, PC-3, PC-4, PC-5]
+
+requirements:
+  - id: PC-1
+    level: MUST
+    title: "the running tree matches the declared shape, both directions"
+  - id: PC-2
+    level: MUST
+    title: "every declared edge is reachable, every refused edge names its side"
+  - id: PC-3
+    level: MUST
+    title: "the roster is closed after boot — deny-all holds, no self-raise"
+  - id: PC-4
+    level: MUST
+    title: "a reboot rehydrates the identical roster, nothing duplicates"
+  - id: PC-5
+    level: MUST
+    title: "the hydration verdict matches the declaration, on the loud channel"
+  - id: C1
+    level: MUST
+    title: "resume after suspension continues the run — script minds: test_mind_plumbed ASK; AI chains: tests/conformance/test_c1_suspend_resume"
+  - id: C14
+    level: MUST
+    title: "cancel stops a live dispatch before its next step, observably"
+  - id: C15
+    level: MUST
+    title: "a terminal task and a deleted agent both absorb further calls"
+  - id: C16
+    level: MUST
+    title: "unknown id / malformed / unknown verb / denial stay distinct"
+  - id: C17
+    level: MUST
+    title: "a refused mutation mutates nothing and says which half refused"
+  - id: C18
+    level: MUST
+    title: "delete removes the whole owned roster and spares its neighbours"
+  - id: C20
+    level: MUST
+    title: "child state is namespaced by position, not by convention"
+  - id: C21
+    level: MUST
+    title: "one semantics, many transports — see tests/conformance/"
+  - id: C24
+    level: MUST
+    title: "stream order/terminal/fan-out — see tests/conformance/ + test_stream_semantics"
+  - id: C23
+    level: MUST
+    title: "an undeclared capability errors — sealed by default, no byte moves"
+  - id: TSG-1
+    level: MUST
+    title: "an edge exists only when BOTH halves grant it"
+  - id: TSG-2
+    level: MUST
+    title: "a denial names the half that refused, and egress is first"
+  - id: TSG-3
+    level: MUST
+    title: "an edge carries only the verbs BOTH halves name"
+  - id: TSG-4
+    level: MUST
+    title: "no undeclared edge exists — co-residency grants nothing"
+  - id: TSG-5
+    level: MUST
+    title: "the missing half comes from ABOVE; a peer cannot supply it"
+  - id: TSG-6
+    level: MUST
+    title: "opening one half never silently closes another"

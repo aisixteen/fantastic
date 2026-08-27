@@ -41,7 +41,7 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
     p_agent.create("file_bridge.tools", id="LOCKED", delete_lock=True)
     p_agent.create("file_bridge.tools", id="OK")
     r = await seeded_kernel.delete("P")
-    assert r["locked"] is True
+    assert r["reason"] == "locked"  # &#27: the one refusal shape, not a flag
     assert r["blocked_by"] == "LOCKED"
     # No mutations.
     assert "P" in seeded_kernel.ctx.agents
@@ -55,7 +55,7 @@ async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
     p_agent = seeded_kernel.ctx.agents["P"]
     p_agent.create("file_bridge.tools", id="L", delete_lock=True)
     blocked = await seeded_kernel.delete("P")
-    assert blocked["locked"] is True
+    assert blocked["reason"] == "locked"
     seeded_kernel.update("L", delete_lock=False)
     r = await seeded_kernel.delete("P")
     assert r == {"deleted": True, "id": "P"}

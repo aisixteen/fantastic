@@ -25,6 +25,7 @@ from _engine import (
     CORE_REQUIREMENTS,
     ConfigError,
     HydrationError,
+    SPEC_DIR,
     Requirement,
     _index,
     config_paths,
@@ -250,7 +251,7 @@ async def test_hydrate_outside_its_own_tmp_path_is_refused(agentic_cwd):
     """The manifest read is clamped to `Path.cwd()`, so hydrating against some
     other directory would silently look for the manifest in the wrong place —
     or, with a leading `/`, silently reinterpret it as cwd-relative."""
-    spec = Path(__file__).resolve().parent / "specs" / "engine_smoke.yaml"
+    spec = SPEC_DIR / "engine_smoke.yaml"
     with pytest.raises(HydrationError, match="clamped to the cwd"):
         await hydrate(spec, agentic_cwd / "somewhere-else")
 

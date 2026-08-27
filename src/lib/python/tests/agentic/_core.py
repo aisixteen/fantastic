@@ -27,10 +27,10 @@ reports a coverage matrix rather than a pass count.
 
 from __future__ import annotations
 
-import pytest
 
 from _engine import (
     MINTED_ID,
+    HydrationError,
     check,
     dehydrate,
     denial_side,
@@ -40,23 +40,26 @@ from _engine import (
 )
 
 
-def _require_built(h) -> None:
-    """Skip a test whose invariant only means something on a kernel that was
-    actually built. A config declaring `refused_at_write` has no tree to match,
-    no edges to walk and no roster to close — PC-5 is its whole contract."""
+def _built(h) -> bool:
+    """Does this hydration have a tree to assert against at all?
+
+    A config declaring `refused_at_write` has no tree to match, no edges to walk
+    and no roster to close — PC-5 is its whole contract, and the other four are
+    not failures, they are inapplicable."""
     if h.config.expect.hydration != "ok":
-        pytest.skip(
-            f"{h.config.name}: declares hydration={h.config.expect.hydration!r}"
-            " — only PC-5 applies"
-        )
+        return False
     if h.outcome() != "ok":
-        pytest.fail(f"{h.config.name}: hydration failed — {h.outcome_error()!r}")
+        raise HydrationError(
+            f"{h.config.name}: declared hydration ok but got"
+            f" {h.outcome()!r} — {h.outcome_error()!r}"
+        )
+    return True
 
 
 # ─── PC-5 · the hydration verdict, on the loud channel ──────────
 
 
-async def test_the_hydration_verdict_matches_the_declaration(hydrated_config):
+async def core_the_hydration_verdict_matches_the_declaration(h):
     """A bad manifest is refused at WRITE time — but only the kind that cannot be
     READ. Measured: `manifest: nope.yaml` is refused by `validate_meta` and never
     becomes a record; a manifest that parses and then names a bad ENTRY produces
@@ -69,7 +72,6 @@ async def test_the_hydration_verdict_matches_the_declaration(hydrated_config):
     `refused_at_write` (the create reply) or `boot_error` (the explicit re-boot).
     Asserting only the happy channel would greenlight a half-built kernel, which
     is the exact failure this suite exists to catch."""
-    h = hydrated_config
     want = h.config.expect.hydration
     got = h.outcome()
     check(
@@ -130,7 +132,7 @@ async def test_the_hydration_verdict_matches_the_declaration(hydrated_config):
 # ─── PC-1 · declared shape == running tree, both directions ─────
 
 
-async def test_the_running_tree_matches_the_declared_shape(hydrated_config):
+async def core_the_running_tree_matches_the_declared_shape(h):
     """Read back through ONE root reflect, not through private attributes — the
     suite reconciles against what the system SAYS about itself.
 
@@ -143,8 +145,8 @@ async def test_the_running_tree_matches_the_declared_shape(hydrated_config):
     Parentage is asserted, not assumed: every manifest entry is created as a
     child of the LOADER (`static_loader/tools.py:106`), and a `parent:` key in a
     spec crashes `Agent.create` inside the swallowed boot."""
-    h = hydrated_config
-    _require_built(h)
+    if not _built(h):
+        return
     d = await dehydrate(h.kernel)
     agents, children = d["agents"], d["children"]
 
@@ -191,52 +193,33 @@ async def test_the_running_tree_matches_the_declared_shape(hydrated_config):
 # ─── PC-2 · reachability, never a config field ──────────────────
 
 
-async def test_every_declared_edge_is_reachable_and_every_refusal_names_its_side(
-    hydrated_config,
-):
-    """The config declares edges as PROBES, not as grant maps, and this walks
-    them with `reach()` — an agent-origin send.
+async def core_every_declared_edge_is_reachable_and_every_refusal_names_its_side(h):
+    """PC-2 is now a property of EXECUTING the spec, not a second walk.
 
-    Reading `can_call` would prove nothing. An agent whose `can_call` names a
-    target is still refused when the target's `callable_by` does not name it
-    back; measured on `static_loader`'s own fixture, where the manifest granted
-    `worker.can_call = {memory: [set, read]}` and the send came back
-    `{"side": "ingress", "reason": "unauthorized"}` — the field was set and the
-    operation was unreachable. `side` is the evidence the gate is two-sided at
-    all, so a denial that declares one must match it.
+    The config used to carry an `edges:` list that this re-walked. With the steps
+    DSL the reach steps ARE the declared edges, so the executor asserts them in
+    order — and it adds the one thing a bare verdict cannot carry: every denial
+    must teach how to open it (`hint`). A refusal that cannot be acted on costs
+    the same as no reply.
 
-    An ALLOW is asserted as a NEGATIVE (`not denied`): a pass returns the
-    handler's own reply, which may itself be an error — a sealed leg, a missing
-    store — and that is a different animal from a refusal."""
-    h = hydrated_config
-    _require_built(h)
-    edges = h.config.expect.edges
-    if not edges:
-        pytest.skip(f"{h.config.name}: declares no edges — PC-2 has nothing to walk")
-    for edge in edges:
-        reply = await reach(h.kernel, edge.sender, edge.target, edge.send)
-        if edge.allow:
-            check("PC-2", not denied(reply), f"{edge}: declared usable, got {reply!r}")
-            continue
-        check("PC-2", denied(reply), f"{edge}: declared refused, got {reply!r}")
-        check(
-            "PC-2",
-            bool(reply.get("hint")),
-            f"{edge}: a denial must teach how to open it",
-        )
-        if edge.side:
-            check(
-                "PC-2",
-                denial_side(reply) == edge.side,
-                f"{edge}: declared side {edge.side!r}, got {denial_side(reply)!r} — the"
-                " half that refused is the whole claim about two-sidedness",
-            )
+    What stays here is the GUARD: a spec that declares no reach at all has
+    nothing to say about reachability, and that must be visible rather than
+    passing silently.
+    """
+    if not _built(h):
+        return
+    reaches = [s for s in h.config.expect.steps if s.kind == "reach"]
+    check(
+        "PC-2",
+        bool(reaches),
+        f"{h.config.name}: declares no `reach:` step — PC-2 has nothing to walk",
+    )
 
 
 # ─── PC-3 · the roster is closed after boot ─────────────────────
 
 
-async def test_the_roster_is_closed_after_boot(hydrated_config):
+async def core_the_roster_is_closed_after_boot(h):
     """The loader hydrates as OPERATOR at boot; that is not standing power. After
     boot every roster agent is deny-all like anything else, so the set of agents
     is FIXED by the manifest — closed by the transport's default, not by a mode
@@ -250,12 +233,12 @@ async def test_the_roster_is_closed_after_boot(hydrated_config):
 
     The refusal is then re-probed for EFFECT, not inspected as a field: after the
     attempted self-grant a previously-denied edge must still deny."""
-    h = hydrated_config
-    _require_built(h)
+    if not _built(h):
+        return
     cfg = h.config
     sender = cfg.expect.closed_roster_sender or next(iter(cfg.roster_ids), None)
     if sender is None:
-        pytest.skip(f"{cfg.name}: declares no roster agent to probe closure from")
+        return
     check(
         "PC-3", sender in h.agents, f"closure probe {sender!r} is not a running agent"
     )
@@ -315,7 +298,7 @@ async def test_the_roster_is_closed_after_boot(hydrated_config):
 # ─── PC-4 · a reboot rehydrates the same tree, once ─────────────
 
 
-async def test_a_reboot_rehydrates_the_identical_roster(hydrated_config):
+async def core_a_reboot_rehydrates_the_identical_roster(h):
     """Persist, drop the kernel, bootstrap the same directory, run the production
     boot pass. `read_tree` hydrates the persisted children FIRST, so by the time
     a loader's `boot` runs every declared id already exists and the whole roster
@@ -326,10 +309,10 @@ async def test_a_reboot_rehydrates_the_identical_roster(hydrated_config):
     The assertion is the roster itself, before and after. `Kernel.load` fires no
     boot, so the pass mirrors `longrun._boot_all_agents` — minus the root, whose
     boot would start the debounced flush loop."""
-    h = hydrated_config
-    _require_built(h)
+    if not _built(h):
+        return
     if not h.config.expect.reboot:
-        pytest.skip(f"{h.config.name}: declares reboot: false")
+        return
 
     before = h.ids
     minted_before = [i for i in before if MINTED_ID.match(i)]
@@ -362,3 +345,31 @@ async def test_a_reboot_rehydrates_the_identical_roster(hydrated_config):
                 f"{ln.id}: skipped {sorted(boot.get('skipped') or [])},"
                 f" declared {sorted(declared)}",
             )
+    # The reboot REPLACED the kernel; hand it back or every later
+    # step would run against a tree that is no longer live.
+    return h2
+
+
+# ─── the CORE PHASE — PC-1..PC-5 on every config, by construction ─
+
+
+# The order is deliberate. PC-4 REBOOTS, which replaces the kernel, so it runs
+# LAST — the scenario's own steps must act on the hydration they were written
+# against, not on a rebuilt one.
+CORE_BEFORE = (
+    core_the_hydration_verdict_matches_the_declaration,
+    core_the_running_tree_matches_the_declared_shape,
+    core_every_declared_edge_is_reachable_and_every_refusal_names_its_side,
+    core_the_roster_is_closed_after_boot,
+)
+CORE_AFTER = (core_a_reboot_rehydrates_the_identical_roster,)
+
+
+async def run_core(h, phases):
+    """Run one group of core phases, threading the hydration through — a phase
+    that rebuilds the kernel returns the new one."""
+    for phase in phases:
+        result = await phase(h)
+        if result is not None:
+            h = result
+    return h

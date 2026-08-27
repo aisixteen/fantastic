@@ -1,0 +1,115 @@
+# Test spec for `configs/owned_subtree_delete.yaml` — WHAT THIS SUITE ASSERTS.
+# The kernel config it runs against is a separate, deployable file; nothing
+# test-specific may leak into it.
+config: owned_subtree_delete.yaml
+
+name: owned_subtree_delete
+description: >
+  Two independent rosters and one lock. `l_a` is the subtree that gets deleted;
+  `l_b` is the neighbour that must not notice it, and it carries the
+  `delete_lock` that refuses a whole cascade.
+
+  OWNERSHIP IS THE LOADER BOUNDARY. Every manifest entry is created as a child
+  of ITS loader (`static_loader/tools.py:106`) and a `parent:` key is not
+  expressible — it crashes `Agent.create` inside the swallowed boot (known gap
+  #2). So "the owned subtree" is exactly "one loader's roster", and proving that
+  a delete spares its neighbours needs TWO loaders, not two branches of one.
+
+requirements: [C17, C18]
+
+expect:
+  hydration: ok
+  reboot: true
+  closed_roster_sender: a_head
+  steps:
+    - name: the doomed roster's own wiring works before anything is deleted
+      reach: {from: a_head, to: a_leaf, send: {type: list, path: ""}}
+      expect: {allow: true}
+    - name: the sidecar-bearing member is reachable from its head
+      reach: {from: a_head, to: a_notes, send: {type: set, key: probe, value: 1}}
+      expect: {allow: true}
+    - name: the neighbour roster is wired the same way, independently
+      reach: {from: b_head, to: b_leaf, send: {type: list, path: ""}}
+      expect: {allow: true}
+    - name: rosters are not laterally reachable across loaders
+      reach: {from: a_head, to: b_leaf, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+    - name: and not in the other direction either
+      reach: {from: b_head, to: a_leaf, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
+
+    # ── C18 · deleting a loader takes EVERYTHING it owns ───────────
+    #
+    # Ownership is the tree, not a namespace convention. A loader's roster is
+    # its SUBTREE, so one `delete_agent` on the loader is a cascade — and the
+    # neighbour roster must not feel it at all.
+    #
+    # EXISTENCE is probed with `operator:`, deliberately. Target resolution runs
+    # BEFORE the gate, so an agent-origin probe conflates "gone" with "live but
+    # unreachable"; only an ungated send tells them apart.
+
+    - name: every agent in the doomed subtree is live before the delete
+      operator: {to: a_notes, send: {type: reflect}}
+      expect: {contains: {id: a_notes}}
+      because: C18
+    - operator: {to: a_leaf, send: {type: reflect}}
+      expect: {contains: {id: a_leaf}}
+      because: C18
+    - name: and the neighbour's declared edge works, so its survival means something
+      reach: {from: b_head, to: b_leaf, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: C18
+
+    - name: deleting the loader answers for the loader it was asked about
+      operator: {to: kernel, send: {type: delete_agent, id: l_a}}
+      expect: {contains: {deleted: true, id: l_a}}
+      because: C18
+
+    - name: the whole subtree is gone — a member is a NON-AGENT now, not a denial
+      operator: {to: a_notes, send: {type: reflect}}
+      expect: {reason: unknown_agent}
+      because: C18
+    - operator: {to: a_leaf, send: {type: reflect}}
+      expect: {reason: unknown_agent}
+      because: C18
+
+    - name: the NEIGHBOUR roster kept its agents and its wiring
+      reach: {from: b_head, to: b_leaf, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: C18
+    - name: and the root-child store did not die with somebody else's subtree
+      operator: {to: store, send: {type: reflect}}
+      expect: {contains: {id: store}}
+      because: C18
+
+    - name: the tree agrees — nothing of the doomed roster is left standing
+      assert_tree: {}
+      expect: {not_contains: {ids.*: a_notes}}
+      because: C18
+
+    # ── C17 · a delete_lock anywhere in the subtree refuses the WHOLE cascade ──
+    #
+    # Refused AND NOT PARTIALLY DONE. A cascade that deleted half a roster and
+    # then hit the lock would be the worst outcome: neither the old system nor
+    # the new one, and no reply saying which.
+
+    - name: the lock refuses the cascade and NAMES what blocked it
+      operator: {to: kernel, send: {type: delete_agent, id: l_b}}
+      expect:
+        reason: locked
+        contains: {blocked_by: b_vault, id: l_b}
+      because: C17
+
+    - name: and nothing in that subtree was taken on the way to the lock
+      operator: {to: b_leaf, send: {type: reflect}}
+      expect: {contains: {id: b_leaf}}
+      because: C17
+    - operator: {to: b_vault, send: {type: reflect}}
+      expect: {contains: {id: b_vault}}
+      because: C17
+
+    - name: clearing the lock the refusal named lets the same cascade through
+      operator: {to: kernel, send: {type: update_agent, id: b_vault, delete_lock: false}}
+    - operator: {to: kernel, send: {type: delete_agent, id: l_b}}
+      expect: {contains: {deleted: true}}
+      because: C17
