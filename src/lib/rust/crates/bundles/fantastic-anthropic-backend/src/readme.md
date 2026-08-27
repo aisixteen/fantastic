@@ -16,12 +16,20 @@ backends, so a caller retargets by changing one id.
 model's behalf, and emitting no `<tool_call>` ends the turn — stop is the
 default and costs nothing.
 
-Tool-calling is RAW and belongs to `fantastic-ai-core`. This backend NEVER sends
-Anthropic `tools`/`input_schema` nor reads `tool_use` blocks: the model writes the
-envelope as TEXT, the Anthropic `Provider` streams that text through as plain
-`text_delta` content knowing nothing about it, and ai-core parses and dispatches
-it. Wire translation is just the `system` role → Anthropic's top-level `system`
-param + alternating user/assistant TEXT turns.
+Tool-calling is RAW and belongs to `fantastic-ai-core`. By default this backend
+sends no Anthropic `tools`/`input_schema`: the model writes the envelope as TEXT,
+the Anthropic `Provider` streams that text through as plain `text_delta` content
+knowing nothing about it, and ai-core parses and dispatches it. Wire translation
+is just the `system` role → Anthropic's top-level `system` param + alternating
+user/assistant TEXT turns.
+
+**Optional `tool_use` route.** Set `tool_use: true` on the record and this
+provider declares the ONE `send` tool and TRANSLATES the `tool_use` blocks it
+receives back into exactly the same `<tool_call>` text envelope — arguments are
+accumulated from `input_json_delta` fragments and re-emitted when the block
+closes. It is off by default and changes nothing else: ai-core's parser never
+learns a vendor dialect, so RAW stays the contract and the translation lives at
+the edge. Use it only for an endpoint that answers better in its native syntax.
 
 ```
 <tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>

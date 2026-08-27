@@ -186,7 +186,7 @@ handler.
 $FANTASTIC core create_agent handler_module=tools.tools id=tools
 $FANTASTIC core create_agent handler_module=proxy_agent.tools id=fm
 
-# 2. Register the host LLM impl in process: kernel.register_proxy_agent("fm", host).
+# 2. Register the host LLM impl in process: register_host("fm", host).
 #    The host's handle({type:"send"}) pulls list_for_llm internally and
 #    streams tokens back as emit events on the fm agent's own inbox.
 
