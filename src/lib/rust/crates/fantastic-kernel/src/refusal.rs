@@ -132,6 +132,18 @@ pub fn missing(verb: &str, arg: &str) -> Value {
     v
 }
 
+/// `missing` WITH a recipe. Use this rather than `refusal_hint(MISSING_ARG, …)`:
+/// the hand-rolled form drops the machine-readable `arg`, which is the whole
+/// point of the code. Measured by the shared C21 corpus 2026-08-27 —
+/// `create_agent: parent_id required` carried a hint and no `arg`, so python's
+/// reply and ours disagreed on a field a caller branches on.
+#[must_use]
+pub fn missing_hint(verb: &str, arg: &str, hint: impl Into<String>) -> Value {
+    let mut v = missing(verb, arg);
+    with(&mut v, "hint", Value::String(hint.into()));
+    v
+}
+
 /// Present but unusable — say what was WANTED, not just that it was wrong.
 #[must_use]
 pub fn bad(verb: &str, arg: &str, want: &str) -> Value {

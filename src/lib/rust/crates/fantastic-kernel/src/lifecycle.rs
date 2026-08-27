@@ -86,9 +86,9 @@ pub(crate) async fn create_from_payload(
     // with no error. The working mechanism was undiscoverable and the field
     // that looked like it expressed placement did nothing.
     let Some(pid) = payload.get("parent_id").and_then(Value::as_str) else {
-        return crate::refusal::refusal_hint(
-            crate::refusal::MISSING_ARG,
-            "create_agent: parent_id required",
+        return crate::refusal::missing_hint(
+            "create_agent",
+            "parent_id",
             "name the OWNER of the new agent — your own id grows your own \
              subtree (no grant needed); the root id for top-level.",
         );
@@ -260,7 +260,7 @@ pub(crate) async fn delete_from_payload(
     payload: &Value,
 ) -> Value {
     let Some(id_str) = payload.get("id").and_then(Value::as_str) else {
-        return json!({ "error": "delete_agent requires id" });
+        return crate::refusal::missing("delete_agent", "id");
     };
     let id = AgentId::from(id_str);
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {

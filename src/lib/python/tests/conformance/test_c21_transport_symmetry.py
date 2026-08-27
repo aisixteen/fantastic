@@ -36,7 +36,6 @@ import types
 from pathlib import Path
 
 import pytest
-import yaml
 from fastapi import FastAPI
 
 from _testkit import boot_root
@@ -46,7 +45,26 @@ from relay_connector import tools as rc
 from ws_bridge import tools as wb
 from web_rest.tools import _make_post_endpoint
 
-CASES = yaml.safe_load((Path(__file__).parent / "c21_cases.yaml").read_text())
+# THE SHARED CORPUS, at the repo root — rust, swift and ts drivers read this
+# same file. It is JSON so every runtime parses it with what it already has (the
+# ts kernel ships zero runtime deps); JSON is valid YAML, so nothing was lost in
+# the move from `c21_cases.yaml`.
+_CORPUS = Path(__file__).resolve().parents[5] / "conformance" / "cases.json"
+_DOC = json.loads(_CORPUS.read_text())
+# `$root` means THIS runtime's root id. Parity asserts the per-runtime value,
+# never equality — python's root is `kernel_state`, rust's and swift's is `core`.
+ROOT_ID = "kernel_state"
+
+
+def _subst_root(v):
+    if isinstance(v, dict):
+        return {k: _subst_root(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_subst_root(x) for x in v]
+    return ROOT_ID if v == "$root" else v
+
+
+CASES = [_subst_root(c) for c in _DOC["cases"]]
 
 # ─── the probe bundle: deterministic, storeless ──────────────────
 
