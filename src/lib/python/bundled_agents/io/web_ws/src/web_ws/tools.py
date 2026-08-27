@@ -23,6 +23,7 @@ from fastapi import WebSocket
 
 from io_bridge import describe as _describe
 from web_ws._proxy import run as _proxy_run
+from kernel._refusal import UNHANDLED, refusal
 
 
 # ─── route endpoint ─────────────────────────────────────────────
@@ -94,5 +95,5 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"web_ws: unknown type {t!r}"}
+        return refusal(UNHANDLED, f"web_ws: unknown type {t!r}", verb=t)
     return await fn(id, payload, kernel)

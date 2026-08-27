@@ -32,7 +32,15 @@ from pathlib import PurePosixPath
 from file_bridge import fs
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
-from kernel._refusal import UNAUTHORIZED, refusal
+from kernel._refusal import (
+    NOT_FOUND,
+    TRANSPORT_ERROR,
+    UNAUTHORIZED,
+    UNHANDLED,
+    bad,
+    missing,
+    refusal,
+)
 
 DEFAULT_HIDDEN = [".git", ".env", ".fantastic", "node_modules", "__pycache__"]
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
@@ -168,13 +176,13 @@ async def _list(id, payload, kernel):
     path = payload.get("path", "")
     try:
         if not fs.exists(root, path):
-            return {"error": f"path {path!r} does not exist"}
+            return refusal(NOT_FOUND, f"path {path!r} does not exist", path=path)
         if not fs.is_dir(root, path):
-            return {"error": f"path {path!r} is not a directory"}
+            return bad("list", "path", f"a directory; {path!r} is not one")
         rdir = fs.resolve_root(root)
         entries = fs.list_dir(root, path)
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     hidden = _hidden(rec)
     files = []
     for entry in entries:
@@ -200,7 +208,7 @@ async def _read(id, payload, kernel):
     ext = PurePosixPath(path).suffix.lower()
     try:
         if not fs.is_file(root, path):
-            return {"error": f"file {path!r} not found"}
+            return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
         if ext in IMAGE_EXT:
             data = fs.read_bytes(root, path)
             mime = {
@@ -230,7 +238,7 @@ async def _read(id, payload, kernel):
                 "mime": mime or "application/octet-stream",
             }
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "content": content, **window}
 
 
@@ -244,7 +252,7 @@ async def _write(id, payload, kernel):
     try:
         fs.write_text(_root_str(rec), path, content)
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "written": True, "bytes": len(content.encode("utf-8"))}
 
 
@@ -259,10 +267,10 @@ async def _delete(id, payload, kernel):
     path = payload.get("path", "")
     try:
         if not fs.exists(root, path):
-            return {"error": f"path {path!r} does not exist"}
+            return refusal(NOT_FOUND, f"path {path!r} does not exist", path=path)
         fs.remove(root, path, recursive=bool(payload.get("recursive")))
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "deleted": True}
 
 
@@ -276,10 +284,10 @@ async def _rename(id, payload, kernel):
     new = payload.get("new_path", "")
     try:
         if not fs.exists(root, old):
-            return {"error": f"path {old!r} does not exist"}
+            return refusal(NOT_FOUND, f"path {old!r} does not exist", path=old)
         fs.rename(root, old, new)
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"old_path": old, "new_path": new}
 
 
@@ -292,7 +300,7 @@ async def _mkdir(id, payload, kernel):
     try:
         fs.mkdir(_root_str(rec), path)
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "created": True}
 
 
@@ -316,10 +324,10 @@ async def _read_stream(id, payload, kernel):
     length = int(payload.get("length", 65536) or 65536)
     try:
         if not fs.is_file(root, path):
-            return {"error": f"file {path!r} not found"}
+            return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
         chunk, size = fs.read_chunk(root, path, offset, length)
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     next_offset = offset + len(chunk)
     return {
         "path": path,
@@ -344,7 +352,7 @@ async def _write_stream(id, payload, kernel):
     path = payload.get("path", "")
     data = payload.get("bytes", b"")
     if not isinstance(data, (bytes, bytearray)):
-        return {"error": "write_stream: `bytes` (one raw chunk) required"}
+        return missing("write_stream", "bytes (one raw chunk)")
     data = bytes(data)
     off_in = payload.get("offset")
     try:
@@ -356,7 +364,7 @@ async def _write_stream(id, payload, kernel):
             truncate=bool(payload.get("truncate")),
         )
     except (ValueError, OSError) as e:
-        return {"error": str(e)}
+        return refusal(TRANSPORT_ERROR, str(e))
     return {"path": path, "written": len(data), "offset": off, "size": size}
 
 
@@ -396,7 +404,7 @@ async def _pump(id, payload, kernel):
         if not isinstance(r, dict) or not isinstance(
             r.get("bytes"), (bytes, bytearray)
         ):
-            return {"error": f"pump: read from {src!r} failed: {r}"}
+            return refusal(TRANSPORT_ERROR, f"pump: read from {src!r} failed: {r}")
         w = (
             await kernel.send(
                 [
@@ -414,7 +422,7 @@ async def _pump(id, payload, kernel):
             )
         )[0]["result"]
         if not isinstance(w, dict) or w.get("error"):
-            return {"error": f"pump: write to {sink!r} failed: {w}"}
+            return refusal(TRANSPORT_ERROR, f"pump: write to {sink!r} failed: {w}")
         first, chunks = False, chunks + 1
         offset = r["next_offset"]
         if r.get("eof"):
@@ -471,7 +479,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"file_bridge: unknown type {t!r}"}
+        return refusal(UNHANDLED, f"file_bridge: unknown type {t!r}", verb=t)
     if t not in UNGATED:
         # AUTH GATE — the fs edge, gated like any io_bridge leg (sealed by default).
         decision = gate_inbound(

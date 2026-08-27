@@ -37,6 +37,7 @@ from kernel import sender_context
 
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
+from kernel._refusal import UNHANDLED, refusal
 
 
 # ─── auth gate (the io_bridge ingress rule on THIS leg) ─────────
@@ -239,5 +240,5 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
-        return {"error": f"web_rest: unknown type {t!r}"}
+        return refusal(UNHANDLED, f"web_rest: unknown type {t!r}", verb=t)
     return await fn(id, payload, kernel)

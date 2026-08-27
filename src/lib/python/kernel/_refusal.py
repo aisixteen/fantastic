@@ -46,6 +46,7 @@ LOCKED = "locked"  # `delete_lock` (carries `id`)
 NOT_HERE = "not_here"  # right verb, wrong agent — kernel verbs are root-only
 EXISTS = "exists"  # an id that is already taken (carries `id`)
 UNHANDLED = "unhandled"  # the agent has no such verb (carries `verb`)
+NOT_FOUND = "not_found"  # the named THING is absent — a path, a job, a key
 
 # Transport codes — a leg that could not carry the call at all. Owned by
 # `relay_connector` today; listed here because they share the field, and a caller
@@ -66,6 +67,7 @@ CODES = frozenset(
         NOT_HERE,
         EXISTS,
         UNHANDLED,
+        NOT_FOUND,
         NOT_CONNECTED,
         TRANSPORT_ERROR,
         TRANSPORT_CLOSED,
@@ -100,3 +102,42 @@ def missing(verb: str, arg: str, *, hint: str = "") -> dict:
 def bad(verb: str, arg: str, want: str, *, hint: str = "") -> dict:
     """Present but unusable — say what was wanted, not just that it was wrong."""
     return refusal(BAD_ARG, f"{verb}: {arg} must be {want}", hint=hint, arg=arg)
+
+
+def guard_agent_id(verb: str, agent_id: object) -> dict | None:
+    """Refuse an agent id that is not ONE SAFE PATH SEGMENT. Returns a refusal,
+    or None when the id is fine.
+
+    An agent id is not just a name — it BECOMES A DIRECTORY. `kernel_state`
+    builds a record's on-disk home by joining the id onto the store root
+    (`_resolve_path`), so an id carrying `..` or a separator walks out of the
+    store and the write, or the `rmtree`, lands wherever it pointed.
+
+    Measured 2026-08-28: an agent holding NO explicit grant at all — only the
+    structural baseline, which lets any child call its own parent — sent
+    `{"type": "forget_record", "id": "../../important_project_dir"}` to the root
+    loader and recursively deleted a directory OUTSIDE the store entirely. The
+    call gate was not bypassed; it correctly allowed a child to call its parent,
+    and `forget_record` is correctly not a privileged verb. Nothing validated
+    the id.
+
+    The same discipline already existed one screen away for blob filenames
+    (`_guard_blob_name`) and simply was never applied to ids. It is enforced HERE
+    — at the kernel, where ids are minted — so every consumer inherits it rather
+    than each remembering.
+    """
+    if not isinstance(agent_id, str) or not agent_id:
+        return bad(verb, "id", "a non-empty string")
+    if "/" in agent_id or "\\" in agent_id:
+        return bad(
+            verb, "id", f"a single path segment (no separators); got {agent_id!r}"
+        )
+    if agent_id == "." or agent_id == ".." or ".." in agent_id:
+        return bad(verb, "id", f"a name that is not a path traversal; got {agent_id!r}")
+    if agent_id.startswith("."):
+        return bad(verb, "id", f"a name that is not hidden; got {agent_id!r}")
+    if ":" in agent_id:
+        # The minted-pid namespace. An id carrying a colon would collide with
+        # `<agent>:<hex>` in the one id space the ledger and task table share.
+        return bad(verb, "id", f"a name without ':' (the minted-pid namespace); got {agent_id!r}")
+    return None

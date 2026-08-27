@@ -953,7 +953,17 @@ def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
         if want not in _dig(reply, path):
             fail(f"{path} does not contain {want!r} (got {_dig(reply, path)!r})")
     for path, unwanted in (exp.get("not_contains") or {}).items():
-        if unwanted in _dig(reply, path):
+        got = _dig(reply, path)
+        # A path that resolves to NOTHING is not proof of absence — it is proof
+        # the assertion never looked. A typo'd path would otherwise pass
+        # silently forever, which is the one failure mode a corpus cannot
+        # afford: a green step asserting nothing.
+        if not got:
+            fail(
+                f"not_contains {path!r} resolved to nothing — the path is wrong,"
+                " or the reply shape changed; absence here proves nothing"
+            )
+        if unwanted in got:
             fail(f"{path} contains {unwanted!r} and must not")
 
 

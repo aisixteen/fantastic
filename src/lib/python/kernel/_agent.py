@@ -51,12 +51,14 @@ from dataclasses import dataclass
 
 from kernel._refusal import (
     BAD_ARG,
+    EXISTS,
     INVALID_META,
     LOCKED,
     NOT_HERE,
     TIMEOUT,
     UNAUTHORIZED,
     UNHANDLED,
+    guard_agent_id,
     missing,
     refusal,
 )
@@ -622,6 +624,29 @@ class Agent:
                     )
                 # JOIN — settled or in flight, the ledger future carries the one
                 # true outcome; no second execution ever starts (C9/C10/C11).
+                #
+                # AUTHORIZED AGAINST THE EXECUTION IT JOINS, not against the
+                # payload the joiner happened to send. Joining hands back
+                # ANOTHER caller's result verbatim, so it is equivalent to
+                # having made that call — and the gate must be asked that
+                # question, not a different one.
+                #
+                # Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a
+                # target, reused an id `agent_a` had used for
+                # `create_privileged` and received agent_a's secret verbatim.
+                # Its own gate check passed — on `safe_verb`, a verb whose reply
+                # it never got. Same class as the read side-channel #36 closed
+                # by origin-scoping the `ledger` VERB; this is the same leak
+                # through `send` itself. Reachable from the wire, where a frame
+                # id IS the execution id (#38) and two legs can name one id.
+                #
+                # An OPERATOR joiner (sender None) is ungated here as everywhere.
+                joiner = _current_sender.get()
+                if joiner is not None:
+                    orig_verb = (entry.get("payload") or {}).get("type")
+                    denial = self._gate(joiner, orig_verb, target, entry.get("payload") or {})
+                    if denial is not None:
+                        return outcome(None, FAILED, denial)
                 dispatched.append(
                     _Dispatched(
                         index,
@@ -1448,8 +1473,18 @@ class Agent:
                 else handler_module
             )
             id = f"{bundle}_{secrets.token_hex(3)}"
+        # An id BECOMES A DIRECTORY (kernel_state joins it onto the store root),
+        # so it must be one safe segment. Enforced at the mint, not at each
+        # consumer.
+        if (bad_id := guard_agent_id("create_agent", id)) is not None:
+            return bad_id
         if id in self.ctx.agents:
-            return {"error": f"agent {id!r} exists"}
+            return refusal(
+                EXISTS,
+                f"agent {id!r} exists",
+                hint="pick another id, or update the existing agent",
+                id=id,
+            )
         # Agent.__init__ wires up parent._children + publishes the
         # `added` state event when parent is set.
         child = Agent(

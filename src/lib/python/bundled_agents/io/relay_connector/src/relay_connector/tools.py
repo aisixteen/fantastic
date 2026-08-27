@@ -43,6 +43,7 @@ from io_bridge import (  # noqa: F401
     _state,
     _test_transport_inject,
 )
+from kernel._refusal import NOT_CONNECTED, bad, refusal
 from relay_connector._relay import (
     ROLES,
     SENTENCE,
@@ -68,7 +69,7 @@ async def _list_peers(id, payload, kernel):
     relay's own `relay` agent (target:"relay"), not the partner. Boot first."""
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {"error": "relay_connector.list_peers: not connected (call boot first)"}
+        return refusal(NOT_CONNECTED, "relay_connector.list_peers: not connected", hint="call boot first")
     return await st.transport.list_peers(timeout=float(payload.get("timeout", 30.0)))
 
 
@@ -109,7 +110,7 @@ async def _set_identity(id, payload, kernel):
         and payload["role"] is not None
         and payload["role"] not in ROLES
     ):
-        return {"error": f"relay_connector.set_identity: role must be one of {ROLES}"}
+        return bad("set_identity", "role", f"one of {ROLES}")
     # Merge only the provided well-known keys into the record + persist (an explicit
     # null retracts a field, e.g. owner_guid:null = become standalone).
     patch = {k: payload[k] for k in ("role", "owner_guid", "exposes") if k in payload}

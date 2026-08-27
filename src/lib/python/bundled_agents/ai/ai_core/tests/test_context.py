@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import types
 
+import pytest
+
 from ai_core import core
 from ai_core.context import (
     DEFAULT_CONTEXT_WINDOW,
@@ -622,3 +624,41 @@ def test_a_turn_whose_every_block_is_superseded_drops_entirely():
     contents = [m["content"] for m in out]
     assert not any("OLD" in c for c in contents)
     assert len(out) == 3, "the emptied turn leaves no husk behind"
+
+
+# ── the SEAM must not undo what the strategies pinned ────────────────
+
+
+@pytest.mark.parametrize("strategy", ["compact", "truncate"])
+@pytest.mark.parametrize("window", [300, 400, 500, 700, 900, 1200])
+async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
+    """`test_every_strategy_keeps_the_goal_when_the_body_overflows` calls the
+    strategies DIRECTLY, so it never saw the layer that undid them.
+
+    `_project_context` appends the real notice and then trims to fit. It trimmed
+    from the FRONT — exactly where `compact`/`truncate` had just pinned the goal
+    turn — so a snug window silently dropped the one turn the whole run serves.
+    Measured 2026-08-28: the goal sentence was absent from the projection across
+    a wide band of windows, in BOTH strategies. The cause was a notice envelope
+    reserved at 80 tokens against a real ~132, which put the projection over
+    budget and woke the backstop.
+
+    This asserts through the seam, which is the only place the bug was visible.
+    """
+    goal = "GOAL-SENTINEL: build the widget and report when done"
+    msgs = [_turn("system", "sys"), _turn("user", goal)] + _body(40)
+    out = await _project_context(
+        {"context_window": window, "output_reserve": 0, "context_strategy": strategy},
+        _cfg(),
+        _FakeProvider(),
+        "ai",
+        _FakeKernel(),
+        "cli",
+        msgs,
+    )
+    assert estimate_tokens(out) <= window, "the projection must still fit"
+    kept = any(goal in (m.get("content") or "") for m in out)
+    assert kept, (
+        f"{strategy}@{window}: the pinned goal turn was dropped by the seam — "
+        f"kept {[m.get('role') for m in out]}"
+    )

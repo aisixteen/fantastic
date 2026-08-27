@@ -1362,7 +1362,18 @@ async def _project_context(
     # final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the last
     # (live) turn: the failsafe above guarantees room for [notice + live turn], so the
     # `len > 1` guard is a defensive backstop, not a fallback.
+    # Trim from the MIDDLE, not the front. `out_body[0]` is the goal turn every
+    # strategy deliberately pins (`compact`/`truncate` both put it first); the
+    # last entry is the live turn. Taking from the front silently undid the pin
+    # — the exact regression the pin exists to prevent, re-introduced one layer
+    # up. Measured 2026-08-28: with a snug window the goal sentence was absent
+    # from the projection entirely, in both strategies.
     out_body = proj.body
+    while len(out_body) > 2 and estimate_tokens(system_block + [notice] + out_body) > b:
+        out_body = drop_orphan_tools([out_body[0]] + out_body[2:])
+    # Last resort, and only when nothing else is left to give: [goal, live] still
+    # over budget. The live turn is what the model must answer, so the goal is
+    # what goes — loudly, in the notice's own count, not silently.
     while len(out_body) > 1 and estimate_tokens(system_block + [notice] + out_body) > b:
         out_body = drop_orphan_tools(out_body[1:])
     dropped_n = max(0, len(body) - len(out_body))
