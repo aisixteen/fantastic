@@ -21,18 +21,28 @@ struct ThinkingTests {
         #expect(withoutThinking("a<think>one</think>b<think>two</think>c") == "abc")
     }
 
-    @Test func aToolCallInsideASpanStaysVisibleToTheParser() {
-        // The whole point of the split: the model wrote its call mid-thought.
-        // The RAW text is what a reader parses (the call dispatches), the
-        // STRIPPED text is what the conversation keeps.
+    @Test func aToolCallInsideASpanSurvivesIntoHistory() {
+        // The RAW text is parsed (the call dispatches) and the STRIPPED text is
+        // persisted — so a call the model wrote mid-thought stays in the record.
+        //
+        // It used to be stripped with the reasoning, and the consequence was a
+        // record we had silently edited: the call RAN, returned a reply, and
+        // left no cause behind it. The model then read an effect it never
+        // caused. Reasoning is still dropped; the INVOCATION is not.
         let call =
             #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect"}}}</tool_call>"#
         let raw = "<think>I should check the tree first. \(call)</think>Checking."
         let calls = extractToolCalls(raw)
         #expect(calls.count == 1)
         #expect(calls[0].arguments["target_id"].asString == "core")
-        // …and the deliberation (call text included) never reaches history.
-        #expect(withoutThinking(raw) == "Checking.")
+
+        let kept = withoutThinking(raw)
+        #expect(kept.contains(call), "the invocation was erased: \(kept)")
+        #expect(kept.contains("Checking."))
+        #expect(!kept.contains("I should check"), "the reasoning must still go")
+        // ...and what we persisted still parses to the same one call, so history
+        // and dispatch agree.
+        #expect(extractToolCalls(kept).count == 1)
     }
 
     @Test func anUnterminatedSpanDropsItsTail() {

@@ -10,20 +10,18 @@ import Testing
 struct KernelStateTests {
     @Test func snapshotIncludesAllAgents() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "alpha",
-            ])
-        _ = await kernel.send(
-            "core",
-            [
+            ])])[0].result
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "beta",
-            ])
+            ])])[0].result
         let snap = kernel.snapshotState()
         #expect(snap.version == 1)
         #expect(snap.agents.count == 3)  // core + alpha + beta
@@ -34,20 +32,19 @@ struct KernelStateTests {
 
     @Test func saveJSONRoundTrip() async throws {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "echo.tools",
                 "id": "x",
-            ])
+            ])])[0].result
         let json = try kernel.saveJSON()
         // Round-trip through a fresh kernel.
         let registry = BundleRegistry()
         registry.register("echo.tools", EchoBundle())
         let kernel2 = Kernel(storage: .inMemory, bundles: registry)
         try kernel2.loadJSON(json)
-        let listed = await kernel2.send("core", ["type": "list_agents"])
+        let listed = await kernel2.send([Item("core", ["type": "list_agents"])])[0].result
         let ids = (listed["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(ids.contains("core"))
         #expect(ids.contains("x"))

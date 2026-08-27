@@ -135,8 +135,17 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                     Self.writeReply(channel: channel, id: id, data: denied)
                     return
                 }
+                // THE FRAME ID IS THE EXECUTION ID. One id space: the
+                // correlation id a client already sends NAMES the execution, so
+                // the same id arriving twice — a double-click, a second tab, a
+                // reconnect replaying its queue — is ONE intent, deduped and
+                // joined by the ledger instead of running the side effect twice.
+                // There is deliberately no second `exec_id` field.
+                //
                 // Field MUST be `data` — transport.js reads `msg.data`.
-                let reply = await kernel.send(AgentId(target), payload)
+                let reply = await kernel.send([
+                    Item.fromFrame(AgentId(target), payload, frameId: id)
+                ])[0].result
                 Self.writeReply(channel: channel, id: id, data: reply)
             }
         case "emit":

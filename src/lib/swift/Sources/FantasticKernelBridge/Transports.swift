@@ -3,7 +3,7 @@
 // The bridge is WS-only (asymmetric client): it opens a WS to the
 // remote kernel's `web_ws` endpoint and ships **raw call frames** —
 // `{type:"call", id, target, payload}`. The remote's `web_ws`
-// dispatches via `kernel.send(target, payload)` exactly like a
+// dispatches via `kernel.send([Item(target, payload)])[0].result` exactly like a
 // browser frame; the matching `{type:"reply", id, data}` flows
 // back. No B-side bridge agent needed.
 //

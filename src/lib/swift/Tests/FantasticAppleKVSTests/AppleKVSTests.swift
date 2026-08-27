@@ -21,13 +21,12 @@ struct AppleKVSTests {
         let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("apple_kvs.tools"),
                 "id": .string("kv"),
-            ]))
+            ]))])[0].result
         return (kernel, AgentId("kv"))
     }
 
@@ -39,41 +38,36 @@ struct AppleKVSTests {
 
     @Test func roundTripSetGetDelete() async throws {
         let (kernel, kv) = await bootKV(available())
-        var r = await kernel.send(
-            kv,
-            .object([
+        var r = await kernel.send([Item(kv, .object([
                 "type": .string("set"), "key": .string("nodes.a"),
                 "value": .object(["host": .string("h1"), "port": .integer(9)]),
-            ]))
+            ]))])[0].result
         #expect(r["set"].asBool == true)
 
-        r = await kernel.send(kv, .object(["type": .string("read"), "key": .string("nodes.a")]))
+        r = await kernel.send([Item(kv, .object(["type": .string("read"), "key": .string("nodes.a")]))])[0].result
         #expect(r["value"]["host"].asString == "h1")
         #expect(r["value"]["port"].asInt == 9)
 
-        r = await kernel.send(kv, .object(["type": .string("read"), "key": .string("nope")]))
+        r = await kernel.send([Item(kv, .object(["type": .string("read"), "key": .string("nope")]))])[0].result
         #expect(r["value"].isNull)
 
-        r = await kernel.send(kv, .object(["type": .string("delete"), "key": .string("nodes.a")]))
+        r = await kernel.send([Item(kv, .object(["type": .string("delete"), "key": .string("nodes.a")]))])[0].result
         #expect(r["deleted"].asBool == true)
-        r = await kernel.send(kv, .object(["type": .string("read"), "key": .string("nodes.a")]))
+        r = await kernel.send([Item(kv, .object(["type": .string("read"), "key": .string("nodes.a")]))])[0].result
         #expect(r["value"].isNull)
     }
 
     @Test func listFiltersByPrefix() async throws {
         let (kernel, kv) = await bootKV(available())
         for (k, v) in [("nodes.a", "1"), ("nodes.b", "2"), ("recents.x", "3")] {
-            _ = await kernel.send(
-                kv,
-                .object(["type": .string("set"), "key": .string(k), "value": .string(v)]))
+            _ = await kernel.send([Item(kv, .object(["type": .string("set"), "key": .string(k), "value": .string(v)]))])[0].result
         }
-        var r = await kernel.send(
-            kv, .object(["type": .string("list"), "prefix": .string("nodes.")]))
+        var r = await kernel.send([Item(kv, .object(["type": .string("list"), "prefix": .string("nodes.")]))])[0].result
         let nodeKeys = (r["keys"].asArray ?? []).map { $0["key"].asString ?? "" }
         #expect(nodeKeys == ["nodes.a", "nodes.b"])
         for item in r["keys"].asArray ?? [] { #expect((item["size"].asInt ?? -1) >= 0) }
 
-        r = await kernel.send(kv, .object(["type": .string("list")]))
+        r = await kernel.send([Item(kv, .object(["type": .string("list")]))])[0].result
         let allKeys = (r["keys"].asArray ?? []).map { $0["key"].asString ?? "" }
         #expect(allKeys == ["nodes.a", "nodes.b", "recents.x"])
     }
@@ -81,9 +75,7 @@ struct AppleKVSTests {
     @Test func setRejectsOversizeValue() async throws {
         let (kernel, kv) = await bootKV(available())
         let big = String(repeating: "x", count: 1_048_577)  // > 1 MB per-value limit
-        let r = await kernel.send(
-            kv,
-            .object(["type": .string("set"), "key": .string("nodes.big"), "value": .string(big)]))
+        let r = await kernel.send([Item(kv, .object(["type": .string("set"), "key": .string("nodes.big"), "value": .string(big)]))])[0].result
         #expect(r["set"].asBool == nil)
         #expect(r["error"].asString?.contains("per-value") == true)
         #expect(r["hint"].asString?.contains("CloudKit") == true)
@@ -91,10 +83,8 @@ struct AppleKVSTests {
 
     @Test func reflectShapeWhenAvailable() async throws {
         let (kernel, kv) = await bootKV(available())
-        _ = await kernel.send(
-            kv,
-            .object(["type": .string("set"), "key": .string("nodes.a"), "value": .string("v")]))
-        let r = await kernel.send(kv, .object(["type": .string("reflect")]))
+        _ = await kernel.send([Item(kv, .object(["type": .string("set"), "key": .string("nodes.a"), "value": .string("v")]))])[0].result
+        let r = await kernel.send([Item(kv, .object(["type": .string("reflect")]))])[0].result
         #expect(r["backing"].asString == "apple_kvs")
         #expect(r["available"].asBool == true)
         #expect(r["synced"].asBool == true)
@@ -117,13 +107,12 @@ struct AppleKVSTests {
         let (kernel, kv) = await bootKV(bundle)
 
         for verb in ["read", "list", "set", "delete"] {
-            let r = await kernel.send(
-                kv, .object(["type": .string(verb), "key": .string("nodes.a")]))
+            let r = await kernel.send([Item(kv, .object(["type": .string(verb), "key": .string("nodes.a")]))])[0].result
             #expect(r["unavailable"].asBool == true, "\(verb) should be gated")
             #expect(r["reason"].asString == "test: offline")
             #expect(r["value"].asString == nil)  // no cached leak
         }
-        let rr = await kernel.send(kv, .object(["type": .string("reflect")]))
+        let rr = await kernel.send([Item(kv, .object(["type": .string("reflect")]))])[0].result
         #expect(rr["available"].asBool == false)
         #expect(rr["key_count"].asInt == 0)  // unavailable → don't trust the cache
     }
@@ -131,7 +120,7 @@ struct AppleKVSTests {
     #if canImport(Darwin)
         @Test func watchEmitsChangedOnExternalUpdate() async throws {
             let (kernel, kv) = await bootKV(available())
-            _ = await kernel.send(kv, .object(["type": .string("boot")]))
+            _ = await kernel.send([Item(kv, .object(["type": .string("boot")]))])[0].result
 
             let watcher = AgentId("test_watcher")
             kernel.watch(src: kv, watcher: watcher)
@@ -147,7 +136,7 @@ struct AppleKVSTests {
             #expect(ev?["type"].asString == "changed")
             #expect((ev?["keys"].asArray ?? []).map { $0.asString } == ["nodes.x"])
 
-            _ = await kernel.send(kv, .object(["type": .string("shutdown")]))
+            _ = await kernel.send([Item(kv, .object(["type": .string("shutdown")]))])[0].result
         }
     #endif
 }

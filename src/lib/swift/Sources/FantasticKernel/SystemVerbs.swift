@@ -11,9 +11,21 @@ extension Kernel {
     /// Dispatch a substrate verb. Caller has already established
     /// the `currentSender` task-local scope.
     func handleSystemVerb(target: Agent, verb: String, payload: JSON) async -> JSON {
+        // ROOT ONLY. These verbs act on the TREE and the kernel-wide task table,
+        // so the agent named is the OPERAND, not the actor. Answered everywhere,
+        // "send create_agent to X" could mean X performs it, X is created under
+        // something, or X is the parent — only the last was ever true, and a
+        // model asked "which target?" for 16 turns and finished with nothing
+        // created.
+        //
+        // Refused HERE, in the handler — not at the call gate — so probes
+        // asserting a denial `side` for a non-root privileged send stay valid.
+        if target.parentId != nil {
+            return Refusal.notHere(verb, target.id.value)
+        }
         switch verb {
         case "list_agents":
-            return listAgentsReply()
+            return listAgentsReply(payload)
         case "create_agent":
             return await createFromPayload(parent: target, payload: payload)
         case "delete_agent":
@@ -25,8 +37,30 @@ extension Kernel {
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
+        // The EXECUTION LEDGER, ORIGIN-SCOPED: an agent sees only what it
+        // originated, the operator sees all. Unscoped this would be a
+        // side-channel around `callable_by` — reading other agents' result
+        // bodies without ever being granted an edge to them.
+        case "persist_blob":
+            return await persistBlob(payload)
+        case "load_blob":
+            return await loadBlob(payload)
+        case "ledger":
+            let rows = ledger.rows(for: KernelTaskLocals.currentOrigin)
+            let (paged, next) = page(rows, payload) { $0["id"].asString ?? "" }
+            return .object([
+                "executions": .array(paged),
+                "next": next.map { JSON.string($0) } ?? .null,
+            ])
         case "ps":
-            return .object(["tasks": .array(tasks.rows())])
+            // PAGED like `list_agents` — same cursor law: the id of the last row
+            // handed over. Over a LIVE table a cursor may miss a row that
+            // finished mid-walk; this is a kernel, not a snapshot store.
+            let (rows, next) = page(tasks.rows(), payload) { $0["id"].asString ?? "" }
+            return .object([
+                "tasks": .array(rows),
+                "next": next.map { JSON.string($0) } ?? .null,
+            ])
         // Kill a task AND ITS SUBTREE (children first, like killing a process
         // group). Each bundle's `onCancel` hook runs BEFORE the abort so real
         // resources (OS subprocesses, PTYs, HTTP streams) die with it. An unknown
@@ -46,28 +80,95 @@ extension Kernel {
     /// they appear in no bundle's map and are advertised on the ROOT reflect (see
     /// `applyReflectFlags`). Mirrors Python's `_SYSTEM_VERB_DOCS` / Rust's
     /// `system_verb_docs`.
-    static func systemVerbDocs() -> JSON {
+    /// One line per KERNEL verb — the honest reflect surface.
+    ///
+    /// These are the SUBSTRATE's own verbs, answered by the ROOT alone, so they
+    /// appear in no bundle's map. Mirrors python's `_SYSTEM_VERB_DOCS`.
+    ///
+    /// THE CONSEQUENCE MUST PRECEDE THE FIRST EM-DASH. A default reflect keeps
+    /// only the text BEFORE it, so anything after the dash reaches
+    /// `detail:"full"` callers only — and these are the facts a caller needs
+    /// BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent`
+    /// read as `args: handler_module:str, id:str?, **meta` with "spawn a child
+    /// agent" cut, and a model spent 16 turns unable to work out what the target
+    /// meant, finishing with `agents_created: []`.
+    static func kernelVerbDocs() -> JSON {
         .object([
             "create_agent": .string(
-                "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it."),
-            "update_agent": .string("args: id:str, **meta — patch a record's meta."),
+                "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. "
+                    + "Creates a CHILD OF `parent_id` — your own id grows your own subtree "
+                    + "(no grant needed); 'core' for top-level. No default parent."),
+            "update_agent": .string(
+                "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED "
+                    + "(a field you do not name is untouched), so a dict field must be sent "
+                    + "WHOLE — `can_call`/`callable_by` included: restate every key you want "
+                    + "to keep, the baseline `$self`/`$parent`/`$children` among them, or the "
+                    + "keys you omit are GONE. Granting one edge reads like a PATCH and "
+                    + "behaves like a PUT."),
             "delete_agent": .string(
-                "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses)."),
-            "list_agents": .string("No args. Every agent's record, flat."),
-            "get": .string("args: id:str — one agent's record (null if unknown)."),
+                "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
+                    + "deepest first; refuses if any descendant carries `delete_lock`."),
+            "list_agents": .string("No args. Every agent's record, flat. Paged."),
+            "get": .string("args: id:str. One agent's record — null if unknown."),
             "ps": .string(
-                "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}. "
-                    + "One row per in-flight dispatch; `parent` chains them into the send tree."),
+                "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
+                    + "verb, started_at}]}, one row per in-flight dispatch. Paged."),
+            "persist_blob": .string(
+                "args: agent_id:str, name:str, content:str. Persist one of YOUR OWN "
+                    + "sidecars through the kernel's store — a whole-file write at "
+                    + "agents/<agent_id>/<name>. You never compute a path or wire a "
+                    + "provider. An agent may only name ITSELF."),
+            "load_blob": .string(
+                "args: agent_id:str, name:str. Read one of YOUR OWN sidecars back — "
+                    + "{name, content:str|null}; null means never written. An agent may "
+                    + "only name ITSELF."),
+            "ledger": .string(
+                "No args. Executions and what they became — {executions:[{id, target, "
+                    + "status, attempts, retries, outcome?}]}, paged, scoped to what YOU "
+                    + "originated. failed/timed_out/cancelled rows are the DEAD-LETTER "
+                    + "QUEUE — inspect, then retry with a NEW id if you choose; nothing is "
+                    + "retried silently."),
             "cancel": .string(
-                "args: task_id:str — kill that task AND ITS SUBTREE (children first). "
-                    + "Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` "
-                    + "resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}."),
+                "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
+                    + "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
+                    + "batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."
+            ),
         ])
+    }
+
+    /// The `_` line that heads `kernel_verbs` — states WHERE to send them and
+    /// what the named id means. Without it "send create_agent to X" reads three
+    /// ways (X performs it / X is created / X is the parent) and only the last
+    /// is true.
+    static let kernelVerbsPreamble =
+        "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, "
+        + "not the actor. (`verbs` is what this agent itself does.)"
+
+    /// `kernel_verbs` as a reflect renders it. `full` keeps each doc whole; the
+    /// default truncates at the first em-dash.
+    ///
+    /// Read-only verbs used to render as `""` (name only), on the ground that
+    /// their reply teaches the rest — but a name with no signature is exactly
+    /// what left `ps` and `list_agents` unusable without a `full` reflect.
+    static func kernelVerbsView(full: Bool) -> JSON {
+        var out: OrderedDictionary<String, JSON> = [:]
+        out["_"] = .string(kernelVerbsPreamble)
+        guard let docs = kernelVerbDocs().asObject else { return .object(out) }
+        for name in docs.keys.sorted() {
+            let doc = docs[name]?.asString ?? ""
+            out[name] =
+                .string(
+                    full
+                        ? doc
+                        : String(doc.split(separator: "—", maxSplits: 1)[0])
+                            .trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return .object(out)
     }
 
     // ── list_agents ─────────────────────────────────────────────
 
-    private func listAgentsReply() -> JSON {
+    private func listAgentsReply(_ payload: JSON = .object([:])) -> JSON {
         var rows: [JSON] = []
         for a in allAgents() {
             do {
@@ -85,8 +186,13 @@ extension Kernel {
         // the mechanism; the arm that opened with `reflect` got `self_extension` and
         // built. This verb rides every reflect's `system_verbs` — it needs a
         // signpost back to the briefing.
+        // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller that
+        // never learned about paging is unaffected; the cursor is the last id
+        // handed over, never an offset.
+        let (pageRows, next) = page(rows, payload) { $0["id"].asString ?? "" }
         return .object([
-            "agents": .array(rows),
+            "agents": .array(pageRows),
+            "next": next.map { JSON.string($0) } ?? .null,
             "more": .string(
                 "Raw records — how agents are WIRED, not what they are FOR, and no "
                     + "manual. {type:'reflect'} on the root is the briefing: each agent's "
@@ -116,9 +222,33 @@ extension Kernel {
 
     // ── create_agent ────────────────────────────────────────────
 
-    func createFromPayload(parent: Agent, payload: JSON) async -> JSON {
+    func createFromPayload(parent root: Agent, payload: JSON) async -> JSON {
         guard let hm = payload["handler_module"].asString else {
-            return .object(["error": .string("create_agent requires handler_module")])
+            return Refusal.missing("create_agent", "handler_module")
+        }
+
+        // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument —
+        // resolved like a send target (the `kernel` alias included), never
+        // defaulted.
+        //
+        // It used to be accepted and silently STRIPPED while the ADDRESSED agent
+        // became the parent: `parent_id:"specialist"` produced `parent_id="core"`
+        // with no error. The working mechanism was undiscoverable and the field
+        // that looked like it expressed placement did nothing.
+        guard let pid = payload["parent_id"].asString, !pid.isEmpty else {
+            return Refusal.make(
+                Refusal.missingArg, "create_agent: parent_id required",
+                hint: "name the OWNER of the new agent — your own id grows your own "
+                    + "subtree (no grant needed); the root id for top-level.",
+                extra: [("arg", .string("parent_id"))])
+        }
+        let parent: Agent
+        if pid == "kernel" {
+            parent = root
+        } else if let found = agent(AgentId(pid)) {
+            parent = found
+        } else {
+            return Refusal.unknown(pid, live: allAgents().map { $0.id.value })
         }
         // Mint an id if caller didn't supply one. Convention from
         // Rust: <bundle>_<6 hex chars>.
@@ -130,7 +260,9 @@ extension Kernel {
         }
         let newId = AgentId(id)
         if agent(newId) != nil {
-            return .object(["error": .string("agent \"\(id)\" already exists")])
+            return Refusal.make(
+                Refusal.exists, "agent \"\(id)\" already exists",
+                extra: [("id", .string(id))])
         }
 
         // Compose meta from extra payload fields.
@@ -193,7 +325,7 @@ extension Kernel {
         // authorized create_agent, not the parent reaching out — so it never runs
         // against the parent's grant.
         let bootReply = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await send(newAgent.id, .object(["type": .string("boot")]))
+            await send([Item(newAgent.id, .object(["type": .string("boot")]))])[0].result
         }
         if let err = bootReply["error"].asString {
             // Telemetry-only — boot errors don't cancel the create.
@@ -290,17 +422,26 @@ extension Kernel {
 
     func updateFromPayload(caller: Agent, payload: JSON) async -> JSON {
         guard let idStr = payload["id"].asString else {
-            return .object(["error": .string("update_agent requires id")])
+            return Refusal.missing("update_agent", "id")
         }
         let id = AgentId(idStr)
         guard let target = agent(id) else {
-            return .object(["error": .string("no agent \"\(idStr)\"")])
+            return Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
         }
         // Patch = every field except type + id.
         var patch: OrderedDictionary<String, JSON> = [:]
         var changed: [String] = []
         if case .object(let dict) = payload {
-            for (k, v) in dict where k != "type" && k != "id" {
+            // `parent_id` is STRUCTURAL — where the agent actually sits, which
+            // only the tree knows. Letting it into meta lets a record LIE about
+            // its own parent: `$parent` then resolves differently on the two
+            // halves of the gate, and a reboot silently corrects it from the
+            // agent's position on disk. Reserved keys are refused for the same
+            // reason — they name substrate wiring, not agent meta.
+            for (k, v) in dict
+            where k != "type" && k != "id" && k != "parent_id"
+                && !reservedRecordKeys.contains(k)
+            {
                 patch[k] = v
                 changed.append(k)
             }
@@ -371,7 +512,15 @@ extension Kernel {
     /// password = gated, deny_inbound/absent on an io leg = sealed), a
     /// file_bridge's served `root`, and what a consumer persists THROUGH
     /// (`file_bridge_id`). Mirrors py/rust `_POSTURE_KEYS`.
-    static let POSTURE_KEYS = ["ingress_rule", "egress_rule", "auth", "root", "file_bridge_id"]
+    static let POSTURE_KEYS = [
+        "ingress_rule", "egress_rule", "auth", "root", "file_bridge_id",
+        // THE CALL GATE, made readable. Without these an agent cannot read its
+        // own authority — only discover it by trying, which cost whole turns of
+        // empirical probing every run. They also make the replace-not-merge
+        // warning on `update_agent` actionable: you must send the map WHOLE, so
+        // you must be able to read it.
+        "can_call", "callable_by",
+    ]
 
     func reflectIdentity(_ agent: Agent) -> JSON {
         var obj: OrderedDictionary<String, JSON> = [:]

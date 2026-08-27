@@ -21,7 +21,7 @@ struct RootGuidTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let r = await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))
+        let r = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result
         let guid = r["guid"].asString
         #expect(isThirtyTwoHex(guid), "root reflect guid not 32-hex: \(guid ?? "nil")")
 
@@ -36,12 +36,12 @@ struct RootGuidTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         let k1 = try await startKernel(workdir: tmp.path)
-        let g1 = await k1.send(AgentId("core"), .object(["type": .string("reflect")]))["guid"]
+        let g1 = await k1.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
 
         // Second boot of the SAME dir must read the guid back verbatim.
         let k2 = try await startKernel(workdir: tmp.path)
-        let g2 = await k2.send(AgentId("core"), .object(["type": .string("reflect")]))["guid"]
+        let g2 = await k2.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
 
         #expect(isThirtyTwoHex(g1))
@@ -62,7 +62,7 @@ struct RootGuidTests {
         try legacy.serializePretty(indent: 2).write(to: recFile, atomically: true, encoding: .utf8)
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let guid = await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))["guid"]
+        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(isThirtyTwoHex(guid))
 
@@ -86,14 +86,14 @@ struct RootGuidTests {
         try rec.serializePretty(indent: 2).write(to: recFile, atomically: true, encoding: .utf8)
 
         let kernel = try await startKernel(workdir: tmp.path)
-        let guid = await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))["guid"]
+        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(guid == explicit, "explicit guid was not preserved")
     }
 
     @Test func inMemoryBootHasEphemeralGuid() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        let guid = await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))["guid"]
+        let guid = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result["guid"]
             .asString
         #expect(isThirtyTwoHex(guid), "in-memory root reflect guid not 32-hex: \(guid ?? "nil")")
     }

@@ -19,7 +19,7 @@ struct ReflectUniformTests {
 
     @Test func rootReflectIsUniformNoPrimerKeys() async {
         let kernel = makeKernel()
-        let r = await kernel.send("core", ["type": "reflect"])
+        let r = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         #expect(r["id"].asString == "core")
         #expect(r["sentence"].asString?.hasPrefix("Fantastic kernel") == true)
         #expect(r["parent_id"].isNull)
@@ -38,60 +38,51 @@ struct ReflectUniformTests {
         let kernel = makeKernel()
         // Bare root has no guid in meta → reflect surfaces an explicit null
         // (persistence-scoped field, always present on the root reflect).
-        let bare = await kernel.send("core", ["type": "reflect"])
+        let bare = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         #expect(bare["guid"].isNull)
         // Seed a 32-hex guid into root meta → reflect surfaces it verbatim.
         kernel.root?.updateMeta(["guid": .string("0123456789abcdef0123456789abcdef")])
-        let r = await kernel.send("core", ["type": "reflect"])
+        let r = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         #expect(r["guid"].asString == "0123456789abcdef0123456789abcdef")
         // Non-root reflects never carry guid.
-        _ = await kernel.send(
-            "core", ["type": "create_agent", "handler_module": "echo.tools", "id": "kid"])
-        let kid = await kernel.send("kid", ["type": "reflect"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "kid"])])[0].result
+        let kid = await kernel.send([Item("kid", ["type": "reflect"])])[0].result
         #expect(kid["guid"] == nil || kid["guid"].isNull)
     }
 
     @Test func treeTiers() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "echo.tools", "id": "kid"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "kid"])])[0].result
         // tree=ids → flat list, root first.
-        let ids = await kernel.send(
-            "core", ["type": "reflect", "tree": "ids"])
+        let ids = await kernel.send([Item("core", ["type": "reflect", "tree": "ids"])])[0].result
         #expect(ids["tree"].asArray?.compactMap { $0.asString } == ["core", "kid"])
         // tree=none → omitted.
-        let none = await kernel.send(
-            "core", ["type": "reflect", "tree": "none"])
+        let none = await kernel.send([Item("core", ["type": "reflect", "tree": "none"])])[0].result
         #expect(none["tree"] == nil || none["tree"].isNull)
     }
 
     @Test func bundlesTiers() async {
         let kernel = makeKernel()
-        let all = await kernel.send(
-            "core", ["type": "reflect", "bundles": "all"])
+        let all = await kernel.send([Item("core", ["type": "reflect", "bundles": "all"])])[0].result
         let arr = all["bundles"].asArray
         #expect(arr != nil && !(arr!.isEmpty))
         #expect(arr?.first?["name"].asString != nil)
         #expect(arr?.first?["handler_module"].asString != nil)
-        let ids = await kernel.send(
-            "core", ["type": "reflect", "bundles": "ids"])
+        let ids = await kernel.send([Item("core", ["type": "reflect", "bundles": "ids"])])[0].result
         #expect(ids["bundles"].asArray?.allSatisfy { $0.asString != nil } == true)
     }
 
     @Test func descriptionSurfacesTopAndTree() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "echo.tools",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "echo.tools",
                 "id": "kid", "description": "holds my notes",
-            ])
+            ])])[0].result
         // top-level on the child's own reflect.
-        let own = await kernel.send("kid", ["type": "reflect"])
+        let own = await kernel.send([Item("kid", ["type": "reflect"])])[0].result
         #expect(own["description"].asString == "holds my notes")
         // and in the parent's tree=all node.
-        let root = await kernel.send("core", ["type": "reflect"])
+        let root = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         let node = root["tree"]["children"].asArray?.first { $0["id"].asString == "kid" }
         #expect(node?["description"].asString == "holds my notes")
     }
@@ -99,15 +90,14 @@ struct ReflectUniformTests {
     @Test func readmeFlagTiersAndFallback() async {
         let kernel = makeKernel()
         // default → no readme key.
-        let plain = await kernel.send("core", ["type": "reflect"])
+        let plain = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         #expect(plain["readme"] == nil || plain["readme"].isNull)
         // readme=true on the root in-memory → embedded canonical readme.
-        let r = await kernel.send("core", ["type": "reflect", "readme": true])
+        let r = await kernel.send([Item("core", ["type": "reflect", "readme": true])])[0].result
         #expect(r["readme"].asString == RootReadme.text)
         #expect(r["readme"].asString?.hasPrefix("# This is a Fantastic kernel.") == true)
         // readme honored.
-        let legacy = await kernel.send(
-            "core", ["type": "reflect", "readme": true])
+        let legacy = await kernel.send([Item("core", ["type": "reflect", "readme": true])])[0].result
         #expect(legacy["readme"].asString == RootReadme.text)
     }
 
@@ -145,7 +135,7 @@ struct ReflectUniformTests {
 
     @Test func rootReflectCarriesReadmesFrame() async {
         let kernel = makeKernel()
-        let r = await kernel.send("core", ["type": "reflect"])
+        let r = await kernel.send([Item("core", ["type": "reflect"])])[0].result
         let readmes = r["readmes"].asArray
         #expect(readmes != nil && !(readmes!.isEmpty))
         #expect(readmes?.contains { $0["key"].asString == "self-extension" } == true)
@@ -160,30 +150,29 @@ struct ReflectUniformTests {
     @Test func readmeIndexKeyedViewAndErrors() async {
         let kernel = makeKernel()
         // readme=index → the token-annotated topic tree.
-        let idx = await kernel.send("core", ["type": "reflect", "readme": "index"])
+        let idx = await kernel.send([Item("core", ["type": "reflect", "readme": "index"])])[0].result
         #expect(
             idx["readme"]["index"].asArray?.contains { $0["key"].asString == "self-extension" }
                 == true)
         // readme=<key> → the topic body + tokens.
-        let doc = await kernel.send("core", ["type": "reflect", "readme": "self-extension"])
+        let doc = await kernel.send([Item("core", ["type": "reflect", "readme": "self-extension"])])[0].result
         #expect(doc["readme"]["key"].asString == "self-extension")
         #expect(doc["readme"]["body"].asString?.lowercased().contains("author") == true)
         #expect((doc["readme"]["tokens"].asInt ?? 0) > 0)
         // unknown key → {error, keys}.
-        let miss = await kernel.send("core", ["type": "reflect", "readme": "nope"])
+        let miss = await kernel.send([Item("core", ["type": "reflect", "readme": "nope"])])[0].result
         #expect(miss["readme"]["error"].asString != nil)
         #expect(
             miss["readme"]["keys"].asArray?.contains { $0.asString == "self-extension" } == true)
         // a `..` escape is refused.
-        let esc = await kernel.send("core", ["type": "reflect", "readme": "../root_readme"])
+        let esc = await kernel.send([Item("core", ["type": "reflect", "readme": "../root_readme"])])[0].result
         #expect(esc["readme"]["error"].asString != nil)
     }
 
     @Test func nonRootHasNoReadmesFrame() async {
         let kernel = makeKernel()
-        _ = await kernel.send(
-            "core", ["type": "create_agent", "handler_module": "echo.tools", "id": "kid"])
-        let kid = await kernel.send("kid", ["type": "reflect"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "kid"])])[0].result
+        let kid = await kernel.send([Item("kid", ["type": "reflect"])])[0].result
         #expect(kid["readmes"] == nil || kid["readmes"].isNull)
         #expect(kid["docs"] == nil || kid["docs"].isNull)
     }
@@ -200,7 +189,7 @@ struct ReflectUniformTests {
     @Test func selfExtensionStatesTheExecutionModel() async throws {
         let kernel = makeKernel()
         let s = try #require(
-            await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+            await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
         #expect(s.contains("SCRIPT"), "\(s)")
         #expect(s.contains("top to bottom"), "\(s)")
         // The specific misread that burned two runs: a bare `def` is inert.
@@ -230,7 +219,7 @@ struct ReflectUniformTests {
             kernel.setRoot(root)
 
             let s = try #require(
-                await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+                await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
             #expect(s.contains(module), "registered \(module) but self_extension omits it: \(s)")
             #expect(s.contains(shape), "\(module) named without its receive shape: \(s)")
             // A registered echo bundle is no script executor.
@@ -247,7 +236,7 @@ struct ReflectUniformTests {
         // than being pointed at a module that cannot be created.
         let kernel = makeKernel()
         let s = try #require(
-            await kernel.send("core", ["type": "reflect"])["self_extension"].asString)
+            await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
         #expect(s.contains("NO script executor"), "\(s)")
         for module in Kernel.scriptExecutors.map(\.handlerModule) {
             #expect(!s.contains(module), "unregistered \(module) named: \(s)")

@@ -8,10 +8,10 @@
 //   - mem  → durable keyed facts, accrete + prune at LLM discretion.
 //
 // ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge — sealed /
-// deny-all by default), referenced by `file_bridge_id` on this agent's record.
+// deny-all by default) that the LOADER discovers — this bundle never names a
 // This bundle owns NO disk surface of its own and never touches FileManager: it
 // `send`s `read` / `write` verbs to its provider, exactly like the Python bundle.
-// `set` / `delete` / `replace` FAILFAST until `file_bridge_id` is set (and
+// provider and never computes a path. `set`/`delete`/`replace` FAIL when no store
 // surface a denied write rather than losing it). Wire it to the `.fantastic`
 // store (the one the loader persists records through — ONE file_bridge serves
 // both): the path is store-relative `agents/<id>/state.yaml`, next to its
@@ -61,8 +61,6 @@ public struct YamlStateBundle: AgentBundle {
             }
             return .object(["keys": .array(items)])
         case "set":
-            // FAILFAST first — persistence needs an opened file_bridge.
-            if let err = needFileBridge(agent, verb: "set") { return err }
             guard let key = payload["key"].asString, !key.isEmpty else {
                 return .object([
                     "error": .string("yaml_state.set: key (non-empty str) required")
@@ -78,7 +76,6 @@ public struct YamlStateBundle: AgentBundle {
             }
             return .object(["key": .string(key), "set": .bool(true)])
         case "delete":
-            if let err = needFileBridge(agent, verb: "delete") { return err }
             guard let key = payload["key"].asString, !key.isEmpty else {
                 return .object([
                     "error": .string("yaml_state.delete: key (non-empty str) required")
@@ -91,7 +88,6 @@ public struct YamlStateBundle: AgentBundle {
             }
             return .object(["key": .string(key), "deleted": .bool(existed)])
         case "replace":
-            if let err = needFileBridge(agent, verb: "replace") { return err }
             // `doc` is REQUIRED ({} clears) — a missing doc is an error, not a
             // silent clear (matches Python).
             guard let docVal = payload.asObject?["doc"] else {
@@ -120,32 +116,17 @@ public struct YamlStateBundle: AgentBundle {
     // ── persistence (THROUGH a file_bridge provider) ────────────
     //
     // ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge), keyed
-    // by `file_bridge_id` on this agent's record — exactly like the Python
-    // bundle. This bundle owns NO disk surface and never touches FileManager: it
-    // `send`s read/write to its provider. set/delete/replace FAILFAST until
-    // file_bridge_id is wired.
+    // The sidecar goes THROUGH the kernel: this bundle names only itself and a
+    // filename, and the loader owns where it lands.
 
     private func fileBridgeId(_ agent: Agent) -> String? {
         agent.metaValue(forKey: "file_bridge_id")?.asString
     }
 
-    /// `state.yaml` in the agent's own dir, RELATIVE to the provider's root (the
-    /// `.fantastic` store) — `agents/<id>/state.yaml`, next to its agent.json.
-    private func statePath(_ agent: Agent) -> String {
-        "agents/\(agent.id.value)/state.yaml"
-    }
-
-    /// Failfast if no provider is wired. Error text byte-identical to Python.
-    private func needFileBridge(_ agent: Agent, verb: String) -> JSON? {
-        if fileBridgeId(agent) == nil {
-            return .object([
-                "error": .string(
-                    "yaml_state.\(verb): file_bridge_id required — wire (and open) a file_bridge to persist"
-                )
-            ])
-        }
-        return nil
-    }
+    /// The sidecar this agent keeps. A NAME, not a path — the LOADER owns where
+    /// sidecars land, so this bundle no longer computes `agents/<id>/…` and no
+    /// longer names a provider of its own.
+    private static let stateBlob = "state.yaml"
 
     private func modeOf(_ agent: Agent) -> String {
         agent.metaValue(forKey: "mode")?.asString == "mem" ? "mem" : "data"
@@ -153,10 +134,19 @@ public struct YamlStateBundle: AgentBundle {
 
     /// Read the store THROUGH the wired provider. Unwired / missing / denied ⇒ [:].
     private func load(_ agent: Agent, kernel: Kernel) async -> [String: JSON] {
-        guard let fid = fileBridgeId(agent) else { return [:] }
-        let r = await kernel.send(
-            AgentId(fid),
-            .object(["type": .string("read"), "path": .string(statePath(agent))]))
+        // THROUGH THE LOADER, not a provider of our own. Operator authority:
+        // reading our OWN sidecar is bookkeeping processed from above.
+        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("load_blob"),
+                        "agent_id": .string(agent.id.value),
+                        "name": .string(Self.stateBlob),
+                    ]))
+            ])[0].result
+        }
         guard
             let text = r["content"].asString,
             !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -183,23 +173,27 @@ public struct YamlStateBundle: AgentBundle {
     private func persist(_ agent: Agent, kernel: Kernel, doc: [String: JSON], verb: String) async
         -> JSON?
     {
-        guard let fid = fileBridgeId(agent) else {
-            return .object(["error": .string("yaml_state.\(verb): file_bridge_id required")])
+        // Operator authority: persisting from above (see `load`).
+        let w = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("persist_blob"),
+                        "agent_id": .string(agent.id.value),
+                        "name": .string(Self.stateBlob),
+                        "content": .string(emit(doc)),
+                    ]))
+            ])[0].result
         }
-        let w = await kernel.send(
-            AgentId(fid),
-            .object([
-                "type": .string("write"), "path": .string(statePath(agent)),
-                "content": .string(emit(doc)),
-            ]))
         guard case .object = w else {
-            return .object(["error": .string("yaml_state.\(verb): provider gave no reply")])
+            return .object(["error": .string("yaml_state.\(verb): loader gave no reply")])
         }
         let reason =
             w["error"].asString ?? (w["reason"].asString == "unauthorized" ? "unauthorized" : nil)
         if let reason {
             var out: JSON = .object([
-                "error": .string("yaml_state.\(verb): provider refused write — \(reason)")
+                "error": .string("yaml_state.\(verb): \(reason)")
             ])
             // Pass the provider's `hint` through (py parity) — e.g. the sealed-edge
             // denial carries the open-it recipe.

@@ -98,14 +98,12 @@ enum DaemonMode {
         // kernel_bridge attaches transport, ollama spawns HTTP
         // client, etc.) all fire here. Errors are logged but don't
         // abort the daemon — weak loading carries through.
-        let listReply = await kernel.send(
-            AgentId("core"), .object(["type": .string("list_agents")]))
+        let listReply = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let bootedIds: [String] = (listReply["agents"].asArray ?? [])
             .compactMap { $0["id"].asString }
             .filter { $0 != "core" }  // root has no handler_module
         for id in bootedIds {
-            let bootReply = await kernel.send(
-                AgentId(id), .object(["type": .string("boot")]))
+            let bootReply = await kernel.send([Item(AgentId(id), .object(["type": .string("boot")]))])[0].result
             if let err = bootReply["error"].asString {
                 FileHandle.standardError.write(
                     "[kernel] boot \(id) failed: \(err)\n"
@@ -117,8 +115,7 @@ enum DaemonMode {
         {
             // web's boot reply included the bound port via the live
             // server. Re-reflect to surface it in the log.
-            let r = await kernel.send(
-                AgentId("web"), .object(["type": .string("reflect")]))
+            let r = await kernel.send([Item(AgentId("web"), .object(["type": .string("reflect")]))])[0].result
             if let p = r["port"].asInt {
                 FileHandle.standardError.write(
                     "[kernel] up — web bound on port \(p)\n"
@@ -153,8 +150,7 @@ enum DaemonMode {
         // Step 6 — Graceful shutdown. Send {type:"shutdown"} to the
         // web agent so its NWListener stops cleanly.
         if webExists {
-            _ = await kernel.send(
-                AgentId("web"), .object(["type": .string("shutdown")]))
+            _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
         }
         FileHandle.standardError.write(
             "[kernel] down\n".data(using: .utf8) ?? Data())

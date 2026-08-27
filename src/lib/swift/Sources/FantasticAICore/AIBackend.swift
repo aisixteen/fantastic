@@ -359,7 +359,8 @@ public final class AIBackend: @unchecked Sendable {
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: produced,
-                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt)
+                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
+                    incoming: text)
             }
         }
 
@@ -658,15 +659,12 @@ public final class AIBackend: @unchecked Sendable {
             blocks = [override]
         } else {
             let selfId = agent.id
-            let primer = await kernel.send(
-                AgentId("core"),
-                .object([
+            let primer = await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("reflect"),
                     "tree": .string("ids"),
                     "bundles": .string("ids"),
-                ]))
-            let me = await kernel.send(
-                selfId, .object(["type": .string("reflect"), "tree": .string("none")]))
+                ]))])[0].result
+            let me = await kernel.send([Item(selfId, .object(["type": .string("reflect"), "tree": .string("none")]))])[0].result
             blocks = [
                 renderReflect(primer),
                 "You are `\(selfId.value)`. " + renderReflect(me),
@@ -773,17 +771,29 @@ public final class AIBackend: @unchecked Sendable {
     /// Per-client chat thread, STORE-RELATIVE (`agents/<id>/…`) so wiring
     /// `file_bridge_id` to the `.fantastic` store lands the sidecar next
     /// to the agent's own record. Matches Rust/Python `chat_path`.
-    private func chatPath(_ id: AgentId, _ client: String) -> String {
-        "agents/\(id.value)/chat_\(safeClient(client)).json"
+    /// The per-client chat sidecar's FILENAME. A name, not a path — the LOADER
+    /// owns where sidecars land, so this bundle no longer computes
+    /// `agents/<id>/…` and no longer names a provider of its own.
+    private func chatBlob(_ client: String) -> String {
+        "chat_\(safeClient(client)).json"
     }
 
-    /// Load a client's persisted chat via the bound file_bridge. Empty on
-    /// no provider / missing file / unparseable.
+    /// Load a client's persisted chat THROUGH the kernel. Empty on no store /
+    /// missing file / unparseable.
     func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
-        guard let fid = fileBridgeId(agent) else { return [] }
-        let r = await kernel.send(
-            AgentId(fid),
-            .object(["type": .string("read"), "path": .string(chatPath(agent.id, client))]))
+        // THROUGH THE LOADER. Operator authority: reading our OWN sidecar is
+        // bookkeeping processed from above, not this agent reaching out.
+        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("load_blob"),
+                        "agent_id": .string(agent.id.value),
+                        "name": .string(chatBlob(client)),
+                    ]))
+            ])[0].result
+        }
         guard let content = r["content"].asString,
             let parsed = try? JSON.parse(content),
             let arr = parsed.asArray
@@ -791,17 +801,21 @@ public final class AIBackend: @unchecked Sendable {
         return arr
     }
 
-    /// Persist a client's full chat via the bound file_bridge. No-op when
-    /// no provider is wired (matches Rust's ignore-on-unset).
+    /// Persist a client's full chat THROUGH the kernel. No store ⇒ nothing
+    /// lands; that is the auto-flush law, not a fallback.
     private func saveHistory(agent: Agent, client: String, kernel: Kernel, rows: [JSON]) async {
-        guard let fid = fileBridgeId(agent) else { return }
-        _ = await kernel.send(
-            AgentId(fid),
-            .object([
-                "type": .string("write"),
-                "path": .string(chatPath(agent.id, client)),
-                "content": .string(JSON.array(rows).serialize()),
-            ]))
+        _ = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("persist_blob"),
+                        "agent_id": .string(agent.id.value),
+                        "name": .string(chatBlob(client)),
+                        "content": .string(JSON.array(rows).serialize()),
+                    ]))
+            ])[0].result
+        }
     }
 
     // MARK: - in-flight

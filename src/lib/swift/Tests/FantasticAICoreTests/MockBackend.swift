@@ -385,13 +385,19 @@ func bootMockKernel(
 ) async -> (Kernel, [String: AgentId], PayloadRecorder) {
     let registry = BundleRegistry()
     registry.register("mock_backend.tools", MockBundle(config: config))
-    registry.register("mock_file_bridge.tools", MockFileBridge())
+    registry.register("file_bridge.tools", MockFileBridge())
     let recorder = PayloadRecorder()
     registry.register("mock_recorder.tools", recorder)
     registry.register("mock_raiser.tools", RaisingBundle())
     registry.register("mock_slow.tools", SlowBundle())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+    // A REAL root path, so `findStore` has something to match the store's own
+    // `root` against — that match is how the loader owns sidecar placement.
+    let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("fantastic-mock-\(UUID().uuidString)")
+        .appendingPathComponent(".fantastic")
+    let root = Agent(
+        id: AgentId("core"), handlerModule: nil, parentId: nil, rootPath: storeRoot)
     kernel.register(root)
     kernel.setRoot(root)
     // Two-sided deny-all: each callee must ACCEPT the backends that reach it. The
@@ -401,39 +407,40 @@ func bootMockKernel(
     var accept: OrderedCollections.OrderedDictionary<String, JSON> = [:]
     for id in backendIds { accept[id] = .string("*") }
     let acceptJSON = JSON.object(accept)
-    // A file_bridge store so chat history persists through file_bridge_id.
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+    // A discoverable file_bridge store, so chat history persists THROUGH the
+    // loader (the consumer names only itself and a filename).
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
-            "handler_module": .string("mock_file_bridge.tools"),
+            "parent_id": .string("core"),
+            "handler_module": .string("file_bridge.tools"),
+            // `findStore` matches a file_bridge whose `root` resolves to the
+            // root agent's own dir — that is how the loader owns sidecar
+            // placement, and the stand-in must satisfy the same rule.
+            "root": .string(storeRoot.path),
             "id": .string("store"),
             "callable_by": acceptJSON,
-        ]))
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+        ]))])[0].result
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("mock_recorder.tools"),
             "id": .string("probe"),
             "callable_by": acceptJSON,
-        ]))
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+        ]))])[0].result
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("mock_raiser.tools"),
             "id": .string("raiser"),
             "callable_by": acceptJSON,
-        ]))
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+        ]))])[0].result
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("mock_slow.tools"),
             "id": .string("slowpoke"),
             "callable_by": acceptJSON,
-        ]))
+        ]))])[0].result
     // Deny-all: a backend persists to its `store`, streams to `cli`, and routes
     // replies to its peers (probe/raiser/slowpoke + the other backends). Grant
     // exactly those lateral edges — wiring pairs with granting.
@@ -444,10 +451,9 @@ func bootMockKernel(
     for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
     for id in backendIds {
-        let r = await kernel.send(
-            AgentId("core"),
-            .object([
+        let r = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("mock_backend.tools"),
                 "id": .string(id),
                 "file_bridge_id": .string("store"),
@@ -455,7 +461,7 @@ func bootMockKernel(
                 "can_call": .object(grant),
                 // Peer backends call each other — accept them (ingress).
                 "callable_by": acceptJSON,
-            ]))
+            ]))])[0].result
         out[id] = AgentId(r["id"].asString ?? id)
     }
     return (kernel, out, recorder)
@@ -465,7 +471,7 @@ func bootMockKernel(
 
 /// The live task table, read through the `ps` VERB like any caller.
 func psRows(_ kernel: Kernel) async -> [JSON] {
-    let r = await kernel.send(AgentId("kernel"), .object(["type": .string("ps")]))
+    let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[0].result
     return r["tasks"].asArray ?? []
 }
 
@@ -499,8 +505,7 @@ func waitForHistory(
     kernel: Kernel, id: AgentId, client: String, count: Int
 ) async throws {
     for _ in 0..<200 {
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string(client)]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string(client)]))])[0].result
         if (h["messages"].asArray ?? []).count >= count { return }
         try await Task.sleep(nanoseconds: 5_000_000)
     }
@@ -508,7 +513,6 @@ func waitForHistory(
 
 /// This client's persisted turns.
 func historyRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
-    let h = await kernel.send(
-        id, .object(["type": .string("history"), "client_id": .string(client)]))
+    let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string(client)]))])[0].result
     return h["messages"].asArray ?? []
 }

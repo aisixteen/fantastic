@@ -35,20 +35,18 @@ struct ProxyAgentAPIShimTests {
     @Test func kernelRegisterProxyAgentMethodForwards() async throws {
         clearHosts()
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("proxy_agent.tools"),
                 "id": .string("ui"),
-            ]))
+            ]))])[0].result
         let host = StubHost()
         // UniFFI-shape method call:
         kernel.registerProxyAgent(agentId: "ui", host: host)
 
         // Verify dispatch goes through.
-        let reply = await kernel.send(
-            AgentId("ui"), .object(["type": .string("render"), "x": .integer(1)]))
+        let reply = await kernel.send([Item(AgentId("ui"), .object(["type": .string("render"), "x": .integer(1)]))])[0].result
         #expect(reply["ok"].asBool == true)
         #expect(host.calls.count(for: "handle") == 1)
     }
@@ -56,13 +54,12 @@ struct ProxyAgentAPIShimTests {
     @Test func kernelUnregisterProxyAgentMethodReturnsHadHost() async throws {
         clearHosts()
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("proxy_agent.tools"),
                 "id": .string("ui"),
-            ]))
+            ]))])[0].result
         let host = StubHost()
         kernel.registerProxyAgent(agentId: "ui", host: host)
         #expect(kernel.unregisterProxyAgent(agentId: "ui") == true)

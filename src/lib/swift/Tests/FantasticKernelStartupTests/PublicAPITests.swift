@@ -10,8 +10,7 @@ import Testing
 struct StartKernelInMemoryTests {
     @Test func bootsWithCoreAndWebAgents() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        let listed = await kernel.send(
-            AgentId("core"), .object(["type": .string("list_agents")]))
+        let listed = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         #expect(ids.contains("core"))
         #expect(ids.contains("web"))
@@ -23,13 +22,12 @@ struct StartKernelInMemoryTests {
         for hm in ["file_bridge.tools", "proxy_agent.tools", "tools.tools", "ollama_backend.tools"]
         {
             let id = "probe_\(hm.replacingOccurrences(of: ".", with: "_"))"
-            let r = await kernel.send(
-                AgentId("core"),
-                .object([
+            let r = await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("create_agent"),
+                    "parent_id": .string("core"),
                     "handler_module": .string(hm),
                     "id": .string(id),
-                ]))
+                ]))])[0].result
             #expect(r["id"].asString == id, "failed to create agent for \(hm): \(r)")
         }
     }
@@ -42,12 +40,10 @@ struct StartKernelInMemoryTests {
     @Test func selfExtensionNamesTheExecutorsThisBuildShips() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         let s = try #require(
-            await kernel.send(AgentId("core"), .object(["type": .string("reflect")]))[
+            await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect")]))])[0].result[
                 "self_extension"
             ].asString)
-        let catalog = await kernel.send(
-            AgentId("core"),
-            .object(["type": .string("reflect"), "bundles": .string("all")]))
+        let catalog = await kernel.send([Item(AgentId("core"), .object(["type": .string("reflect"), "bundles": .string("all")]))])[0].result
         let registered = Set(
             (catalog["bundles"].asArray ?? []).compactMap { $0["handler_module"].asString })
         // Every `<something>.tools` module the self_extension NAMES must actually be
@@ -70,14 +66,13 @@ struct StartKernelInMemoryTests {
         // fall back to a guessed model (a wrong guess reaches the network and 404s).
         // Reflect surfaces `null`, not a baked-in default like "llama3.2".
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("ollama_backend.tools"),
                 "id": .string("ollama_nomodel"),
-            ]))
-        let r = await kernel.send(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))
+            ]))])[0].result
+        let r = await kernel.send([Item(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))])[0].result
         #expect(r["model"].isNull, "ollama must not guess a model default: \(r)")
     }
 
@@ -137,7 +132,7 @@ struct SendJsonTests {
         // the structural baseline on both ends — no explicit grant needed.
         _ = await kernel.sendJson(
             targetId: "core",
-            payloadJson: #"{"type":"create_agent","handler_module":"echo.tools","id":"weather_ui"}"#
+            payloadJson: #"{"type":"create_agent","parent_id":"core","handler_module":"echo.tools","id":"weather_ui"}"#
         )
         let cap = Capture()
         _ = kernel.subscribe(listener: cap)
@@ -189,13 +184,12 @@ struct ToolShimsTests {
     @Test func registerToolRoundTrip() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         // Create the tools agent first.
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("tools.tools"),
                 "id": .string("tools"),
-            ]))
+            ]))])[0].result
         let reply = await kernel.registerTool(
             senderId: "weather",
             name: "get_weather",
@@ -211,13 +205,12 @@ struct ToolShimsTests {
 
     @Test func listToolsForLlmReturnsRegistered() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("tools.tools"),
                 "id": .string("tools"),
-            ]))
+            ]))])[0].result
         _ = await kernel.registerTool(
             senderId: "x",
             name: "ping",
@@ -234,13 +227,12 @@ struct ToolShimsTests {
 
     @Test func unregisterToolDropsIt() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("tools.tools"),
                 "id": .string("tools"),
-            ]))
+            ]))])[0].result
         _ = await kernel.registerTool(
             senderId: "x", name: "t1", agentId: "a", verb: nil,
             description: "d", parametersSchemaJson: #"{}"#
@@ -252,13 +244,12 @@ struct ToolShimsTests {
 
     @Test func unregisterToolsBySenderDropsAll() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("tools.tools"),
                 "id": .string("tools"),
-            ]))
+            ]))])[0].result
         _ = await kernel.registerTool(
             senderId: "auth", name: "a1", agentId: "x", verb: nil,
             description: "d", parametersSchemaJson: #"{}"#
@@ -286,20 +277,17 @@ struct SaveLoadTests {
 
     @Test func loadRoundTrip() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("file_bridge.tools"),
                 "id": .string("snap_target"),
-            ]))
+            ]))])[0].result
         let snap = kernel.save()
         // Make a fresh kernel + load.
         let kernel2 = try await startKernelInMemory(portHint: 0)
         try kernel2.load(json: snap)
-        let listed = await kernel2.send(
-            AgentId("core"),
-            .object(["type": .string("list_agents")]))
+        let listed = await kernel2.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         #expect(ids.contains("snap_target"))
     }

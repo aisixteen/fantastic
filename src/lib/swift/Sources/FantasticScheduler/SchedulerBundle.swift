@@ -39,12 +39,12 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         """
         scheduler — recurring tasks as an agent.
 
-        State persists THROUGH a file_bridge (set `file_bridge_id`; wire it to the
+        State persists THROUGH the kernel's discovered store (wire one to the
         `.fantastic` store): `agents/<id>/schedules.json` + `history.jsonl`.
 
         Verbs: reflect · boot · shutdown · schedule {target, payload, interval_seconds} ·
         unschedule {schedule_id} · list · pause/resume {schedule_id?} · tick_now {schedule_id} ·
-        history {limit?, schedule_id?}. Each schedule fires `kernel.send(target, payload)` on its
+        history {limit?, schedule_id?}. Each schedule fires `kernel.send([Item(target, payload)])[0].result` on its
         interval and emits `schedule_fired` to the scheduler's OWN inbox (the target gets the payload).
         """
     }
@@ -81,38 +81,53 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     // ── persistence (THROUGH a file_bridge provider) ────────────
 
-    private func fileBridgeId(_ agentId: AgentId, _ kernel: Kernel) -> String? {
-        kernel.agent(agentId)?.metaValue(forKey: "file_bridge_id")?.asString
-    }
-
-    private func schedulesPath(_ id: AgentId) -> String { "agents/\(id.value)/schedules.json" }
-    private func historyPath(_ id: AgentId) -> String { "agents/\(id.value)/history.jsonl" }
+    // THE LOADER OWNS THE PATH. This bundle names only a FILENAME; the sidecar
+    // lands beside the agent's own agent.json in whatever store was discovered.
+    private static let schedulesBlob = "schedules.json"
+    private static let historyBlob = "history.jsonl"
 
     /// Read a file THROUGH the wired provider. Unwired / missing ⇒ nil.
-    private func fileRead(_ id: AgentId, _ kernel: Kernel, _ path: String) async -> String? {
-        guard let fid = fileBridgeId(id, kernel) else { return nil }
-        let r = await kernel.send(
-            AgentId(fid), .object(["type": .string("read"), "path": .string(path)]))
+    /// Read one of THIS agent's own sidecars through the kernel. The loader owns
+    /// the path; this bundle names only a filename.
+    private func fileRead(_ agentId: AgentId, _ kernel: Kernel, _ name: String) async -> String? {
+        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("load_blob"),
+                        "agent_id": .string(agentId.value),
+                        "name": .string(name),
+                    ]))
+            ])[0].result
+        }
         return r["content"].asString
+    }
+
+    /// Persist one of THIS agent's own sidecars through the kernel.
+    private func fileWrite(
+        _ agentId: AgentId, _ kernel: Kernel, _ name: String, _ content: String
+    ) async -> String? {
+        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+            await kernel.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("persist_blob"),
+                        "agent_id": .string(agentId.value),
+                        "name": .string(name),
+                        "content": .string(content),
+                    ]))
+            ])[0].result
+        }
+        return r["error"].asString
     }
 
     /// Write a file THROUGH the provider. Returns an error string, or nil on success.
     @discardableResult
-    private func fileWrite(_ id: AgentId, _ kernel: Kernel, _ path: String, _ content: String)
-        async -> String?
-    {
-        guard let fid = fileBridgeId(id, kernel) else { return "file_bridge_id unset" }
-        let w = await kernel.send(
-            AgentId(fid),
-            .object([
-                "type": .string("write"), "path": .string(path), "content": .string(content),
-            ]))
-        if let err = w["error"].asString { return err }
-        return nil
-    }
 
     private func loadSchedules(_ id: AgentId, _ kernel: Kernel) async -> [JSON] {
-        guard let raw = await fileRead(id, kernel, schedulesPath(id)),
+        guard let raw = await fileRead(id, kernel, Self.schedulesBlob),
             let parsed = try? JSON.parse(raw), let arr = parsed.asArray
         else { return [] }
         return arr
@@ -123,11 +138,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         -> String?
     {
         await fileWrite(
-            id, kernel, schedulesPath(id), JSON.array(schedules).serializePretty(indent: 2))
+            id, kernel, Self.schedulesBlob, JSON.array(schedules).serializePretty(indent: 2))
     }
 
     private func appendHistory(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async {
-        let prev = await fileRead(id, kernel, historyPath(id)) ?? ""
+        let prev = await fileRead(id, kernel, Self.historyBlob) ?? ""
         var combined = prev + event.serialize() + "\n"
         // Ring-trim past 2× MAX.
         let lines = combined.split(separator: "\n", omittingEmptySubsequences: false)
@@ -137,11 +152,11 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if real.count > 2 * HISTORY_MAX {
             combined = real.suffix(HISTORY_MAX).joined(separator: "\n") + "\n"
         }
-        await fileWrite(id, kernel, historyPath(id), combined)
+        await fileWrite(id, kernel, Self.historyBlob, combined)
     }
 
     private func readHistory(_ id: AgentId, _ kernel: Kernel, _ limit: Int) async -> [JSON] {
-        guard let raw = await fileRead(id, kernel, historyPath(id)) else { return [] }
+        guard let raw = await fileRead(id, kernel, Self.historyBlob) else { return [] }
         let lines = raw.split(separator: "\n").map(String.init).suffix(limit)
         return lines.compactMap { line -> JSON? in
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -187,7 +202,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
         if target.isEmpty {
             error = .string("empty target")
         } else {
-            let reply = await kernel.send(AgentId(target), payload)
+            let reply = await kernel.send([Item(AgentId(target), payload)])[0].result
             if let err = reply["error"].asString { error = .string(err) } else { result = reply }
         }
         let event: JSON = .object([
@@ -229,10 +244,9 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             "sentence": .string("Recurring-task scheduler."),
             "tick_sec": .double(agent?.metaValue(forKey: "tick_sec")?.asDouble ?? 1.0),
             "paused": .bool(agent?.metaValue(forKey: "paused")?.asBool ?? false),
-            "file_bridge_id": fileBridgeId(agentId, kernel).map { JSON.string($0) } ?? .null,
             "running": .bool(running),
             "verbs": .object([
-                "reflect": .string("Identity + tick state + file_bridge_id. No args."),
+                "reflect": .string("Identity + tick state. No args."),
                 "boot": .string("Idempotent. Starts the tick loop. Requires file_bridge_id."),
                 "shutdown": .string("Idempotent. Cancels the tick loop."),
                 "schedule": .string(
@@ -264,8 +278,12 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     private func bootReply(_ agentId: AgentId, kernel: Kernel) async -> JSON {
-        if fileBridgeId(agentId, kernel) == nil {
-            return .object(["error": .string("scheduler: file_bridge_id required")])
+        // Persistence goes THROUGH the loader now, so what must exist is a
+        // DISCOVERED store — not a provider this bundle names itself.
+        if kernel.findStore() == nil {
+            return .object([
+                "error": .string("scheduler: no store wired — persistence not available")
+            ])
         }
         let started = startTaskIfAbsent(agentId.value) {
             Task { [weak self] in
@@ -294,8 +312,12 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     private func scheduleReply(_ agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-        if fileBridgeId(agentId, kernel) == nil {
-            return .object(["error": .string("scheduler: file_bridge_id required")])
+        // Persistence goes THROUGH the loader now, so what must exist is a
+        // DISCOVERED store — not a provider this bundle names itself.
+        if kernel.findStore() == nil {
+            return .object([
+                "error": .string("scheduler: no store wired — persistence not available")
+            ])
         }
         let target = payload["target"].asString ?? ""
         if target.isEmpty {

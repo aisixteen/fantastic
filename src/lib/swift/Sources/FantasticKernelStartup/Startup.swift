@@ -99,15 +99,13 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
     // app can immediately call `kernel.send("web", {boot})` to
     // start listening. Port hint stashes into the agent's meta so
     // 8B picks it up.
-    _ = await kernel.send(
-        AgentId("core"),
-        .object([
+    _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
+            "parent_id": .string("core"),
             "handler_module": .string("web.tools"),
             "id": .string("web"),
             "port": .integer(Int64(portHint)),
-        ])
-    )
+        ]))])[0].result
 
     return kernel
 }

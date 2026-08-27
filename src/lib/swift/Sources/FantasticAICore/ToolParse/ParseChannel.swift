@@ -62,7 +62,7 @@ func parseChannelCall(_ block: String) -> ToolCall? {
     // emitted
     //   call:kernel_state.send{"payload":{"type":"reflect"},"target_id":"kernel_state"}
     // Reading the prefix as the target turned that into
-    // `send(kernel_state, {"type":"send", …})` and came back
+    // `send([Item(kernel_state, {"type":"send", …})])[0].result` and came back
     // `{"error": "kernel_state: unknown type 'send'"}` eight times in one run.
     //
     // Every lookup below tests PRESENCE on the dictionary, deliberately: a `JSON`

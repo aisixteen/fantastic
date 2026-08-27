@@ -4,7 +4,7 @@
 // map (routing table), per-agent inbox channels, state event
 // subscribers, the bundle registry, and the storage mode.
 //
-// `send(target, payload)` → resolves target → dispatches via system
+// `send([Item(target, payload)])[0].result` → resolves target → dispatches via system
 // verb table OR the agent's bundle → publishes state event +
 // watcher fanout → returns reply.
 //
@@ -33,6 +33,21 @@ public enum KernelTaskLocals {
     /// dispatch (the WS/REST surface, a one-shot CLI verb, a test) — such a task
     /// is a root of the table, like a process spawned by init.
     @TaskLocal public static var currentTask: TaskId? = nil
+
+    /// The id that ORIGINATED the dispatch running right now — the CALLER, as
+    /// the gate saw it, captured before ``currentSender`` is rewritten to the
+    /// target's own id.  `nil` = an operator send.
+    ///
+    /// This exists because `currentSender` is the CALLEE mid-dispatch: inside a
+    /// handler it reads as that handler's own agent, so a bundle could not tell
+    /// who actually called it. That gap let an agent write ANOTHER agent's
+    /// memory through a blob verb — the payload NAMES the namespace and nothing
+    /// could check it against the caller.
+    ///
+    /// Read it when a verb's payload names a resource the caller might not own.
+    /// Do NOT use it for `(sender, target, verb)` decisions — that is the gate's
+    /// job, it runs first, and duplicating it here would be a second truth.
+    @TaskLocal public static var currentOrigin: AgentId? = nil
 
     /// "My own task is inside a subtree the kernel is killing." Set by
     /// `Kernel.cancelTask` on every marked row BEFORE any task is stopped, so a
@@ -85,6 +100,18 @@ public final class Kernel: @unchecked Sendable {
     /// (`"<agent_id>:<n>"`, a pid). Tasks form a TREE through the send chain;
     /// the `ps` system verb reads it, `cancel` kills a subtree. See `Tasks.swift`.
     public let tasks = TaskTable()
+
+    /// EVERY execution and what it became — named (a caller's dedup contract) or
+    /// unnamed (under its minted pid). Session lifetime, retention-ringed; the
+    /// DURABLE half is written through the discovered store, because the kernel
+    /// never touches disk itself.
+    public let ledger = ExecutionLedger()
+
+    /// Installed by the boot seam once a store can be discovered. `nil` = no
+    /// persistence (nothing wired, or a test kernel): settled outcomes live and
+    /// die with the process, exactly like the tree's own auto-flush law.
+    let ledgerFlusherLock = NSLock()
+    var _ledgerFlusher: (@Sendable () -> Void)?
 
     public init(
         storage: StorageMode = .inMemory,

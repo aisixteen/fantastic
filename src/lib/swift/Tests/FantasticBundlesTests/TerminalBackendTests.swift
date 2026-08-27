@@ -14,32 +14,28 @@
         @Test func bootsShellAndEmitsOutput() async throws {
             let kernel = try await startKernelInMemory(portHint: 0)
             // Use /bin/echo via a one-shot bash so the test deterministically terminates.
-            _ = await kernel.send(
-                AgentId("core"),
-                .object([
+            _ = await kernel.send([Item(AgentId("core"), .object([
                     "type": .string("create_agent"),
+                    "parent_id": .string("core"),
                     "handler_module": .string("terminal_backend.tools"),
                     "id": .string("term"),
                     "shell": .string("/bin/bash"),
-                ]))
+                ]))])[0].result
 
             // Subscribe to the agent's inbox so we can read output emit events.
             let inbox = kernel.ensureInbox(AgentId("ws_watcher"))
             kernel.watch(src: AgentId("term"), watcher: AgentId("ws_watcher"))
 
-            let bootReply = await kernel.send(
-                AgentId("term"), .object(["type": .string("boot")]))
+            let bootReply = await kernel.send([Item(AgentId("term"), .object(["type": .string("boot")]))])[0].result
             #expect(bootReply["ok"].asBool == true, "boot failed: \(bootReply.serialize())")
             let pid = bootReply["pid"].asInt ?? 0
             #expect(pid > 0, "expected non-zero pid; got reply: \(bootReply.serialize())")
 
             // Write a command — echo + newline.
-            _ = await kernel.send(
-                AgentId("term"),
-                .object([
+            _ = await kernel.send([Item(AgentId("term"), .object([
                     "type": .string("input"),
                     "data": .string("echo hello-pty\n"),
-                ]))
+                ]))])[0].result
 
             // Wait for output containing "hello-pty".
             var got: String = ""
@@ -54,8 +50,7 @@
             }
             #expect(got.contains("hello-pty"), "expected echo output; got \(got.prefix(200))")
 
-            _ = await kernel.send(
-                AgentId("term"), .object(["type": .string("shutdown")]))
+            _ = await kernel.send([Item(AgentId("term"), .object(["type": .string("shutdown")]))])[0].result
         }
     }
 

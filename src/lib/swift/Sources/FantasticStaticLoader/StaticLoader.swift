@@ -91,9 +91,15 @@ public struct StaticLoaderBundle: AgentBundle {
             // merges on top; the child boots inside create_agent. Operator
             // authority: the loader hydrating the roster it was told to build.
             var payload = obj
+            // The declared agent becomes THIS loader's child ($parent = the
+            // loader), but placement is stated by `parent_id`, not by who is
+            // addressed: `create_agent` is kernel-owned and answered by the ROOT
+            // alone. Baseline grant is stamped + the manifest's explicit
+            // `can_call` merges on top; the child boots inside create_agent.
             payload["type"] = .string("create_agent")
+            payload["parent_id"] = .string(agentId.value)
             let rec = await KernelTaskLocals.$currentSender.withValue(nil) {
-                await kernel.send(agentId, .object(payload))
+                await kernel.send([Item(AgentId("kernel"), .object(payload))])[0].result
             }
             if let id = rec["id"].asString {
                 created.append(.string(id))

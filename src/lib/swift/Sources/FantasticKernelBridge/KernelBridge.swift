@@ -193,7 +193,7 @@ public actor InMemoryBridge {
         // backbone leaks the local sender into the remote, where it's an unknown
         // agent → deny-all.
         return await KernelTaskLocals.$currentSender.withValue(nil) {
-            await remote.send(target, payload)
+            await remote.send([Item(target, payload)])[0].result
         }
     }
 

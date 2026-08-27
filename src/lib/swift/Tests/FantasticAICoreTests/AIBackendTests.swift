@@ -21,7 +21,7 @@ struct AIBackendTests {
     @Test func reflectMergesExtraAndKeepsOrder() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(id, .object(["type": .string("reflect")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("reflect")]))])[0].result
         #expect(r["id"].asString == id.value)
         #expect(r["kind"].asString == "mock_backend")
         #expect(r["provider"].asString == "mock")
@@ -32,7 +32,7 @@ struct AIBackendTests {
     @Test func backendStateMergesExtra() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(id, .object(["type": .string("backend_state")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("backend_state")]))])[0].result
         #expect(r["provider"].asString == "mock")
         #expect(r["configured"].asBool == true)
     }
@@ -40,15 +40,14 @@ struct AIBackendTests {
     @Test func unknownVerbErrors() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(id, .object(["type": .string("nope")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("nope")]))])[0].result
         #expect(r["error"].asString == "unknown verb nope")
     }
 
     @Test func sendReturnsQueuedShape() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(
-            id, .object(["type": .string("send"), "text": .string("hi")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
         #expect(r["queued"].asBool == true)
         #expect(r["stream_id"].asString?.hasPrefix("stm_") == true)
         #expect(r["message_id"].asString?.hasPrefix("msg_") == true)
@@ -58,7 +57,7 @@ struct AIBackendTests {
     @Test func sendWithoutTextErrors() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let r = await kernel.send(id, .object(["type": .string("send")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("send")]))])[0].result
         #expect(r["error"].asString == "send requires text")
     }
 
@@ -68,8 +67,7 @@ struct AIBackendTests {
         ])
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .refused(refusal) })
-        let r = await kernel.send(
-            id, .object(["type": .string("send"), "text": .string("hi")]))
+        let r = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
         #expect(r["error"].asString == "no_key")
         #expect(r["reason"].asString == "missing")
         #expect(r["queued"].asBool == nil)
@@ -78,16 +76,13 @@ struct AIBackendTests {
     @Test func streamPersistsUserAndAssistantHistory() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(tokens: ["Hel", "lo"])) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c1"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c1", count: 2)
 
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c1")]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c1")]))])[0].result
         let msgs = h["messages"].asArray ?? []
         #expect(msgs.count == 2)
         #expect(msgs[0]["role"].asString == "user")
@@ -102,15 +97,12 @@ struct AIBackendTests {
     @Test func statelessRowsCarryIdAndDoNotFeedHistoryBack() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig(stateless: true) { .provider(MockProvider(tokens: ["x"])) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c")]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result
         let msgs = h["messages"].asArray ?? []
         #expect(msgs[0]["id"].asString != nil)  // stateless: id present
         #expect(msgs[1]["id"].asString != nil)
@@ -135,14 +127,12 @@ struct AIBackendTests {
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"),
                 "system_prompt": .string(
                     "CALLER BLOCK: you drive tools via <tool_call> envelopes."),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(await script.waitForCalls(2), "the dispatched call's reply never came back")
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
 
@@ -153,9 +143,10 @@ struct AIBackendTests {
         #expect(!turn2.contains("Reaching other agents"))
         #expect(turn2.contains(" · core "))
 
-        // Four rows: the envelope turn, then the reply turn it caused.
+        // Six rows: the envelope turn, the reply turn it caused, and the nudge
+        // turn that reply's no-call answer earned (user+assistant each).
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
-        #expect(msgs.count == 4)
+        #expect(msgs.count == 6)
         #expect(msgs[1]["content"].asString == envelope)  // persisted verbatim
         #expect(msgs[1]["tool_calls"].asArray == nil)  // and never as a native block
         #expect(msgs[2]["content"].asString?.contains(" · core ") == true)
@@ -180,12 +171,10 @@ struct AIBackendTests {
         let pump = Task { for await ev in inbox { sink.add(ev) } }
         defer { pump.cancel() }
 
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("what is it"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
 
@@ -200,8 +189,7 @@ struct AIBackendTests {
 
         // STRIPPED in the durable store.
         let msgs =
-            (await kernel.send(
-                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+            (await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result)[
                 "messages"
             ].asArray ?? []
         #expect(msgs.count == 2)
@@ -225,12 +213,10 @@ struct AIBackendTests {
         let pump = Task { for await ev in inbox { sink.add(ev) } }
         defer { pump.cancel() }
 
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         try await waitUntil("a terminal done event") { sink.first(type: "done") != nil }
 
@@ -242,8 +228,7 @@ struct AIBackendTests {
         // The conversation keeps no deliberation — the turn persists empty
         // content, and that is the honest record of an answer-free turn.
         let msgs =
-            (await kernel.send(
-                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+            (await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result)[
                 "messages"
             ].asArray ?? []
         #expect(msgs.count == 2)
@@ -254,16 +239,13 @@ struct AIBackendTests {
     @Test func errorStreamDoesNotPersistAssistantTurn() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(throwsError: true)) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         // Only the user turn persists on error; give the stream a beat.
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 1)
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c")]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result
         let msgs = h["messages"].asArray ?? []
         #expect(msgs.count == 1)
         #expect(msgs[0]["role"].asString == "user")
@@ -287,12 +269,10 @@ struct AIBackendTests {
         let pump = Task { for await ev in inbox { sink.add(ev) } }
         defer { pump.cancel() }
 
-        let queued = await kernel.send(
-            id,
-            .object([
+        let queued = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         #expect(queued["queued"].asBool == true)
 
         // The generation OUTLIVES the `send` dispatch (which has already acked
@@ -300,13 +280,10 @@ struct AIBackendTests {
         // makes it killable at all.
         let taskId = try await waitForTask(kernel: kernel, agent: id, verb: "send")
         #expect(taskId.hasPrefix("\(id.value):"))  // a pid: "<agent_id>:<n>"
-        let before = await kernel.send(
-            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        let before = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
         #expect(before["generating"].asBool == true)
 
-        let c = await kernel.send(
-            AgentId("kernel"),
-            .object(["type": .string("cancel"), "task_id": .string(taskId)]))
+        let c = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
         #expect(c["cancelled"].asBool == true)
         #expect((c["killed"].asArray ?? []).contains(.string(taskId)))
 
@@ -322,52 +299,42 @@ struct AIBackendTests {
 
         // No PHANTOM generation: the in-flight entry is gone, so `status` agrees
         // the agent is idle and the row has left the table.
-        let after = await kernel.send(
-            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        let after = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
         #expect(after["generating"].asBool == false)
         #expect(after["current"].isNull)
         let stillListed = await psRows(kernel).contains(where: { $0["id"].asString == taskId })
         #expect(!stillListed)
 
         // The killed turn persisted no partial assistant row — only the user turn.
-        let h = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c")]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result
         let msgs = h["messages"].asArray ?? []
         #expect(msgs.count == 1)
         #expect(msgs[0]["role"].asString == "user")
 
         // The FIFO lock was released as the killed generation unwound: the agent
         // still answers a fresh send (a stranded lock would hang here forever).
-        let next = await kernel.send(
-            id,
-            .object([
+        let next = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("again"),
                 "client_id": .string("c2"),
-            ]))
+            ]))])[0].result
         #expect(next["queued"].asBool == true)
         try await waitUntil("the next generation to take the lock") {
-            let s = await kernel.send(
-                id, .object(["type": .string("status"), "client_id": .string("c2")]))
+            let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c2")]))])[0].result
             return s["generating"].asBool == true
         }
         let live = try await waitForTask(kernel: kernel, agent: id, verb: "send")
-        _ = await kernel.send(
-            AgentId("kernel"),
-            .object(["type": .string("cancel"), "task_id": .string(live)]))
+        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(live)]))])[0].result
     }
 
     @Test func historyIsPerClient() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(tokens: ["z"])) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("a"),
                 "client_id": .string("c1"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c1", count: 2)
-        let h2 = await kernel.send(
-            id, .object(["type": .string("history"), "client_id": .string("c2")]))
+        let h2 = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c2")]))])[0].result
         #expect((h2["messages"].asArray ?? []).isEmpty)
         #expect(h2["client_id"].asString == "c2")
     }
@@ -377,23 +344,18 @@ struct AIBackendTests {
         // turn 1 (the load→save round-trip through file_bridge_id).
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(tokens: ["x"])) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("two"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
         let msgs =
-            (await kernel.send(
-                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+            (await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result)[
                 "messages"
             ].asArray ?? []
         #expect(msgs.count == 4)
@@ -414,26 +376,23 @@ struct AIBackendTests {
         let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
-        let r = await kernel.send(
-            AgentId("core"),
-            .object([
+        let r = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("mock_backend.tools"), "id": .string("naked"),
-            ]))
+            ]))])[0].result
         let id = AgentId(r["id"].asString ?? "naked")
-        _ = await kernel.send(
-            id, .object(["type": .string("send"), "text": .string("hi")]))
+        _ = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
         // Give the stream a beat, then confirm history is still empty.
         try? await Task.sleep(nanoseconds: 60_000_000)
-        let h = await kernel.send(id, .object(["type": .string("history")]))
+        let h = await kernel.send([Item(id, .object(["type": .string("history")]))])[0].result
         #expect((h["messages"].asArray ?? []).isEmpty)
     }
 
     @Test func statusIdleShapeWhenNothingInFlight() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
-        let s = await kernel.send(
-            id, .object(["type": .string("status"), "client_id": .string("c")]))
+        let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
         #expect(s["source"].asString == id.value)
         #expect(s["generating"].asBool == false)
         #expect(s["current"].isNull)
@@ -448,17 +407,14 @@ struct AIBackendTests {
                 .provider(
                     MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
             })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi there"),
                 "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         // Poll until the generation is in-flight.
         var snap: JSON = .null
         for _ in 0..<50 {
-            let s = await kernel.send(
-                id, .object(["type": .string("status"), "client_id": .string("c")]))
+            let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
             if s["generating"].asBool == true {
                 snap = s
                 break
@@ -477,17 +433,14 @@ struct AIBackendTests {
             config: baseConfig {
                 .provider(MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000))
             })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("secret"),
                 "client_id": .string("owner"),
-            ]))
+            ]))])[0].result
         // A DIFFERENT client polls — must not see the owner's text.
         var cur: JSON = .null
         for _ in 0..<50 {
-            let s = await kernel.send(
-                id, .object(["type": .string("status"), "client_id": .string("nosy")]))
+            let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("nosy")]))])[0].result
             if s["generating"].asBool == true {
                 cur = s["current"]
                 break
@@ -506,22 +459,17 @@ struct AIBackendTests {
             config: baseConfig {
                 .provider(MockProvider(tokens: ["x"], chunkDelayNanos: 20_000_000))
             })
-        async let a: JSON = kernel.send(
-            id,
-            .object([
+        async let a: JSON = kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
-            ]))
-        async let b: JSON = kernel.send(
-            id,
-            .object([
+            ]))])[0].result
+        async let b: JSON = kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("two"), "client_id": .string("c"),
-            ]))
+            ]))])[0].result
         _ = await (a, b)
         // Both generations: 2 turns each (user + assistant) = 4 rows.
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
         let msgs =
-            (await kernel.send(
-                id, .object(["type": .string("history"), "client_id": .string("c")])))[
+            (await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result)[
                 "messages"
             ].asArray ?? []
         #expect(msgs.count == 4)
@@ -579,29 +527,25 @@ struct AIBackendTests {
     @Test func recallPagesStoreAndContextStatusShape() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(tokens: ["noted"])) })
-        _ = await kernel.send(
-            id,
-            .object([
+        _ = await kernel.send([Item(id, .object([
                 "type": .string("send"),
                 "text": .string("my project codename is HALCYON"),
                 "client_id": .string("chat"),
-            ]))
+            ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "chat", count: 2)
 
         // recall finds the planted fact by substring, full durable history.
-        let r = await kernel.send(
-            id,
-            .object([
+        let r = await kernel.send([Item(id, .object([
                 "type": .string("recall"), "query": .string("codename"),
                 "client_id": .string("chat"),
-            ]))
+            ]))])[0].result
         let msgs = r["messages"].asArray ?? []
         #expect(
             msgs.contains { ($0["content"].asString ?? "").lowercased().contains("halcyon") })
         #expect(r["client_id"].asString == "chat")
 
         // context_status shape — default strategy, projection recorded.
-        let st = await kernel.send(id, .object(["type": .string("context_status")]))
+        let st = await kernel.send([Item(id, .object(["type": .string("context_status")]))])[0].result
         #expect(st["context_window"].asInt != nil)
         #expect(st["budget"].asInt != nil)
         #expect(st["strategy"].asString == "compact")
@@ -617,7 +561,7 @@ struct AuthorVerbTests {
     @Test func authorRequiresAGoal() async throws {
         let (kernel, backend) = try await freshMockKernel(
             config: scriptedConfig(["mock": ProviderScript([])]))
-        let r = await kernel.send(backend, ["type": "author"])
+        let r = await kernel.send([Item(backend, ["type": "author"])])[0].result
         #expect(r["error"].asString?.contains("goal") == true, "\(r.serialize())")
     }
 
@@ -629,8 +573,7 @@ struct AuthorVerbTests {
                     [#"{"final": "nothing built"}"#],
                 ])
             ]))
-        let r = await kernel.send(
-            backend, ["type": "author", "goal": "echo", "steps": .integer(2)])
+        let r = await kernel.send([Item(backend, ["type": "author", "goal": "echo", "steps": .integer(2)])])[0].result
         #expect(r["error"].asString?.contains("gave up") == true, "\(r.serialize())")
     }
 

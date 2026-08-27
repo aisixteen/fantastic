@@ -22,7 +22,28 @@ extension Kernel {
     /// `KernelState`. Agents are sorted by id for deterministic
     /// output.
     public func snapshotState() -> KernelState {
-        let records = allAgents()
+        // Drop the ephemeral subtree TRANSITIVELY.
+        //
+        // Dropping only the ephemeral agent ITSELF leaves its children behind as
+        // orphans — records whose `parent_id` names an agent that is not in the
+        // document — and `load` rejects exactly that. So `save` would emit a
+        // snapshot its own loader refused.
+        let all = allAgents()
+        var dropped = Set(all.filter { $0.ephemeral }.map { $0.id })
+        // Walk down until nothing new is reached: a child of a dropped agent is
+        // dropped, and so is ITS child.
+        var grew = true
+        while grew {
+            grew = false
+            for a in all where !dropped.contains(a.id) {
+                if let p = a.parentId, dropped.contains(p) {
+                    dropped.insert(a.id)
+                    grew = true
+                }
+            }
+        }
+        let records = all
+            .filter { !dropped.contains($0.id) }
             .map { $0.record() }
             .sorted { $0.id < $1.id }
         return KernelState(agents: records)
@@ -79,6 +100,16 @@ extension Kernel {
         // Duplicate check.
         var seen: Set<String> = []
         for rec in state.agents {
+            // RESERVED KEYS ARE REFUSED HERE — before anything is torn down.
+            // These name substrate wiring, not agent meta, and a hand-authored
+            // `root_path:` once cleared the whole tree and THEN raised: the
+            // kernel was bricked by a field that looked like configuration.
+            // Validation before teardown is what makes a bad document a no-op.
+            for k in reservedRecordKeys where rec.meta[k] != nil {
+                throw KernelError.invalidSnapshot(
+                    "record \(rec.id) carries reserved key \(k) — that names substrate "
+                        + "wiring, not agent meta")
+            }
             if seen.contains(rec.id) {
                 throw KernelError.invalidSnapshot("duplicate id \(rec.id)")
             }

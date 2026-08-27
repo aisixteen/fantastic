@@ -73,9 +73,7 @@ struct BootstrapTests {
         #expect(FileManager.default.fileExists(atPath: lockPath.path))
 
         // Core agent registered.
-        let listed = await kernel.send(
-            AgentId("core"),
-            .object(["type": .string("list_agents")]))
+        let listed = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         #expect(ids.contains("core"))
     }
@@ -105,9 +103,7 @@ struct BootstrapTests {
 
         // One-shot should succeed even though the daemon owns the lock.
         let probe = try await Bootstrap.oneShot(workdir: tmp.path)
-        let listed = await probe.send(
-            AgentId("core"),
-            .object(["type": .string("list_agents")]))
+        let listed = await probe.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         #expect(ids.contains("core"))
     }

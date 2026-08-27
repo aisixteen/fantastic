@@ -88,7 +88,7 @@ extension Kernel {
                 "error": .string("sendJson: payload not valid JSON: \(error)")
             ]).serialize()
         }
-        let reply = await send(AgentId(targetId), payload)
+        let reply = await send([Item(AgentId(targetId), payload)])[0].result
         return reply.serialize()
     }
 
@@ -162,7 +162,7 @@ extension Kernel {
         if let v = verb {
             payload["verb"] = .string(v)
         }
-        let reply = await send(AgentId("tools"), payload)
+        let reply = await send([Item(AgentId("tools"), payload)])[0].result
         return reply.serialize()
     }
 
@@ -173,7 +173,7 @@ extension Kernel {
             "type": .string("unregister"),
             "name": .string(name),
         ]
-        let reply = await send(AgentId("tools"), payload)
+        let reply = await send([Item(AgentId("tools"), payload)])[0].result
         return reply.serialize()
     }
 
@@ -183,15 +183,13 @@ extension Kernel {
             "type": .string("unregister_by_sender"),
             "sender": .string(senderId),
         ]
-        let reply = await send(AgentId("tools"), payload)
+        let reply = await send([Item(AgentId("tools"), payload)])[0].result
         return reply.serialize()
     }
 
     /// Fetch the current tool list in LLM-facing shape.
     public func listToolsForLlm() async -> String {
-        let reply = await send(
-            AgentId("tools"),
-            .object(["type": .string("list_for_llm")]))
+        let reply = await send([Item(AgentId("tools"), .object(["type": .string("list_for_llm")]))])[0].result
         return reply.serialize()
     }
 
@@ -209,7 +207,7 @@ extension Kernel {
             "name": .string(name),
             "arguments": args,
         ]
-        let reply = await send(AgentId("tools"), payload)
+        let reply = await send([Item(AgentId("tools"), payload)])[0].result
         return reply.serialize()
     }
 }

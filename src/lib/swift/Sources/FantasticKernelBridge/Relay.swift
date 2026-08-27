@@ -330,7 +330,12 @@ public actor RelayTransport {
             return
         }
         if !isBinary {
-            let reply = await kernel.send(AgentId(target), inner)
+            // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already
+            // sends NAMES the execution, so a reconnect that replays its queue
+            // joins the original instead of running the side effect twice.
+            let reply = await kernel.send([
+                Item.fromFrame(AgentId(target), inner, frameId: id.asString)
+            ])[0].result
             _ = await sendReply(id: id, data: reply)
         } else {
             let (reply, replyBody) = await kernel.sendWithBinary(AgentId(target), inner, body)

@@ -133,7 +133,7 @@
                 let payload = m["payload"]
                 let rid = m["rid"]
                 Task { [weak self] in
-                    let data = await kernel.send(AgentId(target), payload)
+                    let data = await kernel.send([Item(AgentId(target), payload)])[0].result
                     self?.queue.async {
                         self?.push(.object(["op": .string("reply"), "rid": rid, "data": data]))
                     }

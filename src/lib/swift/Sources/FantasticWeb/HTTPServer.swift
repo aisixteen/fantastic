@@ -11,8 +11,8 @@
 //   GET  /_fantastic/transport.js   → transport.js
 //   GET  /favicon.png               → 404 (not served)
 //   GET  /_assets/<name>            → vendored Three.js / xterm assets
-//   GET  /<agent_id>/               → kernel.send(agentId, render_html)
-//   GET  /<agent_id>/file/<path>    → kernel.send(agentId, read_stream)
+//   GET  /<agent_id>/               → kernel.send([Item(agentId, render_html)])[0].result
+//   GET  /<agent_id>/file/<path>    → kernel.send([Item(agentId, read_stream)])[0].result
 //   <method> /<surface>/<...>       → dynamic child routes (web_rest), via
 //                                     the owner's `handle_route` verb
 //   GET  /<agent_id>/ws             → WebSocket upgrade → the shared proxy
@@ -270,16 +270,14 @@ public final class WebServer: @unchecked Sendable {
         for (k, v) in params { paramsObj[k] = .string(v) }
         var queryObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in query { queryObj[k] = .string(v) }
-        let reply = await kernel.send(
-            spec.ownerId,
-            .object([
+        let reply = await kernel.send([Item(spec.ownerId, .object([
                 "type": .string("handle_route"),
                 "method": .string(request.method),
                 "path": .string(request.path),
                 "params": .object(paramsObj),
                 "query": .object(queryObj),
                 "body": .string(bodyStr),
-            ]))
+            ]))])[0].result
         let status = Int(reply["status"].asInt ?? 200)
         let contentType = reply["content_type"].asString ?? "application/json"
         let bodyOut = reply["body"].asString ?? ""
@@ -289,8 +287,7 @@ public final class WebServer: @unchecked Sendable {
     }
 
     private func serveIndex() async -> HTTPResponse {
-        let listed = await kernel.send(
-            AgentId("core"), .object(["type": .string("list_agents")]))
+        let listed = await kernel.send([Item(AgentId("core"), .object(["type": .string("list_agents")]))])[0].result
         let ids = (listed["agents"].asArray ?? []).compactMap { $0["id"].asString }
         let html = """
             <!doctype html><html><head><title>fantastic</title></head>
@@ -314,7 +311,7 @@ public final class WebServer: @unchecked Sendable {
         if request.method == "GET",
             request.path == "/\(firstSeg)/" || request.path == "/\(firstSeg)"
         {
-            let reply = await kernel.send(agentTarget, .object(["type": .string("render_html")]))
+            let reply = await kernel.send([Item(agentTarget, .object(["type": .string("render_html")]))])[0].result
             if let html = reply["html"].asString {
                 let injected = WebAssets.injectTransport(into: html)
                 return HTTPResponse(

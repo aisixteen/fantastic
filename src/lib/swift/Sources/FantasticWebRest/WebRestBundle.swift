@@ -5,9 +5,9 @@
 // returned HTTP descriptors; when one matches, the host calls this
 // bundle's `handle_route` verb. Canonical wire shape (Python parity):
 //
-//   POST /<self_id>/<target>      body={type:verb,...} → kernel.send(target, body)
+//   POST /<self_id>/<target>      body={type:verb,...} → kernel.send([Item(target, body)])[0].result
 //   GET  /<self_id>/_reflect              → kernel.send("kernel", {reflect})
-//   GET  /<self_id>/_reflect/<target>     → kernel.send(target, {reflect})
+//   GET  /<self_id>/_reflect/<target>     → kernel.send([Item(target, {reflect})])[0].result
 //
 // The verb travels in the request BODY's `type` (not the URL). Routes
 // are namespaced by the agent's own id, so multiple web_rest instances
@@ -53,7 +53,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
                     "get_routes":
                         "Returns this surface's HTTP route descriptors (POST /<self>/<target>, GET /<self>/_reflect[/<target>]).",
                     "handle_route":
-                        "Host calls this on a route match: dispatches kernel.send(target, body) and returns {status, content_type, body}.",
+                        "Host calls this on a route match: dispatches kernel.send([Item(target, body)])[0].result and returns {status, content_type, body}.",
                     "boot": "No-op.", "shutdown": "No-op.",
                 ] as JSON,
             ] as JSON
@@ -114,7 +114,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
             {
                 return jsonResponse(403, denied)
             }
-            let reply = await kernel.send(AgentId(target), parsed)
+            let reply = await kernel.send([Item(AgentId(target), parsed)])[0].result
             if case .null = reply {
                 return .object([
                     "status": .integer(204),
@@ -132,7 +132,7 @@ public final class WebRestBundle: AgentBundle, @unchecked Sendable {
         if rr == "true" || rr == "1" {
             reflectPayload["readme"] = .bool(true)
         }
-        let reply = await kernel.send(AgentId(reflectTarget), .object(reflectPayload))
+        let reply = await kernel.send([Item(AgentId(reflectTarget), .object(reflectPayload))])[0].result
         return jsonResponse(200, reply)
     }
 

@@ -63,7 +63,7 @@ func parseOne(_ inner: String) -> ToolCall? {
     // gemma-4-12B:
     //   {"name":"reflect","arguments":{"target_id":"clock"}}
     // meaning "reflect the clock". Untranslated, routing read `payload` as
-    // absent and dispatched `send("clock", None)`, so the handler was called with
+    // absent and dispatched `send([Item("clock", None)])[0].result`, so the handler was called with
     // None and raised `'NoneType' object has no attribute 'get'` — three times in
     // the run this was found in. An explicit `payload` in the args still wins,
     // since the args decide.

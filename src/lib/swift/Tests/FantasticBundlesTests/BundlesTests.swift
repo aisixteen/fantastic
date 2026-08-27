@@ -20,7 +20,7 @@ import FantasticWebWS
 import Foundation
 import Testing
 
-func makeKernelWithAll() -> Kernel {
+func makeKernelWithAll(rootPath: URL = URL(fileURLWithPath: "")) -> Kernel {
     let registry = BundleRegistry()
     registry.register("file_bridge.tools", FileBundle())
     registry.register("proxy_agent.tools", ProxyAgentBundle())
@@ -30,7 +30,10 @@ func makeKernelWithAll() -> Kernel {
     registry.register("web_ws.tools", WebWSBundle())
     registry.register("web_rest.tools", WebRestBundle())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
-    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    // The root's own dir IS the store root: `findStore` discovers a
+    // `file_bridge` child whose `root` resolves to it, which is how the loader
+    // owns sidecar placement.
+    let root = Agent(id: "core", handlerModule: nil, parentId: nil, rootPath: rootPath)
     kernel.register(root)
     kernel.setRoot(root)
     return kernel
@@ -69,36 +72,30 @@ struct BundleSmokeTests {
         }
 
         // No store wired ⇒ the create stays in RAM (NO direct-fs fallback).
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "tools.tools", "id": "ram_only"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "ram_only"])])[0].result
         #expect(!fm.fileExists(atPath: file("agents/ram_only/agent.json")))
         #expect(kernel.agent("ram_only") != nil)  // live in RAM
 
         // Wire the store (file_bridge @ .fantastic, open) — it self-persists.
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
                 "root": ".fantastic", "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
         #expect(
             fm.fileExists(atPath: file("agents/store/agent.json")),
             "the store must persist itself through itself")
 
         // Now a created agent persists THROUGH the provider.
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "tools.tools", "id": "foo",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "foo",
                 "display_name": "Foo",
-            ])
+            ])])[0].result
         #expect(fm.fileExists(atPath: file("agents/foo/agent.json")))
         let content = try String(contentsOf: URL(fileURLWithPath: file("agents/foo/agent.json")))
         #expect(content.contains("\"foo\"") && content.contains("Foo"))
 
         // Delete removes the record THROUGH the provider's recursive delete.
-        _ = await kernel.send("core", ["type": "delete_agent", "id": "foo"])
+        _ = await kernel.send([Item("core", ["type": "delete_agent", "id": "foo"])])[0].result
         #expect(!fm.fileExists(atPath: file("agents/foo")))
     }
 
@@ -111,12 +108,10 @@ struct BundleSmokeTests {
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "fs",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
         // Non-UTF-8 bytes — proves the channel is raw, not text/base64.
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // SINK.
@@ -142,35 +137,30 @@ struct BundleSmokeTests {
             "fantastic-file-test-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
-        _ = await kernel.send(
-            "core",
-            [
+        _ = await kernel.send([Item("core", [
                 "type": "create_agent",
+                "parent_id": "core",
                 "handler_module": "file_bridge.tools",
                 "id": "fs1",
                 "root": .string(tmp.path),
-            ])
-        let r = await kernel.send("fs1", ["type": "reflect"])
+            ])])[0].result
+        let r = await kernel.send([Item("fs1", ["type": "reflect"])])[0].result
         #expect(r["kind"].asString == nil || r["sentence"].asString?.contains("Filesystem") == true)
     }
 
     @Test func proxyAgentNoHostReturnsStructuredError() async {
         clearHosts()
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "proxy_agent.tools", "id": "p1"])
-        let r = await kernel.send("p1", ["type": "render", "x": 1])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p1"])])[0].result
+        let r = await kernel.send([Item("p1", ["type": "render", "x": 1])])[0].result
         #expect(r["reason"].asString == "no_host")
     }
 
     @Test func proxyAgentReflectShowsHostRegisteredFalse() async {
         clearHosts()
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "proxy_agent.tools", "id": "p2"])
-        let r = await kernel.send("p2", ["type": "reflect"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p2"])])[0].result
+        let r = await kernel.send([Item("p2", ["type": "reflect"])])[0].result
         #expect(r["host_registered"].asBool == false)
         #expect(r["kind"].asString == "proxy_agent")
     }
@@ -178,20 +168,16 @@ struct BundleSmokeTests {
     @Test func toolsRegisterAndDispatch() async {
         _ = FantasticTools.clear()
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "tools.tools", "id": "tools"])
-        let r = await kernel.send(
-            "tools",
-            [
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "tools"])])[0].result
+        let r = await kernel.send([Item("tools", [
                 "type": "register",
                 "name": "ping",
                 "agent_id": "health",
                 "description": "Returns pong.",
                 "parameters_schema": ["type": "object"] as JSON,
-            ])
+            ])])[0].result
         #expect(r["ok"].asBool == true)
-        let list = await kernel.send("tools", ["type": "list_for_llm"])
+        let list = await kernel.send([Item("tools", ["type": "list_for_llm"])])[0].result
         let arr = list["tools"].asArray ?? []
         #expect(arr.count == 1)
         #expect(arr[0]["name"].asString == "ping")
@@ -200,12 +186,8 @@ struct BundleSmokeTests {
     @Test func toolsDispatchUnknownReturnsToolNotFound() async {
         _ = FantasticTools.clear()
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "tools.tools", "id": "tools"])
-        let r = await kernel.send(
-            "tools",
-            ["type": "dispatch", "name": "nope", "arguments": [:] as JSON])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "tools.tools", "id": "tools"])])[0].result
+        let r = await kernel.send([Item("tools", ["type": "dispatch", "name": "nope", "arguments": [:] as JSON])])[0].result
         #expect(r["reason"].asString == "tool_not_found")
     }
 
@@ -213,52 +195,40 @@ struct BundleSmokeTests {
         // py/rust contract: schedule {target, payload, interval_seconds} → mints a
         // schedule_id, persisted THROUGH file_bridge_id (store-relative
         // agents/<id>/schedules.json); schedule/boot FAILFAST until wired.
-        let kernel = makeKernelWithAll()
         let fm = FileManager.default
         let rel = "fantastic-sched-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let kernel = makeKernelWithAll(rootPath: dir)
         defer { try? fm.removeItem(at: dir) }
         // Open file_bridge store — the scheduler persists through it.
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
-            ])
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "scheduler.tools", "id": "sched",
-                "file_bridge_id": "store", "can_call": ["store": "*"],
-            ])
-        let r = await kernel.send(
-            "sched",
-            [
+            ])])[0].result
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "scheduler.tools", "id": "sched",
+                "can_call": ["store": "*"],
+            ])])[0].result
+        let r = await kernel.send([Item("sched", [
                 "type": "schedule", "target": "core", "interval_seconds": .integer(60),
                 "payload": ["type": "list_agents"] as JSON,
-            ])
+            ])])[0].result
         let sid = r["schedule_id"].asString
         #expect(sid != nil, "\(r)")
         // store-relative sidecar landed under the store root.
         #expect(
             fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/schedules.json").path))
-        let list = await kernel.send("sched", ["type": "list"])
+        let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect((list["schedules"].asArray ?? []).count == 1)
-        // FAILFAST: scheduling without a provider refuses (aligned error string).
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "scheduler.tools", "id": "bare"])
-        let bare = await kernel.send(
-            "bare", ["type": "schedule", "target": "core", "payload": ["type": "boot"] as JSON])
-        #expect(bare["error"].asString == "scheduler: file_bridge_id required")
+        // The sidecar landed where the LOADER put it — this bundle named only a
+        // filename, never a path.
         // unschedule removes it.
-        let u = await kernel.send(
-            "sched", ["type": "unschedule", "schedule_id": .string(sid ?? "")])
+        let u = await kernel.send([Item("sched", ["type": "unschedule", "schedule_id": .string(sid ?? "")])])[0].result
         #expect(u["removed"].asBool == true)
-        let after = await kernel.send("sched", ["type": "list"])
+        let after = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect((after["schedules"].asArray ?? []).isEmpty)
     }
 
@@ -267,42 +237,36 @@ struct BundleSmokeTests {
         // target, bumps run_count, appends a `schedule_fired` event to the
         // history.jsonl sidecar (through the provider), and `history` reads it
         // back. Mirrors the py/rust contract.
-        let kernel = makeKernelWithAll()
         let fm = FileManager.default
         let rel = "fantastic-schedfire-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let kernel = makeKernelWithAll(rootPath: dir)
         defer { try? fm.removeItem(at: dir) }
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "store",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the scheduler that persists through it.
                 "callable_by": ["sched": "*"],
-            ])
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "scheduler.tools", "id": "sched",
-                "file_bridge_id": "store", "can_call": ["store": "*"],
-            ])
-        let r = await kernel.send(
-            "sched",
-            [
+            ])])[0].result
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "scheduler.tools", "id": "sched",
+                "can_call": ["store": "*"],
+            ])])[0].result
+        let r = await kernel.send([Item("sched", [
                 "type": "schedule", "target": "core", "interval_seconds": .integer(3600),
                 "payload": ["type": "list_agents"] as JSON,
-            ])
+            ])])[0].result
         let sid = try #require(r["schedule_id"].asString)
         // Fire it NOW (no tick-loop wait).
-        let fired = await kernel.send("sched", ["type": "tick_now", "schedule_id": .string(sid)])
+        let fired = await kernel.send([Item("sched", ["type": "tick_now", "schedule_id": .string(sid)])])[0].result
         #expect(fired["fired"].asBool == true, "\(fired)")
         // run_count bumped + persisted.
-        let list = await kernel.send("sched", ["type": "list"])
+        let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
         #expect(list["schedules"][0]["run_count"].asInt == 1, "\(list)")
         // history returns the schedule_fired event with the dispatch RESULT
         // (list_agents reply) — proving the target was actually called.
-        let h = await kernel.send("sched", ["type": "history", "schedule_id": .string(sid)])
+        let h = await kernel.send([Item("sched", ["type": "history", "schedule_id": .string(sid)])])[0].result
         #expect((h["count"].asInt ?? 0) >= 1, "\(h)")
         let ev = h["history"][0]
         #expect(ev["type"].asString == "schedule_fired")
@@ -320,17 +284,13 @@ struct BundleSmokeTests {
         // Wire bridge from kernel1 → kernel2.
         let bridge = KernelBridgeBundle()
         kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send(
-            "core",
-            ["type": "create_agent", "handler_module": "ws_bridge.tools", "id": "br"])
+        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
         bridge.attachInMemory(agentId: "br", remote: kernel2, localKernel: kernel1)
-        let reply = await kernel1.send(
-            "br",
-            [
+        let reply = await kernel1.send([Item("br", [
                 "type": "forward",
                 "target": "core",
                 "payload": ["type": "list_agents"] as JSON,
-            ])
+            ])])[0].result
         // kernel2's list_agents returns "agents" array including core.
         let names = (reply["agents"].asArray ?? []).map { $0["id"].asString ?? "" }
         #expect(names.contains("core"))
@@ -343,8 +303,7 @@ struct BundleSmokeTests {
         let kernel2 = makeKernelWithAll()
         let bridge = KernelBridgeBundle()
         kernel1.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernel1.send(
-            "core", ["type": "create_agent", "handler_module": "ws_bridge.tools", "id": "br"])
+        _ = await kernel1.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
         bridge.attachInMemory(agentId: "br", remote: kernel2, localKernel: kernel1)
         // kernel2: an OPEN file_bridge in a cwd-relative dir.
         let fm = FileManager.default
@@ -352,12 +311,10 @@ struct BundleSmokeTests {
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        _ = await kernel2.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "file_bridge.tools", "id": "fs",
+        _ = await kernel2.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "fs",
                 "root": .string(rel), "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
         let payload = Data([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80])
         // forward write_stream (binary) → kernel2.fs
         let (w, _) = await kernel1.sendWithBinary(
@@ -390,24 +347,20 @@ struct BundleSmokeTests {
         // never base64. (The in-memory variant is
         // `kernelBridgeBinaryForwardStreamsRawBytes`.)
         let kernel = try await startKernelInMemory(portHint: 0)
-        _ = await kernel.send(AgentId("web"), .object(["type": .string("boot")]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
         // web_ws SEALS by default — open it for the inbound binary call.
-        let rec = await kernel.send(
-            AgentId("web"),
-            .object([
+        let rec = await kernel.send([Item(AgentId("kernel"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("web"),
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
                 "ingress_rule": .string("allow_all_ingress"),
-            ]))
+            ]))])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
-        _ = await kernel.send(
-            AgentId("web"),
-            .object(["type": .string("mount"), "child_id": .string(wsId)]))
+        _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
         defer {
             Task {
-                _ = await kernel.send(
-                    AgentId("web"), .object(["type": .string("shutdown")]))
+                _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("shutdown")]))])[0].result
             }
         }
         // An OPEN file_bridge in a cwd-relative dir on the SAME kernel.
@@ -417,14 +370,13 @@ struct BundleSmokeTests {
             .appendingPathComponent(rel)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        _ = await kernel.send(
-            AgentId("core"),
-            .object([
+        _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
+                "parent_id": .string("core"),
                 "handler_module": .string("file_bridge.tools"),
                 "id": .string("fs"), "root": .string(rel),
                 "ingress_rule": .string("allow_all_ingress"),
-            ]))
+            ]))])[0].result
 
         let port = kernel.httpPort()
         let url = URL(string: "ws://127.0.0.1:\(port)/core/ws")!
@@ -460,18 +412,14 @@ struct BundleSmokeTests {
         let kernelB = makeKernelWithAll()
         let bridge = KernelBridgeBundle()
         kernelA.bundles.register("ws_bridge.tools", bridge)
-        _ = await kernelA.send(
-            "core",
-            ["type": "create_agent", "handler_module": "ws_bridge.tools", "id": "br"])
+        _ = await kernelA.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "ws_bridge.tools", "id": "br"])])[0].result
         bridge.attachInMemory(agentId: "br", remote: kernelB, localKernel: kernelA)
 
         // Give attachInMemory's async setLocalSink Task a tick to land.
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         // Subscribe via the bridge: A.br.watch_remote(target=core)
-        let w = await kernelA.send(
-            "br",
-            ["type": "watch_remote", "target": "core"])
+        let w = await kernelA.send([Item("br", ["type": "watch_remote", "target": "core"])])[0].result
         #expect(w["ok"].asBool == true)
 
         // Synthetic local watcher of the bridge agent's inbox. Every
@@ -507,7 +455,7 @@ struct BundleSmokeTests {
         #expect(event != nil, "expected re-emitted token event on bridge inbox")
         #expect(event?["text"].asString == "hi")
 
-        _ = await kernelA.send("br", ["type": "unwatch_remote", "target": "core"])
+        _ = await kernelA.send([Item("br", ["type": "unwatch_remote", "target": "core"])])[0].result
     }
 
     @Test func cliRendererAttaches() async {
@@ -520,10 +468,8 @@ struct BundleSmokeTests {
 
     @Test func webWSGetRoutesShape() async {
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "web_ws.tools", "id": "ws"])
-        let r = await kernel.send("ws", ["type": "get_routes"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_ws.tools", "id": "ws"])])[0].result
+        let r = await kernel.send([Item("ws", ["type": "get_routes"])])[0].result
         let routes = r["routes"].asArray ?? []
         #expect(routes.count == 1)
         #expect(routes.first?["kind"].asString == "websocket")
@@ -532,10 +478,8 @@ struct BundleSmokeTests {
 
     @Test func webRestGetRoutesNamespacedBySelf() async {
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "web_rest.tools", "id": "rest"])
-        let r = await kernel.send("rest", ["type": "get_routes"])
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest"])])[0].result
+        let r = await kernel.send([Item("rest", ["type": "get_routes"])])[0].result
         let paths = (r["routes"].asArray ?? []).compactMap { $0["path"].asString }
         #expect(paths.contains("/rest/{target}"))
         #expect(paths.contains("/rest/_reflect"))
@@ -545,23 +489,19 @@ struct BundleSmokeTests {
     @Test func webRestHandleRoutePostDispatchesBodyVerb() async {
         let kernel = makeKernelWithAll()
         // The web_rest leg SEALS by default — open it for the inbound POST.
-        _ = await kernel.send(
-            "core",
-            [
-                "type": "create_agent", "handler_module": "web_rest.tools", "id": "rest",
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest",
                 "ingress_rule": "allow_all_ingress",
-            ])
+            ])])[0].result
         // Simulate the host calling handle_route for
         // POST /rest/core  body={type:list_agents}.
-        let reply = await kernel.send(
-            "rest",
-            [
+        let reply = await kernel.send([Item("rest", [
                 "type": "handle_route",
                 "method": "POST",
                 "params": ["target": "core"] as JSON,
                 "query": [:] as JSON,
                 "body": "{\"type\":\"list_agents\"}",
-            ])
+            ])])[0].result
         #expect(reply["status"].asInt == 200)
         #expect(reply["content_type"].asString == "application/json")
         let body = reply["body"].asString ?? ""
@@ -570,18 +510,14 @@ struct BundleSmokeTests {
 
     @Test func webRestHandleRouteBadJsonIs400() async {
         let kernel = makeKernelWithAll()
-        _ = await kernel.send(
-            "core",
-            ["type": "create_agent", "handler_module": "web_rest.tools", "id": "rest"])
-        let reply = await kernel.send(
-            "rest",
-            [
+        _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "web_rest.tools", "id": "rest"])])[0].result
+        let reply = await kernel.send([Item("rest", [
                 "type": "handle_route",
                 "method": "POST",
                 "params": ["target": "core"] as JSON,
                 "query": [:] as JSON,
                 "body": "not json",
-            ])
+            ])])[0].result
         #expect(reply["status"].asInt == 400)
     }
 }

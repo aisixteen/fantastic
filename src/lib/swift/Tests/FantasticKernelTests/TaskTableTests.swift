@@ -81,7 +81,7 @@ private struct SlowBundle: AgentBundle {
         // A nested send — the callee's dispatch becomes a CHILD task of this one.
         case "chain":
             let next = AgentId(payload["next"].asString ?? "")
-            return await kernel.send(next, .object(["type": .string("slow")]))
+            return await kernel.send([Item(next, .object(["type": .string("slow")]))])[0].result
         // Work that OUTLIVES this dispatch: registered in the table, so `ps` sees
         // it and `cancel` can still reach it once the dispatch is gone.
         case "fork":
@@ -95,23 +95,21 @@ private struct SlowBundle: AgentBundle {
         // the `fork` dispatch and is re-parented to THIS task.
         case "chain_fork":
             let next = AgentId(payload["next"].asString ?? "")
-            let r = await kernel.send(next, .object(["type": .string("fork")]))
+            let r = await kernel.send([Item(next, .object(["type": .string("fork")]))])[0].result
             try? await Task.sleep(nanoseconds: 30_000_000_000)
             return r
         // An AGENT cancelling another agent's work: discover via `ps`, then
         // `cancel`. Plain verbs — no privileged surface, no bundle coupling.
         case "kill":
             let victim = payload["victim"].asString ?? ""
-            let table = await kernel.send(AgentId("kernel"), .object(["type": .string("ps")]))
+            let table = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[0].result
             let found = (table["tasks"].asArray ?? []).first {
                 $0["agent"].asString == victim && $0["verb"].asString == "slow"
             }
             guard let taskId = found?["id"].asString else {
                 return .object(["error": .string("no victim task")])
             }
-            return await kernel.send(
-                AgentId("kernel"),
-                .object(["type": .string("cancel"), "task_id": .string(taskId)]))
+            return await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
         case let other:
             return .object(["error": .string("unknown verb \(other)")])
         }
@@ -145,6 +143,7 @@ private func makeAgent(
 ) async -> AgentId {
     var payload: OrderedDictionary<String, JSON> = [
         "type": .string("create_agent"),
+        "parent_id": .string("core"),
         "handler_module": .string("slow.tools"),
         "id": .string(id),
     ]
@@ -152,14 +151,14 @@ private func makeAgent(
     // `can_call` (egress) and the callee's `callable_by` (ingress).
     if case .object = canCall { payload["can_call"] = canCall }
     if case .object = callableBy { payload["callable_by"] = callableBy }
-    let r = await kernel.send(AgentId("core"), .object(payload))
+    let r = await kernel.send([Item(AgentId("core"), .object(payload))])[0].result
     #expect(r["id"].asString == id, "create_agent failed: \(r.serialize())")
     return AgentId(id)
 }
 
 /// The `ps` reply rows — through the VERB, like any caller.
 private func rows(_ kernel: Kernel) async -> [JSON] {
-    let r = await kernel.send(AgentId("kernel"), .object(["type": .string("ps")]))
+    let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("ps")]))])[0].result
     return r["tasks"].asArray ?? []
 }
 
@@ -170,9 +169,7 @@ private func rowFor(_ kernel: Kernel, _ agent: AgentId, _ verb: String) async ->
 }
 
 private func cancel(_ kernel: Kernel, _ taskId: String) async -> JSON {
-    await kernel.send(
-        AgentId("kernel"),
-        .object(["type": .string("cancel"), "task_id": .string(taskId)]))
+    await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(taskId)]))])[0].result
 }
 
 /// Poll until `cond` holds, or fail the test.
@@ -201,7 +198,7 @@ private func waitForTask(_ kernel: Kernel, _ agent: AgentId, _ verb: String) asy
 /// `value` is the eventual reply.
 private func spawnCaller(_ kernel: Kernel, _ target: AgentId, _ payload: JSON) -> Task<JSON, Never>
 {
-    Task { await kernel.send(target, payload) }
+    Task { await kernel.send([Item(target, payload)])[0].result }
 }
 
 /// Await a blocked caller's reply, failing the test rather than hanging. The
@@ -339,12 +336,10 @@ struct TaskTableCancelTests {
         #expect(again == .object(["cancelled": .bool(false), "killed": .array([])]))
 
         // A malformed call fails LOUD; it does not report a phantom success.
-        let bad = await kernel.send(AgentId("kernel"), .object(["type": .string("cancel")]))
+        let bad = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel")]))])[0].result
         #expect(bad["error"].asString == "cancel: task_id (str) required")
         #expect(bad["cancelled"] == .null)
-        let empty = await kernel.send(
-            AgentId("kernel"),
-            .object(["type": .string("cancel"), "task_id": .string("")]))
+        let empty = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string("")]))])[0].result
         #expect(empty["error"].asString == "cancel: task_id (str) required")
     }
 
@@ -363,9 +358,7 @@ struct TaskTableCancelTests {
         defer { caller.cancel() }
         let victimTask = try await waitForTask(kernel, victim, "slow")
 
-        let r = await kernel.send(
-            killer,
-            .object(["type": .string("kill"), "victim": .string(victim.value)]))
+        let r = await kernel.send([Item(killer, .object(["type": .string("kill"), "victim": .string(victim.value)]))])[0].result
         #expect(r["cancelled"].asBool == true)
         #expect(r["killed"] == .array([.string(victimTask)]))
 
@@ -441,24 +434,55 @@ struct TaskTableCancelTests {
     // MARK: - reflect advertises the substrate's own verbs
 
     @Test func rootReflectAdvertisesPsAndCancel() async throws {
-        // `ps`/`cancel` are universal system verbs — they belong to no bundle, so
-        // the ROOT reflect advertises them. One round-trip tells a caller that
-        // work in flight is inspectable and killable.
+        // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
+        // SUBSTRATE's own, answered by the root alone. They are advertised on
+        // EVERY agent: root-only was tried and reverted, because a model that
+        // never reflects the root never learns they exist, guesses, and gives up.
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
 
-        let r = await kernel.send(AgentId("kernel"), .object(["type": .string("reflect")]))
-        let sv = r["system_verbs"]
-        let cancelDoc = try #require(sv["cancel"].asString)
+        let r = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("reflect")]))])[0].result
+        let kv = r["kernel_verbs"]
+        // The `_` line says WHERE to send them and what the named id means —
+        // without it "send create_agent to X" reads three ways.
+        let preamble = try #require(kv["_"].asString)
+        #expect(preamble.contains("kernel"))
+        #expect(preamble.contains("OPERAND"))
+
+        // THE CONSEQUENCE PRECEDES THE FIRST EM-DASH, so a default reflect
+        // (which truncates there) still carries the fact a caller needs BEFORE
+        // firing.
+        let cancelDoc = try #require(kv["cancel"].asString)
         #expect(cancelDoc.contains("task_id"))
-        #expect(cancelDoc.lowercased().contains("subtree"))
-        #expect(sv["ps"].asString?.contains("tasks") == true)
-        for v in ["create_agent", "update_agent", "delete_agent", "list_agents", "get"] {
-            #expect(sv[v].asString != nil, "missing system verb \(v)")
+        #expect(
+            cancelDoc.lowercased().contains("subtree"),
+            "the cascade must survive truncation: \(cancelDoc)")
+        #expect(!cancelDoc.contains("—"), "a default reflect truncates at the dash")
+
+        let createDoc = try #require(kv["create_agent"].asString)
+        #expect(
+            createDoc.contains("parent_id:str REQUIRED"),
+            "placement is the fact a caller needs first: \(createDoc)")
+        let updateDoc = try #require(kv["update_agent"].asString)
+        #expect(
+            updateDoc.contains("REPLACED, NOT MERGED"),
+            "replace-not-merge must precede the dash: \(updateDoc)")
+
+        for v in ["create_agent", "update_agent", "delete_agent", "list_agents", "get", "ps"] {
+            #expect(kv[v].asString != nil, "missing kernel verb \(v)")
         }
-        // Non-root agents don't repeat it (root-only, like `runtime`).
-        let child = await kernel.send(a, .object(["type": .string("reflect")]))
-        #expect(child["system_verbs"] == .null)
+
+        // EVERY agent carries them, not just the root.
+        let child = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result
+        #expect(
+            child["kernel_verbs"]["cancel"].asString != nil,
+            "a non-root agent must advertise them too")
+
+        // `detail:"full"` keeps each doc WHOLE.
+        let full = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("reflect"), "detail": .string("full")]))])[0].result
+        let fullPs = try #require(full["kernel_verbs"]["ps"].asString)
+        #expect(fullPs.contains("tasks"), "full detail keeps the shape")
+        #expect(fullPs.contains("—"))
     }
 }

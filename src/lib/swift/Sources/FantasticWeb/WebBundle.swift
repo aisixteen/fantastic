@@ -133,7 +133,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
     private func mountSurface(server: WebServer, childId: AgentId, kernel: Kernel)
         async -> Bool
     {
-        let reply = await kernel.send(childId, .object(["type": .string("get_routes")]))
+        let reply = await kernel.send([Item(childId, .object(["type": .string("get_routes")]))])[0].result
         guard let routes = reply["routes"].asArray, !routes.isEmpty else {
             return false
         }
@@ -277,8 +277,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             guard let id = payload["agent_id"].asString else {
                 return .object(["error": .string("render requires agent_id")])
             }
-            let renderReply = await kernel.send(
-                AgentId(id), .object(["type": .string("render_html")]))
+            let renderReply = await kernel.send([Item(AgentId(id), .object(["type": .string("render_html")]))])[0].result
             guard let html = renderReply["html"].asString else {
                 return renderReply
             }
