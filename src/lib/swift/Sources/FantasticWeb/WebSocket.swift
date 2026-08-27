@@ -158,7 +158,20 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             if let src = parsed["src"].asString {
                 let s = AgentId(src)
                 if !watching.contains(s) {
-                    kernel.watch(src: s, watcher: clientId)
+                    // UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a
+                    // real caller. Without this `currentSender` is nil, the
+                    // kernel reads the frame as an OPERATOR watch, and the
+                    // two-sided gate never runs — which is exactly how a leg
+                    // granted only `assistant:[send]` could mirror any agent's
+                    // inbox and read the model's prompt out of it.
+                    let denial = KernelTaskLocals.$currentSender.withValue(AgentId(hostId)) {
+                        kernel.watch(src: s, watcher: clientId)
+                    }
+                    if let d = denial {
+                        Self.writeReply(
+                            channel: channel, id: parsed["id"].asString ?? "", data: d)
+                        return
+                    }
                     watching.insert(s)
                 }
             }

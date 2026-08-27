@@ -678,8 +678,32 @@ impl Kernel {
     /// Register `watcher_id` as an observer of `src_id`'s inbox.
     /// Every subsequent `send`/`emit` targeting `src_id` mirrors the
     /// payload into `watcher_id`'s inbox via [`Self::fanout_to_watchers`].
-    pub async fn watch(&self, src_id: &AgentId, watcher_id: AgentId) {
-        if let Some(src) = self.agents.get(src_id) {
+    /// Mirror `src_id`'s inbound traffic into `watcher_id`'s inbox. Returns a
+    /// refusal when the gate denies it, else `None`.
+    ///
+    /// GATED LIKE A SEND, because it IS a read of the target. A watcher receives
+    /// src's raw inbound payloads VERBATIM — the model prompt, the document
+    /// body, whatever was sent — so an ungated `watch` is a read side-channel
+    /// around `callable_by`: an agent that may not CALL an agent could still
+    /// read everything sent TO it.
+    ///
+    /// Found 2026-08-27 in a production audit: a browser leg granted exactly
+    /// `assistant:[send]` could mirror ANY agent's inbox in its session and read
+    /// the packed confidential context out of the model's prompt. The `call`
+    /// path went through the two-sided gate; this one never did.
+    ///
+    /// An OPERATOR watch (`current_sender()` is `None`) is the origin root of
+    /// trust and stays ungated, as with send.
+    pub async fn watch(self: &Arc<Self>, src_id: &AgentId, watcher_id: AgentId) -> Option<Value> {
+        let Some(src) = self.agents.get(src_id).map(|e| Arc::clone(&e)) else {
+            return None; // nothing to mirror; not a refusal
+        };
+        if let Some(orig) = current_sender() {
+            if let Some(denial) = self.gate(&orig, "watch", &src, &Value::Null) {
+                return Some(denial);
+            }
+        }
+        {
             src.watcher_ids.write().await.insert(watcher_id.clone());
         }
         // Auto-vivify the watcher's inbox so fanout has a destination
@@ -688,6 +712,24 @@ impl Kernel {
             let (tx, _rx) = tokio::sync::mpsc::channel(self.inbox_bound);
             self.inboxes.insert(watcher_id, tx);
         }
+        None
+    }
+
+    /// May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or `None`.
+    ///
+    /// The stream carries every send's sender, target, verb and payload summary
+    /// for every agent in the tree, so subscribing is the broadest read the
+    /// kernel offers. It is gated on the ROOT, and `state_subscribe` is in
+    /// [`crate::authz::PRIVILEGED_VERBS`] so a wildcard never covers it: the
+    /// edge must be named.
+    ///
+    /// An ingress rule answers "may this client reach this leg"; it says nothing
+    /// about what the client may then READ.
+    pub fn authorize_state_subscribe(self: &Arc<Self>, watcher_id: &AgentId) -> Option<Value> {
+        // An OPERATOR tap is the origin root of trust, as with send and watch.
+        current_sender()?;
+        let root = self.root()?;
+        self.gate(watcher_id, "state_subscribe", &root, &Value::Null)
     }
 
     /// Detach a previously-registered watcher.
