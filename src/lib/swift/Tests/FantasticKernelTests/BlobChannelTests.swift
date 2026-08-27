@@ -107,6 +107,54 @@ struct BlobChannelTests {
         #expect(r["content"].asString == "k: v\n")
     }
 
+    @Test func aCancelNeverDestroysAWriteTheKernelAlreadyCommitted() async {
+        // MEASURED 2026-08-27. The AI backend commits the user turn, then
+        // streams; cancelling mid-stream marked the whole subtree killed, and
+        // dispatch is INERT to a killed task — so the persist that had already
+        // been decided was swallowed and the chat read back EMPTY. The user's
+        // own message disappeared because the reply was cancelled.
+        //
+        // Bookkeeping is the kernel acting, not the caller: it survives the
+        // caller's death. Deterministic here — the flag is set by hand, so this
+        // pins the law instead of racing a real stream for it.
+        let files = Files()
+        let k = await makeKernel(files)
+        let killed = KilledFlag()
+        killed.mark()
+        #expect(killed.isKilled)
+
+        let inert = await KernelTaskLocals.$currentKilled.withValue(killed) {
+            await k.send([
+                Item(
+                    AgentId("kernel"),
+                    .object([
+                        "type": .string("persist_blob"), "agent_id": .string("desk"),
+                        "name": .string("killed.txt"), "content": .string("nope"),
+                    ]))
+            ])[0].result
+        }
+        #expect(inert["cancelled"].asBool == true, "a killed subtree must dispatch nothing")
+        #expect(!files.paths.contains("agents/desk/killed.txt"))
+
+        // Same killed scope, but entered as BOOKKEEPING: the write lands.
+        let saved = await KernelTaskLocals.$currentKilled.withValue(killed) {
+            await k.asBookkeeping {
+                await k.send([
+                    Item(
+                        AgentId("kernel"),
+                        .object([
+                            "type": .string("persist_blob"), "agent_id": .string("desk"),
+                            "name": .string("committed.txt"), "content": .string("durable"),
+                        ]))
+                ])[0].result
+            }
+        }
+        #expect(saved["ok"].asBool == true, "\(saved)")
+        #expect(
+            files.paths.contains("agents/desk/committed.txt"),
+            "a cancel destroyed an already-committed write: \(files.paths)")
+    }
+
     @Test func aNeverWrittenSidecarReadsEmptyNotError() async {
         let files = Files()
         let k = await makeKernel(files)

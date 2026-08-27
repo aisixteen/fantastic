@@ -142,17 +142,23 @@ swift/
 
 ## Public API contract
 
-The Swift kernel exposes the same method names + payload shapes the
-Apple app already consumes (preserved from the historical UniFFI
-surface to keep the app's import lines unchanged through the
-migration). Coordinated communication with `app-claude` before any
-breaking change to:
-- `Kernel.sendJson(targetId:payloadJson:)`
-- `Kernel.sendJsonAs(senderId:targetId:payloadJson:)`
-- `Kernel.proxyEmit(agentId:eventJson:)`
-- `Kernel.registerProxyAgent(agentId:host:)`
-- `Kernel.registerTool` / `unregisterToolsBySender` / `listToolsForLlm`
-- `ProxyAgent` protocol (`handle`, `onBoot`, `onDelete`)
+The UniFFI-compatibility surface is **deleted**. It existed to keep an Apple
+app's import lines unchanged through the XCFramework → native Swift migration;
+the migration is done, nothing outside its own tests called it, and an unused
+`registerTool`/`listToolsForLlm` registry is a native tool API sitting next to a
+substrate whose tool-calling is raw prompt-and-parse. Gone with it:
+`sendJson`/`sendJsonAs`, `proxyEmit`, the tool registry, the `StateListener`
+bridge, the `ProxyAgent` typealias and `Kernel.registerProxyAgent` /
+`unregisterProxyAgent`.
+
+What the embedding surface is now:
+- `Kernel.send([Item]) -> [Outcome]` — the ONE send; a single call is a
+  one-element array
+- `Kernel.subscribe { event in }` — state events, closure not callback protocol
+- `registerHost(_:_:)` / `unregisterHost(_:)` from `FantasticProxyAgent` — the
+  ONE proxy-host registration path
+- `ProxyAgentHost` protocol (`handle`, `onBoot`, `onDelete`)
+- `save()` / `load(json:)` / `shutdown()`, `httpPort()`
 - HTTP routes (`/<agent_id>/`, `/<agent_id>/ws`, `/_assets/*`,
   `/_fantastic/transport.js`)
 - Bundle names: `proxy_agent.tools`, `tools.tools`, `file_bridge.tools`,
