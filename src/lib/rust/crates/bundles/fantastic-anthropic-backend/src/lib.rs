@@ -216,6 +216,29 @@ fn translate_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
     (system, out)
 }
 
+/// The ONE tool `ai_core` teaches in prose. Sent ONLY on the `tool_use` route,
+/// and it is a TRANSLATION of the same contract — not a second one. Kept beside
+/// the translator so the two can never describe different things.
+fn send_tool() -> Value {
+    json!({
+        "name": "send",
+        "description":
+            "Reach any agent by id. The payload's `type` names the verb; \
+             {type:'reflect'} returns that agent's verbs and state. `reply_to` is \
+             where the reply goes — omit for yourself, name another agent to hand it \
+             to them, or null to discard.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string"},
+                "payload": {"type": "object"},
+                "reply_to": {"type": ["string", "null"]},
+            },
+            "required": ["target_id", "payload"],
+        },
+    })
+}
+
 // ── Anthropic provider (x-api-key + event-typed SSE + 429 retry) ─────
 
 struct AnthropicProvider {
@@ -223,6 +246,11 @@ struct AnthropicProvider {
     endpoint: String,
     model: String,
     max_tokens: u64,
+    /// OFF BY DEFAULT (#16). On, this provider declares the one `send` tool and
+    /// TRANSLATES the `tool_use` blocks back into the same `<tool_call>` text
+    /// `ai_core` parses. RAW stays the contract: the shared parser never learns
+    /// a vendor dialect, this adapter just speaks one at the edge.
+    tool_use: bool,
     kernel: Arc<Kernel>,
     client_id: String,
 }
@@ -245,8 +273,10 @@ impl Provider for AnthropicProvider {
     }
 
     async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
-        // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
-        // envelope out of the streamed text.
+        // RAW by default: no native `tools`/`tool_choice` — ai-core parses the
+        // `<tool_call>` envelope out of the streamed text. The optional
+        // `tool_use` route declares the one `send` tool and translates what
+        // comes back into that same envelope (#16).
         let (system, anthropic_messages) = translate_messages(messages);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
@@ -255,6 +285,9 @@ impl Provider for AnthropicProvider {
         body.insert("messages".into(), json!(anthropic_messages));
         if let Some(sys) = system {
             body.insert("system".into(), json!(sys));
+        }
+        if self.tool_use {
+            body.insert("tools".into(), json!([send_tool()]));
         }
         let body = Value::Object(body);
 
@@ -353,6 +386,11 @@ async fn consume_sse(
     let mut stop_reason: Option<String> = None;
     // What the stream actually CONTAINED — the honest basis for terminality.
     let mut saw_tool_use = false;
+    // The `tool_use` block being assembled, if any: Anthropic streams a block's
+    // arguments as `input_json_delta` fragments, so they are concatenated here
+    // and re-emitted as ONE text envelope when the block closes (#16).
+    let mut tool_name: Option<String> = None;
+    let mut tool_args = String::new();
 
     while let Some(chunk_res) = stream.next().await {
         let bytes = match chunk_res {
@@ -381,17 +419,43 @@ async fn consume_sse(
                 // some routes emit them regardless. Record what came, and let the
                 // terminality check read that rather than our own request flag.
                 "content_block_start" => {
-                    if obj
-                        .get("content_block")
-                        .and_then(|b| b.get("type"))
-                        .and_then(Value::as_str)
-                        == Some("tool_use")
-                    {
+                    let cb = obj.get("content_block");
+                    if cb.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
                         saw_tool_use = true;
+                        tool_name = Some(
+                            cb.and_then(|b| b.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("send")
+                                .to_string(),
+                        );
+                        tool_args.clear();
+                    }
+                }
+                "content_block_stop" => {
+                    // One `tool_use` block finished: re-emit it as the text
+                    // envelope `ai_core` parses — the same shape a raw-route
+                    // model would have written itself. TRANSLATE, never adopt.
+                    if let Some(name) = tool_name.take() {
+                        let args: Value = serde_json::from_str(if tool_args.is_empty() {
+                            "{}"
+                        } else {
+                            &tool_args
+                        })
+                        .unwrap_or_else(|_| json!({}));
+                        out.push(Ok(ProviderEvent::Token(format!(
+                            "<tool_call>{}</tool_call>",
+                            json!({"name": name, "arguments": args})
+                        ))));
+                        tool_args.clear();
                     }
                 }
                 "content_block_delta" => {
                     let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
+                    if delta.get("type").and_then(Value::as_str) == Some("input_json_delta") {
+                        if let Some(t) = delta.get("partial_json").and_then(Value::as_str) {
+                            tool_args.push_str(t);
+                        }
+                    }
                     if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
                         if let Some(t) = delta.get("text").and_then(Value::as_str) {
                             if !t.is_empty() {
@@ -532,11 +596,18 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         .get("max_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_MAX_TOKENS);
+    // OFF unless the record says otherwise: RAW prompt-and-parse is the
+    // contract, and this route is a per-endpoint adapter, not a new default.
+    let tool_use = helpers::agent_meta(agent_id, kernel)
+        .get("tool_use")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let provider: Arc<dyn Provider> = Arc::new(AnthropicProvider {
         self_id: agent_id.clone(),
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
         max_tokens,
+        tool_use,
         kernel: Arc::clone(kernel),
         client_id,
     });
@@ -566,6 +637,9 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "model": model,
         "endpoint": endpoint,
         "max_tokens": max_tokens,
+        // Which ROUTE this agent is on. Readable, because a model debugging why
+        // its envelope did or did not reach the wire cannot otherwise tell.
+        "tool_use": meta.get("tool_use").and_then(Value::as_bool).unwrap_or(false),
         "file_bridge_id": file_bridge_id_v,
         "has_api_key": has_key,
         "generating": generating,

@@ -242,7 +242,7 @@ At kernel boot, create the agent and register the host implementation:
 $FANTASTIC core create_agent handler_module=proxy_agent.tools id=fm
 ```
 
-then `kernel.register_proxy_agent("fm", host)` in process.
+then `register_host("fm", host)` in process.
 
 Tokens flow as **emit events on the fm agent's own inbox** — the
 web-app chat consumer (or any other consumer) watches the `fm` agent

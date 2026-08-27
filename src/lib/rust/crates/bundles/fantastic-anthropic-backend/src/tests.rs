@@ -33,6 +33,15 @@ async fn mk_kernel(
     tmp: &tempfile::TempDir,
     endpoint: Option<String>,
 ) -> (Arc<Kernel>, AgentId, AgentId) {
+    mk_kernel_with(tmp, endpoint, Map::new()).await
+}
+
+/// `mk_kernel` plus extra record fields (e.g. the optional `tool_use` route).
+async fn mk_kernel_with(
+    tmp: &tempfile::TempDir,
+    endpoint: Option<String>,
+    extra: Map<String, Value>,
+) -> (Arc<Kernel>, AgentId, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     kernel
@@ -82,6 +91,9 @@ async fn mk_kernel(
     });
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);
+    }
+    for (k, v) in extra {
+        create[k] = v;
     }
     let _ = kernel
         .send(vec![Item::new(AgentId::from("core"), create)])
@@ -531,4 +543,124 @@ async fn rate_limit_retry_once_then_succeeds() {
     );
     assert_eq!(tokens, "ok");
     assert_eq!(r["response"], "ok");
+}
+
+// ── #16 — the OPTIONAL `tool_use` route ─────────────────────────────
+//
+// RAW is the contract and stays the default. This route exists so an endpoint
+// that answers better in its native syntax can be used WITHOUT teaching the
+// shared parser a vendor dialect: the provider declares the one `send` tool and
+// translates what comes back into the same `<tool_call>` text envelope.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_raw_route_declares_no_tools_by_default() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1", server.uri());
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let body = sse(&[
+        json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+        json!({"type":"message_stop"}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "hi", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert!(
+        sent.get("tools").is_none(),
+        "the default route put a native `tools` key on the wire: {sent}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tool_use_route_declares_send_and_translates_blocks_back_to_raw() {
+    let server = MockServer::start().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("{}/v1", server.uri());
+    let mut extra = Map::new();
+    extra.insert("tool_use".into(), json!(true));
+    let (kernel, ant, _fid) = mk_kernel_with(&tmp, Some(endpoint), extra).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+
+    // A native tool_use block, arguments split across `input_json_delta`
+    // fragments exactly as the real endpoint streams them.
+    let body = sse(&[
+        json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
+        json!({"type":"content_block_start","index":0,
+               "content_block":{"type":"tool_use","id":"tu_1","name":"send","input":{}}}),
+        json!({"type":"content_block_delta","index":0,
+               "delta":{"type":"input_json_delta","partial_json":"{\"target_id\":\"core\","}}),
+        json!({"type":"content_block_delta","index":0,
+               "delta":{"type":"input_json_delta","partial_json":"\"payload\":{\"type\":\"reflect\"}}"}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+        json!({"type":"message_stop"}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let reply = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "send", "text": "go", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+
+    // The ONE `send` tool was declared — a translation of the same contract.
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let tools = sent
+        .get("tools")
+        .and_then(Value::as_array)
+        .expect("no tools declared");
+    assert_eq!(tools.len(), 1, "more than the one `send` tool: {tools:?}");
+    assert_eq!(tools[0]["name"], "send");
+
+    // And the block came back as the SAME text envelope a raw-route model would
+    // have written itself — this is what keeps ai-core's parser dialect-free.
+    let text = reply["response"].as_str().unwrap_or("");
+    assert!(
+        text.contains("<tool_call>") && text.contains("\"name\":\"send\""),
+        "tool_use block was not translated into the raw envelope: {text:?}"
+    );
+    assert!(
+        text.contains("\"target_id\":\"core\""),
+        "input_json_delta fragments were not reassembled: {text:?}"
+    );
 }
