@@ -77,7 +77,11 @@ testpaths = [
   "bundled_agents/io/relay_connector/tests",
   "bundled_agents/io/exec_bridge/tests",
 ]
-addopts = "-q"
+# `-n auto` — xdist across every core BY DEFAULT. It used to live only in
+# run_checks.sh, so a bare `pytest` ran the whole suite on one core while the
+# other nine idled. Parallelism is a property of the suite, not of the one
+# script that happened to remember the flag.
+addopts = "-q -n auto"
 
 [tool.uv.workspace]
 members = [
