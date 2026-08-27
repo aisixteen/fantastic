@@ -70,8 +70,10 @@ export const htmlView: ViewBundle = {
       switch (m.op) {
         case "send":
           void kernel
-            .send(m.target ?? "", m.payload ?? {})
-            .then((data) => toIframe({ op: "reply", rid: m.rid, data }));
+            .send([{ target: m.target ?? "", payload: m.payload ?? {} }])
+            .then((outs) =>
+              toIframe({ op: "reply", rid: m.rid, data: outs[0]!.result }),
+            );
           break;
         case "emit":
           // local frontend agent → local fan-out; host agent → over the bridge.

@@ -48,6 +48,6 @@ test("a plain send('kernel') still resolves LOCALLY to the canvas root", async (
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   kernel.bridge = fakeBridge([]);
 
-  const local = (await kernel.send("kernel", { type: "reflect" })) as Record<string, unknown>;
+  const local = ((await kernel.send([{ target: "kernel", payload: { type: "reflect" } }]))[0]!.result) as Record<string, unknown>;
   assert.equal(local["id"], "canvas", "send('kernel') resolves to the local frontend root");
 });

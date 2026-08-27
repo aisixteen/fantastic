@@ -53,7 +53,7 @@ test("reflect matches the cross-language conformance fixture", async () => {
   const fx = JSON.parse(await readFile(fixtureUrl, "utf8")) as Fixture;
   const k = buildKernel(fx);
   for (const c of fx.cases) {
-    const got = await k.send(c.target, c.payload);
+    const got = (await k.send([{ target: c.target, payload: c.payload }]))[0]!.result;
     assert.deepEqual(got, c.expect, `case: ${c.name}`);
   }
 });

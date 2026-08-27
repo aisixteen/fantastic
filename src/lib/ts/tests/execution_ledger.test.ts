@@ -1,0 +1,157 @@
+// THE EXECUTION LEDGER (#34/#35/#36) — ensure-semantics for sends.
+//
+// The property under test is the one that makes a double-click safe: reusing an
+// id DECLARES "same intent", so the work runs ONCE and every later caller gets
+// the recorded outcome. Measured against the real python kernel 2026-08-27; the
+// ts kernel must agree, because the same ids cross the bridge between them.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Kernel } from "../src/kernel/kernel.ts";
+import { Agent } from "../src/kernel/agent.ts";
+import type { Payload } from "../src/kernel/json.ts";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function kernelWith(handlers: { [id: string]: (p: Payload) => unknown }): Kernel {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "kernel_state" }));
+  for (const [id, fn] of Object.entries(handlers)) {
+    k.registerBundle(`${id}.tools`, async (_id, payload) => (await fn(payload)) as never);
+    k.register(new Agent({ id, parentId: "kernel_state", handlerModule: `${id}.tools` }));
+  }
+  return k;
+}
+
+test("a NAMED execution runs once; re-sending returns the RECORDED outcome", async () => {
+  let runs = 0;
+  const k = kernelWith({ till: () => { runs += 1; return { charged: runs }; } });
+  const first = (await k.send([{ target: "till", payload: { type: "buy" }, id: "order-1" }]))[0]!;
+  const again = (await k.send([{ target: "till", payload: { type: "buy" }, id: "order-1" }]))[0]!;
+  assert.equal(runs, 1, "the handler ran twice for one intent");
+  assert.deepEqual(again.result, first.result);
+  assert.equal(again.pid, "order-1");
+});
+
+test("a re-send while still IN FLIGHT joins — it does not start a second run", async () => {
+  let runs = 0;
+  const k = kernelWith({
+    slow: async () => { runs += 1; await sleep(60); return { n: runs }; },
+  });
+  const a = k.send([{ target: "slow", payload: { type: "go" }, id: "job" }]);
+  await sleep(10);
+  const b = k.send([{ target: "slow", payload: { type: "go" }, id: "job" }]);
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(runs, 1, "the in-flight execution was duplicated");
+  assert.deepEqual(ra[0]!.result, rb[0]!.result);
+});
+
+test("an id is BOUND to its first target — aiming it elsewhere is refused", async () => {
+  const k = kernelWith({ alpha: () => ({ ok: "a" }), beta: () => ({ ok: "b" }) });
+  await k.send([{ target: "alpha", payload: { type: "go" }, id: "1" }]);
+  const [out] = await k.send([{ target: "beta", payload: { type: "go" }, id: "1" }]);
+  assert.equal(out!.status, "failed");
+  assert.equal((out!.result as Payload)["reason"], "bad_arg");
+  assert.match(String((out!.result as Payload)["error"]), /bound to its first execution/);
+});
+
+test("a colon id REFERENCES a minted execution and never creates one", async () => {
+  const k = kernelWith({ a: () => ({ ok: true }) });
+  const [made] = await k.send([{ target: "a", payload: { type: "go" } }]);
+  const pid = made!.pid as string;
+  assert.match(pid, /^a:[0-9a-f]{8}$/, `unexpected pid shape: ${pid}`);
+
+  // Re-fetch by the minted pid: the recorded outcome, no new run.
+  const [refetched] = await k.send([{ target: "a", payload: { type: "go" }, id: pid }]);
+  assert.deepEqual(refetched!.result, made!.result);
+
+  // An INVENTED colon id names nothing and must not create.
+  const [bad] = await k.send([{ target: "a", payload: { type: "go" }, id: "a:deadbeef" }]);
+  assert.equal(bad!.status, "failed");
+  assert.equal((bad!.result as Payload)["reason"], "bad_arg");
+  assert.match(String((bad!.result as Payload)["error"]), /never created/);
+});
+
+test("`retries` re-dispatches a failure under the SAME id; only the final outcome settles", async () => {
+  let attempt = 0;
+  const k = kernelWith({
+    flaky: () => {
+      attempt += 1;
+      if (attempt < 3) throw new Error(`attempt ${attempt} failed`);
+      return { ok: true, attempt };
+    },
+  });
+  const [out] = await k.send([
+    { target: "flaky", payload: { type: "go" }, id: "j", retries: 3 },
+  ]);
+  assert.equal(out!.status, "completed");
+  assert.equal(out!.attempts, 3);
+  assert.equal((out!.result as Payload)["attempt"], 3);
+
+  // A joiner sees ONLY the final outcome — never an attempt retried away.
+  const [joined] = await k.send([{ target: "flaky", payload: { type: "go" }, id: "j" }]);
+  assert.equal(joined!.status, "completed");
+});
+
+test("a spent retry budget PARKS the failure — the dead-letter queue is a query", async () => {
+  const k = kernelWith({ dead: () => { throw new Error("always fails"); } });
+  const [out] = await k.send([
+    { target: "dead", payload: { type: "go" }, id: "dl", retries: 1 },
+  ]);
+  assert.equal(out!.status, "failed");
+  assert.equal(out!.attempts, 2, "the retry budget was not spent");
+
+  const led = ((await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
+  const rows = led["executions"] as { id: string; status: string; attempts: number }[];
+  const parked = rows.filter((r) => r.status !== "completed");
+  assert.ok(parked.some((r) => r.id === "dl" && r.attempts === 2), JSON.stringify(rows));
+
+  // Parked, NOT silently retried: re-sending the id returns the recorded failure.
+  const [again] = await k.send([{ target: "dead", payload: { type: "go" }, id: "dl" }]);
+  assert.equal(again!.status, "failed");
+});
+
+test("the ledger verb is ORIGIN-SCOPED — an agent sees only what it originated", async () => {
+  const k = kernelWith({
+    worker: () => ({ ok: true }),
+    // `nosy` sends on its own behalf, then reads the ledger as ITSELF.
+    nosy: () => ({ ok: true }),
+  });
+  await k.send([{ target: "worker", payload: { type: "secret" }, id: "operator-job" }]);
+
+  // As the operator: everything is visible.
+  const all = ((await k.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
+  const allRows = all["executions"] as { id: string }[];
+  assert.ok(allRows.some((r) => r.id === "operator-job"));
+
+  // As an AGENT: only its own rows. Unscoped, this verb would hand any agent
+  // the result BODIES of everything every other agent ran.
+  const scoped = k.scopedFor("nosy", null);
+  const mine = ((await scoped.send([{ target: "kernel", payload: { type: "ledger" } }]))[0]!.result) as Payload;
+  const mineRows = mine["executions"] as { id: string }[];
+  assert.ok(
+    !mineRows.some((r) => r.id === "operator-job"),
+    "an agent read another origin's executions",
+  );
+});
+
+test("the retention ring evicts settled rows, unnamed before named, in-flight never", async () => {
+  const k = kernelWith({ a: () => ({ ok: true }) });
+  k.ledger.cap = 3;
+  await k.send([{ target: "a", payload: { type: "go" }, id: "keep-me" }]);
+  for (let i = 0; i < 8; i++) {
+    await k.send([{ target: "a", payload: { type: "go" } }]); // unnamed
+  }
+  assert.ok(k.ledger.size() <= 3, `ring not enforced: ${k.ledger.size()}`);
+  assert.ok(
+    k.ledger.has("keep-me"),
+    "a NAMED row was evicted before unnamed ones — a named row is a dedup contract",
+  );
+});
+
+test("kernel verbs are root-only: a non-root agent refuses with not_here", async () => {
+  const k = kernelWith({ a: () => ({ ok: true }) });
+  const [out] = await k.send([{ target: "a", payload: { type: "ps" } }]);
+  assert.equal((out!.result as Payload)["reason"], "not_here");
+  assert.match(String((out!.result as Payload)["hint"]), /send \{type:'ps'\} to 'kernel'/);
+});

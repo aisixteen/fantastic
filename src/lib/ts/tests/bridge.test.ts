@@ -189,3 +189,64 @@ test("a pending call rejects when its socket drops", async () => {
   await assert.rejects(p, /disconnected/);
   bridge.close();
 });
+
+// ─── #38: the wire id IS the execution id ───────────────────────────────────
+
+test("two bridges mint DISJOINT correlator ids — a second tab must not collide", async () => {
+  // MEASURED 2026-08-27 against the real python kernel. The host puts a frame's
+  // `id` straight into the batch item, and an id is BOUND to its first target:
+  //
+  //   tab A  id "1" → alpha   completed
+  //   tab B  id "1" → beta    FAILED  bad_arg
+  //     "send: id '1' already names an execution on 'alpha', not 'beta'"
+  //
+  // Aimed at the same target it was worse than refused — it silently JOINED
+  // tab A's execution and returned tab A's result. A per-socket counter
+  // starting at 1 in every tab cannot be a global execution name.
+  const idsFrom = async (): Promise<string> => {
+    const fk = fakeFactory();
+    const k = kernelWithRoot();
+    const bridge = new WsBridge(k, {
+      origin: "ws://host",
+      controlEndpoint: "kernel_state",
+      makeSocket: fk.factory,
+    });
+    bridge.forward("agent_x", { type: "go" }).catch(() => {}); // close() rejects it
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    const id = String(fk.forEndpoint("kernel_state")[0]!.lastCall()!["id"]);
+    bridge.close();
+    return id;
+  };
+
+  const a = await idsFrom();
+  const b = await idsFrom();
+  assert.notEqual(a, b, "two connections minted the SAME first correlator");
+
+  // Dash form, never colon: the colon namespace is kernel-minted-only, and a
+  // colon id sent from the wire is refused as "names no known execution".
+  for (const id of [a, b]) {
+    assert.ok(!id.includes(":"), `bridge minted into the kernel namespace: ${id}`);
+    assert.match(id, /^[0-9a-z]+-\d+$/, `unexpected correlator shape: ${id}`);
+  }
+});
+
+test("correlators stay unique across many calls on one socket", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+  });
+  const seen = new Set<string>();
+  for (let i = 0; i < 5; i++) {
+    bridge.forward("agent_x", { type: "go", i }).catch(() => {}); // close() rejects it
+    await until(() => {
+      const c = fk.forEndpoint("kernel_state")[0]?.lastCall();
+      return c !== undefined && !seen.has(String(c["id"]));
+    });
+    seen.add(String(fk.forEndpoint("kernel_state")[0]!.lastCall()!["id"]));
+  }
+  assert.equal(seen.size, 5, "a correlator was reused on one socket");
+  bridge.close();
+});

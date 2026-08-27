@@ -6,6 +6,12 @@ import { reflectIdentity, applyReflectFlags } from "./reflect.ts";
 import type { BundleInfo } from "./reflect.ts";
 import { CURRENT_VERSION, validateRecords } from "./state.ts";
 import type { AgentRecord, Snapshot, StateEvent } from "./state.ts";
+import { ExecutionLedger } from "./ledger.ts";
+import { TaskTable } from "./tasks.ts";
+import { runBatch } from "./batch.ts";
+import type { Item, Outcome } from "./outcome.ts";
+import { UNHANDLED, refusal } from "./refusal.ts";
+import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -41,6 +47,24 @@ export class Kernel {
    *  reflect as `persistence:{provider}` (mirrors py). For the browser frontend the
    *  loader sets this to the host loader id/alias it proxies to; null = unwired. */
   persistenceProvider: string | null = null;
+
+  /** Every execution this kernel has run — dedup/join/retry/dead-letter. */
+  readonly ledger = new ExecutionLedger();
+  /** In-flight dispatches, as a tree: a cancel takes the subtree with it. */
+  readonly tasks = new TaskTable();
+
+  /**
+   * The id that ORIGINATED the dispatch now running, or null for an operator.
+   *
+   * The browser has no `AsyncLocalStorage` and a module-global would leak
+   * across every await, so this is not ambient state: `scopedFor` returns a
+   * prototype-linked VIEW of this kernel carrying the origin, and a handler is
+   * handed that view as its `kernel`. A handler therefore cannot forge an
+   * origin — it never names one, it just sends.
+   */
+  readonly currentOrigin: string | null = null;
+  /** The task id of the dispatch now running — a nested send parents to it. */
+  readonly currentTask: string | null = null;
 
   /** handler_module -> the JS handler that runs that view bundle locally. */
   private readonly handlers: Map<string, Handler> = new Map();
@@ -215,34 +239,74 @@ export class Kernel {
       : targetId;
   }
 
+  /** A view of this kernel whose sends are attributed to `agentId`. Shares all
+   *  state by prototype — the ledger, the table and the tree are the SAME
+   *  objects, only the origin differs. */
+  scopedFor(agentId: string, taskId: string | null): Kernel {
+    const view = Object.create(this) as Kernel;
+    Object.defineProperty(view, "currentOrigin", { value: agentId, enumerable: true });
+    Object.defineProperty(view, "currentTask", { value: taskId, enumerable: true });
+    return view;
+  }
+
+  /** Resolve the `"kernel"` alias for callers outside this module. */
+  resolveId(targetId: string): string {
+    return this.resolve(targetId);
+  }
+
   /**
-   * The one primitive. Local agent → dispatch here; unknown target → forward
-   * over the bridge to the host. `reflect` is answered uniformly by the kernel
-   * for EVERY local agent (never the handler), then post-processed with flags.
+   * THE ONE PRIMITIVE: `send([Item]) -> [Outcome]`, array-only.
+   *
+   * A single call is a one-element array — there is no sugar overload, and its
+   * ABSENCE is what stops single and batch drifting apart:
+   *
+   *     const r = (await kernel.send([{ target, payload }]))[0].result;
+   *
+   * Launch is synchronous for the whole batch (so `ps` shows it at once), the
+   * settle phase is concurrent, and the returned array preserves INPUT order.
    */
-  async send(targetId: string, payload: Payload): Promise<Json> {
+  async send(items: Item[]): Promise<Outcome[]> {
+    return runBatch(this, items);
+  }
+
+  /**
+   * Dispatch ONE resolved call — the inside of an execution, after validation,
+   * the ledger and the task row. Local agent → run here; unknown target →
+   * forward over the bridge to the host.
+   *
+   * `reflect` is answered uniformly by the KERNEL for every local agent, never
+   * by the handler, so it cannot drift bundle by bundle.
+   */
+  async dispatch(targetId: string, payload: Payload, taskId: string): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
     const verb = str(payload, "type");
 
     if (target === undefined) {
-      if (this.bridge !== null) return this.bridge.forward(id, payload);
-      return { error: `no agent '${id}' and no bridge to forward to` };
+      // FEDERATION: not ours, so it belongs to the host. `launch` already
+      // refused the no-bridge case, so a bridge is present here.
+      return (this.bridge as Bridge).forward(id, payload);
     }
-
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);
     }
+    // Kernel verbs act on the TABLE and the LEDGER, so they are the root's to
+    // answer and the named agent is the operand — refused HERE, in the handler,
+    // not in the gate.
+    if (isKernelVerb(verb)) return answerKernelVerb(this, id, verb, payload);
     if (target.handler !== null) {
-      return target.handler(target.id, payload, this);
+      // The handler receives a SCOPED kernel: its own nested sends are
+      // attributed to it, and parent to this task so a cancel reaches them.
+      return target.handler(target.id, payload, this.scopedFor(target.id, taskId));
     }
     if (verb === "boot" || verb === "shutdown" || verb === "") {
       return null;
     }
-    return {
-      error: `agent '${id}' is bare (no handler); cannot answer verb '${verb}'`,
-    };
+    return refusal(UNHANDLED, `agent '${id}' is bare (no handler); cannot answer verb '${verb}'`, {
+      hint: "give the agent a handler_module, or send a verb the kernel answers (reflect)",
+      extra: { verb },
+    });
   }
 
   // ---- events: inbox + watch fan-out -------------------------------------
