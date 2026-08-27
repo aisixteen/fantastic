@@ -21,6 +21,7 @@ import type { Item, Outcome, Status } from "./outcome.ts";
 import type { Row } from "./ledger.ts";
 import { refused } from "./outcome.ts";
 import { BAD_ARG, refusal, missing, unknown } from "./refusal.ts";
+import { authorizeCall, denial } from "./authz.ts";
 
 /** An item that reached the ledger and now needs settling. */
 interface Launched {
@@ -75,6 +76,16 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // federation, not an error. Only a missing target with no bridge is unknown.
   if (target === undefined && k.bridge === null) {
     return { index, settled: refused(unknown(resolvedId, [...k.agents.keys()])) };
+  }
+
+  // ── CALL GATE — fully gated, two-sided, from above ───────────────
+  // An OPERATOR send (no origin) is the root of trust and never reaches here.
+  // Every AGENT send — ANY verb, `reflect` included — needs BOTH ends.
+  const origin = k.currentOrigin;
+  if (origin !== null && target !== undefined) {
+    const verb = typeof payload["type"] === "string" ? payload["type"] : "";
+    const d = k.gate(origin, verb, resolvedId);
+    if (d !== null) return { index, settled: refused(d) };
   }
 
   const retries = item.retries ?? 0;
