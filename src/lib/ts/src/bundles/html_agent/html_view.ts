@@ -56,6 +56,17 @@ export const htmlView: ViewBundle = {
 
     // The relay: connector(postMessage) → the REAL JS kernel. The kernel does the
     // local-vs-host routing — the iframe never knows or cares which.
+    //
+    // IT SENDS AS THIS AGENT, NOT AS THE OPERATOR. The iframe holds content the
+    // operator did not necessarily write — that is the whole reason it is
+    // sandboxed — so its reach is this agent's `can_call`, gated like any other
+    // agent's. Relaying as the operator would have made the sandbox cosmetic:
+    // null-origin in the browser, unlimited authority in the kernel.
+    //
+    // The structural baseline still covers the useful cases (its own subtree and
+    // its creator); reaching anything else is an explicit grant on this agent's
+    // record, and a denial says which end refused and how to open it.
+    const asSelf = kernel.scopedFor(selfId, null);
     const onMsg = (e: MessageEvent): void => {
       if (e.source !== iframe.contentWindow) return; // scope strictly to OUR iframe
       const m = e.data as {
@@ -69,7 +80,7 @@ export const htmlView: ViewBundle = {
       if (m?.__ft !== true) return;
       switch (m.op) {
         case "send":
-          void kernel
+          void asSelf
             .send([{ target: m.target ?? "", payload: m.payload ?? {} }])
             .then((outs) =>
               toIframe({ op: "reply", rid: m.rid, data: outs[0]!.result }),
@@ -86,7 +97,17 @@ export const htmlView: ViewBundle = {
         case "watch": {
           const src = m.src ?? "";
           if (!watchOffs.has(src)) {
-            kernel.watch(src, selfId); // host srcs → bridge.watchRemote
+            // GATED like a call (#39): a watcher receives `src`'s raw inbound
+            // payloads verbatim, so an ungated watch would read everything sent
+            // to an agent this iframe may not even call. A denial is reported
+            // BACK to the iframe — half-subscribing (refused upstream, inbox
+            // listener attached anyway) would look like it worked and deliver
+            // nothing, which is the worst of both.
+            const denied = asSelf.watch(src, selfId); // host srcs → bridge.watchRemote
+            if (denied !== null) {
+              toIframe({ op: "event", src, payload: denied });
+              break;
+            }
             const off = kernel.onInbox(src, (p) => toIframe({ op: "event", src, payload: p }));
             watchOffs.set(src, () => {
               off();

@@ -1,6 +1,7 @@
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 import type { AgentRecord } from "./state.ts";
+import { DEFAULT_GRANT } from "./authz.ts";
 
 // A local handler answers an agent's DOMAIN verbs (render, write, resize, …).
 // It never answers `reflect` — the kernel answers that uniformly for every
@@ -48,6 +49,21 @@ export class Agent {
     this.sentence = init.sentence ?? null;
     this.verbs = init.verbs ?? null;
     this.meta = init.meta ?? {};
+    // Structural authority baseline, stamped + MERGED on BOTH fields for EVERY
+    // agent through this one constructor — seeded root, created child, or
+    // record loaded from the host alike, so nothing can lack it. Both start as
+    // {$self,$parent,$children}: reach and accept your own subtree and your
+    // creator. It merges UNDER any explicit grant (an explicit key wins, and
+    // the merge is idempotent on reload). Deny-all governs every other edge.
+    for (const field of ["can_call", "callable_by"] as const) {
+      const explicit = this.meta[field];
+      this.meta[field] = {
+        ...DEFAULT_GRANT,
+        ...(explicit !== null && typeof explicit === "object" && !Array.isArray(explicit)
+          ? explicit
+          : {}),
+      };
+    }
     this.handler = init.handler ?? null;
     this.children = new Map();
   }

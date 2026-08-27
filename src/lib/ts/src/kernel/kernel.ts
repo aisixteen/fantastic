@@ -12,6 +12,7 @@ import { runBatch } from "./batch.ts";
 import type { Item, Outcome } from "./outcome.ts";
 import { UNHANDLED, refusal } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
+import { authorizeCall, denial } from "./authz.ts";
 
 /**
  * The bridge transport (P2). The pure core depends only on this interface, so
@@ -249,6 +250,50 @@ export class Kernel {
     return view;
   }
 
+  /**
+   * Run the two-sided gate for one edge. Returns a refusal, or null to allow.
+   *
+   * BOTH ends must grant it: the sender's `can_call` (egress) and the target's
+   * `callable_by` (ingress). `side` on the refusal says which end refused, so a
+   * caller can tell "I may not call" from "they do not accept me" — the two
+   * have different fixes and only the operator can apply either.
+   */
+  gate(senderId: string, verb: string, targetId: string): Payload | null {
+    const sender = this.agents.get(senderId);
+    const target = this.agents.get(targetId);
+    if (sender !== undefined) {
+      const ok = authorizeCall(
+        sender.meta["can_call"] as Payload | undefined,
+        verb,
+        targetId,
+        {
+          holderId: sender.id,
+          holderParent: sender.parentId,
+          holderChildren: new Set(sender.children.keys()),
+        },
+      );
+      if (!ok) return denial("egress", senderId, targetId, verb);
+    }
+    if (target !== undefined) {
+      const ok = authorizeCall(
+        target.meta["callable_by"] as Payload | undefined,
+        verb,
+        senderId,
+        {
+          holderId: target.id,
+          holderParent: target.parentId,
+          holderChildren: new Set(target.children.keys()),
+          // INGRESS: the privileged escalation is already blocked at egress, so
+          // a callee's `$children:"*"` ("I trust my own subtree") legitimately
+          // accepts a privileged verb.
+          enforcePrivileged: false,
+        },
+      );
+      if (!ok) return denial("ingress", senderId, targetId, verb);
+    }
+    return null;
+  }
+
   /** Resolve the `"kernel"` alias for callers outside this module. */
   resolveId(targetId: string): string {
     return this.resolve(targetId);
@@ -414,16 +459,34 @@ export class Kernel {
   }
 
   /** Watch `src` on behalf of `watcher`. If `src` is remote, ask the bridge. */
-  watch(srcId: string, watcherId: string): void {
+  watch(srcId: string, watcherId: string): Payload | null {
     const id = this.resolve(srcId);
+    // #39 — THE READ SIDE OF THE GATE. A watcher receives its target's raw
+    // inbound payloads VERBATIM: the model's prompt, the document body, the
+    // packed context. Ungated, `watch` is a read side-channel AROUND
+    // `callable_by` — an agent that may not CALL another could still read
+    // everything sent TO it. The `call` path went through the gate; this never
+    // did, which is exactly why it was worth nothing to hold.
+    //
+    // The WATCHER is the caller here, so the edge is gated as `watcher → src`
+    // under the verb `watch`. An operator watch (no origin) stays ungated, as
+    // with send.
+    if (this.currentOrigin !== null) {
+      const d = this.gate(watcherId, "watch", id);
+      if (d !== null) return d;
+    }
     const set = this.watchers.get(id) ?? new Set();
     const firstLocally = set.size === 0;
     set.add(watcherId);
     this.watchers.set(id, set);
     const local = this.agents.get(id);
     if ((local === undefined || local.handler === null) && firstLocally) {
+      // Watching a REMOTE agent goes out as the BRIDGE, not as this watcher:
+      // a local id means nothing in the host's grant space, and the local gate
+      // above already authorized reaching it.
       this.bridge?.watchRemote(id);
     }
+    return null;
   }
 
   unwatch(srcId: string, watcherId: string): void {
