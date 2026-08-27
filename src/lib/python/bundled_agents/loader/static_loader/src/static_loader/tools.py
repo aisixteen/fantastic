@@ -37,6 +37,7 @@ import yaml
 from file_bridge import fs
 
 from kernel import operator_context
+from kernel._refusal import UNHANDLED, refusal
 
 MANIFEST_FIELD = "manifest"
 
@@ -112,8 +113,16 @@ async def _boot(id, payload, agent):
                             "target": "kernel",
                             "payload": {
                                 "type": "create_agent",
-                                "parent_id": agent.id,
                                 **spec,
+                                # AFTER the spread, not before. A manifest entry
+                                # carrying its own `parent_id` used to win and
+                                # place the agent somewhere else entirely —
+                                # measured 2026-08-28: an entry naming the root
+                                # landed as the ROOT's child, not the loader's,
+                                # silently breaking the "roster is the loader's
+                                # subtree" guarantee this docstring states and
+                                # that owned-subtree delete depends on.
+                                "parent_id": agent.id,
                             },
                         }
                     ]
@@ -154,5 +163,5 @@ VERBS = {
 async def handler(id: str, payload: dict, agent) -> dict | None:
     fn = VERBS.get(payload.get("type"))
     if fn is None:
-        return {"error": f"static_loader: unknown type {payload.get('type')!r}"}
+        return refusal(UNHANDLED, f"static_loader: unknown type {payload.get('type')!r}", verb=payload.get("type"))
     return await fn(id, payload, agent)

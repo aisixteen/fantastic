@@ -56,6 +56,7 @@ import time
 from exec_bridge import proc, shims
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
+from kernel._refusal import NOT_FOUND, TRANSPORT_ERROR, bad, refusal
 
 # Per-call `args` ride the process env, and the whole env block caps near 1 MB on
 # darwin/linux — past it `execve` fails with a cryptic E2BIG. Refuse early and say why.
@@ -338,12 +339,12 @@ async def _start(id, payload, kernel):
     try:
         program = shims.apply(payload.get("shim") or rec.get("shim"), code)
     except KeyError as e:
-        return {"error": f"exec_bridge: {e}"}
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: {e}")
 
     try:
         args_json = json.dumps(payload.get("args", {}))
     except (TypeError, ValueError) as e:
-        return {"error": f"exec_bridge: args must be JSON-serializable ({e})"}
+        return bad("start", "args", f"JSON-serializable ({e})")
     if len(args_json.encode("utf-8")) > MAX_ARGS_BYTES:
         return {
             "error": (
@@ -372,10 +373,10 @@ async def _start(id, payload, kernel):
         )
     except proc.InterpreterRefused as e:
         parent_sock.close()
-        return {"error": f"exec_bridge: {e}"}
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: {e}")
     except Exception as e:
         parent_sock.close()
-        return {"error": f"exec_bridge: spawn failed: {e}"}
+        return refusal(TRANSPORT_ERROR, f"exec_bridge: spawn failed: {e}")
     finally:
         # The parent's copy of the CHILD end must go, or EOF never fires and a parked
         # program never learns the kernel died.
@@ -433,7 +434,7 @@ async def _status(id, payload, kernel):
     if jid:
         j = _jobs.get(jid)
         if j is None or j.get("owner") != id:
-            return {"error": f"exec_bridge: no job {jid!r}"}
+            return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
         return {"jobs": [_snap(jid, full=True)]}
     return {"jobs": [_snap(k) for k, v in _jobs.items() if v.get("owner") == id]}
 

@@ -97,9 +97,23 @@ expect:
       expect: {not_contains: {files.*.name: blocked.txt}}
       because: C20
 
-    - name: two legs rooted in different directories cannot see each other's files
+    # Isolation asserted by WRITING through one leg and reading through the
+    # other, not by an absence in a listing. The previous form asserted
+    # `not_contains` on a reply that has no `files` key at all (the vault root
+    # does not exist until something writes there), so it passed without ever
+    # looking — caught 2026-08-28 when the matcher was taught to refuse a path
+    # that resolves to nothing.
+    - name: a file written through one leg is invisible to a leg rooted elsewhere
+      operator: {to: vault, send: {type: write, path: vault_only.txt, content: "v"}}
+      expect: {contains: {written: true}}
+      because: C20
+    - name: the vault leg sees its own file
       operator: {to: vault, send: {type: list, path: ""}}
-      expect: {not_contains: {files.*.name: baseline.txt}}
+      expect: {contains: {files.*.name: vault_only.txt}}
+      because: C20
+    - name: and the data leg cannot — different roots, no shared view
+      operator: {to: rw, send: {type: list, path: ""}}
+      expect: {not_contains: {files.*.name: vault_only.txt}}
       because: C20
 
     - name: a sealed leg still DESCRIBES itself — reflect is how you learn to open it

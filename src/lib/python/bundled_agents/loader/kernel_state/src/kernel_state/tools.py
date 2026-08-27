@@ -43,6 +43,7 @@ from file_bridge import fs
 
 from kernel import CURRENT_VERSION, operator_context
 from kernel import current_origin
+from kernel._refusal import guard_agent_id, missing
 
 # ─── disk I/O via `fs` (the ONE disk surface) — bootstrap cold primitives ──
 # These run before any agent exists, so they call `fs`'s functions directly (not the
@@ -905,13 +906,29 @@ async def _load_tree(id, payload, agent):
     return {"records": read_tree(_root(agent)), "version": CURRENT_VERSION}
 
 
+def _guard_parent_chain(verb: str, parent_id: object) -> dict | None:
+    """`_resolve_path` walks the parent chain and joins EVERY link into the
+    path, so a poisoned `parent_id` escapes exactly as a poisoned `id` does."""
+    if parent_id is None:
+        return None
+    return guard_agent_id(verb, parent_id)
+
+
 async def _persist_record(id, payload, agent):
     """args: record:dict (req). Merge-write one agent.json. Location is the
     live agent's _root_path if present, else computed under this loader's
     root from the record's parent chain."""
     record = payload.get("record")
     if not isinstance(record, dict) or not record.get("id"):
-        return {"error": "persist_record: record (dict with id) required"}
+        return missing("persist_record", "record (dict with id)")
+    # DEFENCE IN DEPTH. `create_agent` guards the id at the mint, but this verb
+    # takes one straight from the PAYLOAD — and a foreign record arrives here
+    # from a bridge/session loader, a lower-trust caller. An id becomes a
+    # directory, so an unvalidated one writes wherever it points.
+    if (bad_id := guard_agent_id("persist_record", record["id"])) is not None:
+        return bad_id
+    if (bad_pid := _guard_parent_chain("persist_record", record.get("parent_id"))) is not None:
+        return bad_pid
     a = agent.ctx.get_agent(record["id"])
     write_record(
         a._root_path if a is not None else _resolve_path(agent, record), record
@@ -926,7 +943,14 @@ async def _forget_record(id, payload, agent):
     its root — a removed agent is no longer in the tree to walk."""
     target = payload.get("id")
     if not target:
-        return {"error": "forget_record: id required"}
+        return missing("forget_record", "id")
+    # This verb ends in `rmtree`. Measured 2026-08-28: an agent with NO explicit
+    # grant sent id="../../important_project_dir" and recursively deleted a
+    # directory outside the store entirely.
+    if (bad_id := guard_agent_id("forget_record", target)) is not None:
+        return bad_id
+    if (bad_pid := _guard_parent_chain("forget_record", payload.get("parent_id"))) is not None:
+        return bad_pid
     a = agent.ctx.get_agent(target)
     if a is not None:
         path = a._root_path
