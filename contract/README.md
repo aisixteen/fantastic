@@ -87,6 +87,31 @@ the three tree-CRUD cases: the browser kernel's tree is built by its bundles and
 persisted through the host loader, so answering `create_agent` would be
 advertising a surface that does not exist. Anything not named must pass.
 
+## The agentic corpus is HOST-RUNTIMES-ONLY (decided 2026-08-27)
+
+Python, rust and swift run `agentic/`. The ts kernel does not, and that is a
+decision, not a gap.
+
+Measured: **no scenario applies to it.** Every config builds its roster from
+`file_bridge` / `yaml_state` / `exec_bridge`, and the browser kernel has only
+view bundles (canvas, html_agent, terminal_view, gl_agent, ai_view, loader). It
+also owns no tree-CRUD verbs and no manifest loader — its tree is built by its
+bundles and persisted through the HOST loader — so hydrating a declared roster
+is not a thing it does. It has no YAML parser either, and ships zero runtime
+deps on purpose.
+
+What covers it instead:
+
+- `conformance/cases.json` (C21), which it replays like the others — three cases
+  skipped BY NAME, with the reason in the driver.
+- its own native tests for the machinery it does have: the two-sided call gate
+  (including #39's gated `watch`), the execution ledger, array-only batch send,
+  refusals and paging.
+
+Giving it a `file_bridge` so the existing scenarios would run was considered and
+rejected: it would grow the browser kernel a filesystem it has no use for
+outside tests.
+
 ## Root ids differ, deliberately
 
 `$root` in a conformance expectation means THAT RUNTIME'S root — python
