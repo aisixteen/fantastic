@@ -51,7 +51,11 @@ pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// `max_tokens` is REQUIRED by the Messages API — default if unset on the meta.
-pub const DEFAULT_MAX_TOKENS: u64 = 4096;
+pub const DEFAULT_MAX_TOKENS: u64 = 8192;
+
+/// Retries for a NON-JSON gateway 5xx (a CDN error page), with 1s/2s backoff.
+/// A JSON body is the API answering deliberately and is never retried.
+const GATEWAY_MAX_RETRIES: u32 = 2;
 
 /// Headless / REPL caller default.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
@@ -134,10 +138,10 @@ fn drop_cached_client(self_id: &AgentId) {
 
 // ── Anthropic-local: api_key sidecar ────────────────────────────────
 
-fn key_path(self_id: &AgentId) -> String {
-    // Store-relative (`agents/<id>/…`) — wire `file_bridge_id` to the `.fantastic`
-    // store; lands next to the agent's agent.json. Matches Python + NIM.
-    format!("agents/{}/api_key", self_id)
+/// The api-key sidecar's FILENAME. A name, not a path — the loader owns where
+/// sidecars land, so this bundle no longer computes `agents/<id>/…`.
+fn key_path(_self_id: &AgentId) -> String {
+    "api_key".to_string()
 }
 
 async fn read_api_key(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
@@ -257,6 +261,7 @@ impl Provider for AnthropicProvider {
         // Retry-once-on-429 (before any chunk yielded). Emits a rate-limit
         // say + status during the backoff.
         let mut attempt: u32 = 0;
+        let mut gw_attempt: u32 = 0;
         let resp = loop {
             let client = get_or_build_client(&self.self_id, &self.kernel).await?;
             let url = format!("{}/messages", self.endpoint.trim_end_matches('/'));
@@ -304,8 +309,27 @@ impl Provider for AnthropicProvider {
                     return Err(format!("send: rate limited (429); retry in {wait}s"));
                 }
             }
+            // A GATEWAY HICCUP, not an answer. 502/503/504/520-524 from a CDN or
+            // reverse proxy in front of the API is transient; a 1-2s restart
+            // returned a Cloudflare HTML page and killed a 26-pass run at pass 5.
+            //
+            // Retried ONLY when the body is not JSON. A JSON body is the API
+            // speaking deliberately — that stays loud and is never retried, or a
+            // real refusal would be re-sent until the budget ran out.
+            let code = status.as_u16();
+            let gateway = code == 502 || code == 503 || code == 504 || (520..=524).contains(&code);
+            if gateway && gw_attempt < GATEWAY_MAX_RETRIES {
+                let body_text = resp.text().await.unwrap_or_default();
+                if serde_json::from_str::<Value>(&body_text).is_err() {
+                    let wait = 1u64 << gw_attempt; // 1s, 2s
+                    gw_attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(wait)).await;
+                    continue;
+                }
+                return Err(format!("send: provider HTTP {code}"));
+            }
             if !status.is_success() {
-                return Err(format!("send: provider HTTP {}", status.as_u16()));
+                return Err(format!("send: provider HTTP {code}"));
             }
             break resp;
         };
@@ -327,6 +351,8 @@ async fn consume_sse(
     let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
     let mut stop = false;
     let mut stop_reason: Option<String> = None;
+    // What the stream actually CONTAINED — the honest basis for terminality.
+    let mut saw_tool_use = false;
 
     while let Some(chunk_res) = stream.next().await {
         let bytes = match chunk_res {
@@ -351,6 +377,19 @@ async fn consume_sse(
                 Err(_) => continue,
             };
             match obj.get("type").and_then(Value::as_str).unwrap_or("") {
+                // A tool_use block can arrive whether or not WE declared tools —
+                // some routes emit them regardless. Record what came, and let the
+                // terminality check read that rather than our own request flag.
+                "content_block_start" => {
+                    if obj
+                        .get("content_block")
+                        .and_then(|b| b.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("tool_use")
+                    {
+                        saw_tool_use = true;
+                    }
+                }
                 "content_block_delta" => {
                     let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
                     if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
@@ -393,8 +432,15 @@ async fn consume_sse(
     // connection was returned as if the model had finished; a create_agent turn
     // stopped mid-`code`, the partial parsed as an unterminated envelope, and the
     // chain died with no visible cause.
+    // TERMINALITY IS DECIDED BY WHAT THE STREAM CONTAINED, not by what we asked
+    // for. A `/cc`-style route returns `tool_use` blocks for a request carrying
+    // no `tools` key at all, so gating on our own flag failed EVERY such turn on
+    // arrival — the completion was whole and we threw it away.
     match stop_reason.as_deref() {
         Some("end_turn") | Some("stop_sequence") => Ok(out),
+        // The model stopped to CALL something. That is a finished turn, not a
+        // truncated one — the blocks are the answer.
+        Some("tool_use") if saw_tool_use => Ok(out),
         Some(other) => Err(format!(
             "anthropic stream ended without end_turn: stop_reason={other:?}"
         )),

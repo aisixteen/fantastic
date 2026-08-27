@@ -84,6 +84,7 @@ fn create_store(dir: &std::path::Path) {
         .args([
             "core",
             "create_agent",
+            "parent_id=kernel",
             "handler_module=file_bridge.tools",
             "id=store",
             "root=.fantastic",
@@ -115,6 +116,7 @@ fn one_shot_create_agent_persists_record() {
         .args([
             "core",
             "create_agent",
+            "parent_id=kernel",
             "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",
@@ -147,6 +149,7 @@ fn one_shot_dispatch_returns_json_reply() {
         .args([
             "core",
             "create_agent",
+            "parent_id=kernel",
             "handler_module=file_bridge.tools",
             "id=ff",
             "root=/tmp",

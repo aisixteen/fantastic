@@ -1,11 +1,10 @@
 //! Integration test: a proxy_agent host acting as a chat backend can
-//! pull the current tool registry via `kernel.send("tools",
-//! {list_for_llm})`. Proves the brain-kernel step-5 chain:
+//! pull the current tool registry via `kernel.send(vec![Item::new("tools", //! {list_for_llm})])`. Proves the brain-kernel step-5 chain:
 //!
-//!   `kernel.send("fm", {send, text})`
+//!   `kernel.send(vec![Item::new("fm", {send, text})])`
 //!     → ProxyAgent bundle forwards to the embedding host
 //!     → host's `handle` spawns a task that calls
-//!       `kernel.send("tools", {list_for_llm})`
+//!       `kernel.send(vec![Item::new("tools", {list_for_llm})])`
 //!     → captured tools_json shape matches what an embedding host would feed
 //!       its LLM tool list
 //!
@@ -13,7 +12,7 @@
 //! Same coverage, generic mechanism — works on any platform.
 #![allow(clippy::await_holding_lock)]
 
-use fantastic_kernel::{Agent, AgentId, Kernel, StorageMode};
+use fantastic_kernel::{Agent, AgentId, Item, Kernel, StorageMode};
 use fantastic_proxy_agent::{
     clear_hosts, register_host, ProxyAgentBundle, ProxyAgentHost, HANDLER_MODULE as PROXY_HM,
 };
@@ -69,8 +68,13 @@ impl ProxyAgentHost for ChatBackendHost {
         if let Some((k, _id)) = kid {
             tokio::spawn(async move {
                 let reply = k
-                    .send(&AgentId::from("tools"), json!({"type":"list_for_llm"}))
-                    .await;
+                    .send(vec![Item::new(
+                        AgentId::from("tools"),
+                        json!({"type":"list_for_llm"}),
+                    )])
+                    .await
+                    .remove(0)
+                    .result;
                 *captured.lock().unwrap() = Some(reply);
                 pulled.store(true, Ordering::Relaxed);
             });
@@ -116,14 +120,13 @@ async fn chat_backend_pulls_registered_tools_during_send() {
 
     // Create tools agent + register one tool.
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":TOOLS_HM,"id":"tools"}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":TOOLS_HM,"id":"tools"}))])
+            .await
+            .remove(0)
+            .result;
     let _ = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({
                 "type":"register",
                 "name":"get_weather",
@@ -138,27 +141,33 @@ async fn chat_backend_pulls_registered_tools_during_send() {
                 },
                 "sender":"app",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Create the chat-backend agent on proxy_agent + attach host.
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":PROXY_HM,"id":"fm"}),
-        )
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":PROXY_HM,"id":"fm"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let host = ChatBackendHost::new();
     host.attach(Arc::clone(&kernel), AgentId::from("fm"));
     register_host(AgentId::from("fm"), host.clone());
 
     // Fire send — host's spawned task pulls list_for_llm.
     let r = kernel
-        .send(
-            &AgentId::from("fm"),
+        .send(vec![Item::new(
+            AgentId::from("fm"),
             json!({"type":"send","text":"hi","client_id":"cli"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["queued"], true, "fm send queued: {r}");
 
     wait_for(&host.pulled).await;
@@ -184,27 +193,30 @@ async fn chat_backend_sees_empty_array_when_no_tools_registered() {
     let kernel = mk_kernel();
 
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":TOOLS_HM,"id":"tools"}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":TOOLS_HM,"id":"tools"}))])
+            .await
+            .remove(0)
+            .result;
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":PROXY_HM,"id":"fm"}),
-        )
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type":"create_agent","parent_id":"kernel","handler_module":PROXY_HM,"id":"fm"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let host = ChatBackendHost::new();
     host.attach(Arc::clone(&kernel), AgentId::from("fm"));
     register_host(AgentId::from("fm"), host.clone());
 
     let _ = kernel
-        .send(
-            &AgentId::from("fm"),
+        .send(vec![Item::new(
+            AgentId::from("fm"),
             json!({"type":"send","text":"hi","client_id":"cli"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     wait_for(&host.pulled).await;
 
     let captured = host.captured.lock().unwrap().clone().expect("pulled tools");

@@ -5,7 +5,7 @@
 //! mind that borrows a brain — it is the AI agent driving ITSELF. Python
 //! `ai_core/author.py` is canonical; on disagreement this module is wrong.
 
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,8 @@ You act by replying with EXACTLY ONE JSON object and NOTHING else, in one of the
 After an {"act"} I send it for you and reply with the result as your next message.
 
 YOUR REPLY MUST BE ONE COMPLETE, WELL-FORMED JSON OBJECT. It is parsed by a machine, not read by a human: nothing is repaired for you. Every "{" you open you MUST close with "}", and every "[" with "]" — an object that ends one brace short is DISCARDED and your act never happens. No prose, no markdown, no code fences, no trailing commas. When the payload carries source code, the code is ONE JSON string: escape every " as \" and every newline as \n, and close the string before you close the enclosing objects. Before you finish, re-read your reply from "{" to the final "}" and confirm it is balanced.
+
+A create_agent act MUST name `parent_id` — the OWNER of the new agent. Name YOUR OWN id to grow your own subtree (that needs no grant); it is a real argument with no default, and omitting it refuses the act.
 
 To LEARN anything, reflect it: {"act":{"target":"<id>","payload":{"type":"reflect"}}}. Reflecting "kernel" returns the system overview, your OWN capabilities, the agent tree, and a MAP of keyed docs (`readmes`) you can fetch one at a time. DISCOVER what you need by reflecting BEFORE you act — do not assume verb or API shapes.
 
@@ -215,7 +217,12 @@ impl Run<'_> {
         let Some(dep) = self.must_call.clone() else {
             return;
         };
-        let r = self.kernel.send(&dep, json!({"type": "reflect"})).await;
+        let r = self
+            .kernel
+            .send(vec![Item::new(dep.clone(), json!({"type": "reflect"}))])
+            .await
+            .remove(0)
+            .result;
         self.dep_verbs = keys_of(&r, "verbs");
         self.dep_emits = keys_of(&r, "emits");
     }
@@ -357,11 +364,21 @@ impl Run<'_> {
     /// the same code throws the same exception, and this time the ear is listening.
     /// This is not a retry and not a fallback — it is how the crash is OBSERVED.
     async fn revive_for_observation(&self, tool: &AgentId) {
-        let st = self.kernel.send(tool, json!({"type": "status"})).await;
+        let st = self
+            .kernel
+            .send(vec![Item::new(tool.clone(), json!({"type": "status"}))])
+            .await
+            .remove(0)
+            .result;
         let alive = st.get("running").and_then(Value::as_bool) == Some(true);
         let has_code = st.get("has_code").and_then(Value::as_bool) == Some(true);
         if !alive && has_code {
-            self.kernel.send(tool, json!({"type": "start"})).await;
+            let _ = self
+                .kernel
+                .send(vec![Item::new(tool.clone(), json!({"type": "start"}))])
+                .await
+                .remove(0)
+                .result;
         }
     }
 
@@ -371,12 +388,15 @@ impl Run<'_> {
     async fn probe_tool(&mut self, tool: &AgentId) -> bool {
         self.reset_window();
         self.revive_for_observation(tool).await;
-        self.kernel
-            .send(
-                tool,
+        let _ = self
+            .kernel
+            .send(vec![Item::new(
+                tool.clone(),
                 json!({"type": "send", "text": self.probe, "client_id": "author"}),
-            )
-            .await;
+            )])
+            .await
+            .remove(0)
+            .result;
         let mut deadline = tokio::time::Instant::now() + PROBE_WAIT;
         let mut extended = false;
         loop {
@@ -408,7 +428,12 @@ impl Run<'_> {
             // create-time boot dies in milliseconds — a syntax error always
             // does). The job table cannot: ask it before calling a dead program
             // merely deaf, and carry the interpreter's own words.
-            let st = self.kernel.send(tool, json!({"type": "status"})).await;
+            let st = self
+                .kernel
+                .send(vec![Item::new(tool.clone(), json!({"type": "status"}))])
+                .await
+                .remove(0)
+                .result;
             let failed = st.get("jobs").and_then(Value::as_array).and_then(|jobs| {
                 jobs.iter()
                     .rev()
@@ -419,8 +444,13 @@ impl Run<'_> {
                 let jid = job.get("job_id").and_then(Value::as_str).unwrap_or("");
                 let full = self
                     .kernel
-                    .send(tool, json!({"type": "status", "job_id": jid}))
-                    .await;
+                    .send(vec![Item::new(
+                        tool.clone(),
+                        json!({"type": "status", "job_id": jid}),
+                    )])
+                    .await
+                    .remove(0)
+                    .result;
                 let text = full["jobs"][0]["stderr"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -452,8 +482,10 @@ impl Run<'_> {
     async fn tool_state(&self, tool: &AgentId) -> String {
         let st = self
             .kernel
-            .send(tool, json!({"type": "reflect"}))
+            .send(vec![Item::new(tool.clone(), json!({"type": "reflect"}))])
             .await
+            .remove(0)
+            .result
             .to_string();
         st.chars().take(1200).collect()
     }
@@ -731,12 +763,14 @@ pub async fn author(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         let text = run.scrub(&turn);
         let reply = run
             .kernel
-            .send(
-                &run.brain,
+            .send(vec![Item::new(
+                run.brain.clone(),
                 json!({"type": "send", "text": text, "system_prompt": LEAN_SYSTEM,
                        "client_id": run.me.as_str()}),
-            )
-            .await;
+            )])
+            .await
+            .remove(0)
+            .result;
         if let Some(err) = reply.get("error").and_then(Value::as_str) {
             run.say(format!("brain error: {err}")).await;
             run.kernel.emit(&run.me, json!({"type": "done"})).await;
@@ -840,11 +874,15 @@ pub async fn author(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let act_payload = act.get("payload").cloned().unwrap_or(json!({}));
+        let mut act_payload = act.get("payload").cloned().unwrap_or(json!({}));
+        // OWNED: the payload is rewritten below (placement), so a borrow of it
+        // must not still be live at that point.
         let verb = act_payload
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
+        let verb = verb.as_str();
         run.status(
             if verb == "create_agent" {
                 "authoring"
@@ -855,18 +893,34 @@ pub async fn author(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         )
         .await;
 
-        // The tools an author builds are ITS OWN subtree. Route every structural
-        // mutation through this agent's own id, so `create_agent` lands the tool as
-        // a child of the author and later `delete_agent`/`update_agent` edit it —
-        // all baseline authority (fork + $children), zero grants, and the tools are
-        // owned + cleaned up with the author. Under deny-all an agent could not
-        // reach a tool parented elsewhere anyway.
-        let dispatch_target = if fantastic_kernel::PRIVILEGED_VERBS.contains(&verb) {
-            agent_id.clone()
+        // The tools an author builds are ITS OWN subtree — but placement is now
+        // stated by `parent_id`, not by who is addressed. Kernel verbs are
+        // answered by the ROOT alone, so a structural mutation goes to 'kernel'
+        // and names THIS agent as the parent: the tool lands as a child of the
+        // author, later `delete_agent`/`update_agent` edit it, and the
+        // placement-keyed exemption means it costs zero grants (forking your
+        // own subtree is baseline). Under deny-all an agent could not reach a
+        // tool parented elsewhere anyway.
+        let privileged = fantastic_kernel::PRIVILEGED_VERBS.contains(&verb);
+        if verb == "create_agent" {
+            if let Some(obj) = act_payload.as_object_mut() {
+                obj.insert("parent_id".to_string(), json!(agent_id.0));
+            }
+        }
+        let dispatch_target = if privileged {
+            AgentId::from("kernel")
         } else {
             AgentId::from(target.as_str())
         };
-        let result = run.kernel.send(&dispatch_target, act_payload.clone()).await;
+        let result = run
+            .kernel
+            .send(vec![Item::new(
+                dispatch_target.clone(),
+                act_payload.clone(),
+            )])
+            .await
+            .remove(0)
+            .result;
 
         // A fresh script agent? That is the candidate tool — put the ear on it.
         let hm = act_payload

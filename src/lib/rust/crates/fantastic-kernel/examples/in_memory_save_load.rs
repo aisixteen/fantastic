@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::Item;
 use fantastic_kernel::{AgentId, Kernel, StorageMode};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -82,11 +83,8 @@ async fn main() {
     banner("Step 2: create three agents (alpha, beta, gamma)");
     for id in ["alpha", "beta", "gamma"] {
         let r = kernel
-            .send(
-                &AgentId::from("core"),
-                json!({"type":"create_agent","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}),
-            )
-            .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"demo.tools","id":id,"display_name":format!("Agent {id}")}))])
+            .await.remove(0).result;
         println!("  create_agent {id} → ok={}", r["ok"]);
     }
     assert_or_die(
@@ -134,18 +132,22 @@ async fn main() {
     assert_or_die(snapshot == snapshot2, "round-trip byte-identical");
 
     banner("Step 6: mutate the restored kernel + show the snapshot diff");
-    kernel2
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel2
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"update_agent","id":"alpha","note":"tutor pipeline"}),
-        )
-        .await;
-    kernel2
-        .send(
-            &AgentId::from("core"),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel2
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"delete_agent","id":"gamma"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let snapshot3 = kernel2.save_json();
     let pretty: Value = serde_json::from_str(&snapshot3).unwrap();
     println!("  post-mutation snapshot:");

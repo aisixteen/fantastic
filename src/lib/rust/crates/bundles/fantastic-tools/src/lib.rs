@@ -43,7 +43,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -67,7 +67,7 @@ pub struct ToolEntry {
     /// replaces the previous entry (last-write-wins).
     pub name: String,
     /// Dispatch target — any agent id reachable via
-    /// `kernel.send(agent_id, …)`.
+    /// `kernel.send(vec![Item::new(agent_id.clone(), …)])`.
     pub agent_id: AgentId,
     /// Payload verb (`payload["type"]`) when dispatching. `None` means
     /// "use the tool name as the verb" — handy when an agent answers
@@ -217,7 +217,7 @@ impl Bundle for ToolsBundle {
 fn reflect(agent_id: &AgentId) -> Value {
     json!({
         "id": agent_id.as_str(),
-        "sentence": "Tool registry for LLM tool calling. Maps name → {agent_id, verb, schema, sender}; LLM-using bundles read list_for_llm before every model call. Dispatch is kernel.send(entry.agent_id, ...).",
+        "sentence": "Tool registry for LLM tool calling. Maps name → {agent_id, verb, schema, sender}; LLM-using bundles read list_for_llm before every model call. Dispatch is kernel.send(vec![Item::new(entry.agent_id, ...)]).",
         "kind": "tools",
         "tool_count": count(),
         "verbs": {
@@ -228,7 +228,7 @@ fn reflect(agent_id: &AgentId) -> Value {
             "clear": "Drops every entry. Returns {ok, removed}. Tests / admin only.",
             "list": "Returns {tools: [full entries, including sender]}. Debug / inspection.",
             "list_for_llm": "Returns {tools: [{name, description, parameters}]} — Apple-FM / OpenAI compatible shape. Read this before every LLM call.",
-            "dispatch": "args: name, arguments. Looks up name → does kernel.send(entry.agent_id, {type: verb_or_name, ...arguments}). Returns raw reply from the dispatch target.",
+            "dispatch": "args: name, arguments. Looks up name → does kernel.send(vec![Item::new(entry.agent_id, {type: verb_or_name, ...arguments})]). Returns raw reply from the dispatch target.",
         },
         "emits": {},
     })
@@ -351,7 +351,11 @@ async fn dispatch_verb(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     };
     let verb_str = entry.verb.clone().unwrap_or_else(|| entry.name.clone());
     out.insert("type".to_string(), Value::String(verb_str));
-    kernel.send(&entry.agent_id, Value::Object(out)).await
+    kernel
+        .send(vec![Item::new(entry.agent_id, Value::Object(out))])
+        .await
+        .remove(0)
+        .result
 }
 
 // ── helpers ───────────────────────────────────────────────────────

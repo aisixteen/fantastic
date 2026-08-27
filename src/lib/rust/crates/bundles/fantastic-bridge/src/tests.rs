@@ -8,6 +8,7 @@
 
 use super::*;
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::Map;
 use tempfile::TempDir;
 
@@ -49,19 +50,21 @@ fn id_for(prefix: &str, tmp: &TempDir) -> String {
 async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport: &str) {
     // io legs SEAL by default; these functional round-trip helpers open the leg so the
     // receiver dispatches inbound frames (mirrors py's _wire_memory_pair allow_all).
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": id,
                 "peer_id": peer_id,
                 "transport": transport,
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[test]
@@ -118,8 +121,13 @@ async fn reflect_shape_for_memory_transport() {
     let bid = id_for("brg_reflect", &tmp);
     create_bridge(&kernel, &bid, "peer_x", "memory").await;
     let r = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], bid);
     assert_eq!(r["transport"], "memory");
     assert_eq!(r["connected"], false);
@@ -139,27 +147,52 @@ async fn boot_pairs_succeed_via_memory() {
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let ra = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let rb = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ra["booted"], true);
     assert_eq!(ra["transport"], "memory");
     assert_eq!(rb["booted"], true);
 
     let ref_a = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ref_a["connected"], true);
 
     // Cleanup so global BRIDGES doesn't carry into other tests.
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -171,50 +204,73 @@ async fn forward_round_trip_over_memory() {
     // On B's kernel side we also create a local "target" file agent
     // that the forward will dispatch against.
     let file_id = id_for("ff_fwd", &tmp);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().to_string_lossy(),
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     create_bridge(&kernel, &a_id, &b_id, "memory").await;
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // A.forward(target=<file_id>, payload={type:"reflect"}) ships a
-    // raw call frame → B's read loop dispatches kernel.send(<file_id>,
-    // {reflect}) → file_agent's reflect reply gets shipped back as the
+    // raw call frame → B's read loop dispatches kernel.send(vec![Item::new(<file_id>, // {reflect})]) → file_agent's reflect reply gets shipped back as the
     // forward's return value (asymmetric; no forward envelope).
     let reply = kernel
-        .send(
-            &AgentId::from(a_id.as_str()),
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
             json!({
                 "type": "forward",
                 "target": file_id,
                 "payload": {"type": "reflect"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["id"], file_id, "forward reply: {reply}");
     assert!(reply["root"].is_string());
 
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -231,22 +287,29 @@ async fn pending_futures_rejected_on_close() {
     // and nothing answers. A's pending oneshot is parked, waiting
     // for a `reply` frame that will never arrive.
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let k = Arc::clone(&kernel);
     let a_id_clone = a_id.clone();
     let forward = tokio::spawn(async move {
-        k.send(
-            &AgentId::from(a_id_clone.as_str()),
+        k.send(vec![Item::new(
+            AgentId::from(a_id_clone.as_str()),
             json!({
                 "type": "forward",
                 "target": "irrelevant_target",
                 "payload": {"type": "reflect"},
                 "timeout": 30.0,
             }),
-        )
+        )])
         .await
+        .remove(0)
+        .result
     });
     // Tiny delay so the forward registers its pending oneshot
     // before we slam the door.
@@ -255,8 +318,13 @@ async fn pending_futures_rejected_on_close() {
     // forward fails with a ConnectionError-flavored reply via the
     // shutdown drain path.
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let reply = forward.await.unwrap();
     let err = reply["error"].as_str().unwrap_or_default();
     assert!(
@@ -272,11 +340,13 @@ async fn watch_remote_before_boot_errors() {
     let bid = id_for("brg_watch_nb", &tmp);
     create_bridge(&kernel, &bid, "peer_x", "memory").await;
     let r = kernel
-        .send(
-            &AgentId::from(bid.as_str()),
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
             json!({"type": "watch_remote", "target": "core"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"]
             .as_str()
@@ -295,15 +365,22 @@ async fn watch_remote_sends_watch_frame() {
     // Inject A's half; keep the peer half to read what A ships.
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let r = kernel
-        .send(
-            &AgentId::from(bid.as_str()),
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
             json!({"type": "watch_remote", "target": "remote_core"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true, "watch_remote: {r}");
     assert_eq!(r["watching"], "remote_core");
 
@@ -316,8 +393,13 @@ async fn watch_remote_sends_watch_frame() {
     assert_eq!(frame["src"], "remote_core");
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -330,30 +412,60 @@ async fn reconnect_calls_shutdown_then_boot() {
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Re-inject a fresh pair so reconnect's boot has something to
     // attach to (the original pair has been consumed at first boot).
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let r = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "reconnect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "reconnect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["booted"], true, "reconnect: {r}");
     let reflect = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reflect["connected"], true);
 
     let _ = kernel
-        .send(&AgentId::from(a_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&AgentId::from(b_id.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(b_id.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[cfg(feature = "full")]
@@ -372,11 +484,11 @@ async fn ssh_transport_unreachable_host_fails_cleanly() {
     // TEST-NET-1 (RFC 5737) — guaranteed unreachable. ExitOnForwardFailure
     // + BatchMode mean ssh exits non-zero quickly on auth/route failure,
     // so this should resolve well before the 5s tunnel-ready deadline.
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": bid,
                 "peer_id": "peer_x",
@@ -385,22 +497,34 @@ async fn ssh_transport_unreachable_host_fails_cleanly() {
                 "remote_port": 9,
                 "local_port": 0,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        kernel.send(&AgentId::from(bid.as_str()), json!({"type": "boot"})),
+        kernel.send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )]),
     )
     .await
-    .expect("ssh+ws boot should not hang");
+    .expect("ssh+ws boot should not hang")
+    .remove(0)
+    .result;
     let err = r["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("ssh+ws") || !err.is_empty(),
         "expected clean error, got: {r}",
     );
     let ref_r = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ref_r["connected"], false, "reflect: {ref_r}");
 }
 
@@ -412,11 +536,11 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
     // TEST-NET-1 (RFC 5737) — guaranteed unreachable. We give a
     // WS uses tokio-tungstenite. The OS will fail-fast on a non-routable
     // address. Bound the overall test to a few seconds.
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": bid,
                 "peer_id": "peer_x",
@@ -424,22 +548,34 @@ async fn ws_boot_fails_cleanly_on_unreachable_host() {
                 "host": "192.0.2.1",
                 "port": 9,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        kernel.send(&AgentId::from(bid.as_str()), json!({"type": "boot"})),
+        kernel.send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )]),
     )
     .await
-    .expect("ws boot should not hang");
+    .expect("ws boot should not hang")
+    .remove(0)
+    .result;
     let err = r["error"].as_str().unwrap_or_default();
     assert!(
         err.contains("ws connect failed") || err.contains("ws") || !err.is_empty(),
         "expected clean error, got: {r}",
     );
     let ref_r = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ref_r["connected"], false, "reflect: {ref_r}");
 }
 
@@ -639,19 +775,21 @@ fn auth_shorthand_is_symmetric() {
 
 /// Create a bridge agent carrying an `auth` policy meta field.
 async fn create_bridge_with_auth(kernel: &Arc<Kernel>, id: &str, peer_id: &str, auth: &str) {
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": id,
                 "peer_id": peer_id,
                 "transport": "memory",
                 "auth": auth,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -663,12 +801,22 @@ async fn deny_inbound_refuses_inbound_call() {
     // Inject A's half; keep the peer half to push a synthetic inbound call.
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     // reflect surfaces the policy back (read-key == write-key, py parity).
     let reflect = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reflect["ingress_rule"], "deny_ingress");
     assert_eq!(reflect["sealed"], true);
 
@@ -686,8 +834,13 @@ async fn deny_inbound_refuses_inbound_call() {
     assert_eq!(reply["data"]["reason"], "unauthorized", "reply: {reply}");
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -700,24 +853,31 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     // An open file_bridge in the workdir to receive/serve the bytes.
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": "fb",
                 "root": tmp.path().to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let bid = id_for("brg_bin", &tmp);
     create_bridge_with_auth(&kernel, &bid, "stand_in", "allow_all").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Non-UTF-8 bytes — proves it's raw, not text/base64.
     let payload: Vec<u8> = vec![0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80];
@@ -752,8 +912,13 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
     }
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -762,25 +927,37 @@ async fn deny_inbound_default_refuses_inbound_call() {
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_sealed", &tmp);
     // No `ingress_rule` meta ⇒ DenyInbound (SEALED by default).
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let reflect = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reflect["ingress_rule"], "deny_ingress");
     assert_eq!(reflect["sealed"], true);
 
@@ -800,8 +977,13 @@ async fn deny_inbound_default_refuses_inbound_call() {
     );
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -812,27 +994,40 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_pw", &tmp);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": bid,
                 "peer_id": "stand_in",
                 "transport": "memory",
                 "auth": {"type": "password", "env": env},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     // reflect surfaces only the policy NAME (never the env-var config).
     let reflect = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reflect["ingress_rule"], "password_ingress");
     assert_eq!(reflect["sealed"], true);
 
@@ -865,11 +1060,13 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     let kc = Arc::clone(&kernel);
     let bid2 = bid.clone();
     let fwd = tokio::spawn(async move {
-        kc.send(
-            &AgentId::from(bid2.as_str()),
+        kc.send(vec![Item::new(
+            AgentId::from(bid2.as_str()),
             json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
-        )
+        )])
         .await
+        .remove(0)
+        .result
     });
     let out = peer
         .recv_frame()
@@ -892,8 +1089,13 @@ async fn password_gate_checks_inbound_and_presents_on_forward() {
     assert_eq!(fwd_reply["ok"], true);
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     std::env::remove_var(env);
 }
 
@@ -905,11 +1107,12 @@ async fn asymmetric_ingress_egress_via_engine() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_kernel(&tmp).await;
     let bid = id_for("brg_asym", &tmp);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": WS_HANDLER_MODULE,
                 "id": bid,
                 "peer_id": "stand_in",
@@ -917,16 +1120,28 @@ async fn asymmetric_ingress_egress_via_engine() {
                 "ingress_rule": "deny_ingress",
                 "egress_rule": {"type": "password_egress", "env": env},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     // reflect surfaces both directions independently.
     let reflect = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reflect["ingress_rule"], "deny_ingress");
     assert_eq!(reflect["egress_rule"], "password_egress");
     // no `auth` in reflect — a legacy WRITE shorthand only (py parity)
@@ -950,11 +1165,13 @@ async fn asymmetric_ingress_egress_via_engine() {
     let kc = Arc::clone(&kernel);
     let bid2 = bid.clone();
     let fwd = tokio::spawn(async move {
-        kc.send(
-            &AgentId::from(bid2.as_str()),
+        kc.send(vec![Item::new(
+            AgentId::from(bid2.as_str()),
             json!({"type": "forward", "target": "remote", "payload": {"type": "reflect"}}),
-        )
+        )])
         .await
+        .remove(0)
+        .result
     });
     let out = peer
         .recv_frame()
@@ -968,7 +1185,12 @@ async fn asymmetric_ingress_egress_via_engine() {
     let _ = fwd.await.unwrap();
 
     let _ = kernel
-        .send(&AgentId::from(bid.as_str()), json!({"type": "shutdown"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     std::env::remove_var(env);
 }

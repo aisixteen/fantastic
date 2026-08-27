@@ -24,8 +24,9 @@
 //! every watcher's inbox. Emits (no reply) do the same with
 //! `"type":"emit"`. Errors emit `{"type":"error", ...}`.
 
-use crate::agent::{Agent, AgentId};
+use crate::agent::{Agent, AgentId, RESERVED_RECORD_KEYS};
 use crate::kernel::Kernel;
+use crate::outcome::{Item, Outcome, Status};
 use crate::tasks::{
     current_killed, current_task, TaskHandle, TaskId, CURRENT_KILLED, CURRENT_TASK,
 };
@@ -47,6 +48,29 @@ task_local! {
 /// an operator send (outside any dispatch, or under [`with_operator`]).
 pub fn current_sender() -> Option<AgentId> {
     CURRENT_SENDER.try_with(|s| s.clone()).ok().flatten()
+}
+
+task_local! {
+    /// The id that ORIGINATED the dispatch running right now — the CALLER, as
+    /// the gate saw it, captured before [`CURRENT_SENDER`] is rewritten to the
+    /// target's own id. `None` = an operator send.
+    ///
+    /// This exists because `CURRENT_SENDER` is the CALLEE mid-dispatch: inside
+    /// a handler it reads as that handler's own agent, so a bundle could not
+    /// tell who actually called it. That gap let an agent write ANOTHER agent's
+    /// memory through a blob verb — the payload named the namespace and nothing
+    /// could check it against the caller.
+    pub static CURRENT_ORIGIN: Option<AgentId>;
+}
+
+/// The id that ORIGINATED this dispatch, or `None` for an operator send.
+///
+/// Read it when a verb's payload NAMES a resource the caller might not own (a
+/// blob namespace, another agent's ledger rows). Do NOT use it for
+/// `(sender, target, verb)` decisions — that is the gate's job, it runs first,
+/// and duplicating it here would be a second truth.
+pub fn current_origin() -> Option<AgentId> {
+    CURRENT_ORIGIN.try_with(|s| s.clone()).ok().flatten()
 }
 
 /// Run `fut` with `sender` set as `CURRENT_SENDER` for its duration.
@@ -91,63 +115,112 @@ fn verb_of(payload: &Value) -> &str {
     payload.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
-/// Read a holder's authority grant (`can_call` or `callable_by`) + its tree facts
-/// (parent id, direct-child ids) for the gate. An absent agent → empty grant →
-/// deny-all (never a hole).
-fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, HashSet<String>) {
-    match holder {
-        Some(a) => {
-            let grant = a
-                .meta
-                .read()
-                .expect("meta lock poisoned")
-                .get(field)
-                .cloned()
-                .unwrap_or(Value::Null);
-            let parent = a.parent_id.as_ref().map(|p| p.0.clone());
-            let kids: HashSet<String> = a.child_ids().into_iter().map(|c| c.0).collect();
-            (grant, parent, kids)
-        }
-        None => (Value::Null, None, HashSet::new()),
-    }
+/// A launched batch item: either it settled before ever reaching the task table
+/// (a refusal), or it is a live dispatch to await.
+enum Launched {
+    /// Nothing entered the task table — `pid` stays `None`.
+    Settled(Outcome),
+    /// Boxed because a `Dispatch` is much larger than an `Outcome`, and a fat
+    /// enum variant would be paid for on every refusal too.
+    Dispatched(Box<Dispatch>),
+    /// Already in flight under this id: wait for ITS outcome, run nothing.
+    Joining(Box<Joiner>),
+}
+
+/// One item that passed the gate and is on its way to a handler.
+struct Dispatch {
+    target: Arc<Agent>,
+    payload: Value,
+    verb: String,
+    sender: AgentId,
+    timeout: Option<f64>,
+    /// The ledger key: the caller's id, or the minted pid for an unnamed item.
+    exec_id: String,
+    /// Minted in the launch phase. A retry re-dispatches under a FRESH pid but
+    /// the SAME exec_id, so the execution keeps one handle across attempts.
+    task_id: TaskId,
+}
+
+/// An item that is JOINING an execution someone else is running, or that is
+/// reading one already settled. Neither runs a handler.
+struct Joiner {
+    rx: tokio::sync::watch::Receiver<Option<Outcome>>,
+    timeout: Option<f64>,
 }
 
 impl Kernel {
-    /// Send a verb. Resolves target in the flat agents index,
-    /// dispatches through system-verb table or the agent's bundle,
-    /// returns the reply (`None` for fire-and-forget).
+    /// ARRAY-ONLY batch send: `[Item] -> [Outcome]`.
     ///
-    /// `CURRENT_SENDER` is set around dispatch. State event + watcher
-    /// fanout fire after a successful dispatch.
-    pub async fn send(self: &Arc<Self>, target_id: &AgentId, payload: Value) -> Value {
-        self.send_traced(target_id, payload, None).await
+    /// There is deliberately NO single-call form — one shape prevents
+    /// single/batch drift. A single call is
+    /// `kernel.send(vec![Item::new(t.clone(), p)]).await.remove(0).result`.
+    ///
+    /// Dispatch is CONCURRENT; the returned vec preserves input order. Every
+    /// dispatched item is a REGISTERED task (one `ps` row, `cancel`-able by the
+    /// pid the outcome carries). Pids are minted in a SYNCHRONOUS launch phase,
+    /// so the whole batch is visible in `ps` before the first await.
+    ///
+    /// `timeout` is per-item seconds and the kernel NEVER defaults it:
+    /// absent = wait forever. On expiry the item is killed through the FRONT
+    /// DOOR (`cancel_task`), so every bundle's `on_cancel` hook runs before the
+    /// abort — a bare task drop would orphan the OS resources those hooks free.
+    ///
+    /// Nothing propagates out of `send`: a handler panic settles as `failed`
+    /// with `raised: true`, a cancel settles as `cancelled`.
+    ///
+    /// Why a batch at all: a model turn that fans out N calls used to get its
+    /// answers spread over the next N turns and re-asked in between (measured
+    /// 2026-08-25: 7 calls → replies `1 of 7`…`7 of 7`, `list_agents` re-asked
+    /// five times, nothing built). The industry shape is the same — all results
+    /// of one turn return together.
+    pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
+        // SYNCHRONOUS launch: resolve, gate and register EVERY item before the
+        // first await, so `ps` shows the whole batch rather than it appearing
+        // one row at a time.
+        let mut launched: Vec<Launched> = Vec::with_capacity(items.len());
+        for item in items {
+            launched.push(self.launch(item));
+        }
+
+        // Concurrent settle. `join_all` over non-spawned futures keeps the
+        // task-locals (`CURRENT_SENDER`/`CURRENT_TASK`/`CURRENT_ORIGIN`) — the
+        // spawn happens INSIDE `run_dispatch`, which re-establishes them by
+        // hand. A `tokio::spawn` here would silently drop all three.
+        let mut out: Vec<Outcome> = Vec::with_capacity(launched.len());
+        let settled =
+            futures_util::future::join_all(launched.into_iter().map(|l| self.settle(l))).await;
+        out.extend(settled);
+        out
     }
 
-    /// `send`, plus the dispatch PID written into `task_out` at dispatch time.
-    ///
-    /// The id is the ONE unambiguous correlator: `ps` rows, `cancel`, and the reply tag
-    /// a model reads all name the same thing. Measured 2026-08-07 and again 2026-08-20
-    /// (python): with two calls in flight to one agent, a reply tagged only
-    /// `[reply to <agent> <verb>]` is unmatchable — one model re-issued both deletes and
-    /// then theorised "duplicate delivery" about its own retries.
-    pub async fn send_traced(
-        self: &Arc<Self>,
-        target_id: &AgentId,
-        payload: Value,
-        task_out: Option<&mut Option<TaskId>>,
-    ) -> Value {
+    /// One item's SYNCHRONOUS half: resolve the target, run the gate, register
+    /// the dispatch. Returns either an immediate outcome (nothing ever reached
+    /// the task table) or a live dispatch to await.
+    fn launch(self: &Arc<Self>, item: Item) -> Launched {
+        if let Some(t) = item.timeout {
+            if !(t.is_finite() && t > 0.0) {
+                return Launched::Settled(Outcome::refused(crate::refusal::bad(
+                    "send",
+                    "timeout",
+                    "a positive number of seconds",
+                )));
+            }
+        }
+
         // Resolve target. Special id `"kernel"` aliases to the root.
-        let resolved: Option<Arc<Agent>> = if target_id.as_str() == "kernel" {
+        let resolved: Option<Arc<Agent>> = if item.target.as_str() == "kernel" {
             self.root()
         } else {
-            self.agents.get(target_id).map(|e| Arc::clone(&e))
+            self.agents.get(&item.target).map(|e| Arc::clone(&e))
         };
         let Some(target) = resolved else {
-            return json!({ "error": format!("no agent {target_id}") });
+            return Launched::Settled(Outcome::refused(crate::refusal::unknown_agent(
+                item.target.as_str(),
+                self.agents.iter().map(|e| e.key().0.clone()).collect(),
+            )));
         };
 
-        let sender = current_sender().unwrap_or_else(|| target.id.clone());
-        let verb = verb_of(&payload).to_string();
+        let verb = verb_of(&item.payload).to_string();
 
         // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // Trust boundary = who ORIGINATED the send. An operator send
@@ -157,24 +230,118 @@ impl Kernel {
         // included, nothing exempt — needs BOTH the sender's `can_call` (egress)
         // AND the target's `callable_by` (ingress) to grant the edge.
         if let Some(orig) = current_sender() {
-            if let Some(denial) = self.gate(&orig, &verb, &target, &payload) {
-                return denial;
+            if let Some(denial) = self.gate(&orig, &verb, &target, &item.payload) {
+                return Launched::Settled(Outcome::refused(denial));
             }
         }
 
-        // Run the dispatch as a REGISTERED, killable task (one row in the
-        // kernel's task table) and await it — that is what makes ANY send
-        // cancelable, on any bundle. A cancelled dispatch does NOT raise out of
-        // `send`: it resolves to `{"cancelled": true}`.
-        let mut reply = self.run_dispatch(&target, &payload, &verb, task_out).await;
+        let sender = current_sender().unwrap_or_else(|| target.id.clone());
+        let origin = current_sender();
 
+        // MINT SYNCHRONOUSLY. The pid must exist before the first await — it is
+        // the ledger key for an unnamed item, and it is what makes the WHOLE
+        // batch visible in `ps` at once rather than appearing row by row.
+        let task_id = self.tasks.mint(&target.id);
+        // ONE ID SPACE: a caller's id names the execution; without one, the
+        // minted pid does. Either way there is exactly one handle.
+        let named = item.id.is_some();
+        let exec_id = item.id.unwrap_or_else(|| task_id.0.clone());
+        let retries = item.retries.unwrap_or(0);
+
+        match self
+            .ledger
+            .open(&exec_id, &target.id, retries, named, origin)
+        {
+            crate::ledger::Opened::Refused(r) => {
+                self.tasks.forget(&task_id);
+                return Launched::Settled(Outcome::refused(*r));
+            }
+            // ALREADY SETTLED — the recorded outcome IS the answer, and the
+            // handler must not run a second time. This is idempotency and
+            // once-only execution in one field.
+            crate::ledger::Opened::Settled(o) => {
+                self.tasks.forget(&task_id);
+                return Launched::Settled(*o);
+            }
+            // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
+            // wait: it does not own the execution and must not kill it.
+            crate::ledger::Opened::Join(rx) => {
+                self.tasks.forget(&task_id);
+                return Launched::Joining(Box::new(Joiner {
+                    rx,
+                    timeout: item.timeout,
+                }));
+            }
+            crate::ledger::Opened::Fresh => {}
+        }
+
+        Launched::Dispatched(Box::new(Dispatch {
+            target,
+            payload: item.payload,
+            verb,
+            sender,
+            timeout: item.timeout,
+            exec_id,
+            task_id,
+        }))
+    }
+
+    /// One item's ASYNC half.
+    ///
+    /// Runs the dispatch, enforces the item's own deadline, and — this is the
+    /// RETRY ENGINE — re-dispatches a terminal `failed`/`timed_out` under the
+    /// SAME id while the budget lasts. Only the FINAL outcome settles the
+    /// ledger, so a joiner or a re-sender never sees an attempt that was later
+    /// retried away.
+    async fn settle(self: &Arc<Self>, launched: Launched) -> Outcome {
+        let d = match launched {
+            Launched::Settled(o) => return o,
+            Launched::Joining(j) => return self.join_execution(*j).await,
+            Launched::Dispatched(d) => *d,
+        };
+        let Dispatch {
+            target,
+            payload,
+            verb,
+            sender,
+            timeout,
+            exec_id,
+            task_id,
+        } = d;
+
+        let mut next_pid = task_id;
+        // The pid of the attempt that actually SETTLED — a retry re-dispatches
+        // under a fresh row, so the last one is what the outcome names.
+        let (pid, reply, status) = loop {
+            self.ledger.attempt(&exec_id);
+            let mut this_pid: Option<TaskId> = None;
+            let (reply, status) = self
+                .run_dispatch(
+                    &target,
+                    &payload,
+                    &verb,
+                    Some(&mut this_pid),
+                    timeout,
+                    next_pid.clone(),
+                )
+                .await;
+            if !self.ledger.should_retry(&exec_id, status) {
+                break (this_pid, reply, status);
+            }
+            // Same exec id across attempts; a fresh task row per attempt, because
+            // the previous one is already forgotten. Cancelling the execution
+            // kills the current attempt AND this loop — a cancel is absorbing.
+            next_pid = self.tasks.mint(&target.id);
+        };
+
+        let mut reply = reply;
         // Universal post-process: compose every reflect reply with the
         // tree/bundles/readme flags (mirrors Python's
         // `Agent._apply_reflect_flags`). Bundle reflects and bare-agent
         // reflects alike get the tree (default all) + the optional
         // bundles catalog + the optional readme. Errors / Null replies
         // pass through unchanged.
-        if verb == "reflect" {
+        if verb == "reflect" && status == Status::Completed {
             crate::reflect::apply_reflect_flags(self, &target, &payload, &mut reply);
         }
 
@@ -192,145 +359,52 @@ impl Kernel {
         // State subscribers above already got the metadata envelope.
         self.fanout_to_watchers(&target, &payload).await;
 
-        reply
+        let out = self
+            .ledger
+            .settle(&exec_id, Outcome::new(pid, status, reply));
+        // The DURABLE half, if a loader installed one. The kernel does not know
+        // what this writes or where.
+        self.ledger_settled();
+        out
     }
 
-    /// The two-sided call gate for an agent-originated send. Returns the error
-    /// `Value` if the send is refused, else `None`. Checks egress (the sender's
-    /// `can_call`) then ingress (the target's `callable_by`), both via the one
-    /// [`crate::authz::authorize_call`] engine, then the authority-conferral rules
-    /// (no self-raise; delegate only a subset). A holder with no record → empty
-    /// grant → deny-all (never a hole).
-    fn gate(
-        self: &Arc<Self>,
-        sender_id: &AgentId,
-        verb: &str,
-        target: &Arc<Agent>,
-        payload: &Value,
-    ) -> Option<Value> {
-        let loader_id = self.root().map(|r| r.id.0.clone());
-        let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
-        let (s_can, s_parent, s_kids) = grant_facts(sender.as_deref(), "can_call");
-
-        // Egress — may the SENDER call the target?
-        let d = crate::authz::authorize_call(
-            &s_can,
-            verb,
-            target.id.as_str(),
-            sender_id.as_str(),
-            s_parent.as_deref(),
-            &s_kids,
-            loader_id.as_deref(),
-            true,
-        );
-        if !d.allowed {
-            return Some(json!({
-                "error": format!("{sender_id} may not call {verb:?} on {}", target.id),
-                "reason": "unauthorized", "side": "egress", "hint": d.hint,
-            }));
-        }
-
-        // Ingress — does the TARGET accept the sender? (tokens relative to target;
-        // privileged-no-wildcard is egress-only, so `enforce_privileged=false`.)
-        let (t_call, t_parent, t_kids) = grant_facts(Some(target.as_ref()), "callable_by");
-        let di = crate::authz::authorize_call(
-            &t_call,
-            verb,
-            sender_id.as_str(),
-            target.id.as_str(),
-            t_parent.as_deref(),
-            &t_kids,
-            loader_id.as_deref(),
-            false,
-        );
-        if !di.allowed {
-            return Some(json!({
-                "error": format!("{} does not accept {verb:?} from {sender_id}", target.id),
-                "reason": "unauthorized", "side": "ingress", "hint": di.hint,
-            }));
-        }
-
-        // Authority conferral — no self-raise, delegate only a subset you hold.
-        if verb == "create_agent" || verb == "update_agent" {
-            return self.check_conferral(
-                sender_id,
-                &s_can,
-                s_parent.as_deref(),
-                &s_kids,
-                loader_id.as_deref(),
-                payload,
-            );
-        }
-        None
-    }
-
-    /// Authority flows from ABOVE only: an agent may not raise its OWN authority
-    /// fields, and may confer on another only a SUBSET of its own `can_call`.
-    fn check_conferral(
-        self: &Arc<Self>,
-        sender_id: &AgentId,
-        s_can: &Value,
-        s_parent: Option<&str>,
-        s_kids: &HashSet<String>,
-        loader_id: Option<&str>,
-        payload: &Value,
-    ) -> Option<Value> {
-        let obj = payload.as_object()?;
-        let confers = obj.contains_key("can_call") || obj.contains_key("callable_by");
-        if !confers {
-            return None;
-        }
-        let verb = verb_of(payload);
-        let edited = obj.get("id").and_then(Value::as_str);
-        // Self-raise: never edit your own authority fields.
-        if verb == "update_agent" && edited == Some(sender_id.as_str()) {
-            return Some(json!({
-                "error": format!("{sender_id} may not edit its own can_call/callable_by"),
-                "reason": "unauthorized", "side": "self-grant", "hint": crate::authz::FROM_ABOVE,
-            }));
-        }
-        // Subset: every LATERAL edge in the conferred `can_call` must be one the
-        // granter itself holds (structural tokens are free; `callable_by` grants no
-        // reach, so it is unbounded).
-        if let Some(Value::Object(conferred)) = obj.get("can_call") {
-            for (key, verbs) in conferred {
-                if key.starts_with('$') {
-                    continue; // structural tokens confer no lateral reach
+    /// Wait for an execution someone else owns.
+    ///
+    /// The joiner's `timeout` bounds only its OWN wait — on expiry it settles
+    /// `timed_out` and the execution KEEPS RUNNING, because a joiner does not
+    /// own it and killing another caller's work would be a surprise.
+    async fn join_execution(self: &Arc<Self>, mut j: Joiner) -> Outcome {
+        let wait = async {
+            loop {
+                if let Some(o) = j.rx.borrow_and_update().clone() {
+                    return o;
                 }
-                // Conferring `"*"` (or a list with it) requires the granter to hold
-                // `"*"` on that target; a concrete list requires each verb.
-                let probe: Vec<&str> = match verbs {
-                    Value::Array(vs) if !vs.iter().any(|v| v.as_str() == Some("*")) => {
-                        vs.iter().filter_map(Value::as_str).collect()
-                    }
-                    _ => vec!["*"],
-                };
-                for v in probe {
-                    let ok = crate::authz::authorize_call(
-                        s_can,
-                        v,
-                        key,
-                        sender_id.as_str(),
-                        s_parent,
-                        s_kids,
-                        loader_id,
-                        true,
-                    )
-                    .allowed;
-                    if !ok {
-                        return Some(json!({
-                            "error": format!(
-                                "{sender_id} cannot delegate {v:?} on {key} — you may only \
-                                 confer can_call you already hold"
-                            ),
-                            "reason": "unauthorized", "side": "delegation",
-                            "hint": crate::authz::FROM_ABOVE,
-                        }));
-                    }
+                if j.rx.changed().await.is_err() {
+                    // The owner's row was evicted mid-flight — nothing to join.
+                    return Outcome::refused(crate::refusal::refusal(
+                        crate::refusal::TRANSPORT_ERROR,
+                        "the execution being joined went away",
+                    ));
+                }
+            }
+        };
+        match j.timeout {
+            None => wait.await,
+            Some(secs) => {
+                let dur = std::time::Duration::from_secs_f64(secs);
+                match tokio::time::timeout(dur, wait).await {
+                    Ok(o) => o,
+                    Err(_) => Outcome::new(
+                        None,
+                        Status::TimedOut,
+                        crate::refusal::refusal(
+                            crate::refusal::TIMEOUT,
+                            format!("joined execution did not settle within {secs}s"),
+                        ),
+                    ),
                 }
             }
         }
-        None
     }
 
     /// Run ONE dispatch as a registered, killable task and await it — the unit
@@ -364,14 +438,17 @@ impl Kernel {
         payload: &Value,
         verb: &str,
         task_out: Option<&mut Option<TaskId>>,
-    ) -> Value {
+        timeout: Option<f64>,
+        task_id: TaskId,
+    ) -> (Value, Status) {
+        // The pid was minted in the SYNCHRONOUS launch phase and is already the
+        // ledger key for an unnamed execution — minting a second one here would
+        // split the two apart, so the row and the reply would name different
+        // things and a pid could not re-fetch its own outcome.
+        //
         // Register BEFORE spawning: the row (and its stop handle) must exist
         // the instant the handler can run, or a nested `send` could claim a
         // parent that isn't in the table yet.
-        let task_id = self.tasks.mint(&target.id);
-        // Hand the PID back SYNCHRONOUSLY, at dispatch — before any reply exists.
-        // A caller that wants to correlate the answer needs the id at send time, not
-        // after; that is the whole point of the id.
         if let Some(slot) = task_out {
             *slot = Some(task_id.clone());
         }
@@ -389,24 +466,31 @@ impl Kernel {
             let tgt = Arc::clone(target);
             let payload = payload.clone();
             let sender = target.id.clone();
+            // The CALLER, read here in the caller's own context — inside the
+            // spawn `CURRENT_SENDER` becomes the target, so this is the last
+            // place the origin is still visible.
+            let origin = current_sender();
             let tid = task_id.clone();
             let cancel = handle.cancel_signal();
             let killed = handle.killed_flag();
             tokio::spawn(async move {
-                CURRENT_SENDER
+                CURRENT_ORIGIN
                     .scope(
-                        Some(sender),
-                        CURRENT_TASK.scope(
-                            tid,
-                            CURRENT_KILLED.scope(killed, async move {
-                                tokio::select! {
-                                    biased;
-                                    // Stopped: DROP the dispatch future — the
-                                    // abort half of `cancel`.
-                                    _ = cancel.notified() => None,
-                                    v = dispatch(kernel, tgt, payload) => Some(v),
-                                }
-                            }),
+                        origin,
+                        CURRENT_SENDER.scope(
+                            Some(sender),
+                            CURRENT_TASK.scope(
+                                tid,
+                                CURRENT_KILLED.scope(killed, async move {
+                                    tokio::select! {
+                                        biased;
+                                        // Stopped: DROP the dispatch future — the
+                                        // abort half of `cancel`.
+                                        _ = cancel.notified() => None,
+                                        v = dispatch(kernel, tgt, payload) => Some(v),
+                                    }
+                                }),
+                            ),
                         ),
                     )
                     .await
@@ -419,12 +503,45 @@ impl Kernel {
         // Also the row's self-cleaner: dropped on every exit path.
         let _guard = DispatchGuard {
             kernel: Arc::clone(self),
-            id: task_id,
+            id: task_id.clone(),
             handle,
         };
 
-        match join.await {
-            Ok(Some(v)) => v,
+        // THE ITEM'S OWN DEADLINE. Expiry kills through the FRONT DOOR
+        // (`cancel_task`) so every bundle's `on_cancel` hook runs BEFORE the
+        // abort — dropping the future would strand the OS resources those hooks
+        // release (a subprocess, a PTY, a socket). The hook's own sends run
+        // under OPERATOR authority: it is the kernel closing out work it was
+        // told to kill, not the batch caller reaching out, so a gated caller
+        // never makes an `on_cancel` fail.
+        //
+        // The race is reported honestly: a handler that finishes during the
+        // grace window COMPLETES — `cancel_task` no-ops on a finished id and
+        // the join below yields its real reply.
+        let outcome = match timeout {
+            None => join.await,
+            Some(secs) => {
+                let dur = std::time::Duration::from_secs_f64(secs);
+                match tokio::time::timeout(dur, &mut Box::pin(&mut { join })).await {
+                    Ok(j) => j,
+                    Err(_) => {
+                        let k = Arc::clone(self);
+                        let tid = task_id.clone();
+                        with_operator(async move { k.cancel_task(&tid).await }).await;
+                        return (
+                            crate::refusal::refusal(
+                                crate::refusal::TIMEOUT,
+                                format!("{verb} on {} timed out after {secs}s", target.id),
+                            ),
+                            Status::TimedOut,
+                        );
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            Ok(Some(v)) => (v, Status::Completed),
             Ok(None) => {
                 if current_killed() {
                     // We are in the killed subtree — park; our own stop signal
@@ -432,13 +549,19 @@ impl Kernel {
                     std::future::pending::<()>().await;
                     unreachable!("a killed task is dropped at its next yield");
                 }
-                json!({ "cancelled": true })
+                (json!({ "cancelled": true }), Status::Cancelled)
             }
-            // The dispatch panicked — propagate, exactly as an inline dispatch
-            // would have. (Nothing tokio-aborts a dispatch: `cancel` stops it
-            // through the select branch above.)
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(_) => json!({ "cancelled": true }),
+            // A handler PANIC is a result, not a crash of the caller: it settles
+            // as `failed` with `raised: true`. `send` propagates nothing — every
+            // net a caller wrapped around it is now dead code.
+            Err(e) if e.is_panic() => {
+                let why = panic_message(&e.into_panic());
+                (
+                    json!({ "error": format!("panic: {why}"), "raised": true }),
+                    Status::Failed,
+                )
+            }
+            Err(_) => (json!({ "cancelled": true }), Status::Cancelled),
         }
     }
 
@@ -589,6 +712,19 @@ impl Kernel {
 /// caller's own future being dropped) it stops the dispatch task and drops its
 /// row. Stopping a task that already finished is a no-op; forgetting a row that
 /// `cancel` already removed is a no-op — both are idempotent by design.
+/// Best-effort human text out of a panic payload — the two shapes
+/// `panic!` produces plus a fallback, so a handler that panicked with a
+/// non-string never reads as "panic: <nothing>".
+fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "handler panicked".to_string()
+    }
+}
+
 struct DispatchGuard {
     kernel: Arc<Kernel>,
     id: TaskId,
@@ -617,8 +753,20 @@ fn dispatch(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
     Box::pin(async move {
         let verb = verb_of(&payload);
-        if is_system_verb(verb) {
-            return handle_system_verb(&kernel, &target, verb, &payload).await;
+        if is_kernel_verb(verb) {
+            // ROOT ONLY. These verbs act on the TREE and the kernel-wide task
+            // table, so the agent named is the OPERAND, not the actor. Answered
+            // everywhere, "send create_agent to X" could mean X performs it, X
+            // is created under something, or X is the parent — only the last was
+            // ever true, and a model asked "which target?" for 16 turns and
+            // finished with nothing created.
+            //
+            // Refused HERE, in the handler — not at the call gate — so probes
+            // asserting a denial `side` for a non-root privileged send stay valid.
+            if target.parent_id.is_some() {
+                return crate::refusal::not_here(verb, target.id.as_str());
+            }
+            return handle_kernel_verb(&kernel, &target, verb, &payload).await;
         }
         // No handler_module → only system verbs answerable.
         let Some(hm) = target.handler_module.as_deref() else {
@@ -689,199 +837,18 @@ plus `self_extension` (how to author your own durable tools in THIS kernel — w
 executor, and the fields without which the agent is created and never runs) and \
 `readmes` (the manual index). Reflect the root before building anything.";
 
-/// excludes `reflect`. Reflect is per-bundle (each handler customizes
-/// its `sentence` + state shape); the substrate's reflect path only
-/// fires for bare agents (no `handler_module`), which is handled
-/// inside `dispatch`.
-fn is_system_verb(verb: &str) -> bool {
-    matches!(
-        verb,
-        "create_agent"
-            | "delete_agent"
-            | "update_agent"
-            | "list_agents"
-            | "get"
-            // The TASK TABLE — work in flight, universal. Baked into the
-            // substrate, in no bundle's verb map: cancellation is a property of
-            // the one primitive (`send`), so EVERY agent is cancelable and a
-            // caller never needs to know which bundle it faces. Plain verbs — an
-            // AGENT can call them on another agent's work.
-            | "ps"
-            | "cancel"
-            // Root-only control verb — gated inside `handle_system_verb`
-            // to the tree root; a non-root target answers with an error.
-            | "shutdown_kernel"
-    )
-}
-
-/// One line per system verb — the honest reflect surface. Bundle verbs are
-/// derived from each bundle's own reflect; these are the SUBSTRATE's own, so
-/// they appear in no bundle's map and are advertised on the ROOT reflect (see
-/// [`crate::reflect::apply_reflect_flags`]). Mirrors Python's
-/// `_SYSTEM_VERB_DOCS`.
-pub fn system_verb_docs() -> Value {
-    json!({
-        "create_agent": "args: handler_module:str, id:str?, **meta — spawn a child agent + boot it.",
-        "update_agent": "args: id:str, **meta — patch a record's meta.",
-        "delete_agent": "args: id:str — cascade-delete an agent + its subtree (delete_lock refuses).",
-        "list_agents": "No args. Every agent's record, flat.",
-        "get": "args: id:str — one agent's record (null if unknown).",
-        "ps": "No args. The live TASK TABLE — {tasks:[{id, agent, parent, verb, started_at}]}. One row per in-flight dispatch; `parent` chains them into the send tree.",
-        "cancel": "args: task_id:str — kill that task AND ITS SUBTREE (children first). Returns {cancelled:bool, killed:[task_id]}; the blocked caller's `send` resolves to {cancelled:true}. Unknown/finished id ⇒ {cancelled:false}.",
-        "shutdown_kernel": "No args. ROOT ONLY — stop the kernel process gracefully.",
-    })
-}
-
-async fn handle_system_verb(
-    kernel: &Arc<Kernel>,
-    target: &Arc<Agent>,
-    verb: &str,
-    payload: &Value,
-) -> Value {
-    match verb {
-        "list_agents" => {
-            let mut out: Vec<Value> = Vec::new();
-            for entry in kernel.agents.iter() {
-                let a = entry.value();
-                out.push(serde_json::to_value(a.record()).unwrap_or(Value::Null));
-            }
-            // Sort by id for stable output.
-            out.sort_by(|a, b| {
-                a.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-            });
-            // `more` is not decoration (py-canonical, measured 2026-08-07): a model
-            // that opened with `list_agents` got bare records, never learned that
-            // authoring a script agent was the mechanism, and made 0 attempts; the
-            // arm that opened with `reflect` got `self_extension` and tried 10
-            // times. This verb rides every reflect's `system_verbs`, so it needs a
-            // signpost back to the briefing.
-            json!({ "agents": out, "more": LIST_HINT })
-        }
-        "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
-        "delete_agent" => crate::lifecycle::delete_from_payload(kernel, target, payload).await,
-        "update_agent" => update_from_payload(kernel, target, payload).await,
-        // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
-        // one row per in-flight dispatch, `parent` chaining them into the send
-        // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
-        "ps" => json!({ "tasks": kernel.tasks.rows() }),
-        // Kill a task AND ITS SUBTREE (children first, like killing a process
-        // group). Each bundle's `on_cancel` hook runs BEFORE the abort so real
-        // resources (OS subprocesses, PTYs, sockets) die with it. An unknown or
-        // already-finished id returns {cancelled:false} — it does not pretend.
-        "cancel" => match payload.get("task_id").and_then(Value::as_str) {
-            Some(t) if !t.is_empty() => kernel.cancel_task(&TaskId::from(t)).await,
-            _ => json!({ "error": "cancel: task_id (str) required" }),
-        },
-        "shutdown_kernel" => {
-            // Privileged: root control surface only. Gate on rootness
-            // (parent_id is None) so it holds whether the verb was
-            // addressed to the literal root id or via the `kernel` alias —
-            // never an arbitrary child agent.
-            if target.parent_id.is_some() {
-                return json!({
-                    "error": "shutdown_kernel: root control surface only; \
-                              address the kernel root (alias 'kernel')"
-                });
-            }
-            // DEFER the shutdown signal so this ack is enqueued onto the WS
-            // out-channel / written as the HTTP body and flushed to the
-            // caller BEFORE the daemon serve loop begins teardown — mirrors
-            // the Python side's `call_later(0.1, ev.set)`. The verb returns
-            // the ack synchronously here (running inside a web task); ~100ms
-            // later `request_shutdown()` fires and the CLI serve loop (which
-            // adds its own short grace) drains agents, releases lock.json,
-            // and exits 0. Never exit inline / signal before the ack is even
-            // enqueued — that would risk truncating the ack mid-flush. Wire
-            // shape mirrors Python exactly (`type` before `ok`).
-            let k = Arc::clone(kernel);
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                k.request_shutdown();
-            });
-            json!({ "type": "shutdown_kernel", "ok": true })
-        }
-        "get" => {
-            let id = payload.get("id").and_then(Value::as_str).map(AgentId::from);
-            match id.and_then(|i| kernel.agents.get(&i).map(|e| Arc::clone(&e))) {
-                Some(a) => serde_json::to_value(a.record()).unwrap_or(Value::Null),
-                None => Value::Null,
-            }
-        }
-        _ => unreachable!("is_system_verb gate"),
-    }
-}
-
-async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload: &Value) -> Value {
-    let id = match payload.get("id").and_then(Value::as_str) {
-        Some(s) => AgentId::from(s),
-        None => return json!({ "error": "update_agent requires id" }),
-    };
-    let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
-        return json!({ "error": format!("no agent {id}") });
-    };
-    // Patch is every field in payload except `type` and `id`. Capture
-    // changed-field names so the lifecycle event mirrors Python's
-    // `agent_updated.changed`.
-    let mut patch: Map<String, Value> = Map::new();
-    let mut changed: Vec<String> = Vec::new();
-    if let Some(obj) = payload.as_object() {
-        for (k, v) in obj {
-            if k == "type" || k == "id" {
-                continue;
-            }
-            patch.insert(k.clone(), v.clone());
-            changed.push(k.clone());
-        }
-    }
-    // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
-    // patch before anything changes — a refusal names the bad field at the point of
-    // the mistake instead of surfacing calls later. Mirrors python's duck-typed
-    // `validate_meta`; the trait default accepts everything.
-    if let Some(hm) = target.handler_module.as_deref() {
-        if let Some(bundle) = kernel.bundles.get(hm) {
-            let current = target.meta.read().expect("meta poisoned").clone();
-            if let Some(why) = bundle.validate_meta(&patch, &current) {
-                return json!({ "error": why, "id": id.to_string(), "updated": false });
-            }
-        }
-    }
-    let rec = target.update_meta(patch);
-    // Persist the updated record THROUGH the discovered provider. Merge-only —
-    // the existing agent.json's other fields (bundle-specific, user additions)
-    // survive. No-op in InMemory mode or when no provider is wired (RAM). See
-    // `persistence::persist` for the dirty-binding semantics.
-    let _ = crate::persistence::persist(kernel, &target).await;
-    let rec_value = serde_json::to_value(&rec).unwrap_or(Value::Null);
-    // Telemetry state event — Python parity (`_agent.py:637-657`):
-    // publish the full record + the list of changed fields, not just
-    // `{type, id}`. State subscribers (telemetry pane, AI test
-    // harnesses) lean on this for diff'ing agent state across events.
-    let event = json!({
-        "type": "updated",
-        "id": rec.id,
-        "changed": changed.clone(),
-        "agent": rec_value.clone(),
-    });
-    kernel.publish_state(&event);
-    // Emit `agent_updated` on the caller's inbox so watchers (canvas
-    // frame chrome, telemetry panels) refresh without polling. Mirrors
-    // Python's `await self.emit(self.id, {type:"agent_updated", ...})`.
-    kernel
-        .emit(
-            &caller.id,
-            json!({
-                "type": "agent_updated",
-                "id": rec.id,
-                "changed": changed,
-                "agent": rec_value.clone(),
-            }),
-        )
-        .await;
-    rec_value
-}
+mod gate;
+mod kernel_verbs;
+use kernel_verbs::{handle_kernel_verb, is_kernel_verb};
+pub use kernel_verbs::{kernel_verb_docs, kernel_verbs_view, KERNEL_VERBS_PREAMBLE};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "send/batch_tests.rs"]
+mod batch_tests;
+
+#[cfg(test)]
+#[path = "send/ledger_tests.rs"]
+mod ledger_tests;

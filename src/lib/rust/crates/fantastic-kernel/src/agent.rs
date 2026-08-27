@@ -91,6 +91,13 @@ pub struct Agent {
     pub ephemeral: bool,
 }
 
+/// Keys a RECORD may never carry: they name substrate wiring, not agent meta.
+///
+/// A hand-authored `root_path:` once cleared the whole tree and THEN raised —
+/// the kernel was bricked by a field that looked like configuration. Refused at
+/// the door, before any teardown, so a bad document cannot half-apply.
+pub const RESERVED_RECORD_KEYS: [&str; 3] = ["root_path", "ctx", "parent"];
+
 impl Agent {
     /// Construct a fresh agent. Caller is responsible for registering
     /// it in the kernel's `agents` map.

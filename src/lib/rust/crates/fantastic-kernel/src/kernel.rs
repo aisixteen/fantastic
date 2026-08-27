@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{mpsc, Notify};
 
 /// Bounded inbox capacity per agent — matches Python's `INBOX_BOUND`.
@@ -76,6 +76,17 @@ pub struct Kernel {
     /// chain. The `ps` system verb reads it; `cancel` kills a task and its
     /// subtree. See [`crate::tasks`].
     pub tasks: TaskTable,
+
+    /// EVERY execution and what it became — named (a caller's dedup contract)
+    /// or unnamed (under its minted pid). Session lifetime, retention-ringed;
+    /// the DURABLE half is installed by the root loader, because the kernel
+    /// never touches disk itself.
+    pub ledger: crate::ledger::Ledger,
+
+    /// Installed by the ROOT LOADER at boot. `None` = no persistence (no store
+    /// wired, or a test kernel): settled outcomes live and die with the process,
+    /// exactly like the tree's own auto-flush law. Called at every settle.
+    ledger_flusher: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Default for Kernel {
@@ -120,6 +131,8 @@ impl Kernel {
             storage,
             shutdown: Notify::new(),
             tasks: TaskTable::new(),
+            ledger: crate::ledger::Ledger::default(),
+            ledger_flusher: Mutex::new(None),
         }
     }
 
@@ -138,6 +151,23 @@ impl Kernel {
     /// returns `ExitCode::SUCCESS`.
     pub async fn shutdown_requested(&self) {
         self.shutdown.notified().await;
+    }
+
+    /// Install the durable-ledger write-through. The kernel calls it after every
+    /// settle and knows NOTHING about what it does — the loader owns the disk,
+    /// exactly as it owns the `.fantastic` layout.
+    pub fn set_ledger_flusher(&self, f: Box<dyn Fn() + Send + Sync>) {
+        *self.ledger_flusher.lock().expect("flusher poisoned") = Some(f);
+    }
+
+    /// Fire the durable write-through, if one is installed. No flusher = no
+    /// persistence: settled outcomes live and die with the process. That is the
+    /// auto-flush law, not a fallback.
+    pub fn ledger_settled(&self) {
+        let g = self.ledger_flusher.lock().expect("flusher poisoned");
+        if let Some(f) = g.as_ref() {
+            f();
+        }
     }
 
     /// Register an agent in the flat index + auto-vivify its inbox.
@@ -209,10 +239,42 @@ impl Kernel {
     /// Ephemeral agents are skipped (they're per-process composition,
     /// never round-trip through a snapshot).
     pub fn save(&self) -> KernelState {
+        // TRANSITIVELY. Dropping only the ephemeral agent ITSELF left its
+        // children behind as orphans — records whose `parent_id` names an agent
+        // that is not in the document — and `load()` rejects exactly that. So
+        // `save()` emitted a snapshot its own loader refused.
+        let ephemeral: std::collections::HashSet<AgentId> = self
+            .agents
+            .iter()
+            .filter(|e| e.value().ephemeral)
+            .map(|e| e.key().clone())
+            .collect();
+        let dropped = {
+            let mut dropped = ephemeral.clone();
+            // Walk down until nothing new is reached: a child of a dropped agent
+            // is dropped, and so is ITS child.
+            loop {
+                let mut grew = false;
+                for e in self.agents.iter() {
+                    let a = e.value();
+                    if dropped.contains(e.key()) {
+                        continue;
+                    }
+                    let orphaned = a.parent_id.as_ref().is_some_and(|p| dropped.contains(p));
+                    if orphaned {
+                        dropped.insert(e.key().clone());
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break dropped;
+                }
+            }
+        };
         let mut agents: Vec<_> = self
             .agents
             .iter()
-            .filter(|e| !e.value().ephemeral)
+            .filter(|e| !dropped.contains(e.key()))
             .map(|e| e.value().record())
             .collect();
         agents.sort_by(|a, b| a.id.cmp(&b.id));
@@ -266,6 +328,20 @@ impl Kernel {
         let mut roots = 0;
         let mut ids_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for rec in &state.agents {
+            // RESERVED KEYS ARE REFUSED HERE — before anything is torn down.
+            // These name substrate wiring, not agent meta, and a hand-authored
+            // `root_path:` once cleared the whole tree and THEN raised: the
+            // kernel was bricked by a field that looked like configuration.
+            // Validation before teardown is what makes a bad document a no-op.
+            for k in crate::agent::RESERVED_RECORD_KEYS {
+                if rec.meta.contains_key(k) {
+                    return Err(KernelError::InvalidSnapshot(format!(
+                        "record {:?} carries reserved key {k:?} — that names substrate \
+                         wiring, not agent meta",
+                        rec.id
+                    )));
+                }
+            }
             if !ids_seen.insert(rec.id.as_str()) {
                 return Err(KernelError::InvalidSnapshot(format!(
                     "duplicate agent id {:?} in snapshot",

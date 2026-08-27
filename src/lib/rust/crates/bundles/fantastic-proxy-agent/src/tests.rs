@@ -7,7 +7,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use super::*;
-use fantastic_kernel::{Agent, StorageMode};
+use fantastic_kernel::{Agent, Item, StorageMode};
 use serde_json::Map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock as StdOnceLock};
@@ -98,11 +98,10 @@ fn mk_kernel(storage: StorageMode) -> Arc<Kernel> {
 
 async fn create_proxy_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     let r = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":HANDLER_MODULE,"id":id}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":HANDLER_MODULE,"id":id}))])
+            .await
+            .remove(0)
+            .result;
     assert_eq!(r["id"], id, "create_agent reply: {r}");
     AgentId::from(id)
 }
@@ -118,7 +117,11 @@ async fn reflect_no_host_says_host_registered_false() {
     let _g = test_lock();
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_proxy_agent(&kernel, "ui").await;
-    let r = kernel.send(&a, json!({"type":"reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], "ui");
     assert_eq!(r["host_registered"], false);
     assert_eq!(r["kind"], "proxy_agent");
@@ -134,7 +137,11 @@ async fn reflect_with_host_merges_replies() {
         r#"{"sentence":"I am Chat UI","extra_field":"yes","host_registered":false}"#,
     );
     register_host(a.clone(), host);
-    let r = kernel.send(&a, json!({"type":"reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["sentence"], "I am Chat UI");
     assert_eq!(r["extra_field"], "yes");
     // Bundle overlays host_registered=true regardless of host claim.
@@ -150,8 +157,13 @@ async fn send_no_host_returns_structured_error() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_proxy_agent(&kernel, "ui").await;
     let r = kernel
-        .send(&a, json!({"type":"render_token","delta":"x"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"render_token","delta":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "no_host");
     assert!(r["error"].as_str().unwrap().contains("no host registered"));
 }
@@ -165,8 +177,13 @@ async fn arbitrary_verb_forwards_to_host() {
     register_host(a.clone(), host.clone());
 
     let r = kernel
-        .send(&a, json!({"type":"render_token","delta":"hi!"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"render_token","delta":"hi!"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["rendered"], true);
     assert_eq!(r["chars"], 3);
 
@@ -184,7 +201,11 @@ async fn boot_with_host_fires_on_boot() {
     let a = create_proxy_agent(&kernel, "ui").await;
     let host = MockHost::new();
     register_host(a.clone(), host.clone());
-    let r = kernel.send(&a, json!({"type":"boot"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"boot"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     assert_eq!(host.on_boot_calls.load(Ordering::Relaxed), 1);
     // Boot verb was forwarded to host.handle too.
@@ -196,7 +217,11 @@ async fn boot_without_host_is_ok() {
     let _g = test_lock();
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_proxy_agent(&kernel, "ui").await;
-    let r = kernel.send(&a, json!({"type":"boot"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"boot"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     assert_eq!(r["host_registered"], false);
 }
@@ -208,7 +233,11 @@ async fn shutdown_with_host_forwards() {
     let a = create_proxy_agent(&kernel, "ui").await;
     let host = MockHost::with_reply(r#"{"closed":true}"#);
     register_host(a.clone(), host);
-    let r = kernel.send(&a, json!({"type":"shutdown"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"shutdown"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["closed"], true);
 }
 
@@ -220,11 +249,13 @@ async fn cascade_delete_fires_on_delete_and_drops_host() {
     let host = MockHost::new();
     register_host(a.clone(), host.clone());
     let r = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"delete_agent","id":"ui"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["deleted"], true);
     assert_eq!(host.on_delete_calls.load(Ordering::Relaxed), 1);
     // Host is dropped from the registry.
@@ -242,8 +273,16 @@ async fn two_proxies_are_isolated() {
     register_host(a.clone(), host_a);
     register_host(b.clone(), host_b);
 
-    let r_a = kernel.send(&a, json!({"type":"ping"})).await;
-    let r_b = kernel.send(&b, json!({"type":"ping"})).await;
+    let r_a = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"ping"}))])
+        .await
+        .remove(0)
+        .result;
+    let r_b = kernel
+        .send(vec![Item::new(b.clone(), json!({"type":"ping"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r_a["who"], "A");
     assert_eq!(r_b["who"], "B");
 }
@@ -255,11 +294,19 @@ async fn unregister_returns_to_no_host_behaviour() {
     let a = create_proxy_agent(&kernel, "ui").await;
     let host = MockHost::with_reply(r#"{"hello":"world"}"#);
     register_host(a.clone(), host);
-    let r1 = kernel.send(&a, json!({"type":"x"})).await;
+    let r1 = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"x"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r1["hello"], "world");
 
     unregister_host(&a);
-    let r2 = kernel.send(&a, json!({"type":"x"})).await;
+    let r2 = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"x"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r2["reason"], "no_host");
 }
 
@@ -270,7 +317,11 @@ async fn host_returning_malformed_json_is_wrapped() {
     let a = create_proxy_agent(&kernel, "ui").await;
     let host = MockHost::with_reply("not even close to json");
     register_host(a.clone(), host);
-    let r = kernel.send(&a, json!({"type":"x"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"x"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "host_reply_malformed");
     assert_eq!(r["reply_raw"], "not even close to json");
 }
@@ -312,7 +363,14 @@ async fn host_can_return_ok_ack_by_default() {
     let a = create_proxy_agent(&kernel, "ui").await;
     let host = MockHost::new(); // no canned replies → default {"ok":true}
     register_host(a.clone(), host);
-    let r = kernel.send(&a, json!({"type":"render","frame":7})).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"render","frame":7}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
 }
 
@@ -330,7 +388,7 @@ async fn host_can_return_ok_ack_by_default() {
 //                                  {interrupted: true}
 //   handle({type:"backend_state"}) → returns availability probes
 //
-// The tools-pull path (kernel.send("tools", list_for_llm) called from
+// The tools-pull path (kernel.send(vec![Item::new("tools", list_for_llm)]) called from
 // the chat backend during streaming) is covered separately in
 // fantastic-tools/tests/chat_backend_pulls_tools.rs — that test needs
 // both bundles + the tools registry which would create a dev-dep
@@ -439,8 +497,13 @@ async fn chat_backend_send_returns_queued_with_stream_id() {
     register_host(a.clone(), host.clone());
 
     let r = kernel
-        .send(&a, json!({"type":"send","text":"hello","client_id":"cli"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"send","text":"hello","client_id":"cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["queued"], true);
     assert_eq!(r["stream_id"], "stm_t");
     assert_eq!(r["message_id"], "msg_t");
@@ -456,14 +519,29 @@ async fn chat_backend_history_returns_messages_appended_by_send() {
     register_host(a.clone(), host.clone());
 
     let _ = kernel
-        .send(&a, json!({"type":"send","text":"first","client_id":"cli"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"send","text":"first","client_id":"cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&a, json!({"type":"send","text":"second","client_id":"cli"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"send","text":"second","client_id":"cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(&a, json!({"type":"history","client_id":"cli"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"history","client_id":"cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let msgs = r["messages"].as_array().expect("messages array");
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0]["content"], "first");
@@ -479,7 +557,11 @@ async fn chat_backend_interrupt_sets_flag_and_returns_interrupted() {
     host.attach(Arc::clone(&kernel), a.clone());
     register_host(a.clone(), host.clone());
 
-    let r = kernel.send(&a, json!({"type":"interrupt"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"interrupt"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["interrupted"], true);
     assert_eq!(host.cancel_flag.load(Ordering::Relaxed), 1);
 }
@@ -493,7 +575,11 @@ async fn chat_backend_backend_state_returns_availability_probes() {
     host.attach(Arc::clone(&kernel), a.clone());
     register_host(a.clone(), host.clone());
 
-    let r = kernel.send(&a, json!({"type":"backend_state"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"backend_state"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["apple_intelligence_available"], true);
     assert_eq!(r["model_available"], true);
     assert_eq!(r["backend_registered"], true);
@@ -519,8 +605,13 @@ async fn chat_backend_streams_tokens_via_emit_to_own_inbox() {
     }));
 
     let r = kernel
-        .send(&a, json!({"type":"send","text":"hi","client_id":"cli"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"send","text":"hi","client_id":"cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["queued"], true);
 
     // Wait for the spawned streaming task to finish.

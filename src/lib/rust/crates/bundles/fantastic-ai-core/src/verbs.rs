@@ -464,6 +464,9 @@ pub async fn send(
         let route_kernel = Arc::clone(kernel);
         let route_self = agent_id.clone();
         let route_client = client_id.clone();
+        // The turn's INCOMING text, so routing can tell a CHAIN turn (answering a
+        // delivered reply) from a chat turn — only the former is ever nudged.
+        let route_incoming = text.clone();
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
                 route_self,
@@ -472,6 +475,7 @@ pub async fn send(
                 route_client,
                 send_to,
                 system_prompt_for_route,
+                route_incoming,
             )
             .await;
         });

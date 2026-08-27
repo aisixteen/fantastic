@@ -49,6 +49,12 @@ serde = { version = "1", features = ["derive"] }
 # cross-runtime byte-for-byte parity flaky.
 serde_json = { version = "1", features = ["preserve_order"] }
 
+# Concurrent combinators. The kernel needs `join_all` for the batch send: a
+# batch must run CONCURRENTLY without `tokio::spawn`, because a spawn moves the
+# future and tokio task-locals do not cross that move — the sender/task/origin
+# scopes would be silently lost at every item.
+futures-util = "0.3"
+
 # Concurrent maps for kernel.agents + kernel.inboxes.
 dashmap = "6"
 arc-swap = "1"

@@ -31,10 +31,8 @@
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
 use crate::tool_parse::{extract_tool_calls, malformed_calls};
-use fantastic_kernel::{AgentId, Kernel};
-use futures_util::FutureExt;
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 /// What a call that named a VERB but no agent gets told.
@@ -84,9 +82,44 @@ async fn deliver(
     if let Some(sp) = system_prompt {
         payload.insert("system_prompt".to_string(), json!(sp));
     }
-    let _ = kernel
-        .send(&AgentId::from(target), Value::Object(payload))
-        .await;
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(target),
+            Value::Object(payload),
+        )])
+        .await
+        .remove(0);
+
+    // ANNOUNCE A FAILED HANDOFF. If the destination could not take the turn —
+    // it is gated, gone, or its own send answered `{"error": …}` — say so on its
+    // inbox instead of dropping the reply.
+    //
+    // Discarding it made a chain that DIED mid-flight identical to a model that
+    // chose to stop: no error anywhere, the last turn simply never happened.
+    // Only the first send's error was ever visible, i.e. never the ones that
+    // matter. This does NOT raise: the routing dispatch is detached, and
+    // unwinding here would kill sibling branches that are still fine.
+    let failed = !out.is_completed() || out.result.get("error").and_then(Value::as_str).is_some();
+    if failed {
+        let why = out
+            .result
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("delivery {}", out.status));
+        kernel
+            .emit(
+                &AgentId::from(target),
+                json!({
+                    "type": "status",
+                    "phase": "done",
+                    "reason": "error",
+                    "error": why,
+                    "client_id": client_id,
+                }),
+            )
+            .await;
+    }
 }
 
 /// python truthiness, for the `target_id or target` fall-through below. A FALSY
@@ -117,50 +150,33 @@ fn you_sent(args: &Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
-/// `kernel.send`, with a handler that DIES turned into a result the model can act
-/// on.
-///
-/// A handler that raises must not take the chain down with it. Python's
-/// equivalent ran bare until 2026-08-02, when a `file_bridge` whose ingress rule
-/// could not be resolved raised out of its handler: the exception escaped the
-/// router, asyncio logged "Task exception was never retrieved", and the model got
-/// no reply, no error, and no further turn — the run simply stopped
-/// mid-verification and looked finished. An exception is a result too; the model
-/// can act on `{"error": …}` and can act on nothing at all.
-///
-/// In THIS runtime a bundle that returns `Err` already arrives as
-/// `{"error": …}` (the kernel's dispatch maps it), so the case left to cover is a
-/// PANIC, which [`fantastic_kernel::Kernel::send`] re-raises into its caller.
-/// `catch_unwind` here and NOT an inner `tokio::spawn`: a spawn loses the task-
-/// locals, so the row would land parentless and escape `cancel`. Note a panic
-/// still poisons any kernel mutex the handler held — today's `resume_unwind` has
-/// the same consequence, and this does not fix that.
-async fn dispatch_guarded(
-    kernel: &Arc<Kernel>,
-    target: &str,
-    payload: Value,
-    pid: &mut Option<fantastic_kernel::tasks::TaskId>,
-) -> Value {
-    let target_id = AgentId::from(target);
-    let fut = kernel.send_traced(&target_id, payload, Some(pid));
-    match AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(reply) => reply,
-        Err(panic) => {
-            let what = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "panic".to_string());
-            json!({"error": format!("panic: {what}"), "raised": true, "target": target})
-        }
-    }
-}
-
 /// Honour where this pass's output goes. Runs DETACHED, after the FIFO guard is
 /// dropped — see the module header.
 ///
 /// Takes owned values because it is spawned as its own kernel task and must be
 /// `'static`.
+/// The runtime reminder a CHAIN turn gets when it emitted no call.
+///
+/// Model-facing PROMPT text, byte-identical across runtimes: a model reads it
+/// and retries from it. Says both halves — act if unfinished, and stopping is
+/// normal — because an earlier version that only pushed toward acting produced
+/// paralysis (a 47k-char turn re-reading the rule, then four consecutive
+/// no-call turns after the task was already done).
+pub const NO_CALL_NUDGE: &str = "[no call was dispatched] Your turn emitted no \
+<tool_call> envelope, so NOTHING ran — a call decided in thinking does not \
+execute unless the envelope is written out. If the task is unfinished, emit that \
+call now. If it is finished, say so — a turn without a call ends the chain \
+normally.";
+
+/// Honour where this pass's output goes.
+///
+/// Runs DETACHED, after the FIFO guard is dropped — see the module header. Takes
+/// owned values because it is spawned as its own kernel task and must be
+/// `'static`.
+///
+/// ONE TURN, ONE BATCH, ONE MESSAGE PER DESTINATION: every call the model
+/// emitted is dispatched together, and everything owed to a destination —
+/// results, parse errors, shape errors — arrives as ONE delivered turn.
 pub async fn route_reply(
     self_id: AgentId,
     kernel: Arc<Kernel>,
@@ -168,9 +184,15 @@ pub async fn route_reply(
     client_id: String,
     send_to: Option<String>,
     system_prompt: Option<String>,
+    incoming: String,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
+
+    // Everything owed to ONE destination, in the order the model wrote it.
+    // Grouping (not a message per call) is the whole point — see below.
+    let mut blocks: Vec<(String, String)> = Vec::new();
+
     // An envelope that OPENED and did not parse gets an error, exactly like a call
     // missing its `target_id` does. Reported FIRST and reported even when other
     // calls in the same pass parsed fine — a partially-read turn dispatched half
@@ -179,16 +201,29 @@ pub async fn route_reply(
     // could not read, and the documented default for an absent `reply_to` is self
     // anyway.
     for bad in malformed_calls(&text) {
-        deliver(
-            &kernel,
-            self_id.as_str(),
-            &bad.report().to_string(),
-            &client_id,
-            sp,
-        )
-        .await;
+        blocks.push((self_id.as_str().to_string(), bad.report().to_string()));
     }
+
     if !calls.is_empty() {
+        // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
+        // SINGLE `kernel.send([...])` — concurrent, side-effect order across
+        // calls undefined — and everything owed to one destination arrives as
+        // ONE delivered turn.
+        //
+        // Why whole, never split: replies used to land one per turn, so a turn
+        // that fanned out 7 calls spent the next 7 turns collecting its own
+        // answers, and every question asked in between was answered turns later
+        // by something older. Measured 2026-08-25 (`live_subai_langgraph`): the
+        // model re-asked `list_agents` five times and the run died with nothing
+        // built. Anthropic documents the split shape as the anti-pattern
+        // ("separate user messages reduce parallel tool use"), OpenAI 400s on a
+        // missing tool result, LangGraph's ToolNode collects every ToolMessage
+        // before the agent runs again. The model never sees a PARTIAL batch, so
+        // it never re-asks for the missing half.
+        let mut items: Vec<Item> = Vec::new();
+        // Per dispatched item: where its answer goes, and what it called.
+        let mut routes: Vec<(Option<String>, String, String)> = Vec::new();
+
         for call in calls {
             let args = &call.arguments;
             let chosen: Option<&Value> = match args.get("target_id") {
@@ -228,55 +263,175 @@ pub async fn route_reply(
                     r
                 }
             });
+
             let Some(target) = target else {
-                if let Some(rt) = reply_to.as_deref() {
+                if let Some(rt) = reply_to {
                     let body = json!({"error": NO_TARGET_ERROR, "you_sent": you_sent(args)});
-                    deliver(&kernel, rt, &body.to_string(), &client_id, sp).await;
+                    blocks.push((rt, body.to_string()));
                 }
                 continue;
             };
             let Some(Value::Object(payload)) = args.get("payload") else {
-                if let Some(rt) = reply_to.as_deref() {
+                if let Some(rt) = reply_to {
                     let body = json!({
                         "error": no_payload_error(target),
                         "target": target,
                         "you_sent": you_sent(args),
                     });
-                    deliver(&kernel, rt, &body.to_string(), &client_id, sp).await;
+                    blocks.push((rt, body.to_string()));
                 }
                 continue;
             };
-            let mut pid: Option<fantastic_kernel::tasks::TaskId> = None;
-            let result =
-                dispatch_guarded(&kernel, target, Value::Object(payload.clone()), &mut pid).await;
-            // Fire-and-forget: it acted, nobody awaits the answer.
-            let Some(rt) = reply_to.as_deref() else {
-                continue;
-            };
+
+            let verb = payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
+            // The model may NAME the execution (dedup/join across retries) and may
+            // bound its own call. The kernel validates both; a bad value settles
+            // that one call as a refusal the model can read.
+            if let Some(id) = args.get("id").and_then(Value::as_str) {
+                if !id.is_empty() {
+                    item = item.with_id(id);
+                }
+            }
+            if let Some(t) = args.get("timeout").and_then(Value::as_f64) {
+                item = item.with_timeout(t);
+            }
+            if let Some(r) = args.get("retries").and_then(Value::as_u64) {
+                item = item.with_retries(r as u32);
+            }
+            items.push(item);
+            routes.push((reply_to, target.to_string(), verb));
+        }
+
+        let outcomes = if items.is_empty() {
+            Vec::new()
+        } else {
+            kernel.send(items).await
+        };
+
+        for (out, (reply_to, target, verb)) in outcomes.into_iter().zip(routes) {
+            // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
+            // NOT counted in M — the model is owed a count of what it will
+            // actually receive.
+            let Some(rt) = reply_to else { continue };
             // The result — INCLUDING an error — goes back. A call that failed
             // silently is the one thing a model can never debug.
             //
-            // Target AND verb in the tag (py-canonical shape). With two calls in
-            // flight to one agent a bare `[reply to kernel_state]` is unmatchable —
-            // measured 2026-08-07 on py: acks lag a turn, the model re-issued both
-            // deletes and read its own retries as "duplicate delivery".
-            // PID first, then target+verb. Target+verb alone is NOT unique: with two
-            // calls in flight to one agent `[reply to kernel_state set]` is unmatchable —
-            // measured 2026-08-07 (opus re-issued both deletes, then theorised
-            // "duplicate delivery" about its own retries) and again 2026-08-20 (qwen:
-            // "the reply queue is running ahead of me", then re-polled forever). The PID
-            // is the same id `ps`/`cancel` use, so a reply names a row you can act on.
-            let verb = payload.get("type").and_then(Value::as_str).unwrap_or("?");
-            let pid = pid.as_ref().map(|t| t.0.as_str()).unwrap_or("-");
-            let body = format!("[reply to {pid} · {target} {verb}]\n{result}");
-            deliver(&kernel, rt, &body, &client_id, sp).await;
+            // PID first, then target+verb. Target+verb alone is NOT unique: with
+            // two calls in flight to one agent `[reply to kernel_state set]` is
+            // unmatchable — measured 2026-08-07 (opus re-issued both deletes,
+            // then theorised "duplicate delivery" about its own retries) and
+            // again 2026-08-20 (qwen: "the reply queue is running ahead of me",
+            // then re-polled forever). The PID is the same id `ps`/`cancel` use,
+            // so a reply names a row the model can act on.
+            let pid = out.pid.as_ref().map(|t| t.0.as_str()).unwrap_or("-");
+            blocks.push((
+                rt,
+                format!("[reply to {pid} · {target} {verb}]\n{}", out.result),
+            ));
         }
+    }
+
+    if !blocks.is_empty() {
+        deliver_grouped(&kernel, blocks, &client_id, sp).await;
         return;
     }
 
     if let Some(to) = send_to.as_deref() {
         deliver(&kernel, to, &text, &client_id, sp).await;
+        return;
     }
+
+    // THE NO-CALL NUDGE. A CHAIN turn (its incoming text was a delivered reply)
+    // that emits no call and no units gets ONE runtime reminder.
+    //
+    // Measured 2026-08-25 (`live_subai`/`live_subai_graph`, qwen3.8-27b, twice
+    // each): the model wrote its next action INSIDE thinking — "Let me send
+    // {type:'list_agents'} to kernel" — and ended the completion without the
+    // envelope. A no-call turn ends the chain, so one lapse killed runs whose
+    // gate, premise and delivery were clean.
+    //
+    // The cap is STRUCTURAL, not a counter: the nudge IS the next incoming text,
+    // and a turn answering a nudge is not a reply turn, so it is never nudged
+    // again. A chat turn (incoming is not a reply tag) is never nudged at all —
+    // stopping is normal there.
+    if is_reply_turn(&incoming) {
+        deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
+    }
+}
+
+/// Was this turn's incoming text a DELIVERED REPLY (i.e. are we mid-chain)?
+fn is_reply_turn(incoming: &str) -> bool {
+    incoming.trim_start().starts_with("[reply to ")
+}
+
+/// ONE delivered message per destination: blocks joined by a blank line, each
+/// stamped `N of M in batch <token>` when the destination is owed more than one.
+///
+/// The stamp is for CORRELATION and COMPLETENESS, not "the rest are still in
+/// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
+/// could not tell "still running" from "answered the wrong one"; that killed
+/// three runs (opus 08-07, qwen 08-20, qwen 08-24).
+async fn deliver_grouped(
+    kernel: &Arc<Kernel>,
+    blocks: Vec<(String, String)>,
+    client_id: &str,
+    sp: Option<&str>,
+) {
+    // Destination order = first appearance, so the model reads them in the order
+    // it wrote the calls.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_dest: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (dest, body) in blocks {
+        if !by_dest.contains_key(&dest) {
+            order.push(dest.clone());
+        }
+        by_dest.entry(dest).or_default().push(body);
+    }
+    // One token per TURN, shared across destinations: it names the batch, and a
+    // model reading two destinations' messages can see they came from one turn.
+    let token = batch_token(&order, &by_dest);
+    for dest in order {
+        let parts = by_dest.remove(&dest).unwrap_or_default();
+        let m = parts.len();
+        let body = if m > 1 {
+            parts
+                .into_iter()
+                .enumerate()
+                .map(|(i, b)| format!("{b}\n[{} of {m} in batch {token}]", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            parts.join("\n\n")
+        };
+        deliver(kernel, &dest, &body, client_id, sp).await;
+    }
+}
+
+/// A short, stable-per-turn batch token. Derived from the batch's own content so
+/// it needs no clock and no counter — both of which would differ across runtimes
+/// and make a cross-runtime byte-diff fail on noise.
+fn batch_token(
+    order: &[String],
+    by_dest: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for d in order {
+        d.hash(&mut h);
+        if let Some(parts) = by_dest.get(d) {
+            parts.len().hash(&mut h);
+            for p in parts {
+                p.len().hash(&mut h);
+            }
+        }
+    }
+    format!("{:04x}", h.finish() as u16)
 }
 
 #[cfg(test)]

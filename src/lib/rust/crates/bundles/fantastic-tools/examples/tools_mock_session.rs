@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo run -p fantastic-tools --example tools_mock_session`
 
-use fantastic_kernel::{Agent, AgentId, Kernel, StorageMode};
+use fantastic_kernel::{Agent, AgentId, Item, Kernel, StorageMode};
 use fantastic_proxy_agent::{
     clear_hosts, register_host, ProxyAgentBundle, ProxyAgentHost, HANDLER_MODULE as PROXY_HM,
 };
@@ -85,18 +85,16 @@ async fn main() {
 
     banner("Step 2: create the tools agent + the calc proxy_agent");
     let r = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":TOOLS_HM,"id":"tools"}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":TOOLS_HM,"id":"tools"}))])
+            .await
+            .remove(0)
+            .result;
     assert_or_die(r["id"] == "tools", "created tools agent");
     let r = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":PROXY_HM,"id":"calc"}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":PROXY_HM,"id":"calc"}))])
+            .await
+            .remove(0)
+            .result;
     assert_or_die(r["id"] == "calc", "created calc agent");
 
     banner("Step 3: register CalcHost on the calc agent");
@@ -106,8 +104,13 @@ async fn main() {
 
     banner("Step 4: reflect on tools — should report tool_count = 0");
     let r = kernel
-        .send(&AgentId::from("tools"), json!({"type":"reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("tools"),
+            json!({"type":"reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reflect: {r}");
     assert_or_die(r["tool_count"] == 0, "tool_count = 0");
     assert_or_die(r["kind"] == "tools", "kind = tools");
@@ -115,8 +118,8 @@ async fn main() {
     banner("Step 5: register calc_add (verb=add) and calc_subtract (verb=subtract)");
     for (name, verb) in [("calc_add", "add"), ("calc_subtract", "subtract")] {
         let r = kernel
-            .send(
-                &AgentId::from("tools"),
+            .send(vec![Item::new(
+                AgentId::from("tools"),
                 json!({
                     "type":"register",
                     "name": name,
@@ -134,15 +137,22 @@ async fn main() {
                         "additionalProperties": false,
                     },
                 }),
-            )
-            .await;
+            )])
+            .await
+            .remove(0)
+            .result;
         assert_or_die(r["ok"] == true, &format!("registered {name}"));
     }
 
     banner("Step 6: list_for_llm — confirm both tools visible in LLM-facing shape");
     let r = kernel
-        .send(&AgentId::from("tools"), json!({"type":"list_for_llm"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("tools"),
+            json!({"type":"list_for_llm"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  list_for_llm: {r}");
     let arr = r["tools"].as_array().unwrap();
     assert_or_die(arr.len() == 2, "two tools listed");
@@ -155,11 +165,13 @@ async fn main() {
 
     banner("Step 7: dispatch calc_add(a=2, b=3) → 5");
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"dispatch","name":"calc_add","arguments":{"a":2,"b":3}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reply: {r}");
     assert_or_die(r["result"] == 5, "calc_add reply = 5");
     assert_or_die(
@@ -169,22 +181,26 @@ async fn main() {
 
     banner("Step 8: dispatch calc_subtract(a=10, b=4) → 6");
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"dispatch","name":"calc_subtract","arguments":{"a":10,"b":4}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reply: {r}");
     assert_or_die(r["result"] == 6, "calc_subtract reply = 6");
 
     banner("Step 9: dispatch unknown tool → tool_not_found, no call to target");
     let calls_before = calc_host.calls.load(Ordering::Relaxed);
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"dispatch","name":"never_registered","arguments":{}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reply: {r}");
     assert_or_die(r["reason"] == "tool_not_found", "tool_not_found");
     assert_or_die(
@@ -194,15 +210,22 @@ async fn main() {
 
     banner("Step 10: unregister calc_add — list now shows only calc_subtract");
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"unregister","name":"calc_add"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(r["ok"] == true, "unregister ok");
     let r = kernel
-        .send(&AgentId::from("tools"), json!({"type":"list"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("tools"),
+            json!({"type":"list"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(r["count"] == 1, "count = 1 after removal");
     assert_or_die(
         r["tools"][0]["name"] == "calc_subtract",
@@ -212,11 +235,13 @@ async fn main() {
     banner("Step 11: dispatch removed calc_add — MUST NOT reach calc_host");
     let calls_before = calc_host.calls.load(Ordering::Relaxed);
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"dispatch","name":"calc_add","arguments":{"a":1,"b":1}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reply: {r}");
     assert_or_die(r["reason"] == "tool_not_found", "tool_not_found");
     assert_or_die(
@@ -226,17 +251,24 @@ async fn main() {
 
     banner("Step 12: unregister_by_sender(calc_owner) — drops calc_subtract too");
     let r = kernel
-        .send(
-            &AgentId::from("tools"),
+        .send(vec![Item::new(
+            AgentId::from("tools"),
             json!({"type":"unregister_by_sender","sender":"calc_owner"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  reply: {r}");
     assert_or_die(r["ok"] == true, "ok");
     assert_or_die(r["removed"] == 1, "removed = 1");
     let r = kernel
-        .send(&AgentId::from("tools"), json!({"type":"list"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("tools"),
+            json!({"type":"list"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(r["count"] == 0, "registry empty");
 
     banner("ALL ASSERTIONS GREEN — tools round-trip healthy");

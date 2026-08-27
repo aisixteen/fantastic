@@ -38,11 +38,54 @@ pub fn without_thinking(text: &str) -> String {
         let a = i + rel_open;
         out.push_str(&text[i..a]);
         let Some(rel_close) = text[a..].find(THINK_CLOSE) else {
-            break; // unterminated (stream cut mid-thought) — drop the tail
+            // Unterminated (stream cut mid-thought) — drop the tail, but keep any
+            // envelope it already contained: it was dispatched.
+            out.push_str(&kept_envelopes(&text[a..]));
+            break;
         };
+        let span = &text[a..a + rel_close];
+        // KEEP THE ENVELOPES, DROP THE REASONING. A `<tool_call>` is an
+        // INVOCATION wherever it is written, thinking included — it is parsed out
+        // of the full completion and dispatched. Stripping the whole span meant
+        // dispatch read the FULL text while history read the STRIPPED text, so a
+        // call made inside a thought RAN, returned a reply, and left no record.
+        // The model then saw an effect with no cause ("I sent a reflect to
+        // file_bridge but the reply came back from exec_bridge" — correct, given
+        // a record we had silently edited). 3 of 169 calls were lost in one day.
+        out.push_str(&kept_envelopes(span));
         i = a + rel_close + THINK_CLOSE.len();
     }
     out.trim().to_string()
+}
+
+/// Every complete tool-call envelope inside `span`, in order, one per line.
+///
+/// All three dialects, because the parser dispatches all three: keeping only the
+/// JSON one would re-open the same gap for a model that speaks another.
+fn kept_envelopes(span: &str) -> String {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for env in crate::tool_parse::ENVELOPES.iter() {
+        let mut from = 0usize;
+        while let Some(rel) = span[from..].find(env.open) {
+            let a = from + rel;
+            let Some(rel_end) = span[a..].find(env.close) else {
+                break;
+            };
+            let end = a + rel_end + env.close.len();
+            found.push((a, span[a..end].to_string()));
+            from = end;
+        }
+    }
+    if found.is_empty() {
+        return String::new();
+    }
+    found.sort_by_key(|(at, _)| *at);
+    let mut out = String::from("\n");
+    for (_, e) in found {
+        out.push_str(&e);
+        out.push('\n');
+    }
+    out
 }
 
 /// Per-TURN reasoning wrapper state, threaded through a provider's chunk decoder.
@@ -109,18 +152,33 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_call_written_inside_a_span_stays_visible_to_the_parser() {
-        // The whole point of the split: the RAW text is parsed, the STRIPPED text
-        // is persisted. A model that writes its call mid-thought still dispatches.
-        let raw = concat!(
-            "<think>I should ",
-            r#"<tool_call>{"name":"send","arguments":{"payload":{"type":"recall"}}}</tool_call>"#,
-            "</think>done"
-        );
-        let calls = crate::tool_parse::extract_tool_calls(raw);
+    fn a_tool_call_written_inside_a_span_survives_into_history() {
+        // The RAW text is parsed, the STRIPPED text is persisted — so a call the
+        // model wrote mid-thought dispatches AND stays in the record.
+        //
+        // It used to be stripped with the reasoning, and the consequence was a
+        // record we had silently edited: the call RAN, returned a reply, and left
+        // no cause behind it. The model then read an effect it never caused ("I
+        // sent a reflect to file_bridge but the reply came back from
+        // exec_bridge"). Reasoning is still dropped; the INVOCATION is not.
+        let envelope =
+            r#"<tool_call>{"name":"send","arguments":{"payload":{"type":"recall"}}}</tool_call>"#;
+        let raw = format!("<think>I should {envelope}</think>done");
+
+        let calls = crate::tool_parse::extract_tool_calls(&raw);
         assert_eq!(calls.len(), 1, "the parser reads the RAW text: {calls:?}");
         assert_eq!(calls[0].arguments["payload"]["type"], "recall");
-        assert_eq!(without_thinking(raw), "done");
+
+        let kept = without_thinking(&raw);
+        assert!(
+            kept.contains(envelope),
+            "the invocation was erased: {kept:?}"
+        );
+        assert!(kept.contains("done"));
+        assert!(!kept.contains("I should"), "the reasoning must still go");
+        // ...and what we persisted still parses to the same one call, so history
+        // and dispatch agree.
+        assert_eq!(crate::tool_parse::extract_tool_calls(&kept).len(), 1);
     }
 
     #[test]

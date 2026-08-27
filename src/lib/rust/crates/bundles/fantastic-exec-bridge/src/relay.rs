@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fantastic_kernel::call_guard::guard_call_stack;
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -131,7 +131,13 @@ pub async fn serve(
                 // child's blocking `q.get()` would hang forever.
                 let data = match guard_call_stack(owner.as_str(), &mut payload) {
                     Err(e) => json!({ "error": e }),
-                    Ok(()) => kernel.send(&AgentId::from(target), payload).await,
+                    Ok(()) => {
+                        kernel
+                            .send(vec![Item::new(AgentId::from(target), payload)])
+                            .await
+                            .remove(0)
+                            .result
+                    }
                 };
                 push(
                     &wr,

@@ -8,11 +8,12 @@
 //! - mem  → durable keyed facts, accrete + prune at LLM discretion.
 //!
 //! ALL disk IO goes THROUGH a `file_bridge` AGENT (the gated fs edge — sealed /
-//! deny-all by default), referenced by `file_bridge_id` on this agent's record.
+//! deny-all by default) that the LOADER discovers — this bundle never names a
 //! This bundle owns NO disk surface of its own and never touches `std::fs`: it
-//! `send`s `read` / `write` verbs to its provider, exactly like the Python bundle
+//! provider and never computes a path. It `send`s `persist_blob` / `load_blob` to
 //! (and rust's `ai_core`). `set` / `delete` / `replace` **failfast** until
-//! `file_bridge_id` is set (and surface a denied write rather than losing it).
+//! the kernel, exactly like the Python bundle (and surfaces a denied write rather
+//! than losing it).
 //! Wire it to the **`.fantastic` store** (the one the loader persists records
 //! through — ONE file_bridge serves both): the path is store-relative
 //! `agents/<id>/state.yaml`, so the sidecar lands next to its `agent.json`.
@@ -25,7 +26,7 @@
 use async_trait::async_trait;
 use fantastic_bundle as _; // keep the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{Agent, AgentId, Kernel};
+use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,33 +39,12 @@ const DATA_SENTENCE: &str = "Your durable scratch-state (component state, config
 pub struct YamlStateBundle;
 
 /// The bound file_bridge provider id, off this agent's record.
-fn file_bridge_id(agent: &Agent) -> Option<String> {
-    agent.meta.read().ok().and_then(|g| {
-        g.get("file_bridge_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    })
-}
-
 /// `state.yaml` in the agent's own dir, RELATIVE to the provider's root (the
 /// `.fantastic` store) — `agents/<id>/state.yaml`, landing next to its
 /// `agent.json` (no `.fantastic/.fantastic/...` double-nest). Matches Python.
-fn state_path(agent: &Agent) -> String {
-    format!("agents/{}/state.yaml", agent.id.0)
-}
-
-/// Failfast if no provider is wired — persistence needs an opened file_bridge.
-/// Error text is byte-identical to the Python bundle.
-fn need_file_bridge(agent: &Agent, verb: &str) -> Option<Value> {
-    if file_bridge_id(agent).is_none() {
-        return Some(json!({
-            "error": format!(
-                "yaml_state.{verb}: file_bridge_id required — wire (and open) a file_bridge to persist"
-            )
-        }));
-    }
-    None
-}
+/// The sidecar this agent keeps. The LOADER owns where it lands — this bundle
+/// names only the file.
+const STATE_BLOB: &str = "state.yaml";
 
 fn mode_of(agent: &Agent) -> String {
     let m = agent
@@ -80,15 +60,21 @@ fn mode_of(agent: &Agent) -> String {
 
 /// Read the store THROUGH the wired provider. Unwired / missing / denied ⇒ {}.
 async fn load(agent: &Agent, kernel: &Arc<Kernel>) -> Map<String, Value> {
-    let Some(fid) = file_bridge_id(agent) else {
-        return Map::new();
-    };
-    let r = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "read", "path": state_path(agent)}),
-        )
-        .await;
+    // THROUGH THE LOADER, not a provider of our own. The consumer names ITSELF
+    // and a filename; the loader owns the path and the store. Operator
+    // authority: reading our OWN sidecar is bookkeeping processed from above,
+    // not this agent reaching out — so it never runs against our grant.
+    let r = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({
+            "type": "load_blob",
+            "agent_id": agent.id.0,
+            "name": STATE_BLOB,
+        }),
+    )]))
+    .await
+    .remove(0)
+    .result;
     let Some(text) = r.get("content").and_then(Value::as_str) else {
         return Map::new();
     };
@@ -119,31 +105,29 @@ async fn persist(
     doc: &Map<String, Value>,
     verb: &str,
 ) -> Option<Value> {
-    let Some(fid) = file_bridge_id(agent) else {
-        return Some(json!({"error": format!("yaml_state.{verb}: file_bridge_id required")}));
-    };
-    let w = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "write", "path": state_path(agent), "content": emit_yaml(doc)}),
-        )
-        .await;
+    // Operator authority: persisting from above (see `load`).
+    let w = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({
+            "type": "persist_blob",
+            "agent_id": agent.id.0,
+            "name": STATE_BLOB,
+            "content": emit_yaml(doc),
+        }),
+    )]))
+    .await
+    .remove(0)
+    .result;
     if !w.is_object() {
-        return Some(json!({"error": format!("yaml_state.{verb}: provider gave no reply")}));
+        return Some(json!({"error": format!("yaml_state.{verb}: loader gave no reply")}));
     }
-    let reason = w.get("error").and_then(Value::as_str).or_else(|| {
-        if w.get("reason").and_then(Value::as_str) == Some("unauthorized") {
-            Some("unauthorized")
-        } else {
-            None
+    if let Some(err) = w.get("error").and_then(Value::as_str) {
+        let mut out = json!({ "error": format!("yaml_state.{verb}: {err}") });
+        // Carry the loader's machine field + recipe through — a sealed-edge
+        // denial must stay a denial, with the open-it hint intact.
+        if let Some(reason) = w.get("reason") {
+            out["reason"] = reason.clone();
         }
-    });
-    if let Some(reason) = reason {
-        let mut out = json!({
-            "error": format!("yaml_state.{verb}: provider refused write — {reason}")
-        });
-        // Pass the provider's `hint` through (py parity) — e.g. the sealed-edge
-        // denial carries the open-it recipe.
         if let Some(hint) = w.get("hint") {
             out["hint"] = hint.clone();
         }
@@ -167,11 +151,10 @@ async fn reflect_reply(agent: &Agent, kernel: &Arc<Kernel>) -> Value {
         "sentence": if mode == "mem" { MEM_SENTENCE } else { DATA_SENTENCE },
         "mode": mode,
         "key_count": doc.len(),
-        "file_bridge_id": file_bridge_id(agent),
         "verbs": {
             "read": "args: key?:str. Value at key (null if absent); whole doc if key omitted.",
             "keys": "args: none. List keys + value sizes — the table-of-contents.",
-            "set": "args: key:str, value:any. Upsert one key. Persisted through file_bridge_id; failfast if unwired.",
+            "set": "args: key:str, value:any. Upsert one key. Persisted through the kernel; a write with no store wired FAILS rather than being lost.",
             "delete": "args: key:str. Remove a key.",
             "replace": "args: doc:object. Overwrite the whole store ({} clears).",
             "state_yaml": "args: none. The entire store as YAML text.",
@@ -226,10 +209,6 @@ impl Bundle for YamlStateBundle {
                 json!({ "keys": keys })
             }
             "set" => {
-                // FAILFAST first — persistence needs an opened file_bridge.
-                if let Some(err) = need_file_bridge(&agent, "set") {
-                    return Ok(Some(err));
-                }
                 let Some(key) = payload
                     .get("key")
                     .and_then(Value::as_str)
@@ -250,9 +229,6 @@ impl Bundle for YamlStateBundle {
                 json!({"key": key, "set": true})
             }
             "delete" => {
-                if let Some(err) = need_file_bridge(&agent, "delete") {
-                    return Ok(Some(err));
-                }
                 let Some(key) = payload
                     .get("key")
                     .and_then(Value::as_str)
@@ -270,9 +246,6 @@ impl Bundle for YamlStateBundle {
                 json!({"key": key, "deleted": existed})
             }
             "replace" => {
-                if let Some(err) = need_file_bridge(&agent, "replace") {
-                    return Ok(Some(err));
-                }
                 // `doc` is REQUIRED ({} clears) — a missing doc is an error, not
                 // a silent clear (matches Python).
                 let doc = match payload.get("doc") {

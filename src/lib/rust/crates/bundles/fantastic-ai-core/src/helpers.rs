@@ -6,7 +6,7 @@
 //! thing that mints one, and python keeps `_mint_id` inside `tool_parse.py` for
 //! the same reason.
 
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,24 +68,26 @@ pub fn safe_client(client_id: &str) -> String {
     }
 }
 
-/// Per-client chat thread path under the agent's dir.
-pub fn chat_path(self_id: &AgentId, client_id: &str) -> String {
-    // STORE-RELATIVE (`agents/<id>/…`): wire `file_bridge_id` to the `.fantastic`
-    // store so the sidecar lands next to the agent's own agent.json (one store,
-    // no `.fantastic/.fantastic/…` double-nest). Matches Python.
-    format!("agents/{}/chat_{}.json", self_id, safe_client(client_id))
+/// Per-client chat thread FILENAME.
+///
+/// A name, not a path: the LOADER owns where sidecars land, so this bundle no
+/// longer computes `agents/<id>/…` or names a provider of its own.
+pub fn chat_path(_self_id: &AgentId, client_id: &str) -> String {
+    format!("chat_{}.json", safe_client(client_id))
 }
 
 /// Read a file via the bound file agent. `None` if no file agent or the
 /// reply carries no `content`.
 pub async fn file_read(self_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> Option<String> {
-    let fid = file_bridge_id(self_id, kernel)?;
-    let reply = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "read", "path": path}),
-        )
-        .await;
+    // Operator authority: reading our OWN sidecar is bookkeeping processed from
+    // above, not this agent reaching out.
+    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({"type": "load_blob", "agent_id": self_id.0, "name": path}),
+    )]))
+    .await
+    .remove(0)
+    .result;
     reply
         .get("content")
         .and_then(Value::as_str)
@@ -99,34 +101,44 @@ pub async fn file_write(
     path: &str,
     content: &str,
 ) -> Result<(), String> {
-    let fid = file_bridge_id(self_id, kernel).ok_or_else(|| "file_bridge_id unset".to_string())?;
-    let reply = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "write", "path": path, "content": content}),
-        )
-        .await;
+    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({
+            "type": "persist_blob",
+            "agent_id": self_id.0,
+            "name": path,
+            "content": content,
+        }),
+    )]))
+    .await
+    .remove(0)
+    .result;
     if let Some(err) = reply.get("error").and_then(Value::as_str) {
         return Err(err.to_string());
     }
     Ok(())
 }
 
-/// Delete a file via the bound file agent. Returns the `deleted` flag.
+/// CLEAR one of this agent's own sidecars. Returns whether the write landed.
+///
+/// The blob channel is a dumb BYTE authority with no delete verb — python has
+/// none either — so "cleared" means written EMPTY. For the one caller that
+/// matters (dropping a stored api key) that is the property wanted: the secret
+/// is gone, and a subsequent read sees nothing.
 pub async fn file_delete(self_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> bool {
-    let Some(fid) = file_bridge_id(self_id, kernel) else {
-        return false;
-    };
-    let reply = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "delete", "path": path}),
-        )
-        .await;
-    reply
-        .get("deleted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({
+            "type": "persist_blob",
+            "agent_id": self_id.0,
+            "name": path,
+            "content": "",
+        }),
+    )]))
+    .await
+    .remove(0)
+    .result;
+    reply.get("ok").and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// Current unix time in fractional seconds.

@@ -1,4 +1,5 @@
 //! Unit tests for [`crate::send`].
+use crate::outcome::Item;
 
 use super::*;
 use crate::agent::Agent;
@@ -55,8 +56,13 @@ async fn with_sender_propagates_to_nested_async() {
 async fn send_to_missing_target_returns_error() {
     let kernel = Arc::new(Kernel::new());
     let v = kernel
-        .send(&AgentId::from("nope"), json!({"type": "ping"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("nope"),
+            json!({"type": "ping"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(v["error"].as_str().unwrap_or("").contains("no agent"));
 }
 
@@ -68,8 +74,13 @@ async fn send_kernel_alias_routes_to_root() {
     kernel.set_root(Arc::clone(&root));
     // Root has no handler_module → reflect is answered natively.
     let v = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "reflect"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     // Reflect returns at least an id + a tree (full shape exercised
     // in reflect.rs tests + integration tests).
     assert!(v.is_object(), "reflect must return an object: {v:?}");
@@ -202,12 +213,120 @@ async fn list_agents_returns_records_for_every_registered() {
     let _rx2 = kernel.register(Arc::clone(&b));
     kernel.set_root(Arc::clone(&a));
     let v = kernel
-        .send(&AgentId::from("a_1"), json!({"type": "list_agents"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("a_1"),
+            json!({"type": "list_agents"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let agents = v["agents"].as_array().expect("list_agents.agents array");
     let ids: Vec<&str> = agents
         .iter()
         .filter_map(|x| x.get("id").and_then(Value::as_str))
         .collect();
     assert_eq!(ids, vec!["a_1", "b_1"]);
+}
+
+// ─── #2 — current_origin: the CALLER, not the callee ────────────────
+
+#[tokio::test]
+async fn a_handler_reads_its_caller_not_itself() {
+    // `current_sender()` inside a handler is that handler's OWN agent — the
+    // callee. A bundle whose payload NAMES a resource needs the CALLER, which
+    // is what `current_origin()` carries. Without it an agent could write
+    // another agent's namespace through a blob verb and nothing could tell.
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    use crate::send::{current_origin, with_sender};
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Option<(Option<String>, Option<String>)>> = Mutex::new(None);
+
+    struct Spy;
+    #[async_trait::async_trait]
+    impl Bundle for Spy {
+        fn name(&self) -> &str {
+            "origin_spy"
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            _payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            *SEEN.lock().unwrap() = Some((
+                crate::send::current_sender().map(|a| a.0),
+                current_origin().map(|a| a.0),
+            ));
+            Ok(Some(json!({"ok": true})))
+        }
+    }
+
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("origin_spy.tools", Spy);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+
+    // Two-sided gate: the edge exists only if BOTH ends grant it, so the agent
+    // half of this test needs real wiring — a bare `with_sender` of an
+    // unregistered id is (correctly) deny-all.
+    let mut spy_meta = Map::new();
+    spy_meta.insert("callable_by".into(), json!({"caller": "*"}));
+    let spy = Agent::new(
+        AgentId::from("spy"),
+        Some("origin_spy.tools".to_string()),
+        None,
+        spy_meta,
+        Path::new("/tmp/nowhere").join("spy"),
+        true,
+    );
+    let _rx = kernel.register(Arc::clone(&spy));
+
+    let mut caller_meta = Map::new();
+    caller_meta.insert("can_call".into(), json!({"spy": "*"}));
+    let caller = Agent::new(
+        AgentId::from("caller"),
+        None,
+        None,
+        caller_meta,
+        Path::new("/tmp/nowhere").join("caller"),
+        true,
+    );
+    let _rx2 = kernel.register(Arc::clone(&caller));
+
+    // OPERATOR send: there is no caller, so there is no origin.
+    let r = kernel
+        .send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
+        .await
+        .remove(0)
+        .result;
+    let (sender, origin) = SEEN
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or_else(|| panic!("handler never ran; reply={r}"));
+    assert_eq!(sender.as_deref(), Some("spy"), "sender is the CALLEE");
+    assert_eq!(origin, None, "an operator send has no origin");
+
+    // AGENT send: origin names the CALLER; sender still names the callee.
+    let _ = with_sender(AgentId::from("caller"), async {
+        kernel
+            .send(vec![Item::new(spy.id.clone(), json!({"type": "poke"}))])
+            .await
+            .remove(0)
+            .result
+    })
+    .await;
+    let (sender, origin) = SEEN
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the granted edge must reach the handler");
+    assert_eq!(sender.as_deref(), Some("spy"));
+    assert_eq!(
+        origin.as_deref(),
+        Some("caller"),
+        "origin must be the CALLER — the whole reason the third local exists"
+    );
 }

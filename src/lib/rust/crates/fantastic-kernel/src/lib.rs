@@ -27,10 +27,14 @@ pub mod bundle;
 pub mod call_guard;
 pub mod errors;
 pub mod kernel;
+pub mod ledger;
 pub mod lifecycle;
 pub mod lock;
+pub mod outcome;
+pub mod paging;
 pub mod persistence;
 pub mod reflect;
+pub mod refusal;
 pub mod send;
 pub mod state;
 pub mod storage;
@@ -39,14 +43,19 @@ pub mod tasks;
 #[doc(hidden)]
 pub mod test_support;
 
-pub use agent::{Agent, AgentId, AgentRecord};
+pub use agent::{Agent, AgentId, AgentRecord, RESERVED_RECORD_KEYS};
 pub use authz::{
     authorize_call, default_callable_by, default_can_call, Decision, FROM_ABOVE, PRIVILEGED_VERBS,
 };
 pub use bundle::{Bundle, BundleRegistry, Reply};
 pub use errors::{KernelError, KernelResult};
 pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
-pub use send::{current_sender, with_operator, with_sender, CURRENT_SENDER};
+pub use outcome::{Item, Outcome, Status};
+pub use paging::page;
+pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
+pub use send::{
+    current_origin, current_sender, with_operator, with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
+};
 pub use state::{KernelState, CURRENT_VERSION};
 pub use storage::StorageMode;
 pub use tasks::{current_killed, current_task, TaskId, TaskTable, CURRENT_TASK};

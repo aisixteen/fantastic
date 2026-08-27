@@ -8,6 +8,7 @@
 
 use super::*;
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::Map;
 use std::time::Duration;
 use wiremock::matchers::{header, method, path};
@@ -50,11 +51,12 @@ async fn mk_kernel(
     kernel.set_root(Arc::clone(&root));
     let ant = ant_id_for(tmp);
     let fid = format!("ff_{}", ant);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type":"create_agent",
+                "parent_id": "kernel",
                 "handler_module":"file_bridge.tools",
                 "id": fid,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
@@ -62,11 +64,14 @@ async fn mk_kernel(
                 // Two-sided deny-all: accept the backend that persists through it.
                 "callable_by": { ant.clone(): "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let store_grant = fid.clone();
     let mut create = json!({
         "type":"create_agent",
+        "parent_id": "kernel",
         "handler_module":HANDLER_MODULE,
         "id": ant,
         "file_bridge_id": fid.clone(),
@@ -78,7 +83,11 @@ async fn mk_kernel(
     if let Some(e) = endpoint {
         create["endpoint"] = json!(e);
     }
-    kernel.send(&AgentId::from("core"), create).await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("core"), create)])
+        .await
+        .remove(0)
+        .result;
     (
         kernel,
         AgentId::from(ant.as_str()),
@@ -153,7 +162,11 @@ fn translate_messages_splits_system_and_text_turns() {
 async fn reflect_shape_has_api_key_false_initially() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
-    let r = kernel.send(&ant, json!({"type": "reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(ant.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], ant.as_str());
     assert_eq!(r["has_api_key"], false);
     assert_eq!(r["model"], "test-model");
@@ -167,11 +180,13 @@ async fn set_api_key_persists_via_file_agent_and_reflect_flips() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
-        .send(
-            &ant,
+        .send(vec![Item::new(
+            ant.clone(),
             json!({"type": "set_api_key", "api_key": "sk-ant-test-abc"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     let key_file = tmp
         .path()
@@ -179,7 +194,11 @@ async fn set_api_key_persists_via_file_agent_and_reflect_flips() {
     assert!(key_file.exists(), "api_key sidecar should exist");
     let content = std::fs::read_to_string(&key_file).unwrap();
     assert_eq!(content.trim(), "sk-ant-test-abc");
-    let r2 = kernel.send(&ant, json!({"type": "reflect"})).await;
+    let r2 = kernel
+        .send(vec![Item::new(ant.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r2["has_api_key"], true);
     let serialized = serde_json::to_string(&r2).unwrap();
     assert!(
@@ -189,21 +208,47 @@ async fn set_api_key_persists_via_file_agent_and_reflect_flips() {
 }
 
 #[tokio::test]
-async fn clear_api_key_deletes_sidecar() {
+async fn clear_api_key_leaves_no_secret_behind() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
-    kernel
-        .send(&ant, json!({"type": "set_api_key", "api_key": "k1"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "k1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let key_file = tmp
         .path()
         .join(format!(".fantastic/agents/{}/api_key", ant));
     assert!(key_file.exists());
-    let r = kernel.send(&ant, json!({"type": "clear_api_key"})).await;
+    let r = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "clear_api_key"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     assert_eq!(r["deleted"], true);
-    assert!(!key_file.exists());
-    let r2 = kernel.send(&ant, json!({"type": "reflect"})).await;
+    // CLEARED, not unlinked. The blob channel is a dumb byte authority with no
+    // delete verb (python has none either), so clearing writes the sidecar
+    // EMPTY. What must hold is that NO SECRET REMAINS — which is the property
+    // this test exists for, and which the reflect below confirms.
+    assert_eq!(
+        std::fs::read_to_string(&key_file)
+            .unwrap_or_default()
+            .trim(),
+        "",
+        "the key survived the clear"
+    );
+    let r2 = kernel
+        .send(vec![Item::new(ant.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r2["has_api_key"], false);
 }
 
@@ -212,11 +257,13 @@ async fn send_without_api_key_returns_clean_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
-        .send(
-            &ant,
+        .send(vec![Item::new(
+            ant.clone(),
             json!({"type": "send", "text": "hi", "client_id": "test"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let err = r["error"].as_str().unwrap_or("");
     assert!(
         err.contains("api_key not set"),
@@ -230,9 +277,14 @@ async fn send_streams_tokens_via_event_typed_sse() {
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    kernel
-        .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let body = sse(&[
         json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]}}),
@@ -261,11 +313,13 @@ async fn send_streams_tokens_via_event_typed_sse() {
     let ant_for_task = ant.clone();
     let join = tokio::spawn(async move {
         send_kernel
-            .send(
-                &ant_for_task,
+            .send(vec![Item::new(
+                ant_for_task.clone(),
                 json!({"type": "send", "text": "hi", "client_id": client_id}),
-            )
+            )])
             .await
+            .remove(0)
+            .result
     });
 
     let mut tokens: Vec<String> = Vec::new();
@@ -314,9 +368,14 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, ant, fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    kernel
-        .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Address the anthropic agent's OWN file agent: its write lands on disk, which
     // is proof the dispatch happened and not just that nothing crashed.
@@ -350,11 +409,13 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
     let client_id = "test_tool";
     let _rx = open_client_inbox(&kernel, client_id);
     let reply = kernel
-        .send(
-            &ant,
+        .send(vec![Item::new(
+            ant.clone(),
             json!({"type": "send", "text": "do it", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["response"], whole, "verbatim text: {reply:#?}");
 
     let routed = tmp.path().join(".fantastic").join("routed.txt");
@@ -377,9 +438,14 @@ async fn rate_limit_retry_once_then_succeeds() {
     let tmp = tempfile::TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    kernel
-        .send(&ant, json!({"type": "set_api_key", "api_key": "sk-ant-x"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            ant.clone(),
+            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -418,11 +484,13 @@ async fn rate_limit_retry_once_then_succeeds() {
     let ant_for_task = ant.clone();
     let join = tokio::spawn(async move {
         send_kernel
-            .send(
-                &ant_for_task,
+            .send(vec![Item::new(
+                ant_for_task.clone(),
                 json!({"type": "send", "text": "go", "client_id": client_id}),
-            )
+            )])
             .await
+            .remove(0)
+            .result
     });
 
     let mut saw_rate_status = false;

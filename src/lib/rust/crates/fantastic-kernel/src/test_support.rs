@@ -114,21 +114,15 @@ pub fn register_fake_store(reg: &mut BundleRegistry, store_root: &Path) {
 /// it exactly as in production). The bundle must already be registered.
 pub async fn wire_fake_store(kernel: &Arc<Kernel>, store_root: &Path) {
     kernel
-        .send(
-            &AgentId::from(
-                kernel
-                    .root()
-                    .map(|r| r.id.0.clone())
-                    .unwrap_or_default()
-                    .as_str(),
-            ),
+        .send(vec![crate::outcome::Item::new(
+            "kernel",
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": "store",
                 "root": store_root.to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
+        )])
         .await;
 }

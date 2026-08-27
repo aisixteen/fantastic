@@ -11,6 +11,7 @@
 //! agent, in no bundle's verb map. So an AGENT can cancel another agent's work
 //! (`agent_cancels_another_agents_task`) — that is the point: cancellation is a
 //! property of the one primitive, not a UI feature bolted onto one bundle.
+use crate::outcome::Item;
 
 use super::*;
 use crate::agent::Agent;
@@ -28,18 +29,23 @@ use std::time::Duration;
 /// it back — aborting the future would leak it, which is the whole point of the
 /// hook.
 #[derive(Default)]
-struct Shared {
+pub(crate) struct Shared {
     /// (agent, task_id, task_still_in_the_table_when_the_hook_ran)
     hooks: Mutex<Vec<(String, String, bool)>>,
     /// Resources currently held, keyed by the task holding them.
     held: Mutex<HashSet<String>>,
+    /// How many times a counting handler actually RAN.
+    runs: Mutex<usize>,
 }
 
 impl Shared {
-    fn hook_log(&self) -> Vec<(String, String, bool)> {
+    pub(crate) fn hook_log(&self) -> Vec<(String, String, bool)> {
         self.hooks.lock().expect("hooks poisoned").clone()
     }
-    fn held_ids(&self) -> HashSet<String> {
+    pub(crate) fn run_count(&self) -> usize {
+        *self.runs.lock().expect("runs poisoned")
+    }
+    pub(crate) fn held_ids(&self) -> HashSet<String> {
         self.held.lock().expect("held poisoned").clone()
     }
 }
@@ -64,6 +70,38 @@ impl Bundle for SlowBundle {
         let reply = match verb {
             "boot" | "shutdown" => Value::Null,
             "reflect" => json!({"id": agent_id.0, "sentence": "slow test agent"}),
+            // Returns immediately — the peer a batch uses to prove the slow item
+            // did not serialize the fast one.
+            "fast" => json!({"fast": true}),
+            // A handler that PANICS. The kernel settles this as an outcome, so
+            // the batch's other items are untouched and `send` returns normally.
+            "boom" => panic!("kaput"),
+            // Counts how many times the HANDLER actually ran under this id —
+            // the only honest way to assert "exactly once".
+            "count" => {
+                let n = {
+                    let mut g = self.sh.runs.lock().expect("runs poisoned");
+                    *g += 1;
+                    *g
+                };
+                json!({"run": n})
+            }
+            // Fails until the Nth run — the retry engine's canonical target.
+            "flaky" => {
+                let n = {
+                    let mut g = self.sh.runs.lock().expect("runs poisoned");
+                    *g += 1;
+                    *g
+                };
+                let need = payload
+                    .get("succeed_on")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(3);
+                if (n as u64) < need {
+                    panic!("flaky miss {n}");
+                }
+                json!({"made_it": n})
+            }
             // In flight until someone kills us (or the test ends). Takes the
             // "resource" for the duration — released ONLY by `on_cancel`.
             "slow" => {
@@ -76,7 +114,11 @@ impl Bundle for SlowBundle {
             // A nested send — the callee's dispatch becomes a CHILD task of this one.
             "chain" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
-                kernel.send(&next, json!({"type": "slow"})).await
+                kernel
+                    .send(vec![Item::new(next, json!({"type": "slow"}))])
+                    .await
+                    .remove(0)
+                    .result
             }
             // Work that OUTLIVES this dispatch: registered in the table, so `ps`
             // sees it and `cancel` can still reach it once the dispatch is gone.
@@ -94,7 +136,11 @@ impl Bundle for SlowBundle {
             // outlives the `fork` dispatch and is re-parented to THIS task.
             "chain_fork" => {
                 let next = AgentId::from(payload.get("next").and_then(Value::as_str).unwrap_or(""));
-                let r = kernel.send(&next, json!({"type": "fork"})).await;
+                let r = kernel
+                    .send(vec![Item::new(next, json!({"type": "fork"}))])
+                    .await
+                    .remove(0)
+                    .result;
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 r
             }
@@ -103,8 +149,13 @@ impl Bundle for SlowBundle {
             "kill" => {
                 let victim = payload.get("victim").and_then(Value::as_str).unwrap_or("");
                 let table = kernel
-                    .send(&AgentId::from("kernel"), json!({"type": "ps"}))
-                    .await;
+                    .send(vec![Item::new(
+                        AgentId::from("kernel"),
+                        json!({"type": "ps"}),
+                    )])
+                    .await
+                    .remove(0)
+                    .result;
                 let found = table["tasks"]
                     .as_array()
                     .and_then(|rows| {
@@ -117,11 +168,13 @@ impl Bundle for SlowBundle {
                     None => json!({"error": "no victim task"}),
                     Some(task_id) => {
                         kernel
-                            .send(
-                                &AgentId::from("kernel"),
+                            .send(vec![Item::new(
+                                AgentId::from("kernel"),
                                 json!({"type": "cancel", "task_id": task_id}),
-                            )
+                            )])
                             .await
+                            .remove(0)
+                            .result
                     }
                 }
             }
@@ -157,7 +210,7 @@ impl Bundle for SlowBundle {
 
 // ─── harness ───────────────────────────────────────────────────
 
-fn mk_kernel(sh: Arc<Shared>) -> Arc<Kernel> {
+pub(crate) fn mk_kernel(sh: Arc<Shared>) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register("slow.tools", SlowBundle { sh });
     let kernel = Arc::new(kernel);
@@ -174,18 +227,22 @@ fn mk_kernel(sh: Arc<Shared>) -> Arc<Kernel> {
     kernel
 }
 
-async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
+pub(crate) async fn mk_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     mk_agent_grant(kernel, id, Value::Null).await
 }
 
 /// Create a slow agent with an explicit `can_call` grant. Two-sided deny-all: a
 /// `chain` send to a SIBLING is lateral egress, so the chain tests grant that edge.
 async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> AgentId {
-    let mut payload = json!({"type": "create_agent", "handler_module": "slow.tools", "id": id});
+    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id});
     if !can_call.is_null() {
         payload["can_call"] = can_call;
     }
-    let r = kernel.send(&AgentId::from("core"), payload).await;
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("core"), payload)])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
     AgentId::from(id)
 }
@@ -194,10 +251,14 @@ async fn mk_agent_grant(kernel: &Arc<Kernel>, id: &str, can_call: Value) -> Agen
 /// ingress half a chain target needs under two-sided deny-all.
 async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> AgentId {
     let payload = json!({
-        "type": "create_agent", "handler_module": "slow.tools", "id": id,
+        "type": "create_agent", "parent_id": "kernel", "handler_module": "slow.tools", "id": id,
         "callable_by": callable_by,
     });
-    let r = kernel.send(&AgentId::from("core"), payload).await;
+    let r = kernel
+        .send(vec![Item::new(AgentId::from("core"), payload)])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], json!(id), "create_agent failed: {r}");
     AgentId::from(id)
 }
@@ -205,8 +266,13 @@ async fn mk_agent_accept(kernel: &Arc<Kernel>, id: &str, callable_by: Value) -> 
 /// The `ps` reply rows — through the VERB, like any caller.
 async fn rows(kernel: &Arc<Kernel>) -> Vec<Value> {
     let r = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "ps"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     r["tasks"].as_array().cloned().unwrap_or_default()
 }
 
@@ -219,11 +285,13 @@ async fn row_for(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> Option<Va
 
 async fn cancel(kernel: &Arc<Kernel>, task_id: &str) -> Value {
     kernel
-        .send(
-            &AgentId::from("kernel"),
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
-        )
+        )])
         .await
+        .remove(0)
+        .result
 }
 
 /// Poll until `f` holds (the handler is in flight), or fail the test.
@@ -262,7 +330,15 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.send(&a, json!({"type": "chain", "next": "slow_b"})).await }
+        async move {
+            k.send(vec![Item::new(
+                a,
+                json!({"type": "chain", "next": "slow_b"}),
+            )])
+            .await
+            .remove(0)
+            .result
+        }
     });
     wait_for_task(&kernel, &b, "slow").await;
 
@@ -321,7 +397,15 @@ async fn cancel_kills_the_whole_subtree() {
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.send(&a, json!({"type": "chain", "next": "slow_b"})).await }
+        async move {
+            k.send(vec![Item::new(
+                a,
+                json!({"type": "chain", "next": "slow_b"}),
+            )])
+            .await
+            .remove(0)
+            .result
+        }
     });
     let b_task = wait_for_task(&kernel, &b, "slow").await;
     let a_task = wait_for_task(&kernel, &a, "chain").await;
@@ -382,7 +466,12 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.send(&a, json!({"type": "slow"})).await }
+        async move {
+            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+                .await
+                .remove(0)
+                .result
+        }
     });
     let task_id = wait_for_task(&kernel, &a, "slow").await;
     let first = cancel(&kernel, &task_id).await;
@@ -398,8 +487,13 @@ async fn cancel_unknown_or_finished_task_is_honest() {
 
     // A malformed call fails LOUD; it does not report a phantom success.
     let bad = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "cancel"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "cancel"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(bad["error"].is_string(), "expected an error: {bad}");
     assert!(bad.get("cancelled").is_none());
 }
@@ -419,13 +513,23 @@ async fn agent_cancels_another_agents_task() {
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let v = victim.clone();
-        async move { k.send(&v, json!({"type": "slow"})).await }
+        async move {
+            k.send(vec![Item::new(v, json!({"type": "slow"}))])
+                .await
+                .remove(0)
+                .result
+        }
     });
     let victim_task = wait_for_task(&kernel, &victim, "slow").await;
 
     let r = kernel
-        .send(&killer, json!({"type": "kill", "victim": victim.0}))
-        .await;
+        .send(vec![Item::new(
+            killer,
+            json!({"type": "kill", "victim": victim.0}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["cancelled"], json!(true));
     assert_eq!(r["killed"], json!([victim_task]));
 
@@ -456,7 +560,12 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
     let caller = tokio::spawn({
         let k = Arc::clone(&kernel);
         let a = a.clone();
-        async move { k.send(&a, json!({"type": "slow"})).await }
+        async move {
+            k.send(vec![Item::new(a, json!({"type": "slow"}))])
+                .await
+                .remove(0)
+                .result
+        }
     });
     let task_id = wait_for_task(&kernel, &a, "slow").await;
     wait_until("the resource to be held", || {
@@ -498,8 +607,13 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
         let k = Arc::clone(&kernel);
         let a = a.clone();
         async move {
-            k.send(&a, json!({"type": "chain_fork", "next": "slow_b"}))
-                .await
+            k.send(vec![Item::new(
+                a,
+                json!({"type": "chain_fork", "next": "slow_b"}),
+            )])
+            .await
+            .remove(0)
+            .result
         }
     });
     let a_task = wait_for_task(&kernel, &a, "chain_fork").await;
@@ -536,31 +650,85 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
 // ─── reflect advertises the substrate's own verbs ──────────────
 
 #[tokio::test]
-async fn root_reflect_advertises_ps_and_cancel() {
-    // `ps`/`cancel` are universal system verbs — they belong to no bundle, so
-    // the ROOT reflect advertises them. One round-trip tells a caller that work
-    // in flight is inspectable and killable.
+async fn every_reflect_advertises_the_kernel_verbs() {
+    // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
+    // SUBSTRATE's own, answered by the root alone. They are advertised on EVERY
+    // agent: root-only was tried and reverted, because a model that never
+    // reflects the root never learns they exist, guesses, and gives up.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
 
     let r = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "reflect"}))
-        .await;
-    let sv = &r["system_verbs"];
-    let cancel_doc = sv["cancel"].as_str().expect("cancel doc");
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let kv = &r["kernel_verbs"];
+    // The `_` line says WHERE to send them and what the named id means —
+    // without it "send create_agent to X" reads three ways.
+    let preamble = kv["_"].as_str().expect("the _ line");
+    assert!(preamble.contains("kernel"));
+    assert!(preamble.contains("OPERAND"));
+
+    // THE CONSEQUENCE PRECEDES THE FIRST EM-DASH, so a default reflect (which
+    // truncates there) still carries the fact a caller needs BEFORE firing.
+    let cancel_doc = kv["cancel"].as_str().expect("cancel doc");
     assert!(cancel_doc.contains("task_id"));
-    assert!(cancel_doc.to_lowercase().contains("subtree"));
-    assert!(sv["ps"].as_str().expect("ps doc").contains("tasks"));
+    assert!(
+        cancel_doc.to_lowercase().contains("subtree"),
+        "the cascade must survive truncation: {cancel_doc:?}"
+    );
+    assert!(
+        !cancel_doc.contains('—'),
+        "default reflect truncates at the dash"
+    );
+
+    let create_doc = kv["create_agent"].as_str().expect("create doc");
+    assert!(
+        create_doc.contains("parent_id:str REQUIRED"),
+        "placement is the fact a caller needs first: {create_doc:?}"
+    );
+    let update_doc = kv["update_agent"].as_str().expect("update doc");
+    assert!(
+        update_doc.contains("REPLACED, NOT MERGED"),
+        "replace-not-merge must precede the dash: {update_doc:?}"
+    );
+
     for v in [
         "create_agent",
         "update_agent",
         "delete_agent",
         "list_agents",
+        "ps",
     ] {
-        assert!(sv[v].is_string(), "missing system verb {v}");
+        assert!(kv[v].is_string(), "missing kernel verb {v}");
     }
-    // Non-root agents don't repeat it (root-only, like `runtime`).
-    let child = kernel.send(&a, json!({"type": "reflect"})).await;
-    assert!(child.get("system_verbs").is_none());
+
+    // Every agent carries them, not just the root.
+    let child = kernel
+        .send(vec![Item::new(a, json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        child["kernel_verbs"]["cancel"].is_string(),
+        "a non-root agent must advertise them too"
+    );
+
+    // `detail:"full"` keeps each doc WHOLE.
+    let full = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect", "detail": "full"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let full_ps = full["kernel_verbs"]["ps"].as_str().expect("ps doc");
+    assert!(full_ps.contains("tasks"), "full detail keeps the shape");
+    assert!(full_ps.contains('—'));
 }
