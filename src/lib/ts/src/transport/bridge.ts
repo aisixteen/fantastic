@@ -55,6 +55,26 @@ class Conn {
   private ws: WebSocketLike | null = null;
   private connected = false;
   private closedByUs = false;
+  /**
+   * Per-CONNECTION correlator prefix. Minted once, never reused.
+   *
+   * MEASURED 2026-08-27 against the real python kernel: this used to be a bare
+   * counter (`"1"`, `"2"`, …), and the host now treats a frame's `id` as the
+   * EXECUTION id (#38) — the ledger's dedup/join key. Two browser tabs each
+   * open a socket, each start at `"1"`, and the second tab's very first call
+   * came back
+   *
+   *     {"error": "send: id '1' already names an execution on 'alpha',
+   *                not 'beta'", "reason": "bad_arg"}
+   *
+   * — refused outright. Aimed at the SAME target it was worse than refused: it
+   * silently JOINED the other tab's execution and returned that tab's result.
+   *
+   * A correlator must therefore be unique across every socket, tab and reload
+   * that can reach one host. The colon namespace is kernel-minted-only, so the
+   * dash form `{prefix}-{n}` is what a bridge mints.
+   */
+  private readonly idPrefix = mintPrefix();
   private nextId = 1;
   private delay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -174,7 +194,7 @@ class Conn {
   async call(envelopePayload: Envelope, target: string): Promise<Json> {
     await this.ready;
     if (!this.connected || this.ws === null) throw new Error("disconnected");
-    const id = String(this.nextId++);
+    const id = `${this.idPrefix}-${this.nextId++}`;
     const frame = encodeFrame({
       type: "call",
       target,
@@ -239,6 +259,22 @@ class Conn {
       /* already closing */
     }
   }
+}
+
+/** A short unguessable per-connection prefix, so correlators from different
+ *  tabs/reloads can never collide in the host's execution ledger. */
+function mintPrefix(): string {
+  const c = (globalThis as {
+    crypto?: { getRandomValues?: (a: Uint8Array) => Uint8Array };
+  }).crypto;
+  if (c !== undefined && typeof c.getRandomValues === "function") {
+    const b = new Uint8Array(6);
+    c.getRandomValues(b);
+    return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  }
+  // No CSPRNG here: still must not collide, so mix time with randomness rather
+  // than falling back to a counter that starts at 1 in every tab.
+  return `${Date.now().toString(36)}${Math.floor(Math.random() * 0xffffff).toString(36)}`;
 }
 
 export class WsBridge implements Bridge {

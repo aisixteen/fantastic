@@ -17,7 +17,7 @@ test("reflect readme=true surfaces a view bundle's registered readme", async () 
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   kernel.register(new Agent({ id: "chat", handlerModule: "ai_view.ts", parentId: "canvas" }));
 
-  const reply = (await kernel.send("chat", { type: "reflect", readme: true })) as Record<
+  const reply = ((await kernel.send([{ target: "chat", payload: { type: "reflect", readme: true } }]))[0]!.result) as Record<
     string,
     unknown
   >;
@@ -40,7 +40,7 @@ test("per-record meta.readme overrides the bundle readme", async () => {
     }),
   );
 
-  const reply = (await kernel.send("chat", { type: "reflect", readme: true })) as Record<
+  const reply = ((await kernel.send([{ target: "chat", payload: { type: "reflect", readme: true } }]))[0]!.result) as Record<
     string,
     unknown
   >;
@@ -53,7 +53,7 @@ test("an agent with no readme reflects readme:null", async () => {
   kernel.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   kernel.register(new Agent({ id: "chat", handlerModule: "ai_view.ts", parentId: "canvas" }));
 
-  const reply = (await kernel.send("chat", { type: "reflect", readme: true })) as Record<
+  const reply = ((await kernel.send([{ target: "chat", payload: { type: "reflect", readme: true } }]))[0]!.result) as Record<
     string,
     unknown
   >;

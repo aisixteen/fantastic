@@ -13,8 +13,8 @@ function withRoot(): Kernel {
 
 test("'kernel' alias resolves to the root agent", async () => {
   const k = withRoot();
-  const viaAlias = (await k.send("kernel", { type: "reflect" })) as Payload;
-  const viaId = (await k.send("kernel_state", { type: "reflect" })) as Payload;
+  const viaAlias = ((await k.send([{ target: "kernel", payload: { type: "reflect" } }]))[0]!.result) as Payload;
+  const viaId = ((await k.send([{ target: "kernel_state", payload: { type: "reflect" } }]))[0]!.result) as Payload;
   assert.equal(viaAlias["id"], "kernel_state");
   assert.deepEqual(viaAlias, viaId);
 });
@@ -25,7 +25,7 @@ test("a local view-agent dispatches its domain verb to its handler", async () =>
   k.register(
     new Agent({ id: "e1", parentId: "kernel_state", handlerModule: "echo.js" }),
   );
-  const r = (await k.send("e1", { type: "say", text: "hi" })) as Payload;
+  const r = ((await k.send([{ target: "e1", payload: { type: "say", text: "hi" } }]))[0]!.result) as Payload;
   assert.deepEqual(r, { echoed: "hi" });
 });
 
@@ -41,7 +41,7 @@ test("reflect is kernel-native even for handler-bearing agents", async () => {
       sentence: "I am a view.",
     }),
   );
-  const r = (await k.send("v", { type: "reflect", tree: "none" })) as Payload;
+  const r = ((await k.send([{ target: "v", payload: { type: "reflect", tree: "none" } }]))[0]!.result) as Payload;
   assert.equal(r["sentence"], "I am a view.");
   assert.equal(r["hijacked"], undefined);
 });
@@ -49,15 +49,15 @@ test("reflect is kernel-native even for handler-bearing agents", async () => {
 test("bare local agent answers reflect but errors on a domain verb", async () => {
   const k = withRoot();
   k.register(new Agent({ id: "bare", parentId: "kernel_state" }));
-  const refl = (await k.send("bare", { type: "reflect" })) as Payload;
+  const refl = ((await k.send([{ target: "bare", payload: { type: "reflect" } }]))[0]!.result) as Payload;
   assert.equal(refl["id"], "bare");
-  const err = (await k.send("bare", { type: "frobnicate" })) as Payload;
+  const err = ((await k.send([{ target: "bare", payload: { type: "frobnicate" } }]))[0]!.result) as Payload;
   assert.match(String(err["error"]), /bare/);
 });
 
 test("unknown target with no bridge errors; with a bridge it forwards", async () => {
   const noBridge = withRoot();
-  const e = (await noBridge.send("ghost", { type: "reflect" })) as Payload;
+  const e = ((await noBridge.send([{ target: "ghost", payload: { type: "reflect" } }]))[0]!.result) as Payload;
   assert.match(String(e["error"]), /no agent 'ghost'/);
 
   const k = withRoot();
@@ -75,7 +75,7 @@ test("unknown target with no bridge errors; with a bridge it forwards", async ()
     subscribeState: () => () => {},
   };
   k.bridge = fake;
-  const r = (await k.send("host_agent", { type: "ls" })) as Payload;
+  const r = ((await k.send([{ target: "host_agent", payload: { type: "ls" } }]))[0]!.result) as Payload;
   assert.deepEqual(r, { from: "host", target: "host_agent" });
   assert.deepEqual(calls, [["host_agent", { type: "ls" }]]);
 });

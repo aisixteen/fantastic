@@ -1,4 +1,5 @@
 import type { Agent } from "./agent.ts";
+import { KERNEL_VERB_DOCS } from "./kernel_verbs.ts";
 import type { Json, Payload } from "./json.ts";
 import type { Kernel } from "./kernel.ts";
 
@@ -29,6 +30,10 @@ export function reflectIdentity(agent: Agent, rootId: string | null): Payload {
   };
   if (agent.description !== null) obj["description"] = agent.description;
   if (agent.verbs !== null) obj["verbs"] = agent.verbs;
+  // #26 — advertised on EVERY agent, not just the root. Root-only was tried and
+  // REVERTED: gemma4:12b never reflected the root, so it never saw the
+  // signatures, guessed, and gave up. The `_` line says where they are answered.
+  obj["kernel_verbs"] = { ...KERNEL_VERB_DOCS };
   for (const [k, v] of Object.entries(agent.meta)) {
     if (!(k in obj)) obj[k] = v;
   }
@@ -114,6 +119,11 @@ const POSTURE_KEYS = [
   "auth",
   "root",
   "file_bridge_id",
+  // #7 — the CALL GATE must be readable, not merely enforced. Without these an
+  // agent could not read its own authority, only discover it by trying; that
+  // cost whole turns of empirical probing every run.
+  "can_call",
+  "callable_by",
 ] as const;
 
 function treeNode(agent: Agent): Payload {

@@ -65,10 +65,9 @@ kernel.setRoot(new Agent({ id: "frontend", sentence: "TS frontend kernel (starte
 const bridge = new WsBridge(kernel, { origin, controlEndpoint: "kernel_state" });
 
 try {
-  const reply = (await kernel.send("kernel", {
-    type: "reflect",
-    tree: "all",
-  } as Payload)) as { tree?: TreeNode; sentence?: string };
+  const reply = (await kernel.send([
+    { target: "kernel", payload: { type: "reflect", tree: "all" } as Payload },
+  ]))[0]!.result as { tree?: TreeNode; sentence?: string };
   const dot = document.getElementById("dot");
   if (dot) dot.classList.add("ok");
   const msg = document.getElementById("msg");

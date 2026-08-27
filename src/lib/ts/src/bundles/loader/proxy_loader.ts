@@ -1,4 +1,5 @@
 import type { Kernel } from "../../kernel/kernel.ts";
+import type { Item } from "../../kernel/outcome.ts";
 import type { Payload } from "../../kernel/json.ts";
 import type { AgentRecord, StateEvent } from "../../kernel/state.ts";
 
@@ -61,9 +62,9 @@ export class ProxyLoader {
    *  loader's OWN record — matched by the addressed id/alias — and its on-disk
    *  id (the real one the host nests under) is learned here for later flushes. */
   async loadTree(): Promise<AgentRecord[]> {
-    const reply = (await this.kernel.send(this.hostLoaderId, {
-      type: "load_tree",
-    })) as unknown as { records?: AgentRecord[] };
+    const reply = (await this.kernel.send([
+      { target: this.hostLoaderId, payload: { type: "load_tree" } },
+    ]))[0]!.result as unknown as { records?: AgentRecord[] };
     const records = reply.records ?? [];
     const anchor = records.find(
       (r) => r.id === this.hostLoaderId || r["alias"] === this.hostLoaderId,
@@ -134,23 +135,34 @@ export class ProxyLoader {
     this.dirtyPersist.clear();
     const forget = [...this.dirtyForget];
     this.dirtyForget.clear();
+    // ONE BATCH, not a loop of awaits. This is what the array-only send is for:
+    // a hundred dirty records used to be a hundred serial round-trips over the
+    // bridge, each waiting out the last. Launch is synchronous for the whole
+    // batch and the settles race, so a flush costs one round-trip's latency
+    // instead of N. Order within the batch is irrelevant — these are
+    // independent per-record writes.
+    const items: Item[] = [];
     for (const id of persist) {
       const a = this.kernel.get(id);
       if (a === undefined) continue;
       const record = a.record();
       record.parent_id = this.rewrittenParent(a.parentId);
-      await this.kernel.send(this.hostLoaderId, {
-        type: "persist_record",
-        record,
-      } as unknown as Payload);
+      items.push({
+        target: this.hostLoaderId,
+        payload: { type: "persist_record", record } as unknown as Payload,
+      });
     }
     for (const [id, parentId] of forget) {
-      await this.kernel.send(this.hostLoaderId, {
-        type: "forget_record",
-        id,
-        parent_id: parentId,
-      } as unknown as Payload);
+      items.push({
+        target: this.hostLoaderId,
+        payload: {
+          type: "forget_record",
+          id,
+          parent_id: parentId,
+        } as unknown as Payload,
+      });
     }
+    if (items.length > 0) await this.kernel.send(items);
   }
 
   /** Stop watching + final flush — a clean teardown loses nothing. */

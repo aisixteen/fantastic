@@ -83,9 +83,9 @@ test("html_agent: agentic CRUD persists the LATEST content, coalesced", async ()
       new Agent({ id: "panel", parentId: "canvas", handlerModule: "html_agent.ts" }),
     );
     // UPDATE twice via the agent's own verb (agentic CRUD over send)
-    const r1 = await k.send("panel", { type: "set_html", html: "<h1>v1</h1>" });
+    const r1 = (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v1</h1>" } }]))[0]!.result;
     assert.deepEqual(r1, { ok: true, bytes: "<h1>v1</h1>".length });
-    await k.send("panel", { type: "set_html", html: "<h1>v2</h1>" });
+    (await k.send([{ target: "panel", payload: { type: "set_html", html: "<h1>v2</h1>" } }]))[0]!.result;
     await loader.flush();
 
     // one coalesced persist carrying the latest content + structure
@@ -97,7 +97,7 @@ test("html_agent: agentic CRUD persists the LATEST content, coalesced", async ()
 
     // the live record + the get verb agree with what was persisted
     assert.equal(k.get("panel")?.meta["html"], "<h1>v2</h1>");
-    const got = (await k.send("panel", { type: "get_html" })) as Payload;
+    const got = ((await k.send([{ target: "panel", payload: { type: "get_html" } }]))[0]!.result) as Payload;
     assert.equal(got["html"], "<h1>v2</h1>");
 
     // DELETE → forget (with parent_id so the host rmtrees the nested dir)
@@ -120,7 +120,7 @@ test("gl_agent: source mutation persists; get_gl_view reflects it", async () => 
       new Agent({ id: "vfx", parentId: "canvas", handlerModule: "gl_agent.ts" }),
     );
     const src = "void main(){ gl_FragColor = vec4(1.0); }";
-    await k.send("vfx", { type: "set_gl_source", source: src });
+    (await k.send([{ target: "vfx", payload: { type: "set_gl_source", source: src } }]))[0]!.result;
     await loader.flush();
 
     const persists = bridge.persistsOf("vfx");
@@ -128,7 +128,7 @@ test("gl_agent: source mutation persists; get_gl_view reflects it", async () => 
     assert.equal(persists[0]["gl_source"], src);
     assert.equal(persists[0]["handler_module"], "gl_agent.ts");
 
-    const view = (await k.send("vfx", { type: "get_gl_view" })) as Payload;
+    const view = ((await k.send([{ target: "vfx", payload: { type: "get_gl_view" } }]))[0]!.result) as Payload;
     assert.equal(view["source"], src); // GlView contract shape ({source})
   } finally {
     await loader.stop();
@@ -167,7 +167,7 @@ test("unknown verb on a content agent errors without mutating state", async () =
     );
     await loader.flush();
     bridge.calls.length = 0;
-    const r = (await k.send("p", { type: "frobnicate" })) as Payload;
+    const r = ((await k.send([{ target: "p", payload: { type: "frobnicate" } }]))[0]!.result) as Payload;
     assert.ok(typeof r["error"] === "string");
     await loader.flush();
     assert.equal(bridge.persistsOf("p").length, 0, "a no-op verb persists nothing");

@@ -18,9 +18,14 @@ export class Host {
     this.selfId = selfId;
   }
 
-  /** Verb call to a host agent; resolves the reply. */
-  call(target: string, payload: Payload): Promise<Json> {
-    return this.kernel.send(target, payload);
+  /** Verb call to a host agent; resolves the reply.
+   *
+   *  `send` is array-only, so a single call is a one-element batch whose one
+   *  outcome we unwrap here. The OUTCOME is not discarded lightly: a refusal
+   *  arrives in `result` like any other reply, which is exactly what the
+   *  iframe/host callers already branch on. */
+  async call(target: string, payload: Payload): Promise<Json> {
+    return (await this.kernel.send([{ target, payload }]))[0]!.result;
   }
 
   /** Call the HOST ROOT (or any host id) over the bridge, bypassing local

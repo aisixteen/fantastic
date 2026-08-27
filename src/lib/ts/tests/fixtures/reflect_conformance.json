@@ -1,5 +1,5 @@
 {
-  "_doc": "CROSS-LANGUAGE reflect contract. The ts kernel (tests/reflect.test.ts) and the python kernel must BOTH reproduce every case's `expect` from `tree`+`bundles`. Edit here once; both runtimes re-verify. This is what keeps a second kernel from drifting. NOTE: the root reflect carries a per-runtime `runtime` field (\"python\"|\"rust\"|\"swift\"|\"ts\"); this fixture is exercised by the ts kernel so the root cases expect \"ts\". The root also carries deployment context `env` + `version` (read from FANTASTIC_ENV / FANTASTIC_VERSION on the host runtimes; the browser ts kernel has no env, so it is always env=\"host\", version=null).",
+  "_doc": "CROSS-LANGUAGE reflect contract. The ts kernel (tests/reflect.test.ts) and the python kernel must BOTH reproduce every case's `expect` from `tree`+`bundles`. Edit here once; both runtimes re-verify. This is what keeps a second kernel from drifting. NOTE: the root reflect carries a per-runtime `runtime` field (\"python\"|\"rust\"|\"swift\"|\"ts\"); this fixture is exercised by the ts kernel so the root cases expect \"ts\". The root also carries deployment context `env` + `version` (read from FANTASTIC_ENV / FANTASTIC_VERSION on the host runtimes; the browser ts kernel has no env, so it is always env=\"host\", version=null). Every reflect also carries `kernel_verbs` (#26): advertised on EVERY agent, answered by the root only. The ts kernel advertises the three verbs IT answers (ps/cancel/ledger) — python/rust/swift additionally list the tree-CRUD verbs they own, because this kernel genuinely has none: its tree is built by its bundles and persisted through the host loader, and advertising a verb it cannot answer would be a lie the model pays for.",
   "bundles": [
     "terminal_view.js",
     "canvas.js"
@@ -38,6 +38,12 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "kernel_state",
+        "kernel_verbs": {
+          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the three below; tree CRUD lives on the HOST root, reached over the bridge.",
+          "ps": "args: limit:int?, after:str? — lists the LIVE dispatches (id, agent, verb), paged.",
+          "cancel": "args: task_id:str — kills that task AND ITS SUBTREE; returns {cancelled, killed:[ids]}. An unknown or finished id kills nothing and says so.",
+          "ledger": "args: limit:int?, after:str? — every execution YOU originated and what it became (id, target, status, attempts, retries, named); terminal non-completed rows ARE the dead-letter queue. Origin-scoped: an agent never sees another's rows."
+        },
         "runtime": "ts",
         "env": "host",
         "version": null,
@@ -75,6 +81,12 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "kernel_state",
+        "kernel_verbs": {
+          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the three below; tree CRUD lives on the HOST root, reached over the bridge.",
+          "ps": "args: limit:int?, after:str? — lists the LIVE dispatches (id, agent, verb), paged.",
+          "cancel": "args: task_id:str — kills that task AND ITS SUBTREE; returns {cancelled, killed:[ids]}. An unknown or finished id kills nothing and says so.",
+          "ledger": "args: limit:int?, after:str? — every execution YOU originated and what it became (id, target, status, attempts, retries, named); terminal non-completed rows ARE the dead-letter queue. Origin-scoped: an agent never sees another's rows."
+        },
         "runtime": "ts",
         "env": "host",
         "version": null,
@@ -101,6 +113,12 @@
         "parent_id": null,
         "handler_module": null,
         "display_name": "kernel_state",
+        "kernel_verbs": {
+          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the three below; tree CRUD lives on the HOST root, reached over the bridge.",
+          "ps": "args: limit:int?, after:str? — lists the LIVE dispatches (id, agent, verb), paged.",
+          "cancel": "args: task_id:str — kills that task AND ITS SUBTREE; returns {cancelled, killed:[ids]}. An unknown or finished id kills nothing and says so.",
+          "ledger": "args: limit:int?, after:str? — every execution YOU originated and what it became (id, target, status, attempts, retries, named); terminal non-completed rows ARE the dead-letter queue. Origin-scoped: an agent never sees another's rows."
+        },
         "runtime": "ts",
         "env": "host",
         "version": null,
@@ -130,6 +148,12 @@
         "verbs": {
           "write": "write bytes to the PTY",
           "resize": "resize the grid"
+        },
+        "kernel_verbs": {
+          "_": "Kernel-owned: send to 'kernel'. The id you name is the OPERAND, not the actor. (`verbs` is what this agent itself does.) This kernel answers the three below; tree CRUD lives on the HOST root, reached over the bridge.",
+          "ps": "args: limit:int?, after:str? — lists the LIVE dispatches (id, agent, verb), paged.",
+          "cancel": "args: task_id:str — kills that task AND ITS SUBTREE; returns {cancelled, killed:[ids]}. An unknown or finished id kills nothing and says so.",
+          "ledger": "args: limit:int?, after:str? — every execution YOU originated and what it became (id, target, status, attempts, retries, named); terminal non-completed rows ARE the dead-letter queue. Origin-scoped: an agent never sees another's rows."
         }
       }
     }
