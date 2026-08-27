@@ -99,6 +99,38 @@ public enum Refusal {
         return .object(o)
     }
 
+    /// Refuse an agent id that is not ONE SAFE PATH SEGMENT. `nil` when fine.
+    ///
+    /// An agent id is not just a name — it BECOMES A DIRECTORY. A loader builds
+    /// a record's on-disk home by joining the id onto the store root, so an id
+    /// carrying `..` or a separator walks out of the store and the write, or a
+    /// recursive delete, lands wherever it pointed.
+    ///
+    /// Measured in python 2026-08-28: an agent holding NO explicit grant — only
+    /// the structural baseline, which lets any child call its parent — sent
+    /// `forget_record` with `id: "../../x"` to the root loader and recursively
+    /// deleted a directory OUTSIDE the store. The gate was not bypassed;
+    /// nothing validated the id.
+    public static func guardAgentId(_ verb: String, _ agentId: String) -> JSON? {
+        if agentId.isEmpty { return bad(verb, "id", "a non-empty string") }
+        if agentId.contains("/") || agentId.contains("\\") {
+            return bad(verb, "id", "a single path segment (no separators); got \"\(agentId)\"")
+        }
+        if agentId == "." || agentId == ".." || agentId.contains("..") {
+            return bad(verb, "id", "a name that is not a path traversal; got \"\(agentId)\"")
+        }
+        if agentId.hasPrefix(".") {
+            return bad(verb, "id", "a name that is not hidden; got \"\(agentId)\"")
+        }
+        if agentId.contains(":") {
+            // The minted-pid namespace `<agent>:<hex>`, one id space with the
+            // ledger and task table.
+            return bad(
+                verb, "id", "a name without ':' (the minted-pid namespace); got \"\(agentId)\"")
+        }
+        return nil
+    }
+
     /// `<verb>: <arg> required` — the commonest refusal, spelled once.
     public static func missing(_ verb: String, _ arg: String, hint: String = "") -> JSON {
         make(

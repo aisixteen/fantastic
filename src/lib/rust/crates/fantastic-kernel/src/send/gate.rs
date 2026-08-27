@@ -40,6 +40,23 @@ impl Kernel {
     /// [`crate::authz::authorize_call`] engine, then the authority-conferral rules
     /// (no self-raise; delegate only a subset). A holder with no record → empty
     /// grant → deny-all (never a hole).
+    /// May `origin` receive the outcome of an execution that ran `verb` on
+    /// `target`? Returns a denial, or None.
+    ///
+    /// Joining hands back ANOTHER caller's result verbatim, so it is equivalent
+    /// to having made that call. Asking the gate about the joiner's own payload
+    /// instead — a different verb, whose reply it never gets — authorizes the
+    /// wrong operation. An OPERATOR joiner (no origin) is ungated, as everywhere.
+    pub(super) fn join_denial(
+        self: &Arc<Self>,
+        origin: &Option<AgentId>,
+        verb: &str,
+        target: &Arc<Agent>,
+    ) -> Option<Value> {
+        let joiner = origin.as_ref()?;
+        self.gate(joiner, verb, target, &serde_json::json!({"type": verb}))
+    }
+
     pub(super) fn gate(
         self: &Arc<Self>,
         sender_id: &AgentId,

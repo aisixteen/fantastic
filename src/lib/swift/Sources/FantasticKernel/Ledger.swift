@@ -39,9 +39,12 @@ public enum Opened {
     /// A new execution: dispatch it, then settle it.
     case fresh
     /// Someone else is running this id — await their outcome, run nothing.
-    case join
+    /// Carries the VERB that execution ran: a joiner is handed its outcome
+    /// verbatim, so it must be authorized for THAT verb, not for whatever it
+    /// happened to send.
+    case join(verb: String)
     /// Already settled: this IS the answer; the handler must not run again.
-    case settled(Outcome)
+    case settled(Outcome, verb: String)
     /// The id is unusable — the refusal to hand back verbatim.
     case refused(JSON)
 }
@@ -49,6 +52,9 @@ public enum Opened {
 /// One execution and what it became.
 private struct Row {
     var target: AgentId
+    /// The verb this execution ran — the question the gate must be asked when
+    /// somebody joins it.
+    var verb: String
     var retries: UInt32
     var attempts: UInt32
     var named: Bool
@@ -75,7 +81,8 @@ public final class ExecutionLedger: @unchecked Sendable {
     /// `named` distinguishes a caller-chosen id from a minted pid: only the
     /// former is a dedup contract, and the ring evicts the latter first.
     public func open(
-        _ execId: String, target: AgentId, retries: UInt32, named: Bool, origin: AgentId?
+        _ execId: String, target: AgentId, verb: String, retries: UInt32, named: Bool,
+        origin: AgentId?
     ) -> Opened {
         lock.lock()
         defer { lock.unlock() }
@@ -94,8 +101,8 @@ public final class ExecutionLedger: @unchecked Sendable {
                             ("arg", .string("id")), ("bound_to", .string(row.target.value)),
                         ]))
             }
-            if let o = row.outcome { return .settled(o) }
-            return .join
+            if let o = row.outcome { return .settled(o, verb: row.verb) }
+            return .join(verb: row.verb)
         }
 
         // A COLON ID REFERENCES an existing minted execution; it never creates
@@ -110,7 +117,8 @@ public final class ExecutionLedger: @unchecked Sendable {
         }
 
         rows[execId] = Row(
-            target: target, retries: retries, attempts: 0, named: named, origin: origin,
+            target: target, verb: verb, retries: retries, attempts: 0, named: named,
+            origin: origin,
             outcome: nil)
         order.append(execId)
         evict()
@@ -178,6 +186,7 @@ public final class ExecutionLedger: @unchecked Sendable {
                 "attempts": .integer(Int64(r.attempts)),
                 "retries": .integer(Int64(r.retries)),
                 "named": .bool(r.named),
+                "verb": .string(r.verb),
             ]
             if let out = r.outcome { o["outcome"] = out.asJSON }
             return .object(o)
@@ -198,6 +207,7 @@ public final class ExecutionLedger: @unchecked Sendable {
                 "retries": .integer(Int64(r.retries)),
                 "attempts": .integer(Int64(r.attempts)),
                 "named": .bool(r.named),
+                "verb": .string(r.verb),
                 "origin": r.origin.map { JSON.string($0.value) } ?? .null,
                 "outcome": outcome.asJSON,
             ])
@@ -226,6 +236,7 @@ public final class ExecutionLedger: @unchecked Sendable {
                 attempts: UInt32(r["outcome"]["attempts"].asInt ?? 1))
             rows[id] = Row(
                 target: AgentId(target),
+                verb: r["verb"].asString ?? "",
                 retries: UInt32(r["retries"].asInt ?? 0),
                 attempts: UInt32(r["attempts"].asInt ?? 1),
                 named: r["named"].asBool ?? true,

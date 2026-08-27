@@ -116,6 +116,11 @@ pub(crate) async fn create_from_payload(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => mint_id(hm),
     };
+    // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
+    // the mint, so every consumer inherits it rather than each remembering.
+    if let Some(r) = crate::refusal::guard_agent_id("create_agent", &id) {
+        return r;
+    }
     if kernel.agents.contains_key(&AgentId::from(id.as_str())) {
         let mut r = crate::refusal::refusal(
             crate::refusal::EXISTS,

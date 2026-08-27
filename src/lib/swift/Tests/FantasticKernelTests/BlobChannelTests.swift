@@ -231,7 +231,7 @@ struct BlobChannelTests {
         // A FRESH ledger rehydrates it DONE.
         let fresh = ExecutionLedger()
         #expect(fresh.rehydrate(parsed) >= 1)
-        if case .settled = fresh.open("job-1", target: AgentId("desk"), retries: 0, named: true, origin: nil) {
+        if case .settled = fresh.open("job-1", target: AgentId("desk"), verb: "probe", retries: 0, named: true, origin: nil) {
         } else {
             Issue.record("a rehydrated row must dedup a re-send")
         }

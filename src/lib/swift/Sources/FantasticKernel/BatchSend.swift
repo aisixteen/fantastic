@@ -90,17 +90,30 @@ extension Kernel {
         let origin = KernelTaskLocals.currentSender
 
         switch ledger.open(
-            execId, target: target.id, retries: retries, named: named, origin: origin)
+            execId, target: target.id, verb: verb, retries: retries, named: named,
+            origin: origin)
         {
         case .refused(let r):
             return .settled(Outcome.refused(r))
         // ALREADY SETTLED — the recorded outcome IS the answer, and the handler
         // must not run a second time. Idempotency and once-only in one field.
-        case .settled(let o):
+        case .settled(let o, let origVerb):
+            // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
+            // belongs to whoever ran it, so handing it back is equivalent to
+            // having made THAT call — the gate must be asked that question, not
+            // about the verb this caller happened to send. Measured in python
+            // 2026-08-28: a caller granted only a harmless verb reused another's
+            // id and received its secret verbatim.
+            if let d = joinDenial(origin: origin, verb: origVerb, target: target) {
+                return .settled(Outcome.refused(d))
+            }
             return .settled(o)
         // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS wait: it
         // does not own the execution and must not kill it.
-        case .join:
+        case .join(let origVerb):
+            if let d = joinDenial(origin: origin, verb: origVerb, target: target) {
+                return .settled(Outcome.refused(d))
+            }
             return .joining(execId, item.timeout)
         case .fresh:
             break

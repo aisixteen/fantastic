@@ -24,6 +24,10 @@ import type { LedgerRow, Outcome, Status } from "./outcome.ts";
 export interface Row {
   id: string;
   target: string;
+  /** The VERB this execution ran. A joiner is handed its outcome verbatim, so
+   *  it must be authorized for THIS verb — not for whatever it happened to
+   *  send. Kept on the row because the row outlives the dispatch. */
+  verb: string;
   named: boolean;
   /** The id that ORIGINATED this execution; null = operator. */
   origin: string | null;
@@ -58,6 +62,7 @@ export class ExecutionLedger {
   open(
     id: string,
     target: string,
+    verb: string,
     origin: string | null,
     retries: number,
     named: boolean,
@@ -67,7 +72,7 @@ export class ExecutionLedger {
       resolve = res;
     });
     const row: Row = {
-      id, target, named, origin, retries,
+      id, target, verb, named, origin, retries,
       attempts: 0, settled: false, outcome: null, promise, resolve,
     };
     this.rows.set(id, row);
@@ -131,6 +136,7 @@ export class ExecutionLedger {
       if (!r.settled || r.outcome === null) continue;
       rows[id] = {
         target: r.target,
+        verb: r.verb,
         named: r.named,
         origin: r.origin,
         attempts: r.attempts,
@@ -153,7 +159,10 @@ export class ExecutionLedger {
       if (target === "") continue;
       const status = (typeof r["status"] === "string" ? r["status"] : "completed") as Status;
       const origin = typeof r["origin"] === "string" ? r["origin"] : null;
-      const row = this.open(id, target, origin, 0, r["named"] === true);
+      const row = this.open(
+        id, target, typeof r["verb"] === "string" ? r["verb"] : "",
+        origin, 0, r["named"] === true,
+      );
       row.attempts = typeof r["attempts"] === "number" ? r["attempts"] : 1;
       this.settle(row, {
         pid: id, status, result: r["result"] ?? null, attempts: row.attempts,
