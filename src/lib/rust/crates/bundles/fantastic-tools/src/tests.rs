@@ -7,7 +7,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use super::*;
-use fantastic_kernel::{Agent, StorageMode};
+use fantastic_kernel::{Agent, Item, StorageMode};
 use fantastic_proxy_agent::{
     clear_hosts, register_host as register_proxy_host, ProxyAgentBundle, ProxyAgentHost,
     HANDLER_MODULE as PROXY_HM,
@@ -51,33 +51,34 @@ fn mk_kernel(storage: StorageMode) -> Arc<Kernel> {
 
 async fn create_tools_agent(kernel: &Arc<Kernel>) -> AgentId {
     let r = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({
-                "type":"create_agent","handler_module":HANDLER_MODULE,"id":"tools",
+            .send(vec![Item::new(AgentId::from("core"), json!({
+                "type":"create_agent","parent_id":"kernel","handler_module":HANDLER_MODULE,"id":"tools",
                 // Deny-all: `dispatch` routes to the registered tool's target agent
                 // (a sibling proxy) — lateral egress, so grant the proxy ids these
                 // tests dispatch to.
                 "can_call": { "calc": "*", "echo": "*", "stub": "*", "x": "*" },
-            }),
-        )
-        .await;
+            }))])
+            .await
+            .remove(0)
+            .result;
     assert_eq!(r["id"], "tools", "create_agent reply: {r}");
     AgentId::from("tools")
 }
 
 async fn create_proxy_agent(kernel: &Arc<Kernel>, id: &str) -> AgentId {
     let r = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type":"create_agent","handler_module":PROXY_HM,"id":id,
+                "type":"create_agent","parent_id":"kernel","handler_module":PROXY_HM,"id":id,
                 // Two-sided deny-all: the `tools` agent dispatches to this proxy —
                 // accept it (ingress) so its granted egress lands.
                 "callable_by": { "tools": "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], id, "create_agent reply: {r}");
     AgentId::from(id)
 }
@@ -122,7 +123,11 @@ async fn reflect_on_empty_registry() {
     let _g = test_lock();
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
-    let r = kernel.send(&a, json!({"type":"reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], "tools");
     assert_eq!(r["kind"], "tools");
     assert_eq!(r["tool_count"], 0);
@@ -137,8 +142,8 @@ async fn register_minimum_payload() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type": "register",
                 "name": "ping",
@@ -146,11 +151,17 @@ async fn register_minimum_payload() {
                 "description": "Returns pong.",
                 "parameters_schema": {"type":"object","properties":{},"additionalProperties":false},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     assert_eq!(r["name"], "ping");
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 1);
     assert_eq!(list["tools"][0]["name"], "ping");
     assert_eq!(list["tools"][0]["agent_id"], "health_check");
@@ -175,8 +186,8 @@ async fn register_maximum_payload_preserves_all_fields() {
         "then": { "required": ["query"] },
     });
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type": "register",
                 "name": "search",
@@ -185,11 +196,17 @@ async fn register_maximum_payload_preserves_all_fields() {
                 "description": "Search docs.",
                 "parameters_schema": schema.clone(),
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
 
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     let entry = &list["tools"][0];
     assert_eq!(entry["name"], "search");
     assert_eq!(entry["agent_id"], "doc_index");
@@ -204,8 +221,8 @@ async fn register_with_schema_as_string_is_parsed() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type": "register",
                 "name": "ping",
@@ -213,9 +230,15 @@ async fn register_with_schema_as_string_is_parsed() {
                 "description": "d",
                 "parameters_schema": r#"{"type":"object","properties":{}}"#,
             }),
-        )
-        .await;
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+        )])
+        .await
+        .remove(0)
+        .result;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     // String got parsed into a JSON object, not stored verbatim as a string.
     assert!(list["tools"][0]["parameters_schema"].is_object());
     assert_eq!(list["tools"][0]["parameters_schema"]["type"], "object");
@@ -227,24 +250,32 @@ async fn register_same_name_last_write_wins() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"x","agent_id":"a1","description":"first",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"x","agent_id":"a2","description":"second",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+        )])
+        .await
+        .remove(0)
+        .result;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 1);
     assert_eq!(list["tools"][0]["agent_id"], "a2");
     assert_eq!(list["tools"][0]["description"], "second");
@@ -256,15 +287,17 @@ async fn register_captures_sender_from_payload() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"x","agent_id":"a","description":"d",
                 "sender":"owner_alpha",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let entry = lookup("x").expect("x registered");
     assert_eq!(entry.sender, AgentId::from("owner_alpha"));
 }
@@ -275,14 +308,16 @@ async fn register_without_sender_defaults_to_anonymous() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"x","agent_id":"a","description":"d",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let entry = lookup("x").expect("x registered");
     assert_eq!(entry.sender, AgentId::from("anonymous"));
 }
@@ -293,22 +328,30 @@ async fn register_from_different_senders_different_names_both_present() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"alpha_tool","agent_id":"a","description":"d",
                    "sender":"alpha",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"beta_tool","agent_id":"b","description":"d",
                    "sender":"beta",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+        )])
+        .await
+        .remove(0)
+        .result;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 2);
     let names: Vec<&str> = list["tools"]
         .as_array()
@@ -328,17 +371,28 @@ async fn unregister_by_name() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"x","agent_id":"a","description":"d",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(&a, json!({"type":"unregister","name":"x"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister","name":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 0);
 }
 
@@ -348,8 +402,13 @@ async fn unregister_non_existent_returns_not_found() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let r = kernel
-        .send(&a, json!({"type":"unregister","name":"nope"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister","name":"nope"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "not_found");
     assert!(r["error"].as_str().unwrap().contains("nope"));
 }
@@ -361,31 +420,44 @@ async fn unregister_by_sender_drops_only_owners_tools() {
     let a = create_tools_agent(&kernel).await;
     for n in &["a1", "a2"] {
         let _ = kernel
-            .send(
-                &a,
+            .send(vec![Item::new(
+                a.clone(),
                 json!({"type":"register","name":n,"agent_id":"a","description":"d",
                        "sender":"alpha",
                        "parameters_schema":{"type":"object"}}),
-            )
-            .await;
+            )])
+            .await
+            .remove(0)
+            .result;
     }
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"b1","agent_id":"b","description":"d",
                    "sender":"beta",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let reply = kernel
-        .send(&a, json!({"type":"unregister_by_sender","sender":"alpha"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister_by_sender","sender":"alpha"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["removed"], 2);
     assert_eq!(reply["sender"], "alpha");
 
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 1);
     assert_eq!(list["tools"][0]["name"], "b1");
 }
@@ -397,17 +469,27 @@ async fn clear_drops_all() {
     let a = create_tools_agent(&kernel).await;
     for n in &["a", "b", "c"] {
         let _ = kernel
-            .send(
-                &a,
+            .send(vec![Item::new(
+                a.clone(),
                 json!({"type":"register","name":n,"agent_id":"x","description":"d",
                        "parameters_schema":{"type":"object"}}),
-            )
-            .await;
+            )])
+            .await
+            .remove(0)
+            .result;
     }
-    let r = kernel.send(&a, json!({"type":"clear"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"clear"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["ok"], true);
     assert_eq!(r["removed"], 3);
-    let list = kernel.send(&a, json!({"type":"list"})).await;
+    let list = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(list["count"], 0);
 }
 
@@ -417,15 +499,21 @@ async fn list_for_llm_returns_compact_shape() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"ping","agent_id":"hc","description":"Returns pong.",
                 "parameters_schema":{"type":"object","properties":{}},
             }),
-        )
-        .await;
-    let r = kernel.send(&a, json!({"type":"list_for_llm"})).await;
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type":"list_for_llm"}))])
+        .await
+        .remove(0)
+        .result;
     let tools = r["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 1);
     // Shape is {name, description, parameters} — NO sender, NO agent_id, NO verb.
@@ -448,21 +536,25 @@ async fn dispatch_routes_to_target_with_explicit_verb() {
 
     // Register a tool that maps name="calc_add" → agent="calc" verb="add".
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"calc_add","agent_id":"calc","verb":"add",
                 "description":"Add two numbers.",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"dispatch","name":"calc_add","arguments":{"a":2,"b":3}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["result"], 5);
 
     // Host saw {"type":"add", "a":2, "b":3} — verb was injected, args flattened.
@@ -481,20 +573,24 @@ async fn dispatch_with_no_verb_uses_tool_name() {
     let host = RecordingHost::new(r#"{"ok":true}"#);
     register_proxy_host(target.clone(), host.clone());
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"echo","agent_id":"echo","description":"d",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"dispatch","name":"echo","arguments":{"x":1}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let seen = host.last().expect("host saw payload");
     assert_eq!(seen["type"], "echo");
     assert_eq!(seen["x"], 1);
@@ -510,11 +606,13 @@ async fn dispatch_unknown_tool_returns_tool_not_found() {
     register_proxy_host(target.clone(), host.clone());
 
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"dispatch","name":"never_registered","arguments":{}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "tool_not_found");
     // No traffic to the target.
     assert_eq!(host.count(), 0);
@@ -530,17 +628,24 @@ async fn dispatch_reply_passes_through_unchanged() {
     let host = RecordingHost::new(r#"{"a":1,"b":[true,false],"nested":{"k":"v"}}"#);
     register_proxy_host(target.clone(), host.clone());
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"stub","agent_id":"stub","description":"d",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(&a, json!({"type":"dispatch","name":"stub","arguments":{}}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"dispatch","name":"stub","arguments":{}}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["a"], 1);
     assert_eq!(r["b"][0], true);
     assert_eq!(r["b"][1], false);
@@ -556,26 +661,43 @@ async fn dispatch_after_unregister_returns_tool_not_found() {
     let host = RecordingHost::new(r#"{"ok":true}"#);
     register_proxy_host(target.clone(), host.clone());
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({
                 "type":"register","name":"x","agent_id":"x","description":"d",
                 "parameters_schema":{"type":"object"},
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     // First dispatch reaches the host.
     let _ = kernel
-        .send(&a, json!({"type":"dispatch","name":"x","arguments":{}}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"dispatch","name":"x","arguments":{}}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(host.count(), 1);
     // Now unregister and dispatch again — no new traffic.
     let _ = kernel
-        .send(&a, json!({"type":"unregister","name":"x"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister","name":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(&a, json!({"type":"dispatch","name":"x","arguments":{}}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"dispatch","name":"x","arguments":{}}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "tool_not_found");
     assert_eq!(host.count(), 1, "host MUST NOT see the second dispatch");
 }
@@ -586,20 +708,24 @@ async fn cascade_delete_clears_registry() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"x","agent_id":"y","description":"d",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(count(), 1);
     // Cascade-delete the tools agent.
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"delete_agent","id":"tools"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(count(), 0, "on_delete cleared the registry");
 }
 
@@ -614,14 +740,16 @@ async fn concurrent_registers_do_not_panic() {
         let a = a.clone();
         handles.push(tokio::spawn(async move {
             let n = format!("tool_{i}");
-            k.send(
-                &a,
+            k.send(vec![Item::new(
+                a.clone(),
                 json!({
                     "type":"register","name":n,"agent_id":"a","description":"d",
                     "parameters_schema":{"type":"object"},
                 }),
-            )
+            )])
             .await
+            .remove(0)
+            .result
         }));
     }
     for h in handles {
@@ -636,8 +764,13 @@ async fn unregister_by_sender_without_sender_field_returns_invalid_args() {
     let kernel = mk_kernel(StorageMode::InMemory);
     let a = create_tools_agent(&kernel).await;
     let r = kernel
-        .send(&a, json!({"type":"unregister_by_sender"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister_by_sender"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "invalid_args");
     assert!(r["error"].as_str().unwrap().contains("sender"));
 }
@@ -656,18 +789,30 @@ async fn register_dispatch_unregister_publish_state_events() {
     }));
 
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"x","agent_id":"y","description":"d",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&a, json!({"type":"dispatch","name":"never","arguments":{}}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"dispatch","name":"never","arguments":{}}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let _ = kernel
-        .send(&a, json!({"type":"unregister","name":"x"}))
-        .await;
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type":"unregister","name":"x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // The kernel publishes one "send" event per kernel.send call.
     // Filter to events targeting the tools agent and verify all three
@@ -700,17 +845,21 @@ async fn dispatch_invalid_arguments_returns_invalid_args() {
     let a = create_tools_agent(&kernel).await;
     // Register first so the lookup succeeds and we reach the args check.
     let _ = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"register","name":"x","agent_id":"y","description":"d",
                    "parameters_schema":{"type":"object"}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type":"dispatch","name":"x","arguments":"not an object"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["reason"], "invalid_args");
 }

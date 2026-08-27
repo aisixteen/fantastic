@@ -31,7 +31,7 @@ fn the_two_hints_are_verbatim() {
 /// every brace after it is string content and the object runs off the end.
 const GEMMA_UNCLOSED_CODE: &str = concat!(
     r#"{"name":"send","arguments":{"target_id":"kernel_state","payload":"#,
-    r#"{"type":"create_agent","handler_module":"exec_bridge.tools","#,
+    r#"{"type":"create_agent","parent_id":"kernel","handler_module":"exec_bridge.tools","#,
     r#""id":"reading_aggregator","code":"def update_totals():\n"#,
     r#"    worker_res = send(\"reading_worker\", {\"type\": \"compute_total\"})\n"#,
     r#"    return f\"updated to {worker_res}\"}}"#

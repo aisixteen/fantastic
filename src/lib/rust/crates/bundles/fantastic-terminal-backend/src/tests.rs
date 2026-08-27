@@ -11,6 +11,7 @@
 
 use super::*;
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::{json, Map};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -61,6 +62,7 @@ async fn mk_term(
     // so the kernel wires it up consistently.
     let mut parent_payload = Map::new();
     parent_payload.insert("type".to_string(), json!("create_agent"));
+    parent_payload.insert("parent_id".to_string(), json!("kernel"));
     parent_payload.insert("handler_module".to_string(), json!(HANDLER_MODULE)); // any
     parent_payload.insert("id".to_string(), json!(parent_id_str));
     // `auto_start=false` is critical here. create_agent now auto-fires
@@ -70,9 +72,14 @@ async fn mk_term(
     // parent agent is only a routing placeholder. Setting auto_start=false
     // makes its boot a no-op.
     parent_payload.insert("auto_start".to_string(), json!(false));
-    kernel
-        .send(&AgentId::from("core"), Value::Object(parent_payload))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            Value::Object(parent_payload),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Backend agent as a child of the parent. Create FIRST so the
     // backend's id exists; we then replace ITS inbox tx with one
@@ -80,6 +87,9 @@ async fn mk_term(
     // reader_loop), so the rx must be bound to the backend's id.
     let mut term_payload = Map::new();
     term_payload.insert("type".to_string(), json!("create_agent"));
+    // PLACEMENT is `parent_id` now, not the address: the backend is a child of
+    // the routing placeholder, and the kernel-owned verb goes to the root.
+    term_payload.insert("parent_id".to_string(), json!(parent_id_str.as_str()));
     term_payload.insert("handler_module".to_string(), json!(HANDLER_MODULE));
     term_payload.insert("id".to_string(), json!(term_id_str));
     if let Some(c) = cmd.as_ref() {
@@ -89,12 +99,14 @@ async fn mk_term(
         );
     }
     term_payload.insert("auto_start".to_string(), json!(false));
-    kernel
-        .send(
-            &AgentId::from(parent_id_str.as_str()),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             Value::Object(term_payload),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // Replace the BACKEND's inbox sender so we can observe the
     // emits the reader fires to self. (Done after create_agent +
@@ -174,7 +186,11 @@ fn readme_present_and_titled() {
 async fn reflect_shape_when_not_running() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, _rx) = mk_term(&tmp, "refl", None).await;
-    let r = kernel.send(&term, json!({"type": "reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     for key in [
         "id",
         "sentence",
@@ -202,7 +218,11 @@ async fn spawn_runs_echo_command_and_emits_data() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) =
         mk_term(&tmp, "echo", Some(vec!["bash", "-c", "echo hi"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true, "spawn failed: {r:?}");
     let events = collect_events(&mut rx, Duration::from_secs(3), |evs| {
         evs.iter()
@@ -220,20 +240,33 @@ async fn spawn_runs_echo_command_and_emits_data() {
             .any(|e| e.get("type").and_then(Value::as_str) == Some("closed")),
         "expected exited event, got: {events:?}"
     );
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
 async fn write_sends_to_pty_and_echoes() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) = mk_term(&tmp, "wr", Some(vec!["bash"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true, "spawn failed: {r:?}");
     // Drain any banner/prompt first.
     let _ = collect_events(&mut rx, Duration::from_millis(300), |_| false).await;
     let wr = kernel
-        .send(&term, json!({"type": "write", "data": "echo MARK1\n"}))
-        .await;
+        .send(vec![Item::new(
+            term.clone(),
+            json!({"type": "write", "data": "echo MARK1\n"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(wr["written"].as_u64().is_some(), "write reply: {wr:?}");
     let events = collect_events(&mut rx, Duration::from_secs(3), |evs| {
         concat_text(evs).contains("MARK1")
@@ -244,26 +277,47 @@ async fn write_sends_to_pty_and_echoes() {
         text.contains("MARK1"),
         "expected MARK1 in output, got: {text:?}"
     );
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
 async fn resize_replies_resized_true() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, _rx) = mk_term(&tmp, "rsz", Some(vec!["bash"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true, "spawn failed: {r:?}");
     let r = kernel
-        .send(&term, json!({"type": "resize", "cols": 120, "rows": 40}))
-        .await;
+        .send(vec![Item::new(
+            term.clone(),
+            json!({"type": "resize", "cols": 120, "rows": 40}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["resized"], true);
     assert_eq!(r["cols"], 120);
     assert_eq!(r["rows"], 40);
     // Reflect sees the new geometry.
-    let refl = kernel.send(&term, json!({"type": "reflect"})).await;
+    let refl = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(refl["cols"], 120);
     assert_eq!(refl["rows"], 40);
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -271,7 +325,11 @@ async fn flow_control_pauses_past_100k() {
     let tmp = TempDir::new().unwrap();
     // `yes` floods stdout indefinitely.
     let (kernel, _parent, term, mut rx) = mk_term(&tmp, "flow", Some(vec!["yes"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true, "spawn failed: {r:?}");
     // Don't ack. Wait until the reader's paused flag flips OR we
     // hit a 3s ceiling.
@@ -280,7 +338,11 @@ async fn flow_control_pauses_past_100k() {
     while std::time::Instant::now() < deadline {
         // Drain so the reader keeps making forward progress.
         while rx.try_recv().is_ok() {}
-        let refl = kernel.send(&term, json!({"type": "reflect"})).await;
+        let refl = kernel
+            .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+            .await
+            .remove(0)
+            .result;
         let unacked = refl["unacked"].as_u64().unwrap_or(0);
         if unacked as usize >= FLOW_PAUSE_THRESHOLD {
             // Re-check after a brief tick — the pause flag flips
@@ -295,20 +357,32 @@ async fn flow_control_pauses_past_100k() {
         paused,
         "reader did not cross flow-pause threshold within 3s"
     );
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
 async fn ack_resumes_paused_reader() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) = mk_term(&tmp, "ack", Some(vec!["yes"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     // Wait until paused.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         while rx.try_recv().is_ok() {}
-        let refl = kernel.send(&term, json!({"type": "reflect"})).await;
+        let refl = kernel
+            .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+            .await
+            .remove(0)
+            .result;
         if refl["unacked"].as_u64().unwrap_or(0) as usize >= FLOW_PAUSE_THRESHOLD {
             break;
         }
@@ -319,11 +393,13 @@ async fn ack_resumes_paused_reader() {
     }
     // Ack a big chunk so unacked drops well below the threshold.
     let acked = kernel
-        .send(
-            &term,
+        .send(vec![Item::new(
+            term.clone(),
             json!({"type": "ack", "count": FLOW_PAUSE_THRESHOLD * 4}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(acked["paused"], false, "ack did not unpause: {acked:?}");
     // Confirm the reader resumed — unacked should climb again past
     // the post-ack value within a reasonable window.
@@ -332,7 +408,11 @@ async fn ack_resumes_paused_reader() {
     let mut climbed = false;
     while std::time::Instant::now() < deadline2 {
         while rx.try_recv().is_ok() {}
-        let refl = kernel.send(&term, json!({"type": "reflect"})).await;
+        let refl = kernel
+            .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+            .await
+            .remove(0)
+            .result;
         if refl["unacked"].as_u64().unwrap_or(0) > post_ack {
             climbed = true;
             break;
@@ -340,7 +420,11 @@ async fn ack_resumes_paused_reader() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(climbed, "reader did not resume after ack");
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -360,7 +444,11 @@ async fn utf8_chunk_boundary_safe() {
         ]),
     )
     .await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     let events = collect_events(&mut rx, Duration::from_secs(3), |evs| {
         evs.iter()
@@ -377,7 +465,11 @@ async fn utf8_chunk_boundary_safe() {
         !text.contains('\u{FFFD}'),
         "replacement char appeared: {text:?}"
     );
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -393,11 +485,19 @@ async fn interrupt_sends_sigint() {
         ]),
     )
     .await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     // Give bash a beat to install the trap.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let ir = kernel.send(&term, json!({"type": "interrupt"})).await;
+    let ir = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "interrupt"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ir["signal"], libc::SIGINT, "interrupt reply: {ir:?}");
     let events = collect_events(&mut rx, Duration::from_secs(4), |evs| {
         concat_text(evs).contains("SIGINT_CAUGHT")
@@ -408,7 +508,11 @@ async fn interrupt_sends_sigint() {
         text.contains("SIGINT_CAUGHT"),
         "expected SIGINT_CAUGHT in output, got: {text:?}"
     );
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -416,10 +520,18 @@ async fn stop_kills_child_and_emits_exited() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) =
         mk_term(&tmp, "stop", Some(vec!["bash", "-c", "sleep 30"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let st = kernel.send(&term, json!({"type": "stop"})).await;
+    let st = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(st["stopped"], true, "stop reply: {st:?}");
     // The reader task should emit an `exited` event when the child
     // is reaped. Allow up to 3 s.
@@ -445,7 +557,11 @@ async fn stop_kills_child_and_emits_exited() {
 async fn paste_image_writes_file_and_types_path() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) = mk_term(&tmp, "pst", Some(vec!["cat"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     // Drain any banner.
     let _ = collect_events(&mut rx, Duration::from_millis(200), |_| false).await;
@@ -455,11 +571,13 @@ async fn paste_image_writes_file_and_types_path() {
     let png_signature: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_signature);
     let pr = kernel
-        .send(
-            &term,
+        .send(vec![Item::new(
+            term.clone(),
             json!({"type": "paste_image", "data": b64, "mime": "image/png"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let path = pr["path"]
         .as_str()
         .unwrap_or_else(|| panic!("paste_image reply missing path: {pr:?}"))
@@ -483,14 +601,25 @@ async fn paste_image_writes_file_and_types_path() {
     );
     // Trailing space, no newline.
     assert!(text.contains(&format!("{path} ")));
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
 async fn unknown_verb_returns_error() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, _rx) = mk_term(&tmp, "unk", None).await;
-    let r = kernel.send(&term, json!({"type": "no_such_verb"})).await;
+    let r = kernel
+        .send(vec![Item::new(
+            term.clone(),
+            json!({"type": "no_such_verb"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(r["error"].as_str().unwrap().contains("unknown verb"));
 }
 
@@ -498,7 +627,11 @@ async fn unknown_verb_returns_error() {
 async fn paste_image_binary_path_skips_base64() {
     let tmp = TempDir::new().unwrap();
     let (kernel, _parent, term, mut rx) = mk_term(&tmp, "pbb", Some(vec!["cat"])).await;
-    let r = kernel.send(&term, json!({"type": "spawn"})).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["spawned"], true);
     let _ = collect_events(&mut rx, Duration::from_millis(200), |_| false).await;
     // Direct call into the binary path — mimics the WS-frame route.
@@ -515,5 +648,9 @@ async fn paste_image_binary_path_skips_base64() {
         .unwrap_or_else(|| panic!("binary paste reply missing path: {reply:?}"))
         .to_string();
     assert!(PathBuf::from(&path).exists());
-    let _ = kernel.send(&term, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }

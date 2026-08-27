@@ -10,7 +10,7 @@ use crate::helpers::safe_client;
 use crate::provider::{Provider, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{Agent, AgentId, Kernel};
+use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -276,11 +276,12 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 
     let backend_id = id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
@@ -289,8 +290,10 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 // Two-sided deny-all: accept the backend that persists through it.
                 "callable_by": { backend_id.clone(): "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
     (kernel, backend)
 }
@@ -304,11 +307,12 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": id,
                 "file_bridge_id": file_id,
@@ -319,8 +323,10 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
                 // with granting).
                 "can_call": { file_id: "*", "cli": "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     AgentId::from(id)
 }
 
@@ -355,7 +361,11 @@ async fn drain(rx: &mut Receiver<Value>) -> Vec<Value> {
 async fn reflect_reports_state_shape() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "refl").await;
-    let r = kernel.send(&backend, json!({"type": "reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     for key in [
         "id",
         "sentence",
@@ -374,7 +384,11 @@ async fn reflect_reports_state_shape() {
 async fn boot_is_noop() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "boot").await;
-    let r = kernel.send(&backend, json!({"type": "boot"})).await;
+    let r = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r.is_null(),
         "boot should be a noop returning null, got {r:?}"
@@ -397,18 +411,19 @@ async fn send_without_file_bridge_id_returns_error() {
     );
     let _rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type": "create_agent", "handler_module": HANDLER_MODULE, "id": "mb_nofile"}),
-        )
-        .await;
+    let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": "mb_nofile"}))])
+            .await
+            .remove(0)
+            .result;
     let r = kernel
-        .send(
-            &AgentId::from("mb_nofile"),
+        .send(vec![Item::new(
+            AgentId::from("mb_nofile"),
             json!({"type": "send", "text": "hi"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"].as_str().unwrap_or("").contains("file_bridge_id"),
         "expected file_bridge_id error, got {r:?}",
@@ -431,11 +446,13 @@ async fn send_streams_tokens_and_emits_done() {
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_tok";
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["client_id"], client_id);
     assert_eq!(reply["response"], "Hello world");
     assert_eq!(reply["final"], "Hello world");
@@ -506,11 +523,13 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
     let mut rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_think";
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // The REPLY is raw — markers intact, mid-thought call still parseable.
     let raw = reply["response"].as_str().expect("response text");
@@ -545,12 +564,30 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
     // The DURABLE turn is stripped — no marker, no deliberation, no mid-thought
     // call text; just the answer.
     let h = kernel
-        .send(&backend, json!({"type": "history", "client_id": client_id}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "history", "client_id": client_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let messages = h["messages"].as_array().expect("messages array");
     let last = messages.last().unwrap();
     assert_eq!(last["role"], "assistant");
-    assert_eq!(last["content"], "the answer");
+    let content = last["content"].as_str().unwrap();
+    // The REASONING is gone...
+    assert!(
+        !content.contains("thinking out loud"),
+        "deliberation was persisted: {content:?}"
+    );
+    assert!(content.contains("the answer"));
+    // ...but the INVOCATION stays. It dispatched, so history must show the cause
+    // of the reply that is about to arrive — a record that hides it makes the
+    // model read an effect it never caused.
+    assert!(
+        content.contains("mid_thought.txt"),
+        "the mid-thought call was erased from history: {content:?}"
+    );
 }
 
 /// A turn spent ENTIRELY reasoning is not an empty completion: the caller still
@@ -571,22 +608,26 @@ async fn a_thinking_only_turn_is_not_an_empty_completion() {
     );
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": "c_thonly"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let raw = reply["response"].as_str().expect("response text");
     assert!(
         raw.contains("all 578 tokens went here"),
         "the reasoning must reach the caller verbatim: {raw:?}"
     );
     let h = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "history", "client_id": "c_thonly"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let messages = h["messages"].as_array().expect("messages array");
     assert_eq!(messages.last().unwrap()["content"], "");
 }
@@ -631,7 +672,15 @@ fn context_estimate_and_budget() {
     let mut m2 = Map::new();
     m2.insert("num_ctx".into(), json!(2000));
     assert_eq!(resolve_context_window(&m2), 2000);
-    assert_eq!(resolve_context_window(&Map::new()), 4096);
+    // The default is 131072, not 4096: at 4096 the budget (4096 − 1024 reserve
+    // = 3072) no longer fit the kernel's OWN ~3174-token system block, so every
+    // agent created without an explicit window failfasted `too_small` before
+    // the model was called.
+    assert_eq!(
+        resolve_context_window(&Map::new()),
+        crate::context::DEFAULT_CONTEXT_WINDOW
+    );
+    assert_eq!(crate::context::DEFAULT_CONTEXT_WINDOW, 131_072);
     let mut tiny = Map::new();
     tiny.insert("context_window".into(), json!(100));
     tiny.insert("output_reserve".into(), json!(1000));
@@ -684,18 +733,22 @@ async fn recall_pages_durable_store_and_context_status_shape() {
     script(&backend, vec![pass("noted")], Duration::ZERO);
     // Plant a distinctive fact in the durable store via a normal send.
     let _ = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "my project codename is HALCYON", "client_id": "chat"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     // recall finds it by substring (case-insensitive), full durable history.
     let r = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "recall", "query": "codename", "client_id": "chat"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let msgs = r["messages"].as_array().expect("recall messages");
     assert!(
         msgs.iter().any(|m| m["content"]
@@ -709,8 +762,13 @@ async fn recall_pages_durable_store_and_context_status_shape() {
 
     // context_status shape — default strategy, projection recorded.
     let st = kernel
-        .send(&backend, json!({"type": "context_status"}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "context_status"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     for key in [
         "context_window",
         "output_reserve",
@@ -737,14 +795,21 @@ async fn history_persists_and_round_trips() {
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_hist";
     let _ = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "ping", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let h = kernel
-        .send(&backend, json!({"type": "history", "client_id": client_id}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "history", "client_id": client_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let messages = h["messages"].as_array().expect("messages array");
     assert!(
         messages.len() >= 2,
@@ -782,15 +847,25 @@ async fn kernel_cancel_kills_an_in_flight_send() {
     let b = backend.clone();
     let c = client_id.to_string();
     let send_join = tokio::spawn(async move {
-        k.send(&b, json!({"type": "send", "text": "hi", "client_id": c}))
-            .await
+        k.send(vec![Item::new(
+            b.clone(),
+            json!({"type": "send", "text": "hi", "client_id": c}),
+        )])
+        .await
+        .remove(0)
+        .result
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Discover the generation in the live task table…
     let table = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "ps"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let task_id = table["tasks"]
         .as_array()
         .expect("tasks")
@@ -802,11 +877,13 @@ async fn kernel_cancel_kills_an_in_flight_send() {
 
     // …and kill it with the universal system verb.
     let r = kernel
-        .send(
-            &AgentId::from("kernel"),
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({"type": "cancel", "task_id": task_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["cancelled"], json!(true));
     assert_eq!(r["killed"], json!([task_id]));
 
@@ -823,7 +900,11 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         "expected a done event after cancel: {events:#?}",
     );
     // …and the backend no longer reports a phantom generation.
-    let st = kernel.send(&backend, json!({"type": "status"})).await;
+    let st = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(st["generating"], json!(false));
 }
 
@@ -838,13 +919,23 @@ async fn status_during_in_flight_shows_phase() {
     let b = backend.clone();
     let c = client_id.to_string();
     let send_join = tokio::spawn(async move {
-        k.send(&b, json!({"type": "send", "text": "hi", "client_id": c}))
-            .await
+        k.send(vec![Item::new(
+            b.clone(),
+            json!({"type": "send", "text": "hi", "client_id": c}),
+        )])
+        .await
+        .remove(0)
+        .result
     });
     tokio::time::sleep(Duration::from_millis(120)).await;
     let snap = kernel
-        .send(&backend, json!({"type": "status", "client_id": client_id}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "status", "client_id": client_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(snap["generating"], true);
     let cur = &snap["current"];
     assert!(
@@ -884,8 +975,13 @@ async fn no_call_means_one_pass() {
         Duration::ZERO,
     );
     let r = kernel
-        .send(&backend, json!({"type": "send", "text": "hi"}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["final"], "the answer");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
@@ -910,9 +1006,14 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "what is here?"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "what is here?"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the call's reply never came back"
@@ -951,9 +1052,14 @@ async fn a_self_chain_does_not_deadlock() {
         Duration::ZERO,
     );
     tokio::time::timeout(Duration::from_secs(5), async {
-        kernel
-            .send(&backend, json!({"type": "send", "text": "go"}))
-            .await;
+        let _ = kernel
+            .send(vec![Item::new(
+                backend.clone(),
+                json!({"type": "send", "text": "go"}),
+            )])
+            .await
+            .remove(0)
+            .result;
         assert!(
             until_passes(&s, 3).await,
             "chain stalled at {} passes",
@@ -991,12 +1097,14 @@ async fn the_self_chain_carries_no_call_stack() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(
-            &backend,
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "go", "_call_stack": ["upstream"]}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the follow-up never ran — a propagated _call_stack would refuse it as a cycle"
@@ -1012,15 +1120,17 @@ async fn an_inbound_cycle_is_refused_before_the_lock() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_cyc").await;
     let s = script(&backend, vec![pass("must never run")], Duration::ZERO);
     let r = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({
                 "type": "send",
                 "text": "go",
                 "_call_stack": ["upstream", backend.as_str()],
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"].as_str().unwrap_or("").contains("cycle detected"),
         "expected a cycle refusal: {r:#?}"
@@ -1063,9 +1173,14 @@ async fn reply_to_omitted_defaults_to_self() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&fo, 1).await,
         "the send itself must still happen"
@@ -1107,9 +1222,14 @@ async fn discarding_a_reply_must_be_said_explicitly() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&fo, 1).await,
         "the send itself must still happen"
@@ -1140,9 +1260,14 @@ async fn a_failed_call_comes_back_to_the_model() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the failure never reached the model"
@@ -1164,9 +1289,14 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_notgt").await;
     let bad = r#"<tool_call>{"name":"send","arguments":{"reply_to":"self"}}</tool_call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(until_passes(&s, 2).await, "the bad call was swallowed");
     let turn2 = s.request(1);
     assert!(turn2.contains("no target_id"), "{turn2}");
@@ -1186,9 +1316,14 @@ async fn a_send_with_no_payload_names_what_is_missing() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_nopl").await;
     let bad = r#"<tool_call>{"name":"send","arguments":{"target_id":"totals"}}</tool_call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the payload-less send was swallowed"
@@ -1211,12 +1346,17 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_broken").await;
     let broken = concat!(
         r#"<tool_call>{"name":"send","arguments":{"target_id":"kernel","payload":"#,
-        r#"{"type":"create_agent","code":"x = \"unclosed}}</tool_call>"#
+        r#"{"type":"create_agent","parent_id":"kernel","code":"x = \"unclosed}}</tool_call>"#
     );
     let s = script(&backend, vec![pass(broken), pass("ok")], Duration::ZERO);
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the malformed call produced no next turn"
@@ -1237,9 +1377,14 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
         r#"<tool_call>{"name":"send","arguments":{"target_id":"n","code":"oops}}"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the broken sibling was swallowed"
@@ -1256,9 +1401,14 @@ async fn a_verb_named_tool_reaches_the_agent() {
     let (kernel, backend) = mk_kernel(&tmp, "rt_verb").await;
     let call = r#"<tool_call>{"name":"reflect","arguments":{"target_id":"core"}}</tool_call>"#;
     let s = script(&backend, vec![pass(call), pass("ok")], Duration::ZERO);
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(until_passes(&s, 2).await, "the reflect never came back");
     let turn2 = s.request(1);
     assert!(
@@ -1285,12 +1435,14 @@ async fn a_caller_send_to_hands_off_once() {
         vec![pass("b replied"), pass("b must not run again")],
         Duration::ZERO,
     );
-    kernel
-        .send(
-            &a,
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe", "send_to": b.as_str()}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&fb, 1).await,
         "the peer never received the reply"
@@ -1323,11 +1475,13 @@ async fn an_error_reply_does_not_route() {
         Duration::ZERO,
     );
     let r = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "go", "client_id": "probe"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"].as_str().unwrap_or("").contains("exploded"),
         "{r:#?}"
@@ -1388,26 +1542,27 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     kernel.set_root(Arc::clone(&root));
     let backend_id = id_for(&tmp, "rt_raise");
     let file_id = format!("ff_{backend_id}");
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
     let raiser = format!("{backend_id}_raiser");
-    kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type": "create_agent", "handler_module": "raiser.tools", "id": raiser}),
-        )
-        .await;
+    let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "raiser.tools", "id": raiser}))])
+            .await
+            .remove(0)
+            .result;
 
     // ① a bundle that returns Err.
     let s = script(
@@ -1418,9 +1573,14 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s, 2).await,
         "the error killed the chain instead of routing"
@@ -1441,9 +1601,14 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         ],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "again"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "again"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         until_passes(&s2, 2).await,
         "the panic killed the chain instead of routing"
@@ -1537,14 +1702,24 @@ async fn routing_is_its_own_ps_row() {
         ))],
         Duration::ZERO,
     );
-    kernel
-        .send(&backend, json!({"type": "send", "text": "go"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(until_passes(&fo, 1).await, "the peer was never reached");
 
     let table = kernel
-        .send(&AgentId::from("kernel"), json!({"type": "ps"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "ps"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let tasks = table["tasks"].as_array().expect("tasks");
     let route_row = tasks
         .iter()
@@ -1574,7 +1749,9 @@ fn author_python() -> Option<String> {
 fn author_act(tool_id: &str, code: &str) -> String {
     let py = author_python().expect("caller must have skipped without python");
     json!({"act": {"target": "core", "payload": {
-        "type": "create_agent", "handler_module": "exec_bridge.tools",
+        // Placement is explicit now: the act names the OWNER of the new agent.
+        "type": "create_agent", "parent_id": "core",
+        "handler_module": "exec_bridge.tools",
         "id": tool_id, "code": code,
         "interpreters": [py], "shim": "python", "ingress_rule": "allow_all_ingress",
     }}})
@@ -1610,18 +1787,20 @@ async fn mk_author_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     kernel.set_root(Arc::clone(&root));
     let backend_id = id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
     (kernel, backend)
 }
@@ -1644,11 +1823,13 @@ async fn author_refuses_final_until_the_tool_is_observed_answering() {
         Duration::ZERO,
     );
     let r = kernel
-        .send(
-            &ai,
+        .send(vec![Item::new(
+            ai.clone(),
             json!({"type": "author", "goal": "echo the text back", "steps": 5}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], "author_echo", "{r}");
     assert!(
         r["code"].as_str().unwrap_or("").contains("on_message"),
@@ -1680,11 +1861,13 @@ async fn author_gives_up_on_a_deaf_tool_and_says_deaf() {
         Duration::ZERO,
     );
     let r = kernel
-        .send(
-            &ai,
+        .send(vec![Item::new(
+            ai.clone(),
             json!({"type": "author", "goal": "echo the text back", "steps": 3}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let err = r["error"].as_str().unwrap_or("");
     assert!(err.contains("gave up"), "{r}");
 }
@@ -1693,6 +1876,10 @@ async fn author_gives_up_on_a_deaf_tool_and_says_deaf() {
 async fn author_requires_a_goal() {
     let tmp = TempDir::new().unwrap();
     let (kernel, ai) = mk_author_kernel(&tmp, "author").await;
-    let r = kernel.send(&ai, json!({"type": "author"})).await;
+    let r = kernel
+        .send(vec![Item::new(ai.clone(), json!({"type": "author"}))])
+        .await
+        .remove(0)
+        .result;
     assert!(r["error"].as_str().unwrap_or("").contains("goal"), "{r}");
 }

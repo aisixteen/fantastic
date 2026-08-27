@@ -1,4 +1,5 @@
 //! Unit tests for [`crate::kernel`].
+use crate::agent::{AgentRecord, RESERVED_RECORD_KEYS};
 
 use super::*;
 use crate::agent::Agent;
@@ -101,5 +102,97 @@ async fn inbox_channel_back_pressure_at_bound() {
     match tx.try_send(json!({"type": "three"})) {
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
         other => panic!("expected Full, got {other:?}"),
+    }
+}
+
+// ─── #3 / #4 / #5 — record hygiene ──────────────────────────────────
+
+#[test]
+fn save_drops_the_ephemeral_subtree_transitively() {
+    // Dropping only the ephemeral agent ITSELF left its children behind as
+    // orphans — records whose `parent_id` names an agent not in the document —
+    // and `load()` rejects exactly that. `save()` emitted a snapshot its own
+    // loader refused.
+    let kernel = Kernel::new();
+    // A PERSISTENT root — `make_agent` builds ephemeral ones.
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let cli = Agent::new(
+        AgentId::from("cli"),
+        None,
+        Some(root.id.clone()),
+        Map::new(),
+        std::path::PathBuf::new(),
+        true, // EPHEMERAL
+    );
+    let _c = kernel.register(Arc::clone(&cli));
+    // A child OF the ephemeral agent, and a grandchild.
+    for (id, parent) in [("cli_kid", "cli"), ("cli_grandkid", "cli_kid")] {
+        let a = Agent::new(
+            AgentId::from(id),
+            None,
+            Some(AgentId::from(parent)),
+            Map::new(),
+            std::path::PathBuf::new(),
+            false, // NOT ephemeral itself — it is orphaned by its parent
+        );
+        let _x = kernel.register(a);
+    }
+
+    let snap = kernel.save();
+    let ids: Vec<&str> = snap.agents.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, vec!["core"], "the ephemeral subtree survived: {ids:?}");
+
+    // The real property: what save() emits, load() accepts.
+    let fresh = Kernel::new();
+    fresh
+        .load(snap)
+        .expect("save() must emit a loadable document");
+}
+
+#[test]
+fn a_reserved_key_is_refused_before_anything_is_torn_down() {
+    // A hand-authored `root_path:` once cleared the whole tree and THEN raised.
+    // Validation BEFORE teardown is what makes a bad document a no-op.
+    let kernel = Kernel::new();
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::new(),
+        false,
+    );
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    for key in RESERVED_RECORD_KEYS {
+        let mut meta = Map::new();
+        meta.insert(key.to_string(), json!("anything"));
+        let state = KernelState {
+            version: CURRENT_VERSION,
+            agents: vec![AgentRecord {
+                id: "core".into(),
+                handler_module: None,
+                parent_id: None,
+                meta,
+            }],
+        };
+        let err = kernel.load(state).expect_err("{key} must be refused");
+        assert!(format!("{err}").contains(key), "{err}");
+        // ...and the live tree is UNTOUCHED.
+        assert!(
+            kernel.agents.contains_key(&AgentId::from("core")),
+            "a refused load tore the tree down anyway"
+        );
     }
 }

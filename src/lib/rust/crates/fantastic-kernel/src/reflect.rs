@@ -209,6 +209,28 @@ pub fn apply_reflect_flags(
             obj.insert("description".to_string(), json!(d));
         }
     }
+    // THE CALL GATE on the agent's OWN reflect. A bundle agent builds its own
+    // identity and would otherwise never report its authority, so an agent
+    // could not read what it may call or who may call it — only discover it by
+    // trying. Same two keys the distilled tree nodes carry.
+    if let Ok(meta) = target.meta.read() {
+        for k in ["can_call", "callable_by"] {
+            if let Some(v) = meta.get(k) {
+                obj.entry(k.to_string()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    // The KERNEL's own verbs — answered by the ROOT alone (they act on the TREE
+    // and the kernel-wide task table), so they appear in no bundle's `verbs`
+    // map. Advertised on EVERY agent, not just the root: root-only was tried
+    // and reverted — a model that never reflects the root never learns they
+    // exist, guesses, and gives up.
+    obj.insert(
+        "kernel_verbs".to_string(),
+        crate::send::kernel_verbs_view(
+            payload.get("detail").and_then(Value::as_str) == Some("full"),
+        ),
+    );
     // Kernel runtime identity + deployment context — surfaced on the ROOT
     // reflect so a client that hops to this kernel learns, in one round-trip:
     // which runtime (`runtime`), WHERE it runs (`env` — "container" when
@@ -236,12 +258,6 @@ pub fn apply_reflect_flags(
             "version".to_string(),
             json!(std::env::var("FANTASTIC_VERSION").ok()),
         );
-        // The substrate's OWN verbs — answered natively by EVERY agent, so they
-        // appear in no bundle's `verbs` map. Advertised here (once, on the root)
-        // so the reflect surface stays honest: one round-trip tells a caller
-        // that work in flight is inspectable (`ps`) and killable (`cancel`), on
-        // any agent.
-        obj.insert("system_verbs".to_string(), crate::send::system_verb_docs());
         // WHICH file_bridge the loader auto-persists records THROUGH (the
         // discovered store), or null = nothing wired (state in RAM). With the
         // provider's posture inline in the tree, a client sees in one reflect
@@ -284,7 +300,12 @@ pub fn apply_reflect_flags(
             obj.insert("tree".to_string(), tree_node(target));
         }
         "ids" => {
-            obj.insert("tree".to_string(), json!(descendant_ids(target)));
+            // PAGED — the cheap id tier is the one most likely to be walked by a
+            // caller with a small budget, so it is also the one that most needs
+            // a bound. Same cursor law as `list_agents`/`ps`.
+            let (ids, next) = crate::paging::page(descendant_ids(target), payload, Clone::clone);
+            obj.insert("tree".to_string(), json!(ids));
+            obj.insert("tree_next".to_string(), json!(next));
         }
         _ => {} // "none" → omit
     }
@@ -368,6 +389,13 @@ pub fn tree_node(target: &Agent) -> Value {
             "auth",
             "root",
             "file_bridge_id",
+            // THE CALL GATE, made readable. Without these an agent cannot read
+            // its own authority — only discover it by trying, which cost whole
+            // turns of empirical probing every run. They also make the
+            // replace-not-merge warning on `update_agent` actionable: you must
+            // send the map WHOLE, so you must be able to read it.
+            "can_call",
+            "callable_by",
         ] {
             if let Some(v) = meta.get(k) {
                 obj.insert(k.to_string(), v.clone());

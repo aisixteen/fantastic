@@ -7,6 +7,7 @@ use super::*;
 use fantastic_ai_core::helpers::safe_client;
 use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::Map;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -57,11 +58,12 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
 
     let backend_id = backend_id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": file_id,
                 "root": tmp.path().join(".fantastic").to_string_lossy(),
@@ -69,13 +71,16 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
                 // Two-sided deny-all: accept the backend that persists through it.
                 "callable_by": { backend_id.clone(): "*" },
             }),
-        )
-        .await;
-    kernel
-        .send(
-            &AgentId::from("core"),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
                 "type": "create_agent",
+                "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": backend_id,
                 "file_bridge_id": file_id,
@@ -84,8 +89,10 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
                 // Deny-all: persists to its store directly + streams to `cli`.
                 "can_call": { file_id: "*", "cli": "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     (kernel, AgentId::from(backend_id.as_str()))
 }
 
@@ -157,11 +164,13 @@ async fn send_streams_tokens_and_emits_done() {
     let client_id = "browser_tok";
 
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["client_id"], client_id);
     assert_eq!(reply["response"], "Hello world");
     assert_eq!(reply["final"], "Hello world");
@@ -218,11 +227,13 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
 
     let client_id = "browser_tool";
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "go", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["response"], envelope, "verbatim text: {reply:#?}");
 
     let routed = tmp.path().join(".fantastic").join("routed.txt");
@@ -307,18 +318,25 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     let (kernel, backend) = mk_kernel(&tmp, "think", &server.uri()).await;
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "hi", "client_id": "c_think"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(
         reply["response"],
         json!(format!("{THINK_OPEN}deliberating{THINK_CLOSE}ack"))
     );
     let h = kernel
-        .send(&backend, json!({"type": "history", "client_id": "c_think"}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "history", "client_id": "c_think"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let messages = h["messages"].as_array().expect("messages array");
     assert_eq!(messages.last().unwrap()["content"], "ack");
 }
@@ -340,30 +358,47 @@ async fn sends_temperature_default_and_override() {
     let _rx = rebind_backend_inbox(&kernel, &backend);
 
     // default: reflect + the actual request both carry 0.3.
-    kernel
-        .send(&backend, json!({"type":"send","text":"hi","client_id":"c"}))
-        .await;
-    let r = kernel.send(&backend, json!({"type": "reflect"})).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type":"send","text":"hi","client_id":"c"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["temperature"], json!(DEFAULT_TEMPERATURE));
     let reqs = server.received_requests().await.unwrap();
     let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(sent["options"]["temperature"], json!(DEFAULT_TEMPERATURE));
 
     // override via the record: reflect + the next request both carry it.
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"update_agent","id": backend.as_str(), "temperature": 0.15}),
-        )
-        .await;
-    let r2 = kernel.send(&backend, json!({"type": "reflect"})).await;
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r2 = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r2["temperature"], json!(0.15));
-    kernel
-        .send(
-            &backend,
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type":"send","text":"hi2","client_id":"c"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let reqs = server.received_requests().await.unwrap();
     let last: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
     assert_eq!(last["options"]["temperature"], json!(0.15));
@@ -407,7 +442,14 @@ async fn list_models_served_returns_names_in_order() {
         .await;
 
     let (kernel, backend) = mk_kernel(&tmp, "lm", &server.uri()).await;
-    let reply = kernel.send(&backend, json!({"type": "list_models"})).await;
+    let reply = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "list_models"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["models"], json!(["gemma3:12b", "llama3:8b"]));
     assert!(
         reply.get("error").is_none(),
@@ -432,11 +474,13 @@ async fn list_models_payload_endpoint_overrides_record() {
     let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
     let (kernel, backend) = mk_kernel(&tmp, "lmo", &dead).await;
     let reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "list_models", "endpoint": server.uri()}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(reply["models"], json!(["probe:1b"]));
 }
 
@@ -445,7 +489,14 @@ async fn list_models_unreachable_returns_error_naming_the_endpoint() {
     let tmp = TempDir::new().unwrap();
     let dead = format!("http://127.0.0.1:{}", free_then_closed_port());
     let (kernel, backend) = mk_kernel(&tmp, "lmx", &dead).await;
-    let reply = kernel.send(&backend, json!({"type": "list_models"})).await;
+    let reply = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "list_models"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let err = reply
         .get("error")
         .and_then(Value::as_str)
@@ -473,15 +524,22 @@ async fn history_persists_and_round_trips() {
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_hist";
     let _reply = kernel
-        .send(
-            &backend,
+        .send(vec![Item::new(
+            backend.clone(),
             json!({"type": "send", "text": "ping", "client_id": client_id}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let h = kernel
-        .send(&backend, json!({"type": "history", "client_id": client_id}))
-        .await;
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "history", "client_id": client_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
     let messages = h["messages"].as_array().expect("messages array");
     assert!(
         messages.len() >= 2,

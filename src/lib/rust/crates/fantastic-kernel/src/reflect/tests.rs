@@ -1,4 +1,5 @@
 //! Unit tests for [`crate::reflect`].
+use crate::outcome::Item;
 
 use super::*;
 use crate::agent::Agent;
@@ -512,4 +513,119 @@ async fn non_root_has_no_readmes_frame() {
     let r = bare_reflect(&kernel, &child, &json!({"type":"reflect","tree":"none"}));
     assert!(r.get("readmes").is_none());
     assert!(r.get("docs").is_none());
+}
+
+// ─── #1 / #7 — paged listings + the gate made readable ──────────────
+
+#[tokio::test]
+async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
+    let kernel = Arc::new(Kernel::new());
+    let root = mk_agent("core", None);
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for i in 0..5 {
+        let c = mk_agent(&format!("kid_{i}"), Some(root.id.clone()));
+        let _ = kernel.register(Arc::clone(&c));
+        root.children.insert(c.id.clone(), Arc::clone(&c));
+    }
+
+    // Default is UNCHANGED — everything, no cursor.
+    let all = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"ids"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(all["tree"].as_array().unwrap().len(), 6); // self + 5
+    assert!(all["tree_next"].is_null());
+
+    // Bounded, and the cursor names the last id handed over.
+    let p1 = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"ids","limit":2}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(p1["tree"].as_array().unwrap().len(), 2);
+    let cursor = p1["tree_next"].as_str().expect("a further page exists");
+    assert_eq!(cursor, p1["tree"][1].as_str().unwrap());
+
+    // Resuming visits each id exactly once.
+    let mut seen: Vec<String> = p1["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    let mut cur = cursor.to_string();
+    loop {
+        let p = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type":"reflect","tree":"ids","limit":2,"after":cur}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        for v in p["tree"].as_array().unwrap() {
+            seen.push(v.as_str().unwrap().to_string());
+        }
+        match p["tree_next"].as_str() {
+            Some(c) => cur = c.to_string(),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 6);
+    let mut uniq = seen.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 6, "a paged walk must not repeat or skip");
+}
+
+#[tokio::test]
+async fn an_agent_can_read_its_own_authority() {
+    // The gate used to be INVISIBLE: an agent could only discover its authority
+    // by trying, which cost whole turns of empirical probing every run. It also
+    // makes `update_agent`'s replace-not-merge warning actionable — you must
+    // send the map whole, so you must be able to read it.
+    let kernel = Arc::new(Kernel::new());
+    let root = mk_agent("core", None);
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let mut meta = Map::new();
+    meta.insert("can_call".into(), json!({"store": ["read"]}));
+    meta.insert("callable_by".into(), json!({"cli": "*"}));
+    let a = mk_agent_meta("worker", Some(root.id.clone()), meta);
+    let _ra = kernel.register(Arc::clone(&a));
+    root.children.insert(a.id.clone(), Arc::clone(&a));
+
+    let own = kernel
+        .send(vec![Item::new(a.id.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(own["can_call"]["store"][0], "read");
+    assert_eq!(own["callable_by"]["cli"], "*");
+
+    // ...and the same two keys ride every distilled TREE node, so the whole
+    // authorization landscape is readable from ONE root reflect.
+    let tree = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let node = tree["tree"]["children"]
+        .as_array()
+        .and_then(|c| c.iter().find(|n| n["id"] == "worker"))
+        .expect("the worker node");
+    assert_eq!(node["can_call"]["store"][0], "read");
+    assert_eq!(node["callable_by"]["cli"], "*");
 }

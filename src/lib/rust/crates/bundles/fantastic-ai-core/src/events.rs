@@ -7,7 +7,7 @@
 
 use crate::helpers::now_secs;
 use crate::state::BackendState;
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallerRoute {
     /// `client_id == "cli"` round-trips through the `cli` agent
-    /// (`kernel.send("cli", ev)`); everyone else gets
+    /// (`kernel.send(vec![Item::new("cli", ev)])`); everyone else gets
     /// `kernel.emit(self_id, ev)` tagged with `client_id`. Matches the
     /// Python reference + the ollama backend.
     CliRoundTrip,
@@ -41,7 +41,11 @@ pub async fn to_caller(
     match route {
         CallerRoute::CliRoundTrip => {
             if client_id == crate::helpers::DEFAULT_CLIENT_ID {
-                let _ = kernel.send(&AgentId::from("cli"), ev).await;
+                let _ = kernel
+                    .send(vec![Item::new(AgentId::from("cli"), ev)])
+                    .await
+                    .remove(0)
+                    .result;
             } else {
                 kernel.emit(self_id, ev).await;
             }

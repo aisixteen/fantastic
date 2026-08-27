@@ -492,7 +492,14 @@ fn workdir_base(kernel: &Kernel) -> PathBuf {
 /// can't be pointed outside the kernel's own dir (the single disk surface stays
 /// bounded); reaching OUTSIDE is a separate `external` concern (not yet here),
 /// not a misconfigured root.
-fn clamp_root(raw: &Path, base: &Path) -> Result<PathBuf, String> {
+/// THE RUNNING-DIR LAW, exposed.
+///
+/// `fs` is the single disk surface, so anything that opens a path goes through
+/// this clamp — including the one-time COLD bring-up reads that happen before a
+/// `file_bridge` AGENT can exist (the roster manifest). Mirrors python, where
+/// `static_loader` imports `file_bridge.fs` for exactly that read: the clamp is
+/// not bypassed just because the reader is a different bundle.
+pub fn clamp_root(raw: &Path, base: &Path) -> Result<PathBuf, String> {
     // Compare LEXICALLY (no canonicalize) so the check doesn't require the dir
     // to exist AND both sides stay in the same path form — canonicalizing only
     // the base would mismatch a non-canonical absolute root on macOS (`/var`

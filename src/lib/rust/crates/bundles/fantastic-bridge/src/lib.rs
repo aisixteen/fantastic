@@ -47,7 +47,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -737,7 +737,11 @@ async fn forward_core(
         }
     };
     let n = state.corr_counter.fetch_add(1, Ordering::SeqCst) + 1;
-    let corr = format!("{}:{}", agent_id, n);
+    // DASH, not colon: `<agent>:<hex>` is the kernel's minted-pid namespace, and
+    // a bridge correlator that borrowed it would read as a REFERENCE to an
+    // execution this kernel never minted. Same reason a caller-chosen id may not
+    // contain one.
+    let corr = format!("{}-{}", agent_id, n);
 
     let (tx, rx) = oneshot::channel::<Result<(Value, Vec<u8>), String>>();
     state
@@ -897,7 +901,19 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                         let _ = state.transport.send_binary(env, reply_body).await;
                     }
                 } else {
-                    let reply = kernel.send(&AgentId::from(target.as_str()), inner).await;
+                    // THE FRAME ID IS THE EXECUTION ID. The correlator a peer
+                    // already sends NAMES the execution, so a reconnect that
+                    // replays its queue joins the original instead of running
+                    // the side effect twice. No second `exec_id` field exists.
+                    let reply = kernel
+                        .send(vec![Item::from_frame(
+                            AgentId::from(target.as_str()),
+                            inner,
+                            corr_id.as_str(),
+                        )])
+                        .await
+                        .remove(0)
+                        .result;
                     let _ = state
                         .transport
                         .send_frame(json!({"type":"reply","id":corr_id,"data":reply}))
@@ -974,8 +990,7 @@ fn take_injected(agent_id: &AgentId) -> Option<Arc<dyn BridgeTransport>> {
 }
 
 /// Wire two agent ids together with a paired in-process
-/// [`MemoryTransport`]. After calling this, `kernel.send(<id>,
-/// {type:"boot"})` on either side will pick up its half from the
+/// [`MemoryTransport`]. After calling this, `kernel.send(vec![Item::new(<id>, /// {type:"boot"})])` on either side will pick up its half from the
 /// injection table.
 ///
 /// Test-only helper; real WS / HTTP bridges build their transport

@@ -16,7 +16,7 @@
 
 use crate::history::load_history;
 use crate::state::BackendState;
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -61,9 +61,69 @@ state. To send, emit exactly this, alone on its line:
 `reply_to` is where that send's reply goes. It defaults to you — leave it out and the
 answer comes back as your next message. Name another agent's id to hand the answer to
 them instead, or `null` to discard it. Text outside the tag is your message to whoever
-asked. A message tagged `[reply to <pid> · <id> <verb>]` is the reply to the send you issued
-naming that agent and that verb — replies can lag a turn behind when several calls are
-in flight, so match the tag before assuming a call was lost and re-issuing it.
+asked. Interpret instructions literally — act on what is asked, not on inferred
+intent. Keep prose brief: the work happens in calls, not in explanation.
+
+A `<tool_call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
+thinking. The envelope is parsed out of everything you emit and dispatched the
+moment it is complete, so there is no hypothetical or illustrative call: writing one
+makes it happen.
+
+Your thinking is NOT carried over between turns — it is stripped from history, so a
+conclusion you only reasoned about is lost. Put what you worked out into the call you
+make, or into a message. Reasoning longer never carries further than acting now does.
+Before ending a turn, check one thing: every action you decided on exists as a
+`<tool_call>` envelope in the turn. A decision without its envelope did not happen.
+
+Stopping is normal and costs nothing: emit no call when the work is done. Deciding
+whether you are allowed to stop is not worth a turn — if the task is finished, say so
+and stop; if it is not, make the next call.
+
+NEEDING A HUMAN IS ALSO NORMAL. When you cannot proceed without an answer, ask and
+stop: put the question in your message — STRICT JSON on its own line, so a UI
+can parse and render it:
+`{"type":"question", "request_id":"<yours>", "kind":"text|single|multi|confirm",
+"question":"...", "options":[...]}` — then emit no call. The chain
+ends; the ANSWER arrives as your next turn (name your request_id to correlate),
+with your full history intact — continue exactly where you stopped. Nothing you
+completed before asking will re-run.
+
+HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
+every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
+literally:
+
+- ALL the calls you make in ONE turn are answered TOGETHER in your next turn —
+  one block per call, each tagged `· N of M in batch <token>` when you made
+  several. M is complete on arrival: there is nothing still coming from that
+  batch, so never wait, poll, or re-ask for a "missing" reply — if a call
+  failed or timed out, its block says so.
+- The calls of one turn run CONCURRENTLY. Their side effects have NO defined
+  order — if B must happen after A, put B in the next turn, after A's reply.
+- Each call may carry `timeout: <seconds>` in its arguments to bound that call;
+  otherwise a generous default applies. A call that exceeds it is CANCELLED and
+  its block reports the timeout.
+- A call may carry `id: "<name>"` in its arguments — BESIDE `payload`, never
+  inside it: `{"name":"send","arguments":{"target_id":"x","payload":{...},
+  "id":"job-1"}}`. That NAMES the execution.
+  Re-sending the SAME id NEVER runs the work twice: you get the first run's
+  recorded outcome back, byte for byte (even if it failed). Use it for any call
+  you must not double-fire (a write, a payment, a create) and to safely re-fetch
+  a reply; a genuinely NEW attempt needs a NEW id. Ids may not contain ':'.
+  Add `retries: N` and the KERNEL re-runs a failing or timing-out call up to N
+  more times before answering — you send once and receive the final outcome
+  (`attempts` says how many runs it took). Work that stays failed is parked:
+  `send 'kernel' {type:'ledger'}` lists your executions and what became of
+  them, outcomes included — inspect there instead of re-firing blind.
+- `reply_to:null` means the call still runs but its answer is discarded — it is
+  not in M and nothing comes back. `reply_to:<someone else>` hands that block to
+  THEM instead of you.
+- A reply whose PID you do not recognise is NORMAL — another agent can route its
+  result to you. Read it, use it if useful, and move on.
+
+A `reflect` reply is LARGE and TRANSIENT — you see its full text once, in the turn it
+arrives, and the reply itself carries the instruction for what to record before it
+goes. Follow it there. If you later need a detail you did not keep, reflect that agent
+again — it is cheap and always current, and re-reading beats guessing.
 "#;
 
 /// The context-window how-to, appended to the DEFAULT system block. Context is
@@ -106,14 +166,21 @@ pub async fn assemble_messages(
         _ => {
             // Lean primer: a flat id-index of the tree + the bundle catalog by name.
             let primer = kernel
-                .send(
-                    &AgentId::from("kernel"),
+                .send(vec![Item::new(
+                    AgentId::from("kernel"),
                     json!({"type": "reflect", "tree": "ids", "bundles": "ids"}),
-                )
-                .await;
+                )])
+                .await
+                .remove(0)
+                .result;
             let me = kernel
-                .send(self_id, json!({"type": "reflect", "tree": "none"}))
-                .await;
+                .send(vec![Item::new(
+                    self_id.clone(),
+                    json!({"type": "reflect", "tree": "none"}),
+                )])
+                .await
+                .remove(0)
+                .result;
             [
                 render_reflect(&primer),
                 format!("You are `{}`. {}", self_id, render_reflect(&me)),

@@ -1,4 +1,5 @@
 //! Unit tests for [`crate::bootstrap`].
+use crate::outcome::Item;
 
 use super::*;
 use crate::Bundle;
@@ -50,12 +51,9 @@ fn bootstrap_hydrates_persisted_children() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
-            kernel
-                .send(
-                    &AgentId::from("core"),
-                    json!({"type":"create_agent","handler_module":"noop.tools","id":"child_a"}),
-                )
-                .await;
+            let _ = kernel
+                .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+                .await.remove(0).result;
         });
         shutdown(tmp.path()).unwrap();
     }

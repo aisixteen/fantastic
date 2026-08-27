@@ -8,6 +8,9 @@ description = "Declarative YAML roster loader — hydrates the declared agents a
 
 [dependencies]
 fantastic-kernel = { path = "../../fantastic-kernel" }
+# The running-dir clamp: `fs` is the one disk surface, and the cold manifest
+# read is not exempt (python does the same — static_loader imports file_bridge.fs).
+fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 serde_yaml = "0.9"

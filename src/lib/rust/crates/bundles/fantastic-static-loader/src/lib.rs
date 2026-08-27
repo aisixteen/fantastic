@@ -14,7 +14,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{with_operator, Agent, AgentId, Kernel};
+use fantastic_kernel::{with_operator, Agent, AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -46,7 +46,13 @@ fn load_manifest(agent: &Agent) -> Result<Vec<Value>, String> {
             "static_loader: no `{MANIFEST_FIELD}` path on the record"
         ));
     };
-    let text = std::fs::read_to_string(&path)
+    // CLAMPED to the running dir. A cold read is still a read: `fs` is the one
+    // disk surface, and a manifest path pointing outside the kernel's own dir
+    // refuses here rather than being opened because this happens at bring-up.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let clamped = fantastic_file::clamp_root(std::path::Path::new(&path), &cwd)
+        .map_err(|e| format!("static_loader: manifest {path:?} is not readable: {e}"))?;
+    let text = std::fs::read_to_string(&clamped)
         .map_err(|e| format!("static_loader: cannot read manifest {path:?}: {e}"))?;
     let data: Value = serde_yaml::from_str(&text)
         .map_err(|e| format!("static_loader: manifest {path:?} is not valid YAML: {e}"))?;
@@ -90,13 +96,22 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 continue;
             }
         }
-        // create_agent to SELF → the declared agent becomes THIS loader's child
-        // ($parent = the loader). Baseline grant is stamped + the manifest's
-        // explicit `can_call` merges on top; the child boots inside create_agent.
-        // Operator authority: the loader hydrating the roster it was told to build.
+        // The declared agent becomes THIS loader's child ($parent = the loader),
+        // but placement is stated by `parent_id`, not by who is addressed:
+        // `create_agent` is kernel-owned and answered by the ROOT alone. Baseline
+        // grant is stamped + the manifest's explicit `can_call` merges on top;
+        // the child boots inside create_agent. Operator authority: the loader
+        // hydrating the roster it was told to build.
         let mut payload = obj.clone();
         payload.insert("type".to_string(), json!("create_agent"));
-        let rec = with_operator(kernel.send(&agent.id, Value::Object(payload))).await;
+        payload.insert("parent_id".to_string(), json!(agent.id.0));
+        let rec = with_operator(kernel.send(vec![Item::new(
+            AgentId::from("kernel"),
+            Value::Object(payload),
+        )]))
+        .await
+        .remove(0)
+        .result;
         match rec.get("id").and_then(Value::as_str) {
             Some(id) => created.push(id.to_string()),
             None => {
@@ -128,6 +143,39 @@ fn reflect_reply(agent: &Agent) -> Value {
 impl Bundle for StaticLoaderBundle {
     fn name(&self) -> &str {
         "static_loader"
+    }
+
+    /// Refuse a manifest that is absent or unreadable at WRITE time, so a broken
+    /// roster never becomes a booting record. Merged view (record + patch): a
+    /// record may exist without a manifest yet — `boot` reports that — but a
+    /// manifest that is NAMED must be readable now.
+    fn validate_meta(
+        &self,
+        meta: &serde_json::Map<String, Value>,
+        record: &serde_json::Map<String, Value>,
+    ) -> Option<String> {
+        let mut merged = record.clone();
+        for (k, v) in meta {
+            merged.insert(k.clone(), v.clone());
+        }
+        let raw = merged.get(MANIFEST_FIELD)?;
+        let path = match raw.as_str() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                return Some(format!(
+                    "static_loader: {MANIFEST_FIELD} must be a non-empty path string"
+                ))
+            }
+        };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        match fantastic_file::clamp_root(std::path::Path::new(path), &cwd) {
+            Err(e) => Some(format!(
+                "static_loader: manifest {path:?} is not readable: {e}"
+            )),
+            Ok(clamped) => std::fs::read_to_string(&clamped)
+                .err()
+                .map(|e| format!("static_loader: manifest {path:?} is not readable: {e}")),
+        }
     }
 
     fn readme(&self) -> Option<&'static str> {

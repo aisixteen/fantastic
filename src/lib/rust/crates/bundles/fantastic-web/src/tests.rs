@@ -2,6 +2,7 @@
 
 use super::*;
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::Map;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -135,23 +136,30 @@ async fn web_alone_has_no_ws_endpoint() {
 
     // create + boot web
     let create_reply = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         create_reply.get("error").is_none(),
         "create: {create_reply}"
     );
     let boot_reply = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
@@ -169,9 +177,14 @@ async fn web_alone_has_no_ws_endpoint() {
     );
 
     // cleanup
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 /// `web` + `web_ws` child: WS endpoint live at `/<web_id>/ws` after boot.
@@ -185,30 +198,39 @@ async fn web_with_ws_child_serves_ws() {
     let port = free_port();
     let web_id = "web_with_ws";
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
-    kernel
-        .send(
-            &AgentId::from(web_id),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_ws.tools",
                 "id": "wws_child",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let boot_reply = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
@@ -236,9 +258,14 @@ async fn web_with_ws_child_serves_ws() {
     assert_eq!(v["id"], "x1");
     assert!(v["data"]["agents"].is_array());
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 /// `web` + `web_rest` child: POST endpoint live at `/<rest_id>/<target>`.
@@ -250,22 +277,25 @@ async fn web_with_rest_child_serves_rest() {
     let web_id = "web_with_rest";
     let rest_id = "wr_child";
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
-    kernel
-        .send(
-            &AgentId::from(web_id),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
+                "parent_id": web_id,
                 "handler_module": "web_rest.tools",
                 "id": rest_id,
                 // Deny-all: an inbound relay dispatches browser calls into the
@@ -273,22 +303,31 @@ async fn web_with_rest_child_serves_rest() {
                 // says WHERE into the kernel it lands. This test POSTs to `core`.
                 "can_call": { "core": "*" },
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     // Two-sided deny-all: the relay dispatches into root AS ITSELF, but it is
     // root's GRANDCHILD (child of `web`), so $children:* does not cover it — open
     // root's ingress for the relay (merged with the structural baseline).
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type": "update_agent", "id": "core", "callable_by": {
                 "$self": "*", "$parent": "*", "$children": "*", rest_id: "*",
             }}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let boot_reply = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
@@ -304,9 +343,14 @@ async fn web_with_rest_child_serves_rest() {
     let body: Value = resp.json().await.expect("body json");
     assert!(body["agents"].is_array(), "body: {body}");
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 /// Boot web alone, then create a `web_ws` child + emit `routes_changed`,
@@ -321,20 +365,27 @@ async fn runtime_added_ws_child_hot_mounts() {
     let port = free_port();
     let web_id = "web_hot";
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let boot_reply = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 
@@ -348,22 +399,29 @@ async fn runtime_added_ws_child_hot_mounts() {
     assert_eq!(pre.status().as_u16(), 404, "pre-mount must 404");
 
     // Stage the child + trigger a re-mount via `routes_changed` emit.
-    kernel
-        .send(
-            &AgentId::from(web_id),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_ws.tools",
                 "id": "wws_hot",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     // `create_agent` itself emits `created` which the subscriber treats
     // as a re-mount signal — but we also explicitly emit
     // `routes_changed` for spec parity. Both should be idempotent.
-    kernel
-        .send(&AgentId::from("wws_hot"), json!({"type": "routes_changed"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("wws_hot"),
+            json!({"type": "routes_changed"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // The subscriber tokio::spawns the rebuild; poll until the WS
     // upgrades or we time out.
@@ -390,9 +448,14 @@ async fn runtime_added_ws_child_hot_mounts() {
     }
     assert!(ok, "WS endpoint never became live after hot-mount");
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 // ── Binary frame chunking ───────────────────────────────────────────
@@ -410,30 +473,40 @@ async fn runtime_added_ws_child_hot_mounts() {
 /// web agent id. Caller is responsible for stop.
 async fn stage_web_with_ws(tmp: &TempDir, port: u16, web_id: &str) -> Arc<Kernel> {
     let kernel = mk_kernel(tmp, true, false);
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
-    kernel
-        .send(
-            &AgentId::from(web_id),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             json!({
                 "type": "create_agent",
+                "parent_id": web_id,
                 "handler_module": "web_ws.tools",
                 "id": format!("{web_id}_ws"),
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let r = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["running"], true, "boot: {r}");
     wait_until_port_accepts(port).await;
     kernel
@@ -507,9 +580,14 @@ async fn single_frame_upload_dispatches_immediately() {
         "expected `no agent` in data.error, got: {reply}"
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -567,9 +645,14 @@ async fn chunked_upload_reassembles_in_order() {
         }
     }
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -632,9 +715,14 @@ async fn chunked_upload_handles_out_of_order_chunks() {
         "expected 'no agent' in dispatch reply, got {reply}"
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -664,9 +752,14 @@ async fn oversized_chunk_rejected() {
         .unwrap_or("")
         .contains("exceeds chunk cap"));
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -714,9 +807,14 @@ async fn oversized_total_rejected() {
         "expected total-size cap to fire before chunk 101"
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -753,9 +851,14 @@ async fn chunk_ack_emitted_after_each_non_final_chunk() {
         assert_eq!(ack["chunk_index"], idx);
     }
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -808,9 +911,14 @@ async fn pending_uploads_drop_on_ws_disconnect() {
         "fresh WS should treat upload_id as new — got {frames:?}",
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 // ── /_assets/* — vendored third-party web deps ─────────────────────
@@ -822,19 +930,26 @@ async fn pending_uploads_drop_on_ws_disconnect() {
 
 async fn boot_web_for_assets(kernel: &Arc<Kernel>, port: u16, web_id: &str) {
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": HANDLER_MODULE,
                 "id": web_id,
                 "port": port,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let boot_reply = kernel
-        .send(&AgentId::from(web_id), json!({"type": "boot"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
     wait_until_port_accepts(port).await;
 }
@@ -870,9 +985,14 @@ async fn assets_three_js_served_with_javascript_mime() {
         "body doesn't look like Three.js"
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -902,9 +1022,14 @@ async fn assets_xterm_js_served_with_javascript_mime() {
         body.len()
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -927,9 +1052,14 @@ async fn assets_xterm_css_served_with_css_mime() {
     let body = resp.text().await.expect("body");
     assert!(body.contains("xterm"), "css body looks wrong");
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -955,9 +1085,14 @@ async fn assets_xterm_addon_fit_served() {
     let body = resp.text().await.expect("body");
     assert!(!body.is_empty());
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -984,9 +1119,14 @@ async fn assets_carry_immutable_cache_control() {
         "expected max-age in cache-control; got {cache:?}"
     );
 
-    kernel
-        .send(&AgentId::from(web_id), json!({"type": "stop"}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 // ── ingest_chunk unit tests (pure assembly, no WS) ──────────────────

@@ -7,6 +7,7 @@
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::Item;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -54,30 +55,31 @@ async fn in_memory_boots_and_creates_agents_without_touching_disk() {
     // Create + mutate + delete an agent — all should work in
     // memory.
     let v = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":"noop.tools","id":"brainpipe"}),
-        )
-        .await;
+        .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"brainpipe"}))])
+        .await.remove(0).result;
     assert_eq!(v["id"], "brainpipe");
     assert!(kernel.agents.contains_key(&AgentId::from("brainpipe")));
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"update_agent","id":"brainpipe","note":"tutor"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let snap = kernel.save();
     let bp = snap.agents.iter().find(|a| a.id == "brainpipe").unwrap();
     assert_eq!(bp.meta.get("note"), Some(&json!("tutor")));
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"delete_agent","id":"brainpipe"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(!kernel.agents.contains_key(&AgentId::from("brainpipe")));
 
     // Critical assertion: no `.fantastic/` dir appeared anywhere
@@ -99,12 +101,9 @@ async fn in_memory_save_load_roundtrips() {
     let booted = bootstrap(registry(), BootstrapOptions::in_memory()).unwrap();
     let kernel = Arc::clone(&booted.kernel);
     for id in ["a", "b", "c"] {
-        kernel
-            .send(
-                &AgentId::from("core"),
-                json!({"type":"create_agent","handler_module":"noop.tools","id":id}),
-            )
-            .await;
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .await.remove(0).result;
     }
     let snapshot = kernel.save_json();
 

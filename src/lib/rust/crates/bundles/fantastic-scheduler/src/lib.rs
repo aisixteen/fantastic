@@ -26,7 +26,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -165,25 +165,22 @@ async fn update_meta(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str, value:
 
 // ── file-agent-routed persistence ───────────────────────────────────
 
-// STORE-RELATIVE paths (`agents/<id>/…`): wire `file_bridge_id` to the
-// `.fantastic` store and the sidecars land next to the agent's own agent.json —
-// one store, no `.fantastic/.fantastic/…` double-nest. Matches Python.
-fn schedules_path(agent_id: &AgentId) -> String {
-    format!("agents/{}/schedules.json", agent_id)
-}
+// THE LOADER OWNS THE PATH. This bundle names only a FILENAME; the sidecar
+// lands beside the agent's own agent.json in whatever store the kernel
+// discovered. No provider is named here and no path is computed.
+const SCHEDULES_BLOB: &str = "schedules.json";
+const HISTORY_BLOB: &str = "history.jsonl";
 
-fn history_path(agent_id: &AgentId) -> String {
-    format!("agents/{}/history.jsonl", agent_id)
-}
-
-async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> Option<String> {
-    let fid = meta_string(agent_id, kernel, "file_bridge_id")?;
-    let reply = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "read", "path": path}),
-        )
-        .await;
+async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, name: &str) -> Option<String> {
+    // Operator authority: reading our OWN sidecar is bookkeeping processed from
+    // above, not this agent reaching out.
+    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({"type": "load_blob", "agent_id": agent_id.0, "name": name}),
+    )]))
+    .await
+    .remove(0)
+    .result;
     reply
         .get("content")
         .and_then(Value::as_str)
@@ -193,19 +190,21 @@ async fn file_read(agent_id: &AgentId, kernel: &Arc<Kernel>, path: &str) -> Opti
 async fn file_write(
     agent_id: &AgentId,
     kernel: &Arc<Kernel>,
-    path: &str,
+    name: &str,
     content: &str,
 ) -> Result<(), String> {
-    let fid = match meta_string(agent_id, kernel, "file_bridge_id") {
-        Some(s) => s,
-        None => return Err("file_bridge_id unset".to_string()),
-    };
-    let reply = kernel
-        .send(
-            &AgentId::from(fid.as_str()),
-            json!({"type": "write", "path": path, "content": content}),
-        )
-        .await;
+    let reply = fantastic_kernel::send::with_operator(kernel.send(vec![Item::new(
+        AgentId::from("kernel"),
+        json!({
+            "type": "persist_blob",
+            "agent_id": agent_id.0,
+            "name": name,
+            "content": content,
+        }),
+    )]))
+    .await
+    .remove(0)
+    .result;
     if let Some(err) = reply.get("error").and_then(Value::as_str) {
         return Err(err.to_string());
     }
@@ -216,7 +215,7 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
     if let Some(cached) = SCHEDULE_CACHE.lock().get(agent_id).cloned() {
         return cached;
     }
-    let raw = file_read(agent_id, kernel, &schedules_path(agent_id)).await;
+    let raw = file_read(agent_id, kernel, SCHEDULES_BLOB).await;
     let parsed: Vec<Value> = match raw {
         Some(s) => serde_json::from_str(&s).unwrap_or_default(),
         None => Vec::new(),
@@ -233,7 +232,7 @@ async fn save_schedules(
     schedules: &[Value],
 ) -> Result<(), String> {
     let body = serde_json::to_string_pretty(schedules).map_err(|e| format!("serialize: {e}"))?;
-    file_write(agent_id, kernel, &schedules_path(agent_id), &body).await?;
+    file_write(agent_id, kernel, SCHEDULES_BLOB, &body).await?;
     SCHEDULE_CACHE
         .lock()
         .insert(agent_id.clone(), schedules.to_vec());
@@ -245,7 +244,7 @@ async fn append_history(
     kernel: &Arc<Kernel>,
     event: &Value,
 ) -> Result<(), String> {
-    let prev = file_read(agent_id, kernel, &history_path(agent_id))
+    let prev = file_read(agent_id, kernel, HISTORY_BLOB)
         .await
         .unwrap_or_default();
     let line = serde_json::to_string(event).map_err(|e| format!("serialize: {e}"))?;
@@ -266,11 +265,11 @@ async fn append_history(
     } else {
         combined
     };
-    file_write(agent_id, kernel, &history_path(agent_id), &trimmed).await
+    file_write(agent_id, kernel, HISTORY_BLOB, &trimmed).await
 }
 
 async fn read_history(agent_id: &AgentId, kernel: &Arc<Kernel>, limit: usize) -> Vec<Value> {
-    let raw = match file_read(agent_id, kernel, &history_path(agent_id)).await {
+    let raw = match file_read(agent_id, kernel, HISTORY_BLOB).await {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -351,8 +350,13 @@ async fn fire_schedule(agent_id: &AgentId, kernel: &Arc<Kernel>, sch: &Value) {
         error = Some("empty target".to_string());
     } else {
         let reply = kernel
-            .send(&AgentId::from(target.as_str()), payload.clone())
-            .await;
+            .send(vec![Item::new(
+                AgentId::from(target.as_str()),
+                payload.clone(),
+            )])
+            .await
+            .remove(0)
+            .result;
         if let Some(err) = reply.get("error").and_then(Value::as_str) {
             error = Some(err.to_string());
         } else {

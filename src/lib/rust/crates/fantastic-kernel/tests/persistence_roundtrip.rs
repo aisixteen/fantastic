@@ -9,6 +9,7 @@
 //! is a no-op (RAM) — also asserted.
 
 use async_trait::async_trait;
+use fantastic_kernel::Item;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Kernel, Reply, StorageMode};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -135,18 +136,20 @@ fn kernel_at(store_root: &Path) -> Arc<Kernel> {
 /// `store_root`, THROUGH the real `create_agent` verb (so `children` is
 /// populated for `find_store` exactly as in production).
 async fn wire_store(kernel: &Arc<Kernel>, store_root: &Path) {
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
                 "id": "store",
                 "root": store_root.to_string_lossy(),
                 "ingress_rule": "allow_all_ingress",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[tokio::test]
@@ -158,18 +161,20 @@ async fn persist_through_provider_writes_record() {
 
     // Create a child of root through the real lifecycle — its record persists
     // THROUGH the discovered provider (no direct fs::write in the substrate).
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "noop.tools",
                 "id": "test_1",
                 "display_name": "Testy",
                 "port": 18181,
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let rec =
         fantastic_kernel::persistence::read_record_at(&store_root.join("agents/test_1/agent.json"))
@@ -190,16 +195,18 @@ async fn persist_with_no_provider_is_ram_noop() {
     let store_root = tmp.path();
     let kernel = kernel_at(store_root); // NO store wired ⇒ find_store → None.
 
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({
-                "type": "create_agent",
+                "type": "create_agent", "parent_id": "kernel",
                 "handler_module": "noop.tools",
                 "id": "test_1",
             }),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     // No provider ⇒ nothing written (RAM). NO FALLBACK to direct fs.
     assert!(
@@ -216,19 +223,18 @@ async fn delete_removes_record_through_provider() {
     let store_root = tmp.path();
     let kernel = kernel_at(store_root);
     wire_store(&kernel, store_root).await;
-    kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type": "create_agent", "handler_module": "noop.tools", "id": "doomed"}),
-        )
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "noop.tools", "id": "doomed"}))])
+        .await.remove(0).result;
     assert!(store_root.join("agents/doomed/agent.json").exists());
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type": "delete_agent", "id": "doomed"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     // The provider's recursive delete removed the dir.
     assert!(
         !store_root.join("agents/doomed").exists(),

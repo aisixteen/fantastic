@@ -32,6 +32,7 @@ use crate::agent::{Agent, AgentId, AgentRecord};
 use crate::bundle::BundleRegistry;
 use crate::errors::{KernelError, KernelResult};
 use crate::kernel::Kernel;
+use crate::outcome::Item;
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,11 +52,27 @@ pub fn find_store(kernel: &Kernel) -> Option<AgentId> {
     // (absolutize + fold `.`/`..`) — no filesystem touch, so discovery works
     // before the dir exists (and stays a single deterministic path, no fallback).
     let want = normalize_lexical(&base, &root.root_path);
-    for cid in root.child_ids() {
-        let child = match kernel.agents.get(&cid) {
-            Some(e) => Arc::clone(&e),
-            None => continue,
+
+    // SUBTREE, not direct children, BREADTH-FIRST.
+    //
+    // One level was scanned for a long time and the consequence was invisible: a
+    // provider declared through a `static_loader` manifest lands as a GRANDCHILD
+    // (a child of the roster loader, not of the root), was never discovered, and
+    // the flush then no-opped with no error anywhere — the tree silently stayed
+    // in RAM. Declaring it was never the problem; FINDING it was.
+    //
+    // Breadth-first so the shallowest match still wins, which keeps the previous
+    // behaviour whenever a direct child matches.
+    let mut queue: std::collections::VecDeque<AgentId> = root.child_ids().into_iter().collect();
+    let mut seen: std::collections::HashSet<AgentId> = std::collections::HashSet::new();
+    while let Some(cid) = queue.pop_front() {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        let Some(child) = kernel.agents.get(&cid).map(|e| Arc::clone(&e)) else {
+            continue;
         };
+        queue.extend(child.child_ids());
         if child.handler_module.as_deref() != Some("file_bridge.tools") {
             continue;
         }
@@ -103,32 +120,53 @@ fn normalize_lexical(base: &Path, p: &Path) -> PathBuf {
 /// loader itself → `""` (its `agent.json` sits at the provider root); a child →
 /// `agents/<id>` (recursively). Both paths share the same base, so this is a
 /// plain prefix-strip (no canonicalization).
-fn store_reldir(store_root: &Path, agent_root: &Path) -> String {
+pub(crate) fn store_reldir(store_root: &Path, agent_root: &Path) -> String {
     match agent_root.strip_prefix(store_root) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => agent_root.to_string_lossy().into_owned(),
     }
 }
 
-/// `read_stream` an agent.json-relative path through the provider, returning the
-/// raw bytes (empty on any error / missing file). One chunk — records are small
-/// (well under the default stream length), matching Python's single read.
-async fn read_via_store(kernel: &Arc<Kernel>, store_id: &AgentId, path: &str) -> Vec<u8> {
-    // Box::pin breaks the async TYPE-recursion cycle: a persist (reached from
-    // `send`'s dispatch) sends to the provider, whose dispatch could re-enter
-    // `send`. Boxing erases the future type at this hop.
-    // Operator authority: the substrate reading its OWN store is persistence
-    // bookkeeping, not an agent reaching out — it never runs against a grant.
-    let (meta, body) = Box::pin(crate::send::with_operator(kernel.send_with_binary(
-        store_id,
-        serde_json::json!({"type": "read_stream", "path": path}),
-        Vec::new(),
-    )))
-    .await;
-    if meta.get("error").is_some() {
-        return Vec::new();
+/// `read_stream` a store-relative path through the provider, PUMPED TO EOF,
+/// returning the raw bytes (empty on any error / missing file).
+///
+/// To EOF, not one chunk. The provider's default stream length is 64 KiB, so a
+/// single read silently TRUNCATED anything larger — and for a record that meant
+/// `serde_json` failed on the fragment, the merge fell back to an empty map, and
+/// every non-kernel key already on disk was quietly dropped on the next write.
+/// A partial read that looks like a successful one is the worst shape available.
+pub(crate) async fn read_via_store(
+    kernel: &Arc<Kernel>,
+    store_id: &AgentId,
+    path: &str,
+) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        // Box::pin breaks the async TYPE-recursion cycle: a persist (reached from
+        // `send`'s dispatch) sends to the provider, whose dispatch could re-enter
+        // `send`. Boxing erases the future type at this hop.
+        // Operator authority: the substrate reading its OWN store is persistence
+        // bookkeeping, not an agent reaching out — it never runs against a grant.
+        let (meta, body) = Box::pin(crate::send::with_operator(kernel.send_with_binary(
+            store_id,
+            serde_json::json!({"type": "read_stream", "path": path, "offset": offset}),
+            Vec::new(),
+        )))
+        .await;
+        if meta.get("error").is_some() {
+            return Vec::new();
+        }
+        out.extend_from_slice(&body);
+        // A provider that reports neither `eof` nor a moving cursor gets ONE
+        // pass — the loop must not spin on a surface that cannot answer.
+        let eof = meta.get("eof").and_then(Value::as_bool).unwrap_or(true);
+        let next = meta.get("next_offset").and_then(Value::as_u64);
+        match next {
+            Some(n) if !eof && n > offset => offset = n,
+            _ => return out,
+        }
     }
-    body
 }
 
 /// Fold `main.py` back onto the record as `code`. Absent file ⇒ the field simply
@@ -283,10 +321,10 @@ pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     if reldir.is_empty() {
         return Ok(()); // never remove the root
     }
-    let _ = Box::pin(crate::send::with_operator(kernel.send(
-        &store_id,
+    let _ = Box::pin(crate::send::with_operator(kernel.send(vec![Item::new(
+        store_id,
         serde_json::json!({"type": "delete", "path": reldir}),
-    )))
+    )])))
     .await;
     Ok(())
 }
@@ -441,3 +479,95 @@ fn _path_constants_used() {
     let _ = (LOCK_PATH, ROOT_RECORD_PATH, CHILDREN_DIR);
     let _ = Map::<String, serde_json::Value>::new();
 }
+
+// ─── the DURABLE LEDGER (#37) ────────────────────────────────────────
+
+/// The sidecar holding SETTLED executions, store-relative at the root.
+pub const LEDGER_BLOB: &str = "ledger.json";
+
+/// Write every settled row through the discovered store.
+///
+/// No store ⇒ RAM only. That is the AUTO-FLUSH LAW, not a fallback: with
+/// nothing wired the tree does not persist either, and the ledger follows the
+/// same rule rather than inventing a second disk surface.
+pub async fn flush_ledger(kernel: &Arc<Kernel>) {
+    if kernel.storage.is_in_memory() {
+        return;
+    }
+    let Some(store_id) = find_store(kernel) else {
+        return;
+    };
+    let doc = kernel.ledger.settled_snapshot().to_string();
+    Box::pin(crate::send::with_operator(kernel.send_with_binary(
+        &store_id,
+        serde_json::json!({"type": "write_stream", "path": LEDGER_BLOB, "truncate": true}),
+        doc.into_bytes(),
+    )))
+    .await;
+}
+
+/// Restore settled executions at boot, so dedup holds across a restart: a
+/// completed step is never re-executed by a fresh process and a parked dead
+/// letter stays dead.
+///
+/// Runs BEFORE the flusher is installed, so hydration never rewrites what it
+/// just read. Every failure is LOUD and starts empty — a ledger that silently
+/// half-loads would re-arm exactly the side effects it exists to prevent.
+pub async fn rehydrate_ledger(kernel: &Arc<Kernel>) -> usize {
+    let Some(store_id) = find_store(kernel) else {
+        return 0;
+    };
+    let bytes = read_via_store(kernel, &store_id, LEDGER_BLOB).await;
+    if bytes.is_empty() {
+        return 0;
+    }
+    let doc: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("  [ledger] {LEDGER_BLOB} unreadable, starting empty: {e}");
+            return 0;
+        }
+    };
+    // An unknown version is not a migration we can guess at.
+    match doc.get("v").and_then(Value::as_u64) {
+        Some(1) => {}
+        other => {
+            println!(
+                "  [ledger] {LEDGER_BLOB} is version {other:?}, this kernel reads 1 \
+                 — starting empty (no migration written)"
+            );
+            return 0;
+        }
+    }
+    kernel.ledger.rehydrate(&doc)
+}
+
+/// Rehydrate, then install the debounced write-through.
+///
+/// Debounced because a batch settles many rows in a burst and each one would
+/// otherwise rewrite the whole sidecar; settles that land mid-write coalesce
+/// into ONE follow-up pass.
+pub async fn install_ledger_persistence(kernel: &Arc<Kernel>) {
+    let n = rehydrate_ledger(kernel).await;
+    if n > 0 {
+        println!("  [ledger] rehydrated {n} settled execution(s)");
+    }
+    let k = Arc::clone(kernel);
+    let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    kernel.set_ledger_flusher(Box::new(move || {
+        use std::sync::atomic::Ordering;
+        // Already scheduled? Fold into that pass.
+        if pending.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let k2 = Arc::clone(&k);
+        let p2 = Arc::clone(&pending);
+        tokio::spawn(async move {
+            p2.store(false, Ordering::SeqCst);
+            flush_ledger(&k2).await;
+        });
+    }));
+}
+
+mod blob;
+pub(crate) use blob::{load_blob, persist_blob};

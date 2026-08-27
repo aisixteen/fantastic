@@ -37,7 +37,7 @@ use axum::{
     Router,
 };
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::{AgentId, Kernel, SubscriberToken};
+use fantastic_kernel::{AgentId, Item, Kernel, SubscriberToken};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -407,7 +407,11 @@ async fn build_router_from_siblings(
     let mut surface_has_routes = false;
 
     for cid in child_ids {
-        let reply = kernel.send(&cid, json!({"type": "get_routes"})).await;
+        let reply = kernel
+            .send(vec![Item::new(cid.clone(), json!({"type": "get_routes"}))])
+            .await
+            .remove(0)
+            .result;
         let Some(routes) = reply.get("routes").and_then(Value::as_array) else {
             continue;
         };
@@ -598,7 +602,12 @@ async fn serve_rest_post_dynamic(
 ) -> Response {
     let target = AgentId::from(target_id.as_str());
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state.kernel.send(&target, payload).await
+        state
+            .kernel
+            .send(vec![Item::new(target.clone(), payload)])
+            .await
+            .remove(0)
+            .result
     })
     .await;
     // Python parity: return 204 No Content if the verb's reply was
@@ -633,7 +642,12 @@ async fn serve_rest_reflect_root_dynamic(
         "readme": q.readme.unwrap_or(0) != 0,
     });
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state.kernel.send(&target, payload).await
+        state
+            .kernel
+            .send(vec![Item::new(target.clone(), payload)])
+            .await
+            .remove(0)
+            .result
     })
     .await;
     (
@@ -658,7 +672,12 @@ async fn serve_rest_reflect_dynamic(
         "readme": q.readme.unwrap_or(0) != 0,
     });
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state.kernel.send(&target, payload).await
+        state
+            .kernel
+            .send(vec![Item::new(target.clone(), payload)])
+            .await
+            .remove(0)
+            .result
     })
     .await;
     (
@@ -684,11 +703,13 @@ async fn serve_root_index_dynamic(State(state): State<AppState>) -> impl IntoRes
 
     // Pull the root's reflect to get the tree (default tree=all).
     let primer = kernel
-        .send(
-            &AgentId::from("kernel"),
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
             serde_json::json!({"type":"reflect"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let tree = primer.get("tree").cloned().unwrap_or(Value::Null);
 
     // Collect every agent id from the tree (depth-first).
@@ -713,21 +734,25 @@ async fn serve_root_index_dynamic(State(state): State<AppState>) -> impl IntoRes
         async move {
             // Try render_html first.
             let r = kernel
-                .send(
-                    &AgentId::from(id.as_str()),
+                .send(vec![Item::new(
+                    AgentId::from(id.as_str()),
                     serde_json::json!({"type":"render_html"}),
-                )
-                .await;
+                )])
+                .await
+                .remove(0)
+                .result;
             if r.get("html").and_then(Value::as_str).is_some() {
                 return (id, true);
             }
             // Then get_webapp.
             let r = kernel
-                .send(
-                    &AgentId::from(id.as_str()),
+                .send(vec![Item::new(
+                    AgentId::from(id.as_str()),
                     serde_json::json!({"type":"get_webapp"}),
-                )
-                .await;
+                )])
+                .await
+                .remove(0)
+                .result;
             if r.get("url").is_some() && r.get("error").is_none() {
                 return (id, true);
             }
@@ -882,8 +907,13 @@ async fn serve_agent_render(
     let target = AgentId::from(agent_id.as_str());
     let reply = state
         .kernel
-        .send(&target, json!({"type": "render_html"}))
-        .await;
+        .send(vec![Item::new(
+            target.clone(),
+            json!({"type": "render_html"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     // Successful response: {html: "..."}.
     if let Some(html) = reply.get("html").and_then(Value::as_str) {
         let injected = inject_transport(html);
@@ -1221,9 +1251,25 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                 // slow tools) doesn't block the receive loop. Stash
                 // the JoinHandle so disconnect can abort it, releasing
                 // any kernel-side locks the dispatch holds.
+                let frame_id = id.clone();
                 let handle = tokio::spawn(async move {
                     let reply = fantastic_kernel::send::with_sender(sender_for_scope, async {
-                        kernel.send(&target, payload).await
+                        // THE FRAME ID IS THE EXECUTION ID. One id space: the
+                        // correlation id a client already sends NAMES the
+                        // execution, so the same id arriving twice — a
+                        // double-click, a second tab, a reconnect replaying its
+                        // queue — is ONE intent, deduped and joined by the
+                        // ledger instead of running the side effect twice.
+                        // There is deliberately no second `exec_id` field.
+                        kernel
+                            .send(vec![Item::from_frame(
+                                target.clone(),
+                                payload,
+                                frame_id.as_deref(),
+                            )])
+                            .await
+                            .remove(0)
+                            .result
                     })
                     .await;
                     if let Some(id) = id {

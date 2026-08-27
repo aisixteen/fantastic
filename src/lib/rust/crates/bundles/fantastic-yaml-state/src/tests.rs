@@ -50,12 +50,25 @@ async fn mk_agent(store_root: &Path, mode: &str) -> (Arc<Kernel>, AgentId) {
 /// A yaml_state agent with NO provider wired — for the failfast path.
 fn mk_unwired(mode: &str) -> (Arc<Kernel>, AgentId) {
     let kernel = Arc::new(Kernel::new());
+    // A ROOT, but NO file_bridge child — the real "no store wired" shape. Without
+    // a root at all the kernel alias would not resolve and we would be asserting
+    // a routing failure instead of the persistence contract.
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/tmp/unused"),
+        false,
+    );
+    let _ = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
     let mut meta = Map::new();
     meta.insert("mode".to_string(), json!(mode));
     let agent = Agent::new(
         AgentId::from("agent"),
         Some("yaml_state.tools".to_string()),
-        None,
+        Some(AgentId::from("core")),
         meta,
         std::path::PathBuf::from("/tmp/unused"),
         false,
@@ -193,7 +206,9 @@ async fn reflect_mode_sentence() {
         .contains("scratch-state"));
     assert!(rmem["verbs"]["set"].is_string());
     // reflect surfaces the provider binding.
-    assert_eq!(rmem["file_bridge_id"], "store");
+    // No `file_bridge_id`: this bundle no longer names a provider at all — the
+    // loader owns the store, and reflect must not advertise wiring that is gone.
+    assert!(rmem.get("file_bridge_id").is_none() || rmem["file_bridge_id"].is_null());
 }
 
 #[tokio::test]
@@ -209,32 +224,31 @@ async fn disk_is_truth() {
 }
 
 #[tokio::test]
-async fn mutators_failfast_without_provider() {
-    // No file_bridge_id wired → set/delete/replace refuse (no silent loss);
-    // read/keys/state_yaml degrade to empty. Error text matches Python.
+async fn mutators_failfast_without_a_store() {
+    // NO STORE WIRED → set/delete/replace REFUSE (no silent loss); read/keys
+    // degrade to empty. Persistence now goes THROUGH the loader, so the failure
+    // this bundle must surface is "the kernel has no store", not "my own
+    // file_bridge_id is unset" — the consumer no longer names a provider at all.
     let (k, id) = mk_unwired("data");
-    let s = call(&k, &id, json!({"type":"set","key":"k","value":"v"})).await;
-    assert_eq!(
-        s["error"],
-        "yaml_state.set: file_bridge_id required — wire (and open) a file_bridge to persist"
-    );
-    let d = call(&k, &id, json!({"type":"delete","key":"k"})).await;
-    assert!(d["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("yaml_state.delete: file_bridge_id required"));
-    let rp = call(&k, &id, json!({"type":"replace","doc":{}})).await;
-    assert!(rp["error"]
-        .as_str()
-        .unwrap()
-        .starts_with("yaml_state.replace: file_bridge_id required"));
+    for (verb, payload) in [
+        ("set", json!({"type":"set","key":"k","value":"v"})),
+        ("delete", json!({"type":"delete","key":"k"})),
+        ("replace", json!({"type":"replace","doc":{}})),
+    ] {
+        let r = call(&k, &id, payload).await;
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with(&format!("yaml_state.{verb}:")),
+            "{verb} must fail in this bundle's own words: {r}"
+        );
+        assert!(
+            err.contains("no store wired"),
+            "{verb} must name the real cause: {r}"
+        );
+    }
     // reads degrade to empty, not error.
     assert_eq!(
         call(&k, &id, json!({"type":"read"})).await["doc"],
         json!({})
-    );
-    assert_eq!(
-        call(&k, &id, json!({"type":"state_yaml"})).await["yaml"],
-        ""
     );
 }

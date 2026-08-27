@@ -9,6 +9,7 @@
 
 use super::*;
 use fantastic_kernel::Agent;
+use fantastic_kernel::Item;
 use serde_json::Map;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -76,7 +77,7 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     kernel.set_root(Arc::clone(&root));
     let pid = agent_id_for(tmp);
     let mut create = json!({
-        "type": "create_agent",
+        "type": "create_agent", "parent_id": "kernel",
         "handler_module": HANDLER_MODULE,
         "id": pid,
     });
@@ -84,7 +85,11 @@ async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel
     for (k, v) in extra {
         obj.insert(k, v);
     }
-    kernel.send(&AgentId::from("core"), create).await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("core"), create)])
+        .await
+        .remove(0)
+        .result;
     (kernel, AgentId::from(pid.as_str()))
 }
 
@@ -131,7 +136,11 @@ fn no_doc_advertises_the_retired_exec_verb() {
 async fn reflect_reports_resolved_interpreter() {
     let tmp = TempDir::new().unwrap();
     let (kernel, pid) = mk_kernel(&tmp).await;
-    let r = kernel.send(&pid, json!({"type": "reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(pid.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["id"], pid.as_str());
     // Py-canonical sentence: the process edge, sealed, allowlisted.
     assert_eq!(
@@ -231,11 +240,13 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "start", "code": "x = 1", "interpreter": "/no/such/python"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"]
             .as_str()
@@ -244,7 +255,11 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
         "an unlisted interpreter must refuse naming the set: {r}"
     );
     assert!(r["job_id"].is_null(), "nothing may be spawned: {r}");
-    let st = kernel.send(&a, json!({"type": "status"})).await;
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(
         st["jobs"].as_array().map(Vec::len),
         Some(0),
@@ -256,8 +271,13 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
     let tmp2 = TempDir::new().unwrap();
     let (k2, sealed) = mk_kernel_with(&tmp2, Map::new()).await;
     let d = k2
-        .send(&sealed, json!({"type": "start", "code": "x"}))
-        .await;
+        .send(vec![Item::new(
+            sealed.clone(),
+            json!({"type": "start", "code": "x"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(d["reason"], json!("unauthorized"), "{d}");
     assert!(
         d["hint"]
@@ -266,7 +286,11 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
             .contains("ingress_rule=allow_all_ingress"),
         "the denial must teach how to open: {d}"
     );
-    let refl = k2.send(&sealed, json!({"type": "reflect"})).await;
+    let refl = k2
+        .send(vec![Item::new(sealed.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(refl["sealed"], json!(true), "{refl}");
     assert!(
         refl["interpreters"].is_array(),
@@ -282,7 +306,11 @@ async fn reflect_advertises_the_allowlist_and_shims() {
     let mut meta = Map::new();
     meta.insert("interpreters".to_string(), json!(["/wired/bin/python"]));
     let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel.send(&a, json!({"type": "reflect"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(r["interpreters"], json!(["/wired/bin/python"]), "{r}");
     assert_eq!(r["shims"], json!(["python"]), "{r}");
     assert!(r["wire"]
@@ -308,13 +336,22 @@ signal.signal(signal.SIGINT, h)
 time.sleep(30)
 "#;
     let r = kernel
-        .send(&pid, json!({"type": "start", "code": code}))
-        .await;
+        .send(vec![Item::new(
+            pid.clone(),
+            json!({"type": "start", "code": code}),
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(r["job_id"].is_string(), "start failed: {r}");
     // Let python install the handler before signalling it.
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    let n = kernel.send(&pid, json!({"type": "interrupt"})).await;
+    let n = kernel
+        .send(vec![Item::new(pid.clone(), json!({"type": "interrupt"}))])
+        .await
+        .remove(0)
+        .result;
     assert!(
         n["interrupted"].as_u64().unwrap_or(0) >= 1,
         "interrupt returned {n}"
@@ -339,21 +376,31 @@ async fn stop_sigkills_the_job() {
     let (kernel, pid) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &pid);
     let r = kernel
-        .send(
-            &pid,
+        .send(vec![Item::new(
+            pid.clone(),
             json!({"type": "start", "code": "import time; time.sleep(30)"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(r["job_id"].is_string(), "start failed: {r}");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let n = kernel.send(&pid, json!({"type": "stop"})).await;
+    let n = kernel
+        .send(vec![Item::new(pid.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
     assert!(n["killed"].as_u64().unwrap_or(0) >= 1, "stop returned {n}");
 
     until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done after stop");
-    let st = kernel.send(&pid, json!({"type": "status"})).await;
+    let st = kernel
+        .send(vec![Item::new(pid.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
     let status = st["jobs"][0]["status"].as_str().unwrap_or("");
     assert_ne!(status, "running", "row left stuck running: {st}");
 }
@@ -525,15 +572,21 @@ async fn start_returns_a_job_id_immediately() {
     let (kernel, a) = mk_kernel(&tmp).await;
     let t0 = std::time::Instant::now();
     let r = kernel
-        .send(
-            &a,
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "start", "code": "import time; time.sleep(30)"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert!(r["job_id"].is_string(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
-    kernel.send(&a, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 /// One `progress` per line, and `n` is ONE sequence across stdout AND stderr.
@@ -545,13 +598,15 @@ async fn progress_streams_per_line_with_a_shared_counter() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    kernel
-        .send(
-            &a,
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "start", "code":
                 "import sys\nprint('o1')\nprint('e1', file=sys.stderr)\nprint('o2')\n"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
@@ -570,13 +625,15 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    kernel
-        .send(
-            &a,
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "start", "code":
                 "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
@@ -595,13 +652,15 @@ async fn per_call_args_reach_the_program() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    kernel
-        .send(
-            &a,
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
             json!({"type": "start", "code": "print('N', kernel.args['n'] + 1)",
                    "args": {"n": 41}}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
@@ -630,17 +689,30 @@ def _on(m):
 kernel.on_message(_on)
 threading.Event().wait()
 "#;
-    kernel
-        .send(&a, json!({"type": "start", "code": code}))
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "start", "code": code}),
+        )])
+        .await
+        .remove(0)
+        .result;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let ack = kernel.send(&a, json!({"type": "ping"})).await;
+    let ack = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+        .await
+        .remove(0)
+        .result;
     assert_eq!(ack["queued"], true, "not queued: {ack}");
     let pong = until(&mut rx, |v| v["type"] == "pong", 20)
         .await
         .expect("program never received the turn");
     assert_eq!(pong["count"], 1, "delivered more than once: {pong}");
-    kernel.send(&a, json!({"type": "stop"})).await;
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
 }
 
 /// No running job ⇒ a loud error, never a silent drop.
@@ -648,7 +720,11 @@ threading.Event().wait()
 async fn an_unknown_verb_without_a_job_errors_loudly() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
-    let r = kernel.send(&a, json!({"type": "ping"})).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+        .await
+        .remove(0)
+        .result;
     assert!(
         r["error"].as_str().unwrap_or("").contains("no running job"),
         "{r}"

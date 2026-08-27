@@ -14,6 +14,7 @@
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
+use crate::outcome::Item;
 use crate::persistence;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -70,12 +71,42 @@ pub fn mint_guid() -> String {
 /// Any extra fields become the new agent's meta.
 pub(crate) async fn create_from_payload(
     kernel: &Arc<Kernel>,
-    parent: &Arc<Agent>,
+    root: &Arc<Agent>,
     payload: &Value,
 ) -> Value {
     let Some(hm) = payload.get("handler_module").and_then(Value::as_str) else {
-        return json!({ "error": "create_agent requires handler_module" });
+        return crate::refusal::missing("create_agent", "handler_module");
     };
+
+    // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
+    // like a send target (the `kernel` alias included), never defaulted.
+    //
+    // It used to be accepted and silently STRIPPED while the ADDRESSED agent
+    // became the parent: `parent_id:"specialist"` produced `parent_id="core"`
+    // with no error. The working mechanism was undiscoverable and the field
+    // that looked like it expressed placement did nothing.
+    let Some(pid) = payload.get("parent_id").and_then(Value::as_str) else {
+        return crate::refusal::refusal_hint(
+            crate::refusal::MISSING_ARG,
+            "create_agent: parent_id required",
+            "name the OWNER of the new agent — your own id grows your own \
+             subtree (no grant needed); the root id for top-level.",
+        );
+    };
+    let parent: Arc<Agent> = if pid == "kernel" {
+        Arc::clone(root)
+    } else {
+        match kernel.agents.get(&AgentId::from(pid)) {
+            Some(e) => Arc::clone(&e),
+            None => {
+                return crate::refusal::unknown_agent(
+                    pid,
+                    kernel.agents.iter().map(|e| e.key().0.clone()).collect(),
+                )
+            }
+        }
+    };
+    let parent = &parent;
     // We allow creation of agents whose bundle isn't yet registered —
     // record persists, agent is registered but won't dispatch domain
     // verbs until the bundle lands. Matches Python's behaviour. Only
@@ -86,7 +117,12 @@ pub(crate) async fn create_from_payload(
         _ => mint_id(hm),
     };
     if kernel.agents.contains_key(&AgentId::from(id.as_str())) {
-        return json!({ "error": format!("agent {id:?} already exists") });
+        let mut r = crate::refusal::refusal(
+            crate::refusal::EXISTS,
+            format!("agent {id:?} already exists"),
+        );
+        crate::refusal::with(&mut r, "id", json!(id));
+        return r;
     }
 
     // Compose meta from the remaining payload fields.
@@ -111,7 +147,7 @@ pub(crate) async fn create_from_payload(
     // at create: the merged view IS the patch.
     if let Some(bundle) = kernel.bundles.get(hm) {
         if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
-            return json!({ "error": why, "created": false });
+            return crate::refusal::refusal(crate::refusal::INVALID_META, why);
         }
     }
 
@@ -172,7 +208,11 @@ pub(crate) async fn create_from_payload(
     // authorized create_agent (the kernel initializing what it was told to make),
     // not the parent reaching out — so it never runs against the parent's grant.
     let boot_reply = Box::pin(crate::send::with_operator(async move {
-        kernel_for_boot.send(&new_id, json!({"type": "boot"})).await
+        kernel_for_boot
+            .send(vec![Item::new(new_id.clone(), json!({"type": "boot"}))])
+            .await
+            .remove(0)
+            .result
     }))
     .await;
     let new_id = new_agent.id.clone();

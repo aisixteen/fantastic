@@ -10,6 +10,7 @@
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+use fantastic_kernel::Item;
 use fantastic_kernel::{AgentId, Kernel, KernelState, StorageMode};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -57,12 +58,9 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     .unwrap();
     let kernel = Arc::clone(&booted.kernel);
     fantastic_kernel::test_support::wire_fake_store(&kernel, &store_root).await;
-    kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":"noop.tools","id":"alpha"}),
-        )
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"alpha"}))])
+        .await.remove(0).result;
 
     // KernelState lives only in RAM. No `state.json` file is ever
     // created — the on-disk medium is the per-agent agent.json tree
@@ -95,12 +93,9 @@ async fn save_json_is_byte_deterministic() {
     drop(booted_kernel);
 
     for id in ["b", "a", "c"] {
-        kernel
-            .send(
-                &AgentId::from("core"),
-                json!({"type":"create_agent","handler_module":"noop.tools","id":id}),
-            )
-            .await;
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .await.remove(0).result;
     }
     let first = kernel.save_json();
     let second = kernel.save_json();
@@ -117,12 +112,9 @@ async fn save_and_load_round_trips_disk_to_memory() {
     let booted = bootstrap(registry_with_noop(), BootstrapOptions::daemon(tmp.path())).unwrap();
     let disk_kernel = Arc::clone(&booted.kernel);
     for id in ["alpha", "beta"] {
-        disk_kernel
-            .send(
-                &AgentId::from("core"),
-                json!({"type":"create_agent","handler_module":"noop.tools","id":id}),
-            )
-            .await;
+        let _ = disk_kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":id}))])
+            .await.remove(0).result;
     }
     let snapshot_json = disk_kernel.save_json();
 
@@ -229,12 +221,9 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     fantastic_kernel::test_support::wire_fake_store(&kernel, &store_root).await;
 
     // Create the agent normally.
-    kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":"noop.tools","id":"merge_test","port":8080}),
-        )
-        .await;
+    let _ = kernel
+        .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"merge_test","port":8080}))])
+        .await.remove(0).result;
     let agent_json = tmp.path().join(".fantastic/agents/merge_test/agent.json");
     assert!(agent_json.exists());
 
@@ -249,12 +238,14 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     .unwrap();
 
     // Update something else via the kernel — should merge, not overwrite.
-    kernel
-        .send(
-            &AgentId::from("core"),
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"update_agent","id":"merge_test","port":9090}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
 
     let after: Map<String, Value> =
         serde_json::from_str(&std::fs::read_to_string(&agent_json).unwrap()).unwrap();

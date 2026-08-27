@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo run -p fantastic-proxy-agent --example proxy_mock_session`
 
-use fantastic_kernel::{Agent, AgentId, Kernel, StorageMode};
+use fantastic_kernel::{Agent, AgentId, Item, Kernel, StorageMode};
 use fantastic_proxy_agent::{
     clear_hosts, register_host, ProxyAgentBundle, ProxyAgentHost, HANDLER_MODULE,
 };
@@ -98,11 +98,10 @@ async fn main() {
     banner("Step 2: create two proxy_agent instances (chat_ui + settings_ui)");
     for id in ["chat_ui", "settings_ui"] {
         let r = kernel
-            .send(
-                &AgentId::from("core"),
-                json!({"type":"create_agent","handler_module":HANDLER_MODULE,"id":id}),
-            )
-            .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":HANDLER_MODULE,"id":id}))])
+            .await
+            .remove(0)
+            .result;
         assert_or_die(r["id"] == id, &format!("created {id}"));
     }
 
@@ -115,8 +114,16 @@ async fn main() {
     register_host(settings.clone(), settings_host.clone());
 
     banner("Step 4: fire boot on each — host.on_boot should run");
-    let _ = kernel.send(&chat, json!({"type":"boot"})).await;
-    let _ = kernel.send(&settings, json!({"type":"boot"})).await;
+    let _ = kernel
+        .send(vec![Item::new(chat.clone(), json!({"type":"boot"}))])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(settings.clone(), json!({"type":"boot"}))])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(
         chat_host.boots.load(Ordering::Relaxed) == 1,
         "chat_ui on_boot fired once",
@@ -128,18 +135,31 @@ async fn main() {
 
     banner("Step 5: send arbitrary verbs — forwarded to host.handle");
     let r1 = kernel
-        .send(&chat, json!({"type":"render_token","delta":"Hello"}))
-        .await;
+        .send(vec![Item::new(
+            chat.clone(),
+            json!({"type":"render_token","delta":"Hello"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  chat_ui reply: {r1}");
     assert_or_die(r1["rendered"] == true, "chat_ui rendered=true");
     assert_or_die(r1["label"] == "chat_ui", "label routed correctly");
 
-    let r2 = kernel.send(&settings, json!({"type":"ping"})).await;
+    let r2 = kernel
+        .send(vec![Item::new(settings.clone(), json!({"type":"ping"}))])
+        .await
+        .remove(0)
+        .result;
     println!("  settings_ui reply: {r2}");
     assert_or_die(r2["pong"] == true, "settings_ui pong=true");
 
     banner("Step 6: reflect — merges host's response with bundle identity");
-    let r3 = kernel.send(&chat, json!({"type":"reflect"})).await;
+    let r3 = kernel
+        .send(vec![Item::new(chat.clone(), json!({"type":"reflect"}))])
+        .await
+        .remove(0)
+        .result;
     println!("  chat_ui reflect: {r3}");
     assert_or_die(r3["host_registered"] == true, "host_registered=true");
     assert_or_die(
@@ -151,24 +171,30 @@ async fn main() {
 
     banner("Step 7: unknown agent + no host = graceful_degrade");
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
-            json!({"type":"create_agent","handler_module":HANDLER_MODULE,"id":"orphan"}),
-        )
-        .await;
+            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":HANDLER_MODULE,"id":"orphan"}))])
+            .await
+            .remove(0)
+            .result;
     let r4 = kernel
-        .send(&AgentId::from("orphan"), json!({"type":"anything"}))
-        .await;
+        .send(vec![Item::new(
+            AgentId::from("orphan"),
+            json!({"type":"anything"}),
+        )])
+        .await
+        .remove(0)
+        .result;
     println!("  orphan reply: {r4}");
     assert_or_die(r4["reason"] == "no_host", "orphan has no host");
 
     banner("Step 8: cascade-delete chat_ui — on_delete fires, host dropped");
     let _ = kernel
-        .send(
-            &AgentId::from("core"),
+        .send(vec![Item::new(
+            AgentId::from("core"),
             json!({"type":"delete_agent","id":"chat_ui"}),
-        )
-        .await;
+        )])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(
         chat_host.deletes.load(Ordering::Relaxed) == 1,
         "chat_ui on_delete fired",
@@ -179,7 +205,11 @@ async fn main() {
     );
 
     banner("Step 9: settings_ui still works — isolation");
-    let r5 = kernel.send(&settings, json!({"type":"ping"})).await;
+    let r5 = kernel
+        .send(vec![Item::new(settings.clone(), json!({"type":"ping"}))])
+        .await
+        .remove(0)
+        .result;
     assert_or_die(r5["pong"] == true, "settings_ui untouched");
 
     banner("ALL ASSERTIONS GREEN — proxy_agent round-trip healthy");

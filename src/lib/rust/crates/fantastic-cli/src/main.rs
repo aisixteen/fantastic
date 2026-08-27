@@ -17,7 +17,7 @@
 //!    already holds it.
 
 use fantastic_kernel::bootstrap::{self, BootstrapOptions, DEFAULT_ROOT_ID};
-use fantastic_kernel::{AgentId, BundleRegistry};
+use fantastic_kernel::{AgentId, BundleRegistry, Item};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -144,8 +144,13 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         let reply = booted
             .kernel
-            .send(&AgentId::from(target.as_str()), Value::Object(payload))
-            .await;
+            .send(vec![Item::new(
+                AgentId::from(target.as_str()),
+                Value::Object(payload),
+            )])
+            .await
+            .remove(0)
+            .result;
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
     }
@@ -165,8 +170,13 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         let reply = booted
             .kernel
-            .send(&AgentId::from(id.as_str()), Value::Object(payload))
-            .await;
+            .send(vec![Item::new(
+                AgentId::from(id.as_str()),
+                Value::Object(payload),
+            )])
+            .await
+            .remove(0)
+            .result;
         println!("{}", serde_json::to_string_pretty(&reply)?);
         bootstrap::shutdown(&workdir)?;
         return Ok(());
@@ -184,11 +194,21 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // serves, and blocks. `boot` every loaded agent (web binds its listener
     // here); failures are logged + skipped — boot must never abort the daemon.
     for id in booted.loaded.iter() {
-        let reply = kernel.send(id, json!({"type": "boot"})).await;
+        let reply = kernel
+            .send(vec![Item::new(id.clone(), json!({"type": "boot"}))])
+            .await
+            .remove(0)
+            .result;
         if let Some(err) = reply.get("error").and_then(Value::as_str) {
             tracing::warn!(agent = %id, error = %err, "boot failed");
         }
     }
+
+    // THE DURABLE LEDGER. After the roster is up (so the store agent exists and
+    // `find_store` can see it) and before anything is served: rehydrate settled
+    // executions, then install the write-through. Order matters — hydrating
+    // after the flusher were installed would rewrite what it just read.
+    fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
 
     // Composition decision: a headless host only blocks when it's actually
     // serving something (a web daemon). With nothing to serve there's no point
@@ -227,7 +247,11 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // Issue shutdown on every loaded agent (LIFO so children stop
     // before parents).
     for id in booted.loaded.iter().rev() {
-        let _ = kernel.send(id, json!({"type": "shutdown"})).await;
+        let _ = kernel
+            .send(vec![Item::new(id.clone(), json!({"type": "shutdown"}))])
+            .await
+            .remove(0)
+            .result;
     }
     bootstrap::shutdown(&workdir)?;
     eprintln!("fantastic_kernel: done.");
