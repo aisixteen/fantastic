@@ -320,7 +320,7 @@ async def test_delete_agent_refused_when_locked(seeded_kernel):
             [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
         )
     )[0]["result"]
-    assert r.get("locked") is True
+    assert r.get("reason") == "locked"
     assert r.get("id") == aid
     assert "delete_lock" in r.get("error", "")
     # Record still present.
@@ -350,7 +350,7 @@ async def test_delete_agent_succeeds_after_unlock(seeded_kernel):
             [{"target": "kernel_state", "payload": {"type": "delete_agent", "id": aid}}]
         )
     )[0]["result"]
-    assert r1.get("locked") is True
+    assert r1.get("reason") == "locked"
     # Unlock via update_agent.
     (
         await seeded_kernel.send(

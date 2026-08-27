@@ -13,38 +13,22 @@ expect:
   hydration: ok
   reboot: true
   closed_roster_sender: worker
-  edges:
+  steps:
     - name: the declared worker→memory edge is usable
-      from: worker
-      to: memory
-      send: {type: set, key: probe, value: 1}
-      allow: true
+      reach: {from: worker, to: memory, send: {type: set, key: probe, value: 1}}
+      expect: {allow: true}
     - name: a loader reaches its own child on the structural baseline
-      from: static_loader
-      to: memory
-      send: {type: reflect}
-      allow: true
+      reach: {from: static_loader, to: memory, send: {type: reflect}}
+      expect: {allow: true}
     - name: a verb outside the grant is refused by the sender's own egress
-      from: worker
-      to: memory
-      send: {type: delete, key: probe}
-      allow: false
-      side: egress
+      reach: {from: worker, to: memory, send: {type: delete, key: probe}}
+      expect: {allow: false, side: egress}
     - name: can_call without callable_by is refused BY THE CALLEE
-      from: worker
-      to: quiet
-      send: {type: list, path: ""}
-      allow: false
-      side: ingress
+      reach: {from: worker, to: quiet, send: {type: list, path: ""}}
+      expect: {allow: false, side: ingress}
     - name: an undeclared lateral edge never leaves the sender
-      from: worker
-      to: island
-      send: {type: list, path: ""}
-      allow: false
-      side: egress
+      reach: {from: worker, to: island, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
     - name: a granted edge is one-way — the reverse was never declared
-      from: memory
-      to: worker
-      send: {type: list, path: ""}
-      allow: false
-      side: egress
+      reach: {from: memory, to: worker, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}

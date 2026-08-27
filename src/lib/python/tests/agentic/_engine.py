@@ -47,7 +47,9 @@ Two deliberate deviations from the `fantastic init` path
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -59,6 +61,11 @@ from kernel_state.tools import read_tree
 from _testkit import boot_root, persist
 from kernel import sender_context
 
+# THE SHARED CORPUS, at the repo root. The rust and swift runners read these
+# same files: a scenario is DATA, and the runner is the only per-runtime part.
+CONTRACT_DIR = Path(__file__).resolve().parents[5] / "contract"
+
+
 # ─── requirement registry (a2a-tck's ID discipline) ─────────────
 #
 # Stable ids, one table, duplicate detection AT IMPORT. The point is not
@@ -67,7 +74,6 @@ from kernel import sender_context
 # things. MUST asserts; SHOULD/MAY xfail, so a known-soft expectation reports as
 # a coverage hole instead of a red build.
 
-_LEVELS = frozenset({"MUST", "SHOULD", "MAY"})
 
 
 @dataclass(frozen=True)
@@ -80,70 +86,18 @@ class Requirement:
     title: str
 
 
-# (id, level, title). Ordered: the five core preconfig invariants first, then the
-# per-scenario items they do not cover.
-_ROWS: tuple[tuple[str, str, str], ...] = (
-    # ── the five CORE preconfig invariants, asserted for EVERY config ──
-    ("PC-1", "MUST", "the running tree matches the declared shape, both directions"),
-    (
-        "PC-2",
-        "MUST",
-        "every declared edge is reachable, every refused edge names its side",
-    ),
-    ("PC-3", "MUST", "the roster is closed after boot — deny-all holds, no self-raise"),
-    ("PC-4", "MUST", "a reboot rehydrates the identical roster, nothing duplicates"),
-    (
-        "PC-5",
-        "MUST",
-        "the hydration verdict matches the declaration, on the loud channel",
-    ),
-    # ── per-scenario items (validators tag their own assertions) ──
-    #
-    # The `C<n>` ids are NOT this suite's invention: they are row numbers in the
-    # canonical-assertion table of `tmp/agentic_development.md`, so a gap in the
-    # sequence is a checkpoint nobody has claimed rather than a missing row. This
-    # suite closes C14–C18, C20 and C23 out of that table's "built but unasserted"
-    # bucket. C21 and C24 wanted scenarios this manifest cannot declare and are
-    # asserted in `tests/conformance/` instead (2026-08-26): C21 =
-    # test_c21_transport_symmetry (five transports, one envelope, byte-diffed);
-    # C24 = test_stream_semantics (in-proc order/terminal/multi-subscriber) +
-    # test_c24_stream_transport (the streaming subscriber ACROSS a transport).
-    # Rows kept here so the registry stays the one index of the canonical 26.
-    (
-        "C1",
-        "MUST",
-        "resume after suspension continues the run — script minds: test_mind_plumbed ASK; AI chains: tests/conformance/test_c1_suspend_resume",
-    ),
-    ("C14", "MUST", "cancel stops a live dispatch before its next step, observably"),
-    ("C15", "MUST", "a terminal task and a deleted agent both absorb further calls"),
-    ("C16", "MUST", "unknown id / malformed / unknown verb / denial stay distinct"),
-    ("C17", "MUST", "a refused mutation mutates nothing and says which half refused"),
-    ("C18", "MUST", "delete removes the whole owned roster and spares its neighbours"),
-    ("C20", "MUST", "child state is namespaced by position, not by convention"),
-    ("C21", "MUST", "one semantics, many transports — see tests/conformance/"),
-    (
-        "C24",
-        "MUST",
-        "stream order/terminal/fan-out — see tests/conformance/ + test_stream_semantics",
-    ),
-    (
-        "C23",
-        "MUST",
-        "an undeclared capability errors — sealed by default, no byte moves",
-    ),
-    # ── two_sided_gate ──
-    ("TSG-1", "MUST", "an edge exists only when BOTH halves grant it"),
-    ("TSG-2", "MUST", "a denial names the half that refused, and egress is first"),
-    ("TSG-3", "MUST", "an edge carries only the verbs BOTH halves name"),
-    ("TSG-4", "MUST", "no undeclared edge exists — co-residency grants nothing"),
-    ("TSG-5", "MUST", "the missing half comes from ABOVE; a peer cannot supply it"),
-    ("TSG-6", "MUST", "opening one half never silently closes another"),
-)
+# The registry is DATA: `contract/requirements.yaml`, read by every runtime's
+# runner. It used to be a python tuple in this file, which made it unreadable to
+# the rust and swift runners that must pin the SAME ids.
+REQUIREMENTS_FILE = CONTRACT_DIR / "requirements.yaml"
+
+
+_LEVELS = frozenset({"MUST", "SHOULD", "MAY"})
 
 
 def _index(rows) -> dict[str, Requirement]:
     """Build the id→Requirement table, refusing a duplicate id or an unknown
-    level AT IMPORT. A duplicate id is the one failure mode that makes the whole
+    level AT LOAD. A duplicate id is the one failure mode that makes the whole
     registry worthless — two validators would pin different things under one
     name and the coverage matrix would read as covered either way."""
     out: dict[str, Requirement] = {}
@@ -158,14 +112,16 @@ def _index(rows) -> dict[str, Requirement]:
     return out
 
 
-REQUIREMENTS: dict[str, Requirement] = _index(_ROWS)
+def _load_requirements() -> tuple[dict[str, Requirement], frozenset[str]]:
+    doc = yaml.safe_load(REQUIREMENTS_FILE.read_text()) or {}
+    rows = tuple(
+        (r["id"], r["level"], r["title"]) for r in (doc.get("requirements") or [])
+    )
+    return _index(rows), frozenset(doc.get("core") or ())
 
-# The five the GENERAL runner pins on every config, by construction. A config
-# never declares them: they are not a property of the scenario, they are the
-# price of being a config at all, and listing them per file made the field mean
-# three different things across eight of them. `requirements:` therefore names
-# ONLY what a scenario's own validator pins — enforced in `load_config`.
-CORE_REQUIREMENTS: frozenset[str] = frozenset({"PC-1", "PC-2", "PC-3", "PC-4", "PC-5"})
+
+REQUIREMENTS, CORE_REQUIREMENTS = _load_requirements()
+
 
 # id → how many times a check was made against it in THIS process. The coverage
 # matrix a2a-tck keeps: an id with 0 checks is a requirement nobody pins.
@@ -222,10 +178,10 @@ def coverage_matrix() -> dict[str, dict[str, Any]]:
 # quietly ignores half of what you wrote is the exact failure this suite exists
 # to catch.
 
-CONFIG_DIR = Path(__file__).resolve().parent / "configs"
+CONFIG_DIR = CONTRACT_DIR / "agentic" / "configs"
 # Specs are the suite's index: a config is a deployable kernel document and does
 # not know it is being tested.
-SPEC_DIR = Path(__file__).resolve().parent / "specs"
+SPEC_DIR = CONTRACT_DIR / "agentic" / "specs"
 
 HYDRATIONS = frozenset({"ok", "refused_at_write", "boot_error"})
 
@@ -245,9 +201,31 @@ _LOADER_KEYS = frozenset(
     {"id", "file", "manifest", "manifest_text", "missing_manifest", "meta"}
 )
 _EXPECT_KEYS = frozenset(
-    {"hydration", "error_contains", "reboot", "edges", "closed_roster_sender"}
+    {"hydration", "error_contains", "reboot", "steps", "closed_roster_sender"}
 )
-_EDGE_KEYS = frozenset({"name", "from", "to", "send", "allow", "side"})
+# One step = exactly one verb key + optional `expect`/`because`/`name`.
+_STEP_VERBS = frozenset({
+    "reach",      # send AS an agent — gated; the reachability primitive
+    "operator",   # send with OPERATOR authority — setup, and side-effect reads
+    "grant",      # sugar: operator update_agent on can_call / callable_by
+    "revoke",     # sugar: the same, removing an entry
+    "reboot",     # persist + rehydrate
+    "assert_tree",# the dehydrated shape
+    "start",      # fire a send WITHOUT awaiting it, bound to a name
+    "await_task", # block until a bound send is visible in `ps`
+    "collect",    # await a bound send and assert its Outcome
+    # COMPUTED SWEEPS — derived from the manifest, not hand-listed. A hand
+    # written probe list can only confirm the edges its author thought of; these
+    # walk what the config actually declares, so a grant somebody added and
+    # forgot to assert is still probed.
+    "reconcile_grants",   # every declared (sender,target,verb) triple
+    "sweep_undeclared",   # every ordered pair: nothing rides along
+})
+_STEP_META = frozenset({"expect", "because", "name"})
+_EXPECT_MATCHERS = frozenset({
+    "allow", "side", "reason", "status",
+    "contains", "not_contains", "error_contains",
+})
 
 # `<bundle>_<6 hex>` — the shape `Agent.create` mints when a spec carries no id
 # (`kernel/_agent.py:885-892`). An id-less manifest entry duplicates on EVERY
@@ -292,20 +270,35 @@ class LoaderSpec:
 
 
 @dataclass(frozen=True)
-class Edge:
-    """One reachability probe: an agent-origin send and the verdict it must get.
-    `side` is what proves the gate is TWO-sided — a declared `can_call` with no
-    matching `callable_by` denies on `ingress`, the reverse on `egress`."""
+class Step:
+    """ONE ordered action and the verdict it must produce.
 
-    sender: str
-    target: str
-    send: dict
-    allow: bool
-    side: str | None = None
+    A flat edge list could state a verdict but never a CAUSE. The two-sided gate
+    is the case that forced this: opening one grant half at a time and watching
+    the denial MOVE from `egress` to `ingress` is what proves the second half was
+    refusing independently the whole time — invisible behind the first. That is a
+    sequence, not a table.
+
+    `kind` is the verb; `args` its payload; `expect` the matchers. `because` tags
+    the requirement id this step pins, so the coverage matrix survives the move
+    out of python.
+    """
+
+    kind: str
+    args: dict
+    expect: dict = field(default_factory=dict)
+    because: str = ""
     name: str = ""
 
     def __str__(self) -> str:
-        return self.name or f"{self.sender} → {self.target} {self.send.get('type')!r}"
+        if self.name:
+            return self.name
+        if self.kind in ("reach", "start"):
+            return (
+                f"{self.args.get('from')} → {self.args.get('to')} "
+                f"{(self.args.get('send') or {}).get('type')!r}"
+            )
+        return f"{self.kind} {self.args}"
 
 
 @dataclass(frozen=True)
@@ -313,7 +306,7 @@ class Expectation:
     hydration: str = "ok"
     error_contains: str = ""
     reboot: bool = True
-    edges: tuple[Edge, ...] = ()
+    steps: tuple[Step, ...] = ()
     closed_roster_sender: str | None = None
 
 
@@ -359,37 +352,78 @@ def _reject_unknown(where: str, got, allowed: frozenset[str]) -> dict:
     return got
 
 
-def _parse_edges(raw) -> tuple[Edge, ...]:
+def _parse_steps(raw) -> tuple[Step, ...]:
+    """Parse `expect.steps`. STRICT: exactly one verb per step, known matchers
+    only. A typo'd verb must fail at load, not read as a step that did nothing."""
     if raw is None:
         return ()
     if not isinstance(raw, list):
-        raise ConfigError("expect.edges: must be a list")
-    edges: list[Edge] = []
+        raise ConfigError("expect.steps: must be a list")
+    steps: list[Step] = []
     for i, item in enumerate(raw):
-        item = _reject_unknown(f"expect.edges[{i}]", item, _EDGE_KEYS)
-        for req in ("from", "to", "send", "allow"):
-            if req not in item:
-                raise ConfigError(f"expect.edges[{i}]: `{req}:` is required")
-        if not isinstance(item["send"], dict) or not item["send"].get("type"):
-            raise ConfigError(f"expect.edges[{i}]: `send:` needs a payload with a type")
-        allow = item["allow"]
-        if not isinstance(allow, bool):
-            raise ConfigError(f"expect.edges[{i}]: `allow:` must be true/false")
-        if allow and item.get("side"):
+        where = f"expect.steps[{i}]"
+        if not isinstance(item, dict):
+            raise ConfigError(f"{where}: must be a mapping")
+        verbs = sorted(set(item) & _STEP_VERBS)
+        extra = set(item) - _STEP_VERBS - _STEP_META
+        if extra:
             raise ConfigError(
-                f"expect.edges[{i}]: `side:` only means something on a denial"
+                f"{where}: unknown key(s) {sorted(extra)};"
+                f" verbs {sorted(_STEP_VERBS)}, meta {sorted(_STEP_META)}"
             )
-        edges.append(
-            Edge(
-                sender=item["from"],
-                target=item["to"],
-                send=dict(item["send"]),
-                allow=allow,
-                side=item.get("side"),
+        if len(verbs) != 1:
+            raise ConfigError(
+                f"{where}: needs exactly ONE verb, got {verbs or 'none'}"
+            )
+        kind = verbs[0]
+        args = item[kind]
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            raise ConfigError(f"{where}: `{kind}:` must be a mapping")
+        exp = item.get("expect") or {}
+        if not isinstance(exp, dict):
+            raise ConfigError(f"{where}: `expect:` must be a mapping")
+        bad = set(exp) - _EXPECT_MATCHERS
+        if bad:
+            raise ConfigError(
+                f"{where}.expect: unknown matcher(s) {sorted(bad)};"
+                f" known {sorted(_EXPECT_MATCHERS)}"
+            )
+        if exp.get("allow") is True and exp.get("side"):
+            raise ConfigError(
+                f"{where}: `side:` only means something on a denial"
+            )
+        if kind in ("reach", "start"):
+            for req in ("from", "to", "send"):
+                if req not in args:
+                    raise ConfigError(f"{where}: `{kind}:` needs `{req}:`")
+        if kind == "operator" and "to" not in args:
+            raise ConfigError(f"{where}: `operator:` needs `to:`")
+        if kind in ("grant", "revoke"):
+            for req in ("agent", "field", "to"):
+                if req not in args:
+                    raise ConfigError(f"{where}: `{kind}:` needs `{req}:`")
+            if args["field"] not in ("can_call", "callable_by"):
+                raise ConfigError(
+                    f"{where}: `field:` is can_call or callable_by,"
+                    f" got {args['field']!r}"
+                )
+        if kind in ("await_task", "collect") and "name" not in args:
+            raise ConfigError(f"{where}: `{kind}:` needs `name:` (a bound send)")
+        rid = item.get("because", "")
+        if rid:
+            requirement(rid)  # a typo'd tag fails at LOAD, not at report time
+        steps.append(
+            Step(
+                kind=kind,
+                args=dict(args),
+                expect=dict(exp),
+                because=rid,
                 name=item.get("name", ""),
             )
         )
-    return tuple(edges)
+    return tuple(steps)
 
 
 def _parse_loaders(raw) -> tuple[LoaderSpec, ...]:
@@ -489,7 +523,7 @@ def load_config(spec_path: str | Path) -> Config:
             hydration=hydration,
             error_contains=exp_raw.get("error_contains", ""),
             reboot=bool(exp_raw.get("reboot", True)),
-            edges=_parse_edges(exp_raw.get("edges")),
+            steps=_parse_steps(exp_raw.get("steps")),
             closed_roster_sender=exp_raw.get("closed_roster_sender"),
         ),
     )
@@ -782,3 +816,436 @@ def denial_side(reply: dict) -> str | None:
     target does not accept) / `self-grant` / `delegation`. This field is the
     evidence that the gate is two-sided at all."""
     return reply.get("side") if isinstance(reply, dict) else None
+
+
+# ─── the STEP EXECUTOR — what makes a spec runnable ─────────────
+#
+# Every runtime implements this same loop over the same YAML. It is the only
+# per-runtime part of the agentic suite; the scenarios themselves are data.
+
+
+class StepFailure(AssertionError):
+    """A step whose verdict contradicted its spec. Carries the step's own name
+    so a failure reads as the scenario's sentence, not as a python traceback."""
+
+
+def _dig(obj: Any, path: str) -> list[Any]:
+    """Resolve a dotted path, `*` meaning "every element of this list".
+
+    `files.*.name` over `{"files": [{"name": "a"}]}` → `["a"]`. Used by the
+    `contains` / `not_contains` matchers so a spec can assert a side effect
+    (a directory that must NOT have been created) without the runner knowing
+    anything about the bundle that produced it.
+    """
+    cur: list[Any] = [obj]
+    for part in path.split("."):
+        nxt: list[Any] = []
+        for c in cur:
+            if part == "*":
+                if isinstance(c, list):
+                    nxt.extend(c)
+            elif isinstance(c, dict) and part in c:
+                nxt.append(c[part])
+        cur = nxt
+    return cur
+
+
+def _canon_tree(node: Any) -> Any:
+    """A tree with children in a canonical order.
+
+    A reboot rebuilds the roster from persisted records and hands the children
+    back sorted by id, while the first hydration builds them in MANIFEST order.
+    That is an ordering difference, not a roster difference, and "the roster came
+    back identical" is a claim about CONTENT — comparing raw order would fail on
+    a system that lost nothing.
+    """
+    if isinstance(node, dict):
+        out = {k: _canon_tree(v) for k, v in node.items()}
+        kids = out.get("children")
+        if isinstance(kids, list):
+            out["children"] = sorted(
+                kids, key=lambda c: c.get("id", "") if isinstance(c, dict) else ""
+            )
+        return out
+    if isinstance(node, list):
+        return [_canon_tree(v) for v in node]
+    return node
+
+
+def _resolve(value: Any, bound: dict[str, Any]) -> Any:
+    """Substitute `$name.field` references from earlier steps.
+
+    A `start` step binds its outcome under a name; a later `cancel` has to say
+    WHICH task, and only the kernel knows the pid it minted. Without bindings a
+    spec could not name what it had just created.
+    """
+    if isinstance(value, str) and value.startswith("$"):
+        ref = value[1:]
+        name, _, field_ = ref.partition(".")
+        if name not in bound:
+            raise ConfigError(f"${ref}: nothing bound under {name!r}")
+        target = bound[name]
+        if not field_:
+            return target
+        got = _dig(target, field_)
+        if not got:
+            raise ConfigError(f"${ref}: {field_!r} not present in {target!r}")
+        return got[0]
+    if isinstance(value, dict):
+        return {k: _resolve(v, bound) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve(v, bound) for v in value]
+    return value
+
+
+def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
+    """Apply a step's matchers to what it got back. Raises `StepFailure` naming
+    the step, the matcher and the actual reply — a spec failure has to be
+    readable without opening the runner."""
+    exp = step.expect
+
+    def fail(why: str) -> None:
+        raise StepFailure(f"{step}: {why}\n  reply: {reply!r}")
+
+    if "allow" in exp:
+        was_denied = denied(reply)
+        if exp["allow"] and was_denied:
+            fail("expected the edge to be OPEN, it was denied")
+        if not exp["allow"] and not was_denied:
+            fail("expected a DENIAL, the call went through")
+    if "side" in exp:
+        got = denial_side(reply)
+        if got != exp["side"]:
+            fail(f"expected the {exp['side']!r} half to refuse, got {got!r}")
+    if "reason" in exp and reply.get("reason") != exp["reason"]:
+        fail(f"expected reason {exp['reason']!r}, got {reply.get('reason')!r}")
+    if "error_contains" in exp:
+        if exp["error_contains"] not in str(reply.get("error", "")):
+            fail(f"error does not contain {exp['error_contains']!r}")
+    if "status" in exp:
+        got = (outcome or {}).get("status")
+        if got != exp["status"]:
+            fail(f"expected status {exp['status']!r}, got {got!r}")
+    for path, want in (exp.get("contains") or {}).items():
+        if want not in _dig(reply, path):
+            fail(f"{path} does not contain {want!r} (got {_dig(reply, path)!r})")
+    for path, unwanted in (exp.get("not_contains") or {}).items():
+        if unwanted in _dig(reply, path):
+            fail(f"{path} contains {unwanted!r} and must not")
+
+
+async def _grant_step(h: "Hydration", step: Step, remove: bool) -> dict:
+    """`grant`/`revoke` — sugar over an OPERATOR `update_agent`.
+
+    Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging
+    it (#6), so a spec that hand-wrote the payload would have to restate the
+    whole grant map every time and would silently drop the structural baseline.
+    The runner reads the live map, edits one entry, and writes it back whole.
+    """
+    agent_id = step.args["agent"]
+    field_ = step.args["field"]
+    other = step.args["to"]
+    agent = h.kernel.ctx.agents[agent_id]
+    current = dict(agent._meta.get(field_) or {})
+    if remove:
+        current.pop(other, None)
+    else:
+        current[other] = list(step.args.get("verbs") or ["*"])
+    return (
+        await h.kernel.ctx.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": agent_id,
+                        field_: current,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+
+
+async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
+    """Execute a spec's steps in order. Returns the (possibly rebooted) hydration.
+
+    Bindings live for the whole scenario, so a `start` early on can be cancelled
+    and collected much later.
+    """
+    bound: dict[str, Any] = {}
+    tasks: dict[str, Any] = {}
+    tree_before: dict | None = None
+
+    for idx, step in enumerate(steps):
+        args = _resolve(step.args, bound)
+        reply: dict = {}
+        outcome: dict | None = None
+
+        if step.kind == "reach":
+            reply = await reach(h.kernel, args["from"], args["to"], args["send"])
+
+        elif step.kind == "operator":
+            # OPERATOR authority: no `sender_context`, so the gate is not
+            # consulted. This is setup and side-effect READS — never evidence
+            # about an agent's reach, which is what `reach` is for.
+            out = (
+                await h.kernel.ctx.send(
+                    [{"target": args["to"], "payload": args.get("send") or {}}]
+                )
+            )[0]
+            outcome = out
+            reply = out["result"] if isinstance(out["result"], dict) else {}
+
+        elif step.kind in ("grant", "revoke"):
+            reply = await _grant_step(h, step, remove=step.kind == "revoke")
+
+        elif step.kind == "reboot":
+            tree_before = await dehydrate(h.kernel)
+            h = await reboot(h)
+            reply = {"rebooted": True}
+
+        elif step.kind == "assert_tree":  # noqa: PLR2004
+            got = await dehydrate(h.kernel, disk=bool(args.get("disk")))
+            if args.get("same_as") == "before_reboot":
+                if tree_before is None:
+                    raise ConfigError(
+                        f"{step}: `same_as: before_reboot` with no preceding reboot"
+                    )
+                if _canon_tree(got.get("tree")) != _canon_tree(
+                    tree_before.get("tree")
+                ):
+                    raise StepFailure(
+                        f"{step}: the roster did not come back identical\n"
+                        f"  before: {tree_before.get('tree')!r}\n"
+                        f"  after:  {got.get('tree')!r}"
+                    )
+            reply = got
+
+        elif step.kind == "start":
+            # Fire WITHOUT awaiting. The cancel-semantics rows (C14/C15/C16)
+            # need a dispatch that is still running when the next step acts on
+            # it; nothing else in the DSL can express "in flight".
+            task = asyncio.ensure_future(
+                reach_outcome(h.kernel, args["from"], args["to"], args["send"])
+            )
+            tasks[args["name"]] = task
+            reply = {"started": True}
+
+        elif step.kind == "await_task":
+            # Block until the started send is visible in `ps`. Replaces the
+            # suite's one wall-clock sleep: a fixed sleep is a race that passes
+            # on a fast machine and fails on a loaded one.
+            name = args["name"]
+            deadline = time.monotonic() + float(args.get("timeout", 5))
+            agent_id = None
+            while time.monotonic() < deadline:
+                rows = (
+                    await h.kernel.ctx.send(
+                        [{"target": "kernel", "payload": {"type": "ps"}}]
+                    )
+                )[0]["result"]
+                live = rows.get("tasks") or []
+                match = [t for t in live if t.get("agent") == args.get("agent")]
+                if match:
+                    bound[name] = match[0]
+                    agent_id = match[0]
+                    break
+                await asyncio.sleep(0.005)
+            if agent_id is None:
+                raise StepFailure(
+                    f"{step}: no task for agent {args.get('agent')!r} appeared"
+                    f" in `ps` within the timeout"
+                )
+            reply = agent_id
+
+        elif step.kind in ("reconcile_grants", "sweep_undeclared"):
+            # The sweeps need a concrete payload per verb: `list` wants a path,
+            # `reflect` wants nothing. The table is DATA in the step so a
+            # scenario using other verbs does not need runner changes.
+            table = dict(args.get("payloads") or {})
+
+            def payload_for(verb: str, _t=table) -> dict:
+                return {"type": verb, **dict(_t.get(verb) or {})}
+
+            if step.kind == "reconcile_grants":
+                await _sweep_reconcile(h, step, payload_for)
+            else:
+                await _sweep_undeclared(h, step, payload_for, prior=steps[:idx])
+            reply = {"swept": True}
+
+        elif step.kind == "collect":
+            name = args["name"]
+            if name not in tasks:
+                raise ConfigError(f"{step}: nothing started under {name!r}")
+            outcome = await tasks.pop(name)
+            reply = outcome["result"] if isinstance(outcome["result"], dict) else {}
+            # MERGE, never clobber. `await_task` bound the ps row (`id`) and this
+            # binds the outcome (`pid`) — the SAME id, by the one-id-space rule —
+            # so a later step can still name either. Replacing the binding would
+            # silently break every `$job.id` written before the collect.
+            merged = dict(bound.get(name) or {})
+            merged.update(outcome)
+            bound[name] = merged
+
+        else:  # pragma: no cover — the parser rejects unknown verbs
+            raise ConfigError(f"{step}: unknown step verb {step.kind!r}")
+
+        # Bindings resolve in the MATCHERS too: a step that asserts on the pid
+        # an earlier step minted has to be able to name it.
+        _match(replace(step, expect=_resolve(step.expect, bound)), reply, outcome)
+        if step.because:
+            check(step.because, True, str(step))
+
+    for name, task in tasks.items():
+        task.cancel()
+    return h
+
+
+async def reach_outcome(kernel, sender: str, target: str, payload: dict) -> dict:
+    """`reach`, but returning the whole OUTCOME rather than just the result —
+    `start`/`collect` assert on `status`, which only the outcome carries."""
+    with sender_context(sender):
+        return (await kernel.send([{"target": target, "payload": payload}]))[0]
+
+
+# ─── the computed sweeps ────────────────────────────────────────
+#
+# Both are reconciliations: they walk the DECLARATION (the manifest's grant
+# maps, the running tree's parentage) and probe the running system against it.
+# That is the step the borrowed corpora do not have — openfga and a2a-tck both
+# assert behaviour with a declarative file as INPUT, never that a declared shape
+# equals a running one.
+
+
+def _manifest_specs(cfg) -> dict[str, dict]:
+    """The manifest entries by id — the DECLARATION, never evidence."""
+    return {
+        spec["id"]
+        : spec
+        for ln in cfg.loaders
+        for spec in ln.declared_agents
+        if spec.get("id")
+    }
+
+
+def _declared_verbs(spec: dict, field_: str, other: str) -> set[str]:
+    """The verbs `spec` declares for `other`. A `"*"` is REFUSED rather than
+    interpreted: a wildcard makes the per-verb intersection unobservable, and
+    that intersection is the whole point of the walk."""
+    grant = (spec.get(field_) or {}).get(other)
+    if grant is None:
+        return set()
+    if not isinstance(grant, list):
+        raise ConfigError(
+            f"reconcile_grants: {field_}[{other}] is {grant!r}; this sweep needs"
+            " explicit verb lists, a wildcard hides the intersection"
+        )
+    return set(grant)
+
+
+def _structural_pairs(children: dict, universe: set[str]) -> set:
+    """The edges the kernel stamps and nobody declares: `$self`, `$parent`,
+    `$children` — each agent, plus each parent↔child pair, both directions.
+    Derived from the RUNNING tree, which PC-1 already reconciled."""
+    pairs = {(a, a) for a in universe}
+    for parent, kids in children.items():
+        for kid in kids:
+            if parent in universe and kid in universe:
+                pairs |= {(parent, kid), (kid, parent)}
+    return pairs
+
+
+async def _sweep_reconcile(h, step: Step, payload_for) -> None:
+    """For every pair either half mentions, the edge's verb set is the
+    INTERSECTION of the two declared lists, and a verb outside it is refused by
+    the half that omitted it — checked in order, so `side` is not symmetric
+    bookkeeping."""
+    specs = _manifest_specs(h.config)
+    probed = 0
+    for sender, s_spec in specs.items():
+        for target, t_spec in specs.items():
+            if sender == target:
+                continue
+            egress = _declared_verbs(s_spec, "can_call", target)
+            ingress = _declared_verbs(t_spec, "callable_by", sender)
+            for verb in sorted(egress | ingress):
+                probed += 1
+                reply = await reach(h.kernel, sender, target, payload_for(verb))
+                both = verb in egress and verb in ingress
+                if denied(reply) == both:
+                    raise StepFailure(
+                        f"{step}: {sender} -{verb}-> {target}: declared"
+                        f" egress={sorted(egress)} ingress={sorted(ingress)} —"
+                        f" expected {'reachable' if both else 'refused'},"
+                        f" got {reply!r}"
+                    )
+                if both:
+                    continue
+                want = "egress" if verb not in egress else "ingress"
+                if denial_side(reply) != want:
+                    raise StepFailure(
+                        f"{step}: {sender} -{verb}-> {target}: the half that"
+                        f" omitted {verb!r} is {want!r}, the denial named"
+                        f" {denial_side(reply)!r}"
+                    )
+    # A guard on the WALK, not a claim about the kernel: a manifest edited down
+    # to nothing would otherwise reconcile perfectly against no probes at all.
+    floor = int(step.args.get("min_probes", 1))
+    if probed < floor:
+        raise StepFailure(
+            f"{step}: only {probed} declared triples to walk (min {floor})"
+        )
+
+
+async def _sweep_undeclared(h, step: Step, payload_for, prior=()) -> None:
+    """The whole roster, every ordered pair, every named verb. The reachable set
+    must be EXACTLY the structural baseline plus the spec's own allowed reaches
+    — nothing rides along.
+
+    Two properties fall out that no single probe shows: co-residency grants
+    nothing (siblings on one loader are not reachable unless both halves name
+    it), and authority is not transitive (`$children` is direct children, a set
+    membership, not a subtree).
+    """
+    d = await dehydrate(h.kernel)
+    universe = [h.kernel.id, *h.config.loader_ids, *h.config.roster_ids]
+    missing = set(universe) - set(d["ids"])
+    if missing:
+        raise StepFailure(f"{step}: sweep universe is not running: {sorted(missing)}")
+    structural = _structural_pairs(d["children"], set(universe))
+
+    for verb in step.args.get("verbs") or ["reflect"]:
+        # Only the reaches declared open BEFORE this sweep. The steps are
+        # ORDERED and grants happen mid-scenario, so a sweep asserts the state
+        # AS OF ITS POSITION — counting an edge the ladder opens later would
+        # demand it be open before the grant that opens it.
+        declared = {
+            (s.args["from"], s.args["to"])
+            for s in prior
+            if s.kind == "reach"
+            and s.expect.get("allow") is True
+            and (s.args.get("send") or {}).get("type") == verb
+        }
+        want = structural | declared
+        got: set = set()
+        sides: dict = {}
+        for sender in universe:
+            for target in universe:
+                reply = await reach(h.kernel, sender, target, payload_for(verb))
+                if denied(reply):
+                    sides[(sender, target)] = denial_side(reply)
+                else:
+                    got.add((sender, target))
+        if got != want:
+            raise StepFailure(
+                f"{step}: verb {verb!r}: undeclared edges {sorted(got - want)},"
+                f" declared-and-missing {sorted(want - got)}"
+            )
+        bad = {s for s in sides.values() if s not in ("egress", "ingress")}
+        if bad:
+            raise StepFailure(
+                f"{step}: verb {verb!r}: a refusal did not name a call-gate half"
+                f" — {sorted(bad)} (a sealed io leg denies with"
+                " reason=unauthorized and NO side, which is a DIFFERENT gate)"
+            )

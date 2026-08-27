@@ -49,7 +49,7 @@ from web_rest.tools import _make_post_endpoint
 # same file. It is JSON so every runtime parses it with what it already has (the
 # ts kernel ships zero runtime deps); JSON is valid YAML, so nothing was lost in
 # the move from `c21_cases.yaml`.
-_CORPUS = Path(__file__).resolve().parents[5] / "conformance" / "cases.json"
+_CORPUS = Path(__file__).resolve().parents[5] / "contract" / "conformance" / "cases.json"
 _DOC = json.loads(_CORPUS.read_text())
 # `$root` means THIS runtime's root id. Parity asserts the per-runtime value,
 # never equality — python's root is `kernel_state`, rust's and swift's is `core`.

@@ -32,6 +32,7 @@ from pathlib import PurePosixPath
 from file_bridge import fs
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
+from kernel._refusal import UNAUTHORIZED, refusal
 
 DEFAULT_HIDDEN = [".git", ".env", ".fantastic", "node_modules", "__pycache__"]
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
@@ -110,8 +111,19 @@ def _window_text(rec: dict, payload: dict, text: str) -> tuple[str, dict]:
 
 
 def _readonly_or_none(rec: dict) -> dict | None:
+    """A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
+
+    This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
+    the shared agentic corpus caught it: no `reason`, so a caller could only
+    branch on the prose. `unauthorized` is the same code the io SEAL answers with
+    — both say "this edge is not open for that", and neither is about the caller,
+    which is why neither carries a `side`."""
     if rec.get("readonly"):
-        return {"error": "agent is readonly"}
+        return refusal(
+            UNAUTHORIZED,
+            "agent is readonly",
+            hint="this leg accepts reads only; an operator may clear `readonly`",
+        )
     return None
 
 

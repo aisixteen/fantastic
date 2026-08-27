@@ -1,6 +1,6 @@
 //! C21 — one semantics, many transports, MANY RUNTIMES.
 //!
-//! This driver replays the SHARED corpus (`conformance/cases.json` at the repo
+//! This driver replays the SHARED corpus (`contract/conformance/cases.json` at the repo
 //! root) against the rust kernel. The python, swift and ts drivers replay the
 //! SAME file. Add a case there and every runtime is on the hook for it — a
 //! wire-visible contract is decidable from outside, so asserting it once as
@@ -28,7 +28,7 @@ fn corpus_path() -> PathBuf {
         .ancestors()
         .nth(5)
         .expect("repo root above src/lib/rust/crates/fantastic-kernel")
-        .join("conformance/cases.json")
+        .join("contract/conformance/cases.json")
 }
 
 struct C21Probe;

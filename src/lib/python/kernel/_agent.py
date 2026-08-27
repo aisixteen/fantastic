@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from kernel._refusal import (
     BAD_ARG,
     INVALID_META,
+    LOCKED,
     NOT_HERE,
     TIMEOUT,
     UNAUTHORIZED,
@@ -1487,15 +1488,19 @@ class Agent:
             return self.ctx.unknown_agent(agent_id, deleted=False)
         blocked_by = target._find_locked_descendant()
         if blocked_by is not None:
-            return {
-                "locked": True,
-                "blocked_by": blocked_by,
-                "error": (
-                    f"delete_agent: {agent_id!r} blocked by delete_lock on "
-                    f"{blocked_by!r}; clear it via update_agent before deleting"
-                ),
-                "id": agent_id,
-            }
+            # THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: True`
+            # flag and no `reason` until 2026-08-27, when the shared agentic
+            # corpus caught it — in all three runtimes at once, because the flag
+            # #27 declared dropped was never actually removed here. A caller had
+            # to know it had called `delete_agent` to know which field to read.
+            return refusal(
+                LOCKED,
+                f"delete_agent: {agent_id!r} blocked by delete_lock on "
+                f"{blocked_by!r}; clear it via update_agent before deleting",
+                hint="clear the lock with update_agent, then delete again",
+                blocked_by=blocked_by,
+                id=agent_id,
+            )
         await target._cascade_delete()
         return {"deleted": True, "id": agent_id}
 

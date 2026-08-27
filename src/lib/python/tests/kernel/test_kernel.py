@@ -78,7 +78,7 @@ async def test_delete_refuses_locked(kernel):
     self-protect via update_agent)."""
     kernel.create("file_bridge.tools", id="locked", delete_lock=True)
     r = await kernel.delete("locked")
-    assert r.get("locked") is True
+    assert r.get("reason") == "locked"
     assert kernel.get("locked") is not None
 
 
