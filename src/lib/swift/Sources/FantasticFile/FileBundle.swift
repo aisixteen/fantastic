@@ -37,6 +37,36 @@ func readonlyRefusal() -> JSON {
         hint: "this leg accepts reads only; an operator may clear `readonly`")
 }
 
+/// Clamp `raw` under `base`, or throw. THE running-dir law, exported.
+///
+/// Mirror of rust's `fantastic_file::clamp_root`. Public because the cold
+/// bring-up readers need it too: `static_loader` reads its manifest before any
+/// file_bridge agent can exist, and that read is NOT exempt from the clamp —
+/// python does the same through `fs.read_text(Path.cwd(), path)`.
+///
+/// Compared LEXICALLY (no canonicalize) so the check does not require the path
+/// to exist, and so both sides stay in the same form — canonicalizing only the
+/// base would mismatch a non-canonical absolute root on macOS (`/var` vs
+/// `/private/var`).
+public func clampRoot(_ raw: String, base: URL) throws -> URL {
+    struct Escape: Error, CustomStringConvertible {
+        let raw: String
+        var description: String { "path \(raw) escapes the running directory" }
+    }
+    // Absoluteness is a property of the STRING, not of the URL:
+    // `URL(fileURLWithPath:)` absolutizes a relative path against the CWD, so
+    // asking the URL always says "absolute" and the base would be discarded —
+    // a relative `agents/x/agent.json` then resolved against the cwd instead of
+    // the store root and was refused as an escape.
+    let combined =
+        raw.hasPrefix("/")
+        ? URL(fileURLWithPath: raw).standardizedFileURL
+        : base.appendingPathComponent(raw).standardizedFileURL
+    let root = base.standardizedFileURL.path
+    if combined.path == root || combined.path.hasPrefix(root + "/") { return combined }
+    throw Escape(raw: raw)
+}
+
 public struct FileBundle: AgentBundle {
     public let name = "file_bridge"
 
@@ -450,12 +480,7 @@ public struct FileBundle: AgentBundle {
     }
 
     private func resolve(root: URL, path: String) -> URL? {
-        let combined = root.appendingPathComponent(path).standardizedFileURL
-        let canonicalRoot = root.standardizedFileURL.path
-        let canonicalCombined = combined.path
-        // Refuse if the resolved path escapes root.
-        if !canonicalCombined.hasPrefix(canonicalRoot) { return nil }
-        return combined
+        try? clampRoot(path, base: root)
     }
 
     private func readonlyError(agent: Agent) -> JSON? {
