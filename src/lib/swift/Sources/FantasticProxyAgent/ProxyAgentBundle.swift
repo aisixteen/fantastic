@@ -26,20 +26,16 @@ public let HANDLER_MODULE = "proxy_agent.tools"
 
 // ── Host protocol ──────────────────────────────────────────────────
 
-/// Trait the embedding host implements. Swift classes / actors
-/// conform to this and register via `registerHost`. All methods are
-/// sync to match the UniFFI 0.29 callback-interface constraint that
-/// the Apple app already relies on.
-/// Trait the embedding host implements. Inherits from
-/// `_ProxyAgentRegistrable` so any `ProxyAgentHost` works directly
-/// with `Kernel.registerProxyAgent(agentId:host:)` — no explicit
-/// bridging needed.
-public protocol ProxyAgentHost: AnyObject, Sendable, _ProxyAgentRegistrable {}
-
-/// Source-compatibility alias for the original UniFFI callback
-/// interface name. Apps that imported `ProxyAgent` from
-/// `FantasticKernelEmbedded` keep compiling unchanged.
-public typealias ProxyAgent = ProxyAgentHost
+/// Trait the embedding host implements. Swift classes / actors conform to this
+/// and register via `registerHost(_:_:)` — the ONE registration path.
+///
+/// `handle` is sync and takes/returns a JSON STRING: the host is foreign code,
+/// so the boundary is a value both sides can build without sharing a type.
+public protocol ProxyAgentHost: AnyObject, Sendable {
+    func handle(payloadJson: String) -> String
+    func onBoot()
+    func onDelete()
+}
 
 extension ProxyAgentHost {
     public func onBoot() {}
@@ -73,57 +69,12 @@ public func hostFor(_ agentId: AgentId) -> ProxyAgentHost? {
     return hosts[agentId]
 }
 
-public func clearHosts() {
-    hostsLock.lock()
-    defer { hostsLock.unlock() }
-    hosts.removeAll()
-}
-
 // ── Bundle ─────────────────────────────────────────────────────────
-
-// ── Kernel.registerProxyAgent / unregisterProxyAgent bridge ───────
-//
-// `FantasticKernel` declares `Kernel.registerProxyAgent(agentId:host:)`
-// + `unregisterProxyAgent(agentId:)` (in `PublicAPI.swift`) that
-// match the UniFFI surface. They route through these globals so
-// `FantasticKernel` doesn't need to import `FantasticProxyAgent`
-// (which would be a circular dep — proxy_agent already imports the
-// kernel). Hook installed lazily on first ProxyAgentBundle init.
-//
-// Bridge converts the kernel-side `_ProxyAgentRegistrable`
-// existential into the local `ProxyAgentHost` shape via a small
-// wrapper class.
-
-private final class HostAdapter: ProxyAgentHost {
-    let inner: any _ProxyAgentRegistrable
-    init(_ inner: any _ProxyAgentRegistrable) { self.inner = inner }
-    func handle(payloadJson: String) -> String { inner.handle(payloadJson: payloadJson) }
-    func onBoot() { inner.onBoot() }
-    func onDelete() { inner.onDelete() }
-}
-
-private let installHookOnce: Void = {
-    installProxyAgentRegistrationHook(
-        register: { agentId, host in
-            registerHost(agentId, HostAdapter(host))
-        },
-        unregister: { agentId in
-            let had = hostFor(agentId) != nil
-            unregisterHost(agentId)
-            return had
-        }
-    )
-}()
 
 public struct ProxyAgentBundle: AgentBundle {
     public let name = "proxy_agent"
 
-    public init() {
-        // Wire Kernel.registerProxyAgent into our host registry the
-        // first time anyone instantiates the bundle. dispatch-once
-        // semantics via the file-private constant above.
-        _ = installHookOnce
-    }
+    public init() {}
 
     public var readme: String? {
         "proxy_agent — host-implemented agents. Register a Swift class via `registerHost(agentId, host)` after creating the agent; subsequent verbs flow through `host.handle(payloadJson:)`."

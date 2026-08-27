@@ -149,7 +149,6 @@ struct BundleSmokeTests {
     }
 
     @Test func proxyAgentNoHostReturnsStructuredError() async {
-        clearHosts()
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p1"])])[0].result
         let r = await kernel.send([Item("p1", ["type": "render", "x": 1])])[0].result
@@ -157,7 +156,6 @@ struct BundleSmokeTests {
     }
 
     @Test func proxyAgentReflectShowsHostRegisteredFalse() async {
-        clearHosts()
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "proxy_agent.tools", "id": "p2"])])[0].result
         let r = await kernel.send([Item("p2", ["type": "reflect"])])[0].result

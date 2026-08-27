@@ -393,13 +393,21 @@ public final class AIBackend: @unchecked Sendable {
 
         let deadline = Date().addingTimeInterval(sendTimeoutSeconds)
 
-        // Load + persist the user turn UNDER the FIFO lock (we hold it
-        // here), so serialized sends on one client can't race load→save.
+        // Load the prior turns UNDER the FIFO lock (we hold it here), so
+        // serialized sends on one client can't race load→save.
+        //
+        // The user turn is NOT persisted here. It is persisted ONCE, with the
+        // assistant turn, after the stream completes — matching python
+        // (`ai_core.core._save_history`, one call site) and rust
+        // (`agent_loop.rs`, one call site). Saving it early made a cancelled or
+        // errored turn leave a user row with no answer, which python and rust
+        // never produce: there, an interrupted turn persists NOTHING, because
+        // the exchange it was part of never happened.
+        //
         // The user row carries `id` only for stateless backends (FM bubble
         // identity); ollama/NIM don't. Stateless keeps history UI-only.
         let prior = await loadHistory(agent: agent, client: clientId, kernel: kernel)
         let persistBase = prior + [userTurn(id: userMessageId, text: userText)]
-        await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: persistBase)
         let modelHistory = config.stateless ? [] : prior
 
         // Rebuild the system block every turn from the live substrate (a lean
@@ -516,9 +524,10 @@ public final class AIBackend: @unchecked Sendable {
         if Task.isCancelled { return nil }
 
         // Persist the full chat: base (prior + user turn) + the assistant turn.
-        // One write of the whole conversation (matches Rust/Python
-        // `save_history`). The error / FM-interrupt / timeout paths return
-        // earlier and leave the base (just the user turn) as the record.
+        // THE ONLY WRITE, and the only one python/rust make either. The error /
+        // FM-interrupt / timeout / cancel paths all return before this point,
+        // so an interrupted turn persists nothing at all — neither half of an
+        // exchange that never completed.
         //
         // PARSE THE RAW TEXT, PERSIST THE STRIPPED TEXT (Python core.py:1016-1018).
         // The deliberation is not part of the conversation: re-feeding a reasoning
@@ -804,7 +813,14 @@ public final class AIBackend: @unchecked Sendable {
     /// Persist a client's full chat THROUGH the kernel. No store ⇒ nothing
     /// lands; that is the auto-flush law, not a fallback.
     private func saveHistory(agent: Agent, client: String, kernel: Kernel, rows: [JSON]) async {
-        _ = await KernelTaskLocals.$currentSender.withValue(nil) {
+        // KERNEL BOOKKEEPING, not the caller's send: it clears the caller's
+        // identity AND the caller's kill flag. Clearing only the sender left the
+        // write inside the turn's killed subtree, where dispatch is inert — so
+        // cancelling mid-stream destroyed the user row that was already
+        // committed. A cancel must never corrupt what was already durable. The
+        // partial-assistant row is a different question, and it is guarded
+        // separately by `Task.isCancelled` before the second save.
+        _ = await kernel.asBookkeeping {
             await kernel.send([
                 Item(
                     AgentId("kernel"),

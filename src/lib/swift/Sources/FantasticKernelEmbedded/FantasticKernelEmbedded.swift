@@ -9,10 +9,12 @@
 //     let port = kernel.httpPort()
 //     defer { kernel.shutdown() }
 //
-//     class MyHost: ProxyAgent { ... }
-//     try kernel.registerProxyAgent(agentId: "my_agent", host: MyHost())
+//     class MyHost: ProxyAgentHost { ... }
+//     registerHost(AgentId("my_agent"), MyHost())
 //
-// keeps working after the UniFFI/Rust backend was retired.
+// `registerHost` is the ONE registration path — the UniFFI-shaped
+// `kernel.registerProxyAgent` wrapper is deleted along with the rest
+// of that compatibility surface.
 //
 // The Lite tier targets iOS, iPadOS, visionOS, tvOS, watchOS, and
 // sandboxed macOS. Sandbox-incompatible bundles (terminal_backend,

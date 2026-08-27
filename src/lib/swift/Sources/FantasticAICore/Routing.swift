@@ -298,8 +298,16 @@ func routeReply(
         // (KernelDispatch.swift). So the try/except python needs is the kernel's,
         // and all routing adds is the `target`, which the kernel does not know is
         // interesting.
-        let pidBox = TaskIdBox()
-        var result = await kernel.sendTraced(AgentId(target), .object(payload), taskOut: pidBox)
+        // THE BATCH SEND IS THE ONLY SEND. The model may NAME the execution
+        // (dedup/join across retries), bound its own call, and declare a retry
+        // budget; the kernel validates all three and a bad value settles that
+        // one call as a refusal the model can read.
+        var item = Item(AgentId(target), .object(payload))
+        if let execId = args["id"]?.asString, !execId.isEmpty { item.id = execId }
+        if let t = args["timeout"]?.asDouble { item.timeout = t }
+        if let r = args["retries"]?.asInt { item.retries = UInt32(r) }
+        let outcome = await kernel.send([item])[0]
+        var result = outcome.result
         if result["raised"].asBool == true, var obj = result.asObject, obj["target"] == nil {
             obj["target"] = .string(target)
             result = .object(obj)
@@ -318,7 +326,7 @@ func routeReply(
         // is running ahead of me", then re-polled forever). The PID is the same id
         // `ps`/`cancel` use, so a reply names a row the model can act on.
         let verb = payload["type"]?.asString ?? "?"
-        let pid = pidBox.value?.value ?? "-"
+        let pid = outcome.pid?.value ?? "-"
         blocks.append(
             (replyTo, "[reply to \(pid) · \(target) \(verb)]\n" + result.serialize()))
     }

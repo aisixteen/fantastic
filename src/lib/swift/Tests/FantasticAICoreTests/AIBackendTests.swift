@@ -85,7 +85,7 @@ struct AIBackendTests {
         let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c1")]))])[0].result
         let msgs = h["messages"].asArray ?? []
         #expect(msgs.count == 2)
-        #expect(msgs[0]["role"].asString == "user")
+        #expect(msgs.first?["role"].asString == "user")
         #expect(msgs[0]["content"].asString == "hi")
         #expect(msgs[0]["complete"].asBool == true)
         #expect(msgs[0]["id"].asString == nil)  // non-stateless: no id
@@ -134,7 +134,10 @@ struct AIBackendTests {
                 "client_id": .string("c"),
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the dispatched call's reply never came back")
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
+        // Wait for ALL SIX rows the assertion below reads. Waiting for 4 raced
+        // the nudge turn: alone it had landed by the time we looked, under full
+        // suite load it had not, and the count read 5.
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 6)
 
         // Pass 2's system message is the CALLER's, still — not the substrate's
         // default block (whose `SEND_TO_HOWTO` heading would be in there).
@@ -236,19 +239,22 @@ struct AIBackendTests {
         #expect(msgs[1]["content"].asString == "")
     }
 
-    @Test func errorStreamDoesNotPersistAssistantTurn() async throws {
+    @Test func anErroredStreamPersistsNEITHERHalfOfTheTurn() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(throwsError: true)) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
             ]))])[0].result
-        // Only the user turn persists on error; give the stream a beat.
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 1)
+        // A turn is persisted as a UNIT or not at all. This used to leave the
+        // user row behind, because the backend wrote it up-front and the error
+        // path returned before the assistant row — so a failed exchange read
+        // back as a question nobody answered. Python and rust never produced
+        // that: both have ONE save, after the stream, carrying both turns.
+        try await Task.sleep(nanoseconds: 60_000_000)
         let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result
         let msgs = h["messages"].asArray ?? []
-        #expect(msgs.count == 1)
-        #expect(msgs[0]["role"].asString == "user")
+        #expect(msgs.isEmpty, "a failed turn left a half-exchange behind: \(msgs)")
     }
 
     @Test func cancellingAnInFlightSendClosesTheTurnOut() async throws {
@@ -305,11 +311,14 @@ struct AIBackendTests {
         let stillListed = await psRows(kernel).contains(where: { $0["id"].asString == taskId })
         #expect(!stillListed)
 
-        // The killed turn persisted no partial assistant row — only the user turn.
+        // The killed turn persisted NOTHING — not the partial assistant row, and
+        // not the user row either. The exchange never completed, so no half of
+        // it is a record. This matches python (`_save_history`, one call site
+        // after the stream) and rust (`agent_loop.rs`, likewise): a turn is
+        // persisted as a UNIT or not at all.
         let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string("c")]))])[0].result
         let msgs = h["messages"].asArray ?? []
-        #expect(msgs.count == 1)
-        #expect(msgs[0]["role"].asString == "user")
+        #expect(msgs.isEmpty, "an interrupted turn left a half-exchange behind: \(msgs)")
 
         // The FIFO lock was released as the killed generation unwound: the agent
         // still answers a fresh send (a stranded lock would hang here forever).
