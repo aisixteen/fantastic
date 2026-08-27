@@ -355,15 +355,19 @@ extension Kernel {
             return .object(["error": .string("no agent \"\(idStr)\"")])
         }
         if let blocker = findLockedDescendant(of: target) {
-            return .object([
-                "error":
-                    .string(
-                        "delete_agent: \(id.value) blocked by delete_lock on descendant \(blocker.value)"
-                    ),
-                "locked": .bool(true),
-                "id": .string(id.value),
-                "blocked_by": .string(blocker.value),
-            ])
+            // THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: true`
+            // flag and no `reason` until 2026-08-27, when the shared agentic
+            // corpus caught it — in python, rust and swift at once, because the
+            // flag #27 declared dropped was never actually removed anywhere.
+            return Refusal.make(
+                Refusal.locked,
+                "delete_agent: \(id.value) blocked by delete_lock on descendant "
+                    + "\(blocker.value)",
+                hint: "clear the lock with update_agent, then delete again",
+                extra: [
+                    ("id", .string(id.value)),
+                    ("blocked_by", .string(blocker.value)),
+                ])
         }
         await cascadeDelete(target: target)
         await emit(
@@ -452,9 +456,12 @@ extension Kernel {
         if let hm = target.handlerModule, let bundle = bundles.get(hm),
             let why = bundle.validateMeta(patch, record: target.meta)
         {
-            return .object([
-                "error": .string(why), "id": .string(idStr), "updated": .bool(false),
-            ])
+            // THE ONE REFUSAL SHAPE (#27). A bundle's own `validate_meta`
+            // rejection is `invalid_meta`; it carried the ad-hoc `updated:
+            // false` flag #27 declared dropped, and no `reason` at all, until
+            // the shared agentic corpus caught it 2026-08-27.
+            return Refusal.make(
+                Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
         let rec = target.updateMeta(patch)
         await persistRecord(target)

@@ -151,6 +151,7 @@ let package = Package(
                 "FantasticKernel", "FantasticJSON",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Yams", package: "Yams"),
+                "FantasticExecBridge",
             ]
         ),
         .target(
@@ -371,6 +372,11 @@ let package = Package(
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",
+                // The agentic runner boots the rosters the shared corpus at
+                // `contract/agentic/` declares, so it needs the bundles those
+                // manifests name — and Yams to read the corpus itself.
+                .product(name: "Yams", package: "Yams"),
+                "FantasticExecBridge",
             ]
         ),
     ]
