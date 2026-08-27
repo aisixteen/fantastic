@@ -82,8 +82,8 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // An OPERATOR send (no origin) is the root of trust and never reaches here.
   // Every AGENT send — ANY verb, `reflect` included — needs BOTH ends.
   const origin = k.currentOrigin;
+  const verb = typeof payload["type"] === "string" ? payload["type"] : "";
   if (origin !== null && target !== undefined) {
-    const verb = typeof payload["type"] === "string" ? payload["type"] : "";
     const d = k.gate(origin, verb, resolvedId);
     if (d !== null) return { index, settled: refused(d) };
   }
@@ -131,11 +131,21 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
           ),
         };
       }
+      // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
+      // belongs to whoever ran it, so handing it back is equivalent to having
+      // made THAT call — the gate must be asked that question, not about the
+      // verb this caller happened to send. Measured in python 2026-08-28: a
+      // caller granted only a harmless verb reused another's id and received
+      // its secret verbatim. An OPERATOR joiner is ungated, as everywhere.
+      if (k.currentOrigin !== null) {
+        const d = k.gate(k.currentOrigin, existing.verb, resolvedId);
+        if (d !== null) return { index, settled: refused(d) };
+      }
       // JOIN — settled or in flight, the ledger row carries the ONE true
       // outcome and no second execution ever starts.
       return { index, row: existing, joined: true, timeout, pid: execId };
     }
-    const row = k.ledger.open(execId, resolvedId, k.currentOrigin, retries, true);
+    const row = k.ledger.open(execId, resolvedId, verb, k.currentOrigin, retries, true);
     return { index, row, pid: execId, target: resolvedId, payload, timeout };
   }
 
@@ -143,7 +153,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // engine — any reply re-fetchable and joinable by pid, and the ring bounds
   // what that history costs.
   const pid = k.tasks.mint(resolvedId);
-  const row = k.ledger.open(pid, resolvedId, k.currentOrigin, retries, false);
+  const row = k.ledger.open(pid, resolvedId, verb, k.currentOrigin, retries, false);
   return { index, row, pid, target: resolvedId, payload, timeout };
 }
 

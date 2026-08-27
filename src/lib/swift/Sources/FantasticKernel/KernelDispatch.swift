@@ -564,6 +564,20 @@ extension Kernel {
     /// `can_call`) then ingress (the target's `callable_by`), both via the one
     /// `authorizeCall` engine, then the authority-conferral rules (no self-raise;
     /// delegate only a subset). A holder with no record → empty grant → deny-all.
+    /// May `origin` receive the outcome of an execution that ran `verb` on
+    /// `target`? A denial, or nil.
+    ///
+    /// Joining hands back ANOTHER caller's result verbatim, so it is equivalent
+    /// to having made that call. Asking the gate about the joiner's own payload
+    /// instead — a different verb, whose reply it never gets — authorizes the
+    /// wrong operation. An OPERATOR joiner (no origin) is ungated, as everywhere.
+    func joinDenial(origin: AgentId?, verb: String, target: Agent) -> JSON? {
+        guard let joiner = origin else { return nil }
+        return gate(
+            sender: joiner, verb: verb, target: target,
+            payload: .object(["type": .string(verb)]))
+    }
+
     func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
         let loaderId = root?.id.value
         let senderAgent = agent(sender)

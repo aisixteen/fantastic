@@ -124,6 +124,56 @@ pub fn with(target: &mut Value, key: &str, value: Value) {
     }
 }
 
+/// Refuse an agent id that is not ONE SAFE PATH SEGMENT. `None` when it is fine.
+///
+/// An agent id is not just a name — it BECOMES A DIRECTORY. The loader builds a
+/// record's on-disk home by joining the id onto the store root, so an id
+/// carrying `..` or a separator walks out of the store and the write, or the
+/// recursive delete, lands wherever it pointed.
+///
+/// Measured in python 2026-08-28: an agent holding NO explicit grant — only the
+/// structural baseline, which lets any child call its parent — sent
+/// `forget_record` with `id: "../../x"` to the root loader and recursively
+/// deleted a directory OUTSIDE the store. The call gate was not bypassed;
+/// nothing validated the id.
+#[must_use]
+pub fn guard_agent_id(verb: &str, agent_id: &str) -> Option<Value> {
+    if agent_id.is_empty() {
+        return Some(bad(verb, "id", "a non-empty string"));
+    }
+    if agent_id.contains('/') || agent_id.contains('\\') {
+        return Some(bad(
+            verb,
+            "id",
+            &format!("a single path segment (no separators); got {agent_id:?}"),
+        ));
+    }
+    if agent_id == "." || agent_id == ".." || agent_id.contains("..") {
+        return Some(bad(
+            verb,
+            "id",
+            &format!("a name that is not a path traversal; got {agent_id:?}"),
+        ));
+    }
+    if agent_id.starts_with('.') {
+        return Some(bad(
+            verb,
+            "id",
+            &format!("a name that is not hidden; got {agent_id:?}"),
+        ));
+    }
+    if agent_id.contains(':') {
+        // The minted-pid namespace: `<agent>:<hex>` in the one id space the
+        // ledger and task table share.
+        return Some(bad(
+            verb,
+            "id",
+            &format!("a name without ':' (the minted-pid namespace); got {agent_id:?}"),
+        ));
+    }
+    None
+}
+
 /// `<verb>: <arg> required` — the commonest refusal, spelled once.
 #[must_use]
 pub fn missing(verb: &str, arg: &str) -> Value {

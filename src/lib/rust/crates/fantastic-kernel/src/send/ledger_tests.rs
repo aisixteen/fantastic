@@ -8,6 +8,7 @@
 
 use crate::agent::AgentId;
 use crate::outcome::{Item, Status};
+use crate::send::with_sender;
 use crate::tasks::tests::{mk_agent, mk_kernel, Shared};
 use serde_json::json;
 use std::sync::Arc;
@@ -333,4 +334,92 @@ async fn a_cancelled_execution_stays_cancelled() {
     let out = batch.await.expect("send returns").remove(0);
     assert_eq!(out.status, Status::Cancelled, "a cancel was retried away");
     assert_eq!(out.attempts, 1, "cancel must not spend the budget");
+}
+
+/// Joining is authorized against the verb THAT EXECUTION RAN.
+///
+/// The gate used to be asked the wrong question on a join — the joiner's own
+/// payload verb — and the JOIN then handed back the ORIGINAL call's outcome, a
+/// reply for a verb the joiner never had authorized. Measured in python
+/// 2026-08-28: a caller granted only a harmless verb reused another's id and
+/// received its secret verbatim. Dedup was correct; the RESULT crossed an
+/// authorization boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joining_is_gated_on_the_verb_that_execution_ran() {
+    let sh = Arc::new(Shared::default());
+    let kernel = mk_kernel(Arc::clone(&sh));
+    for (who, grant) in [("alice", "work"), ("bob", "ping")] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("core"),
+                json!({
+                    "type": "create_agent", "parent_id": "kernel",
+                    "handler_module": "slow.tools", "id": who,
+                    "can_call": {"vault": [grant]},
+                }),
+            )])
+            .await;
+    }
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": "slow.tools", "id": "vault",
+                "callable_by": {"alice": ["work"], "bob": ["ping"]},
+            }),
+        )])
+        .await;
+
+    let k = Arc::clone(&kernel);
+    let a = with_sender(AgentId::from("alice"), async move {
+        k.send(vec![Item {
+            target: AgentId::from("vault"),
+            payload: json!({"type": "work"}),
+            id: Some("job1".into()),
+            timeout: None,
+            retries: None,
+        }])
+        .await
+        .remove(0)
+    })
+    .await;
+    assert_eq!(a.status, Status::Completed, "{a:?}");
+
+    let k = Arc::clone(&kernel);
+    let b = with_sender(AgentId::from("bob"), async move {
+        k.send(vec![Item {
+            target: AgentId::from("vault"),
+            payload: json!({"type": "ping"}),
+            id: Some("job1".into()),
+            timeout: None,
+            retries: None,
+        }])
+        .await
+        .remove(0)
+    })
+    .await;
+    assert_eq!(
+        b.result["reason"], "unauthorized",
+        "bob joined an execution it may not run: {b:?}"
+    );
+
+    // An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
+    let k = Arc::clone(&kernel);
+    let again = with_sender(AgentId::from("alice"), async move {
+        k.send(vec![Item {
+            target: AgentId::from("vault"),
+            payload: json!({"type": "work"}),
+            id: Some("job1".into()),
+            timeout: None,
+            retries: None,
+        }])
+        .await
+        .remove(0)
+    })
+    .await;
+    assert_eq!(
+        again.result, a.result,
+        "the recorded outcome stopped returning"
+    );
 }

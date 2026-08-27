@@ -258,6 +258,9 @@ extension Kernel {
         } else {
             id = mintId(hm)
         }
+        // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
+        // the mint, so every consumer inherits it rather than each remembering.
+        if let badId = Refusal.guardAgentId("create_agent", id) { return badId }
         let newId = AgentId(id)
         if agent(newId) != nil {
             return Refusal.make(

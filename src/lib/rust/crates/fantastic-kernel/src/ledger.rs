@@ -42,6 +42,11 @@ pub const DEFAULT_LEDGER_CAP: usize = 1_000_000;
 /// One execution and what it became.
 struct Row {
     target: AgentId,
+    /// The verb of the execution this row NAMES. A joiner is handed this row's
+    /// outcome verbatim, so it must be authorized for THIS verb — not for
+    /// whatever it happened to send. Kept here because the row outlives the
+    /// dispatch that opened it.
+    verb: String,
     retries: u32,
     attempts: u32,
     named: bool,
@@ -61,9 +66,9 @@ pub enum Opened {
     /// A new execution: dispatch it, then call [`Ledger::settle`].
     Fresh,
     /// Someone else is running this id — await their outcome, run nothing.
-    Join(watch::Receiver<Option<Outcome>>),
+    Join(watch::Receiver<Option<Outcome>>, String),
     /// Already settled: this IS the answer, the handler must not run again.
-    Settled(Box<Outcome>),
+    Settled(Box<Outcome>, String),
     /// The id is unusable — the refusal to hand back verbatim.
     Refused(Box<Value>),
 }
@@ -104,10 +109,12 @@ impl Ledger {
     ///
     /// `named` distinguishes a caller-chosen id from a minted pid: only the
     /// former is a dedup contract, and the ring evicts the latter first.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
         exec_id: &str,
         target: &AgentId,
+        verb: &str,
         retries: u32,
         named: bool,
         origin: Option<AgentId>,
@@ -132,8 +139,10 @@ impl Ledger {
                 return Opened::Refused(Box::new(r));
             }
             return match &row.outcome {
-                Some(o) => Opened::Settled(Box::new(o.clone())),
-                None => Opened::Join(row.tx.subscribe()),
+                // The joiner is authorized against THIS row's verb by the
+                // caller — hand it out with the decision.
+                Some(o) => Opened::Settled(Box::new(o.clone()), row.verb.clone()),
+                None => Opened::Join(row.tx.subscribe(), row.verb.clone()),
             };
         }
 
@@ -154,6 +163,7 @@ impl Ledger {
             exec_id.to_string(),
             Row {
                 target: target.clone(),
+                verb: verb.to_string(),
                 retries,
                 attempts: 0,
                 named,
@@ -231,6 +241,7 @@ impl Ledger {
                     "attempts": r.attempts,
                     "retries": r.retries,
                     "named": r.named,
+                "verb": r.verb,
                 });
                 if let Some(out) = &r.outcome {
                     o["outcome"] = out.to_value();
@@ -254,6 +265,7 @@ impl Ledger {
                 "retries": r.retries,
                 "attempts": r.attempts,
                 "named": r.named,
+                "verb": r.verb,
                 "origin": r.origin.as_ref().map(|o| o.0.clone()),
                 "outcome": out.to_value(),
             });
@@ -308,6 +320,11 @@ impl Ledger {
                 id.clone(),
                 Row {
                     target: AgentId::from(target),
+                    verb: r
+                        .get("verb")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     retries: r.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
                     attempts: r.get("attempts").and_then(Value::as_u64).unwrap_or(1) as u32,
                     named: r.get("named").and_then(Value::as_bool).unwrap_or(true),

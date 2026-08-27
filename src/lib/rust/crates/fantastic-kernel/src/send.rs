@@ -248,9 +248,15 @@ impl Kernel {
         let exec_id = item.id.unwrap_or_else(|| task_id.0.clone());
         let retries = item.retries.unwrap_or(0);
 
+        let verb = item
+            .payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         match self
             .ledger
-            .open(&exec_id, &target.id, retries, named, origin)
+            .open(&exec_id, &target.id, &verb, retries, named, origin.clone())
         {
             crate::ledger::Opened::Refused(r) => {
                 self.tasks.forget(&task_id);
@@ -259,14 +265,26 @@ impl Kernel {
             // ALREADY SETTLED — the recorded outcome IS the answer, and the
             // handler must not run a second time. This is idempotency and
             // once-only execution in one field.
-            crate::ledger::Opened::Settled(o) => {
+            crate::ledger::Opened::Settled(o, orig_verb) => {
                 self.tasks.forget(&task_id);
+                // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded
+                // outcome belongs to whoever ran it, so handing it back is
+                // equivalent to having made THAT call — the gate must be asked
+                // that question, not about the verb this caller happened to
+                // send. Measured in python 2026-08-28: a caller granted only a
+                // harmless verb reused another's id and got its secret verbatim.
+                if let Some(d) = self.join_denial(&origin, &orig_verb, &target) {
+                    return Launched::Settled(Outcome::refused(d));
+                }
                 return Launched::Settled(*o);
             }
             // IN FLIGHT — join it. A joiner's own `timeout` bounds only ITS
             // wait: it does not own the execution and must not kill it.
-            crate::ledger::Opened::Join(rx) => {
+            crate::ledger::Opened::Join(rx, orig_verb) => {
                 self.tasks.forget(&task_id);
+                if let Some(d) = self.join_denial(&origin, &orig_verb, &target) {
+                    return Launched::Settled(Outcome::refused(d));
+                }
                 return Launched::Joining(Box::new(Joiner {
                     rx,
                     timeout: item.timeout,

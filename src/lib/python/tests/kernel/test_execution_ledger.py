@@ -839,3 +839,63 @@ async def test_a_joiner_during_the_retry_loop_sees_only_the_final_outcome(
     (o1,) = await owner
     assert o1["status"] == "completed" and o1["attempts"] == 3
     assert joiner == o1, "the joiner saw an intermediate attempt"
+
+
+# ─── joining is gated on the execution it joins ─────────────────
+
+
+async def test_joining_is_authorized_against_the_verb_that_execution_ran(
+    seeded_kernel,
+):
+    """The gate was asked the WRONG QUESTION on a join.
+
+    It checked the joiner's own payload verb, then the JOIN handed back the
+    ORIGINAL call's outcome — a reply for a verb the joiner never had authorized.
+    Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a target, reused
+    an id `agent_a` had used for `create_privileged` and received agent_a's
+    secret verbatim. The handler ran once (dedup was correct); the RESULT crossed
+    an authorization boundary.
+
+    Same class as the read side-channel #36 closed by origin-scoping the `ledger`
+    verb — this was the same leak through `send` itself, and it is reachable from
+    the wire, where a frame id IS the execution id (#38).
+
+    Joining is equivalent to having made that call, so that is what is asked.
+    """
+    from kernel._kernel import sender_context
+
+    k = seeded_kernel
+    await _mk(k, "vault")
+    k.ctx.agents["vault"]._meta["callable_by"] = {
+        "alice": ["privileged"],
+        "bob": ["harmless"],
+    }
+    for who, grant in (("alice", ["privileged"]), ("bob", ["harmless"])):
+        await _mk(k, who)
+        k.ctx.agents[who]._meta["can_call"] = {"vault": grant}
+
+    with sender_context("alice"):
+        a = (
+            await k.send(
+                [{"target": "vault", "id": "job1", "payload": {"type": "privileged"}}]
+            )
+        )[0]
+    assert a["status"] == "completed", a
+
+    with sender_context("bob"):
+        b = (
+            await k.send(
+                [{"target": "vault", "id": "job1", "payload": {"type": "harmless"}}]
+            )
+        )[0]
+    assert b["status"] == "failed", f"bob joined an execution it may not run: {b}"
+    assert b["result"].get("reason") == "unauthorized", b["result"]
+
+    # An AUTHORIZED re-sender still dedups — the fix must not cost ensure-semantics.
+    with sender_context("alice"):
+        again = (
+            await k.send(
+                [{"target": "vault", "id": "job1", "payload": {"type": "privileged"}}]
+            )
+        )[0]
+    assert again["result"] == a["result"], "the recorded outcome stopped being returned"

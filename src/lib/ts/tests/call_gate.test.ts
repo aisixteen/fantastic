@@ -139,3 +139,47 @@ test("an untrusted iframe's reach is its AGENT's, not the operator's", async () 
   const [up] = await panel.send([{ target: "kernel_state", payload: { type: "reflect" } }]);
   assert.equal(up!.status, "completed");
 });
+
+test("joining an execution is gated on the verb THAT execution ran", async () => {
+  // Measured in python 2026-08-28: the gate was checked against the JOINER's own
+  // verb, then the JOIN handed back the ORIGINAL call's outcome — so a caller
+  // granted only a harmless verb reused another's id and received its secret
+  // verbatim. Joining is equivalent to having made that call, so that is the
+  // question the gate must be asked. Reachable from the wire, where a frame id
+  // IS the execution id (#38) and two legs can name one id.
+  const k = tree();
+  k.registerBundle("vault.tools", (_id, payload) =>
+    payload["type"] === "steal" ? { secret: "TOP-SECRET" } : { ok: true },
+  );
+  k.register(
+    new Agent({
+      id: "vault",
+      parentId: "kernel_state",
+      handlerModule: "vault.tools",
+      meta: { callable_by: { alice: ["steal"], bob: ["harmless"] } },
+    }),
+  );
+  k.get("alice")!.meta["can_call"] = { vault: ["steal"] };
+  k.get("bob")!.meta["can_call"] = { vault: ["harmless"] };
+
+  const alice = k.scopedFor("alice", null);
+  const [a] = await alice.send([
+    { target: "vault", payload: { type: "steal" }, id: "job1" },
+  ]);
+  assert.equal((a!.result as Payload)["secret"], "TOP-SECRET");
+
+  // bob may call `harmless` — and reuses the id.
+  const bob = k.scopedFor("bob", null);
+  const [b] = await bob.send([
+    { target: "vault", payload: { type: "harmless" }, id: "job1" },
+  ]);
+  assert.equal(b!.status, "failed", "bob joined an execution it may not run");
+  assert.equal((b!.result as Payload)["reason"], "unauthorized");
+  assert.notEqual((b!.result as Payload)["secret"], "TOP-SECRET");
+
+  // An AUTHORIZED re-sender still dedups — the fix must not break ensure-semantics.
+  const [again] = await alice.send([
+    { target: "vault", payload: { type: "steal" }, id: "job1" },
+  ]);
+  assert.equal((again!.result as Payload)["secret"], "TOP-SECRET");
+});
