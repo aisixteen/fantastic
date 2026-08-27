@@ -24,6 +24,19 @@ let IMAGE_EXTENSIONS: Set<String> = [
     "png", "jpg", "jpeg", "gif", "webp", "svg",
 ]
 
+/// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
+///
+/// This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
+/// the shared agentic corpus caught it: no `reason`, so a caller could only
+/// branch on the prose. `unauthorized` is the code the io SEAL answers with too
+/// — both say "this edge is not open for that", and neither is about the
+/// caller, which is why neither carries a `side`.
+func readonlyRefusal() -> JSON {
+    Refusal.make(
+        Refusal.unauthorized, "agent is readonly",
+        hint: "this leg accepts reads only; an operator may clear `readonly`")
+}
+
 public struct FileBundle: AgentBundle {
     public let name = "file_bridge"
 
@@ -153,7 +166,7 @@ public struct FileBundle: AgentBundle {
             return readStream(root: root, header: header)
         }
         if agent.metaValue(forKey: "readonly")?.asBool == true {
-            return (.object(["error": .string("agent is readonly")]), Data())
+            return (readonlyRefusal(), Data())
         }
         return (writeStream(root: root, header: header, blob: blob), Data())
     }
@@ -447,7 +460,7 @@ public struct FileBundle: AgentBundle {
 
     private func readonlyError(agent: Agent) -> JSON? {
         if agent.metaValue(forKey: "readonly")?.asBool == true {
-            return .object(["error": .string("agent is readonly")])
+            return readonlyRefusal()
         }
         return nil
     }

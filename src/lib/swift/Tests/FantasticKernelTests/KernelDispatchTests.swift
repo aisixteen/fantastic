@@ -252,7 +252,8 @@ struct SystemVerbTests {
                 "delete_lock": true,
             ])])[0].result
         let reply = await kernel.send([Item("core", ["type": "delete_agent", "id": "locked"])])[0].result
-        #expect(reply["locked"].asBool == true)
+        // #27: the machine field, not the ad-hoc flag it replaced.
+        #expect(reply["reason"].asString == "locked")
         #expect(reply["blocked_by"].asString == "locked")
     }
 
