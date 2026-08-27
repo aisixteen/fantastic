@@ -240,7 +240,15 @@ public actor InMemoryBridge {
         let watcherId = AgentId(
             "inmem_relay_\(UUID().uuidString.prefix(8))_\(target.value)")
         watcherIds[target] = watcherId
-        remote.watch(src: target, watcher: watcherId)
+        // OPERATOR on the REMOTE kernel. `watch` is gated there like a send, but
+        // this bridge's LOCAL agent id means nothing in the remote's grant space
+        // — cross-kernel authorization is the transport's own ingress rule, and
+        // the caller already passed the LOCAL gate to reach this bridge at all.
+        // Gating again with a foreign id would refuse every legitimate
+        // `watch_remote`.
+        KernelTaskLocals.$currentSender.withValue(nil) {
+            remote.watch(src: target, watcher: watcherId)
+        }
         let stream = remote.ensureInbox(watcherId)
 
         let task = Task {

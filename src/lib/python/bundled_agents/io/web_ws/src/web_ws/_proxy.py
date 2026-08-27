@@ -199,9 +199,19 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         if not _gate("watch", frame).allowed:
             return
         src = frame.get("src", "")
-        if src and src not in watching:
-            kernel.watch(src, client_id)
-            watching.add(src)
+        if not src or src in watching:
+            return
+        # UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a real caller.
+        # Without this `_current_sender` is None, the kernel reads the frame as
+        # an OPERATOR watch, and the two-sided gate never runs — which is exactly
+        # how a leg granted only `assistant:[send]` could mirror any agent's
+        # inbox and read the model's prompt out of it.
+        with sender_context(web_agent_id):
+            denial = kernel.watch(src, client_id)
+        if denial is not None:
+            await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
+            return
+        watching.add(src)
 
     async def _on_unwatch(frame):
         src = frame.get("src", "")
@@ -222,6 +232,16 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     async def _on_state_subscribe(frame):
         if not _gate("state_subscribe", frame).allowed:
             return  # sealed leg leaks no telemetry, not just no dispatch
+        # The state stream is a KERNEL-WIDE read: every send's sender, target,
+        # verb and payload summary, for every agent in the tree. So it is gated
+        # on the ROOT exactly as a kernel verb is — the leg needs an explicit
+        # `state_subscribe` edge, not merely an open ingress rule. An ingress
+        # rule answers "may this client reach this leg"; it says nothing about
+        # what the client may then READ.
+        denial = kernel.authorize_state_subscribe(web_agent_id)
+        if denial is not None:
+            await _send_envelope({"type": "error", "id": frame.get("id", ""), **denial})
+            return
         await _send_envelope(
             {"type": "state_snapshot", "agents": kernel.state_snapshot()}
         )

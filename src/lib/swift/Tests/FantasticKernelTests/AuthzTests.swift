@@ -3,6 +3,7 @@
 // on the sender opens it.
 
 import FantasticJSON
+import OrderedCollections
 import Testing
 
 @testable import FantasticKernel
@@ -108,4 +109,66 @@ private func authIngress(_ grant: JSON, _ verb: String, _ other: String) -> Deci
     let g: JSON = .object(["root": .array([.string("create_agent")])])
     #expect(auth(g, "create_agent", "root").allowed)
     #expect(!auth(g, "delete_agent", "root").allowed)
+}
+
+// ─── the READ side of the gate: watch + the state stream ────────────
+
+@Test func anUngrantedAgentCannotWatchAnother() async {
+    // A watcher receives its target's raw inbound payloads VERBATIM — the model
+    // prompt, the document body, whatever was sent. So an ungated `watch` is a
+    // read side-channel around `callable_by`: an agent that may not CALL an
+    // agent could still read everything sent TO it.
+    //
+    // Found 2026-08-27 in a dataroom audit: a browser leg granted exactly
+    // `assistant:[send]` could mirror ANY agent's inbox in its session and read
+    // the packed confidential context out of the model's prompt.
+    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    kernel.register(root)
+    kernel.setRoot(root)
+    let secret = Agent(id: "secret", handlerModule: nil, parentId: nil)
+    kernel.register(secret)
+
+    let denial = KernelTaskLocals.$currentSender.withValue(AgentId("nosy")) {
+        kernel.watch(src: AgentId("secret"), watcher: AgentId("nosy"))
+    }
+    #expect(denial != nil, "an ungranted watch was allowed")
+    #expect(denial?["reason"].asString == "unauthorized")
+    // ...and nothing was registered, so no payload can ever reach it.
+    #expect(!secret.watcherIds().contains(AgentId("nosy")))
+}
+
+@Test func anOperatorWatchStaysUngated() {
+    // `currentSender` nil is the origin root of trust — the bootstrap wiring a
+    // renderer, a test driver. Same rule as send.
+    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+    let src = Agent(id: "src", handlerModule: nil, parentId: nil)
+    kernel.register(src)
+    #expect(kernel.watch(src: AgentId("src"), watcher: AgentId("cli")) == nil)
+    #expect(src.watcherIds().contains(AgentId("cli")))
+}
+
+@Test func theStateStreamIsNotCoveredByAWildcard() {
+    // The broadest read the kernel offers. The structural baseline grants
+    // `$parent: "*"`, so WITHOUT `state_subscribe` being privileged every direct
+    // child of the root could tap the whole stream while holding no grant that
+    // names it.
+    let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+    let root = Agent(id: "core", handlerModule: nil, parentId: nil)
+    kernel.register(root)
+    kernel.setRoot(root)
+    // A wildcard on the root — deliberately generous, and still not enough.
+    var meta: OrderedDictionary<String, JSON> = [:]
+    meta["can_call"] = .object(["core": .string("*")])
+    let leaf = Agent(
+        id: "leaf", handlerModule: nil, parentId: AgentId("core"), meta: meta)
+    kernel.register(leaf)
+
+    let denial = KernelTaskLocals.$currentSender.withValue(AgentId("leaf")) {
+        kernel.authorizeStateSubscribe(AgentId("leaf"))
+    }
+    #expect(denial != nil, "a wildcard covered the whole state stream")
+    #expect(denial?["reason"].asString == "unauthorized")
+    // An OPERATOR tap is ungated.
+    #expect(kernel.authorizeStateSubscribe(AgentId("cli")) == nil)
 }

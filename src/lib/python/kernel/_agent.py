@@ -1340,16 +1340,59 @@ class Agent:
             return
         target._fanout(payload, kind="emit")
 
-    def watch(self, src_id: str, tgt_id: str) -> None:
-        """Mirror src_id's incoming traffic into tgt_id's inbox.
-        tgt_id may be an agent or a synthetic browser-client id."""
+    def watch(self, src_id: str, tgt_id: str) -> dict | None:
+        """Mirror src_id's incoming traffic into tgt_id's inbox. Returns a
+        refusal when the gate denies it, else None.
+
+        GATED LIKE A SEND, because it IS a read of the target. A watcher
+        receives src's raw inbound payloads verbatim — the model prompt, the
+        document body, whatever was sent — so an ungated `watch` is a read
+        side-channel around `callable_by`: an agent that may not CALL an agent
+        could still read everything sent TO it.
+
+        Found 2026-08-27 in a dataroom audit: a browser leg granted exactly
+        `assistant:[send]` could mirror ANY agent's inbox in its session and
+        read the packed confidential context out of the model's prompt. The
+        `call` path went through the two-sided gate; this one never did.
+
+        The verb checked is `watch`, so an operator grants it exactly like any
+        other edge (`callable_by: {viewer: ["watch"]}`). An OPERATOR watch
+        (`sender=None` — the bootstrap wiring a renderer, a test) is the origin
+        root of trust and stays ungated, as with send."""
         src = self.ctx.agents.get(src_id)
-        if src is not None:
-            src._watcher_ids.add(tgt_id)
-            # Make sure tgt has an inbox (synthetic clients need to
-            # be addressable; we lazy-create here so callers don't
-            # have to ensure_inbox first).
-            self.ctx.ensure_inbox(tgt_id)
+        if src is None:
+            return None  # nothing to mirror; not a refusal
+        sender_id = _current_sender.get()
+        if sender_id is not None:
+            denial = self._gate(sender_id, "watch", src, {})
+            if denial is not None:
+                return denial
+        src._watcher_ids.add(tgt_id)
+        # Make sure tgt has an inbox (synthetic clients need to
+        # be addressable; we lazy-create here so callers don't
+        # have to ensure_inbox first).
+        self.ctx.ensure_inbox(tgt_id)
+        return None
+
+    def authorize_state_subscribe(self, watcher_id: str) -> dict | None:
+        """May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or None.
+
+        The stream carries every send's sender, target, verb and payload summary
+        for every agent in the tree, so subscribing is the broadest read the
+        kernel offers — broader than any single `watch`. It is therefore gated on
+        the ROOT, exactly as a kernel verb is: the operand is the whole tree, so
+        the edge must be named explicitly (`can_call: {<root>: ["state_subscribe"]}`).
+
+        An ingress rule answers "may this client reach this leg"; it says nothing
+        about what the client may then READ. Conflating the two is what let a
+        leg with an open `ingress_rule` and no grants tap the whole stream."""
+        # An OPERATOR tap (`sender=None` — the bootstrap wiring a telemetry
+        # view, the CLI, a test) is the origin root of trust and stays ungated,
+        # exactly as with send and watch. `watcher_id` names WHO would read;
+        # whether the read is gated at all depends on the ORIGIN.
+        if _current_sender.get() is None:
+            return None
+        return self._gate(watcher_id, "state_subscribe", self._root(), {})
 
     def unwatch(self, src_id: str, tgt_id: str) -> None:
         src = self.ctx.agents.get(src_id)

@@ -213,11 +213,49 @@ public final class Kernel: @unchecked Sendable {
     }
 
     /// Register `watcherId` as an observer of `srcId`'s inbox.
-    public func watch(src: AgentId, watcher: AgentId) {
-        if let src = agent(src) {
-            src.addWatcher(watcher)
+    /// Mirror `src`'s inbound traffic into `watcher`'s inbox. Returns a refusal
+    /// when the gate denies it, else `nil`.
+    ///
+    /// GATED LIKE A SEND, because it IS a read of the target. A watcher receives
+    /// src's raw inbound payloads VERBATIM — the model prompt, the document
+    /// body, whatever was sent — so an ungated `watch` is a read side-channel
+    /// around `callable_by`: an agent that may not CALL an agent could still
+    /// read everything sent TO it.
+    ///
+    /// Found 2026-08-27 in a dataroom audit: a browser leg granted exactly
+    /// `assistant:[send]` could mirror ANY agent's inbox in its session and read
+    /// the packed confidential context out of the model's prompt. The `call`
+    /// path went through the two-sided gate; this one never did.
+    ///
+    /// An OPERATOR watch (`currentSender` is nil) is the origin root of trust
+    /// and stays ungated, as with send.
+    @discardableResult
+    public func watch(src: AgentId, watcher: AgentId) -> JSON? {
+        guard let srcAgent = agent(src) else { return nil }
+        if let orig = KernelTaskLocals.currentSender {
+            if let denial = gate(sender: orig, verb: "watch", target: srcAgent, payload: .null) {
+                return denial
+            }
         }
+        srcAgent.addWatcher(watcher)
         ensureInbox(watcher)
+        return nil
+    }
+
+    /// May `watcher` tap the kernel-wide STATE STREAM? Refusal, or `nil`.
+    ///
+    /// The stream carries every send's sender, target, verb and payload summary
+    /// for every agent in the tree, so subscribing is the broadest read the
+    /// kernel offers. It is gated on the ROOT, and `state_subscribe` is a
+    /// privileged verb so a wildcard never covers it: the edge must be named.
+    ///
+    /// An ingress rule answers "may this client reach this leg"; it says nothing
+    /// about what the client may then READ.
+    public func authorizeStateSubscribe(_ watcher: AgentId) -> JSON? {
+        // An OPERATOR tap is the origin root of trust, as with send and watch.
+        guard KernelTaskLocals.currentSender != nil else { return nil }
+        guard let rootAgent = root else { return nil }
+        return gate(sender: watcher, verb: "state_subscribe", target: rootAgent, payload: .null)
     }
 
     public func unwatch(src: AgentId, watcher: AgentId) {

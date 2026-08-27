@@ -45,7 +45,19 @@ public struct Decision {
 }
 
 /// Structural graph mutation — privileged (a wildcard never satisfies these).
-public let privilegedVerbs: Set<String> = ["create_agent", "delete_agent", "update_agent"]
+/// Verbs a WILDCARD never covers — they must be named explicitly, because a
+/// wildcard grant is a statement about REACH and these are statements about
+/// AUTHORITY or about BULK READS.
+///
+/// The mutators are here because they change the tree. `state_subscribe` is here
+/// because its operand is the WHOLE tree: the stream carries every send's
+/// sender, target, verb and payload summary, for every agent. Without it, the
+/// structural baseline (`$parent: "*"`) silently handed the entire stream to
+/// every direct child of the root — which is how a leaf browser leg could tap it
+/// while holding no grant that names it (dataroom audit, 2026-08-27).
+public let privilegedVerbs: Set<String> = [
+    "create_agent", "delete_agent", "update_agent", "state_subscribe",
+]
 
 /// The remedy shown on any denial: authority descends, it is never self-raised.
 public let fromAbove: String =

@@ -330,3 +330,93 @@ async fn a_handler_reads_its_caller_not_itself() {
         "origin must be the CALLER — the whole reason the third local exists"
     );
 }
+
+// ─── the READ side of the gate: watch + the state stream ────────────
+
+#[tokio::test]
+async fn an_ungranted_agent_cannot_watch_another() {
+    // A watcher receives its target's raw inbound payloads VERBATIM — the model
+    // prompt, the document body, whatever was sent. So an ungated `watch` is a
+    // read side-channel around `callable_by`: an agent that may not CALL an
+    // agent could still read everything sent TO it.
+    //
+    // Found 2026-08-27 in a dataroom audit: a browser leg granted exactly
+    // `assistant:[send]` could mirror ANY agent's inbox in its session and read
+    // the packed confidential context out of the model's prompt.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("core");
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let secret = make_agent("secret");
+    let _s = kernel.register(Arc::clone(&secret));
+    let nosy = make_agent("nosy");
+    let _n = kernel.register(Arc::clone(&nosy));
+
+    let denial = crate::send::with_sender(AgentId::from("nosy"), async {
+        kernel
+            .watch(&AgentId::from("secret"), AgentId::from("nosy"))
+            .await
+    })
+    .await;
+    assert!(denial.is_some(), "an ungranted watch was allowed");
+    assert_eq!(denial.unwrap()["reason"], "unauthorized");
+    // ...and nothing was registered, so no payload can ever reach it.
+    assert!(!secret
+        .watcher_ids
+        .read()
+        .await
+        .contains(&AgentId::from("nosy")));
+}
+
+#[tokio::test]
+async fn an_operator_watch_stays_ungated() {
+    // `sender = None` is the origin root of trust — the bootstrap wiring a
+    // renderer, a test driver. Same rule as send.
+    let kernel = Arc::new(Kernel::new());
+    let src = make_agent("src");
+    let _s = kernel.register(Arc::clone(&src));
+    assert!(kernel
+        .watch(&AgentId::from("src"), AgentId::from("cli"))
+        .await
+        .is_none());
+    assert!(src.watcher_ids.read().await.contains(&AgentId::from("cli")));
+}
+
+#[tokio::test]
+async fn the_state_stream_is_not_covered_by_a_wildcard() {
+    // The broadest read the kernel offers. The structural baseline grants
+    // `$parent: "*"`, so WITHOUT `state_subscribe` being privileged every direct
+    // child of the root could tap the whole stream while holding no grant that
+    // names it.
+    let kernel = Arc::new(Kernel::new());
+    let root = make_agent("core");
+    let _r = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let mut meta = Map::new();
+    // A wildcard on the root — deliberately generous, and still not enough.
+    meta.insert("can_call".into(), json!({"core": "*"}));
+    let leaf = Agent::new(
+        AgentId::from("leaf"),
+        None,
+        Some(root.id.clone()),
+        meta,
+        Path::new("/tmp/nowhere").join("leaf"),
+        true,
+    );
+    let _l = kernel.register(Arc::clone(&leaf));
+
+    let denial = crate::send::with_sender(AgentId::from("leaf"), async {
+        kernel.authorize_state_subscribe(&AgentId::from("leaf"))
+    })
+    .await;
+    assert!(
+        denial.is_some(),
+        "a wildcard covered the whole state stream"
+    );
+    assert_eq!(denial.unwrap()["reason"], "unauthorized");
+
+    // An OPERATOR tap is ungated.
+    assert!(kernel
+        .authorize_state_subscribe(&AgentId::from("cli"))
+        .is_none());
+}

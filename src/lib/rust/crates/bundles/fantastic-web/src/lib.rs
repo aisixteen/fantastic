@@ -1304,7 +1304,24 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                 };
                 let mut w = watching.lock().await;
                 if !w.contains(&src) {
-                    kernel.watch(&src, client_id.clone()).await;
+                    // UNDER THE LEG'S OWN IDENTITY, so the kernel's gate sees a
+                    // real caller. Without this `current_sender()` is None, the
+                    // kernel reads the frame as an OPERATOR watch, and the
+                    // two-sided gate never runs — which is exactly how a leg
+                    // granted only `assistant:[send]` could mirror any agent's
+                    // inbox and read the model's prompt out of it.
+                    let denial = fantastic_kernel::send::with_sender(
+                        host_agent_id.clone(),
+                        kernel.watch(&src, client_id.clone()),
+                    )
+                    .await;
+                    if let Some(d) = denial {
+                        let id = env.get("id").cloned().unwrap_or(Value::Null);
+                        let _ = out
+                            .send(json!({"type": "error", "id": id, "data": d}).to_string())
+                            .await;
+                        continue;
+                    }
                     w.insert(src);
                 }
             }
@@ -1318,6 +1335,23 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                 }
             }
             "state_subscribe" => {
+                // The state stream is a KERNEL-WIDE read: every send's sender,
+                // target, verb and payload summary, for every agent in the tree.
+                // So it is gated on the ROOT, and `state_subscribe` is a
+                // privileged verb so a wildcard never covers it. An ingress rule
+                // answers "may this client reach this leg"; it says nothing
+                // about what the client may then READ.
+                let denial = fantastic_kernel::send::with_sender(host_agent_id.clone(), async {
+                    kernel.authorize_state_subscribe(&host_agent_id)
+                })
+                .await;
+                if let Some(d) = denial {
+                    let id = env.get("id").cloned().unwrap_or(Value::Null);
+                    let _ = out
+                        .send(json!({"type": "error", "id": id, "data": d}).to_string())
+                        .await;
+                    continue;
+                }
                 // Python parity (web/_proxy.py:231-256): first emit a
                 // `state_snapshot` frame carrying every agent's identity
                 // so the consumer (a state-watching view) can bootstrap before
