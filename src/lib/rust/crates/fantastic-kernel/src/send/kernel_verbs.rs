@@ -186,7 +186,7 @@ pub(super) async fn handle_kernel_verb(
         // already-finished id returns {cancelled:false} — it does not pretend.
         "cancel" => match payload.get("task_id").and_then(Value::as_str) {
             Some(t) if !t.is_empty() => kernel.cancel_task(&TaskId::from(t)).await,
-            _ => json!({ "error": "cancel: task_id (str) required" }),
+            _ => crate::refusal::missing("cancel", "task_id"),
         },
         "shutdown_kernel" => {
             // Privileged: root control surface only. Gate on rootness
@@ -230,10 +230,13 @@ pub(super) async fn handle_kernel_verb(
 async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload: &Value) -> Value {
     let id = match payload.get("id").and_then(Value::as_str) {
         Some(s) => AgentId::from(s),
-        None => return json!({ "error": "update_agent requires id" }),
+        None => return crate::refusal::missing("update_agent", "id"),
     };
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
-        return json!({ "error": format!("no agent {id}") });
+        return crate::refusal::unknown_agent(
+            id.as_str(),
+            kernel.agents.iter().map(|e| e.key().to_string()).collect(),
+        );
     };
     // Patch is every field in payload except `type` and `id`. Capture
     // changed-field names so the lifecycle event mirrors Python's
@@ -266,7 +269,9 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
         if let Some(bundle) = kernel.bundles.get(hm) {
             let current = target.meta.read().expect("meta poisoned").clone();
             if let Some(why) = bundle.validate_meta(&patch, &current) {
-                return json!({ "error": why, "id": id.to_string(), "updated": false });
+                let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, why);
+                crate::refusal::with(&mut r, "id", json!(id));
+                return r;
             }
         }
     }
