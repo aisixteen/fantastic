@@ -55,13 +55,19 @@ expect:
     # everywhere else — is refused too, and the two refusals are told apart by
     # `side`: the call gate names the half that refused, the seal names none.
 
+    # The seal and the call gate BOTH answer `reason: unauthorized`, so the
+    # thing that tells them apart is `side`: the call gate names the half that
+    # refused, the seal names none — it is not about the caller at all. That is
+    # the machine-readable claim, and it is what is asserted. (The prose differs
+    # between runtimes — python "edge sealed by policy", rust "inbound calls
+    # denied by policy" — and pinning prose would make this test about wording.)
     - name: the seal refuses the OPERATOR, because it gates the edge not the caller
       operator: {to: sealed_fs, send: {type: list, path: ""}}
-      expect: {reason: unauthorized, error_contains: "edge sealed by policy"}
+      expect: {reason: unauthorized, side: null}
       because: C23
-    - name: and it carries NO side — a side is the call gate's signature
+    - name: and a write over the same sealed edge is refused the same way
       operator: {to: sealed_fs, send: {type: write, path: nope.txt, content: "x"}}
-      expect: {error_contains: "edge sealed by policy"}
+      expect: {reason: unauthorized, side: null}
       because: C23
     - name: the refusal was not a quiet no-op — the byte never reached the disk
       operator: {to: rw, send: {type: list, path: ""}}
@@ -70,7 +76,7 @@ expect:
 
     - name: an explicit deny_ingress is the SAME seal, said out loud
       operator: {to: denied_fs, send: {type: list, path: ""}}
-      expect: {reason: unauthorized, error_contains: "edge sealed by policy"}
+      expect: {reason: unauthorized, side: null}
       because: C23
 
     - name: an OPEN leg answers that same operator — the seal is the only difference
@@ -113,5 +119,5 @@ expect:
       because: C23
     - name: so the leg it named is still sealed
       operator: {to: denied_fs, send: {type: list, path: ""}}
-      expect: {error_contains: "edge sealed by policy"}
+      expect: {reason: unauthorized, side: null}
       because: C23

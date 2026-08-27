@@ -273,15 +273,21 @@ pub(crate) async fn delete_from_payload(
     // them. Returns the first locked id so the caller can clear it
     // (`update_agent id=<blocker> delete_lock=null`) before retrying.
     if let Some(blocker) = find_locked_descendant(kernel, &target) {
-        return json!({
-            "error": format!(
+        // THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: true` flag
+        // and no `reason` until 2026-08-27, when the shared agentic corpus
+        // caught it — in python, rust and swift at once, because the flag #27
+        // declared dropped was never actually removed anywhere.
+        let mut r = crate::refusal::refusal_hint(
+            crate::refusal::LOCKED,
+            format!(
                 "delete_agent: {} blocked by delete_lock on descendant {}",
                 id.0, blocker.0,
             ),
-            "locked": true,
-            "id": id.0,
-            "blocked_by": blocker.0,
-        });
+            "clear the lock with update_agent, then delete again",
+        );
+        crate::refusal::with(&mut r, "id", json!(id.0));
+        crate::refusal::with(&mut r, "blocked_by", json!(blocker.0));
+        return r;
     }
     cascade_delete(kernel, &target).await;
     // Emit `agent_deleted` on the caller's inbox so watchers refresh

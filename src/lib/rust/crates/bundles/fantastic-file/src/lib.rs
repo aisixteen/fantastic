@@ -18,7 +18,7 @@
 //! | `mkdir`  | `path`                     | `{path, created: true}`               |
 //!
 //! `readonly: true` on the agent record refuses every mutating verb
-//! with `{"error": "agent is readonly"}`.
+//! with the one refusal shape, `reason: "unauthorized"` (#27).
 
 #![deny(missing_docs)]
 
@@ -45,6 +45,21 @@ const IMAGE_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
 
 /// The filesystem bundle.
 pub struct FileBundle;
+
+/// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
+///
+/// This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
+/// the shared agentic corpus caught it: no `reason`, so a caller could only
+/// branch on the prose. `unauthorized` is the code the io SEAL answers with too
+/// — both say "this edge is not open for that", and neither is about the
+/// caller, which is why neither carries a `side`.
+fn readonly_refusal() -> Value {
+    fantastic_kernel::refusal::refusal_hint(
+        fantastic_kernel::refusal::UNAUTHORIZED,
+        "agent is readonly",
+        "this leg accepts reads only; an operator may clear `readonly`",
+    )
+}
 
 #[async_trait]
 impl Bundle for FileBundle {
@@ -155,13 +170,13 @@ impl Bundle for FileBundle {
                 match verb {
                     "list" => list_reply(&root, payload, &hidden),
                     "read" => read_reply(&root, payload, &meta),
-                    "write" if readonly => json!({"error": "agent is readonly"}),
+                    "write" if readonly => readonly_refusal(),
                     "write" => write_reply(&root, payload),
-                    "delete" if readonly => json!({"error": "agent is readonly"}),
+                    "delete" if readonly => readonly_refusal(),
                     "delete" => delete_reply(&root, payload),
-                    "rename" if readonly => json!({"error": "agent is readonly"}),
+                    "rename" if readonly => readonly_refusal(),
                     "rename" => rename_reply(&root, payload),
-                    "mkdir" if readonly => json!({"error": "agent is readonly"}),
+                    "mkdir" if readonly => readonly_refusal(),
                     "mkdir" => mkdir_reply(&root, payload),
                     other => json!({"error": format!("unknown verb {other:?}")}),
                 }
@@ -223,7 +238,7 @@ impl Bundle for FileBundle {
             }
             "write_stream" => {
                 if readonly {
-                    Ok((Some(json!({"error": "agent is readonly"})), Vec::new()))
+                    Ok((Some(readonly_refusal()), Vec::new()))
                 } else {
                     Ok((Some(write_stream_reply(&root, &header, &blob)), Vec::new()))
                 }

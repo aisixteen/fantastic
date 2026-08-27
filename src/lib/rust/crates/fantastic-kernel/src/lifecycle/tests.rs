@@ -134,7 +134,8 @@ async fn delete_refuses_locked() {
         .await
         .remove(0)
         .result;
-    assert_eq!(v["locked"], true);
+    // #27: the machine field, not the ad-hoc flag it replaced.
+    assert_eq!(v["reason"], "locked");
     assert!(kernel.agents.contains_key(&AgentId::from("locked_1")));
 }
 

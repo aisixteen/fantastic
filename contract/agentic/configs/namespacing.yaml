@@ -26,7 +26,7 @@ loaders:
           handler_module: yaml_state.tools
           mode: data
           can_call:
-            kernel_state: [persist_blob]
+            $root: [persist_blob]
         - id: space_a
           handler_module: file_bridge.tools
           root: rooms/a

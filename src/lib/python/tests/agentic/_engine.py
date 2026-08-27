@@ -390,7 +390,7 @@ def _parse_steps(raw) -> tuple[Step, ...]:
                 f"{where}.expect: unknown matcher(s) {sorted(bad)};"
                 f" known {sorted(_EXPECT_MATCHERS)}"
             )
-        if exp.get("allow") is True and exp.get("side"):
+        if exp.get("allow") is True and exp.get("side") is not None and "side" in exp:
             raise ConfigError(
                 f"{where}: `side:` only means something on a denial"
             )
@@ -464,6 +464,23 @@ def _parse_loaders(raw) -> tuple[LoaderSpec, ...]:
     return tuple(out)
 
 
+# THIS RUNTIME'S root id. `$root` anywhere in a config or spec means exactly
+# this — python's root is `kernel_state`, rust's and swift's is `core`. A grant
+# or a target that named one runtime's root by literal id could never be read by
+# the others, so the corpus names it abstractly and each runner substitutes.
+ROOT_ID = "kernel_state"
+
+
+def _subst_root(value):
+    if isinstance(value, str):
+        return ROOT_ID if value == "$root" else value
+    if isinstance(value, dict):
+        return {_subst_root(k): _subst_root(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_subst_root(v) for v in value]
+    return value
+
+
 def load_config(spec_path: str | Path) -> Config:
     """Parse one scenario: a SPEC file plus the kernel CONFIG it names.
 
@@ -488,7 +505,7 @@ def load_config(spec_path: str | Path) -> Config:
     cfg_raw = _reject_unknown(str(cfg_path), cfg_raw, _CONFIG_KEYS)
 
     # One runtime object; the split is on disk, not in the validators' hands.
-    raw = {**cfg_raw, **spec_raw}
+    raw = _subst_root({**cfg_raw, **spec_raw})
     raw.pop("config", None)
     path = spec_path
     reqs = tuple(raw.get("requirements") or ())
@@ -915,7 +932,13 @@ def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
             fail("expected a DENIAL, the call went through")
     if "side" in exp:
         got = denial_side(reply)
-        if got != exp["side"]:
+        if exp["side"] is None:
+            # `side: null` — the refusal must carry NO side. That is what tells
+            # an io SEAL from the call gate: both answer `unauthorized`, but only
+            # the gate names a half, because only the gate is about the caller.
+            if got is not None:
+                fail(f"expected NO side (an io seal), got {got!r} (the call gate)")
+        elif got != exp["side"]:
             fail(f"expected the {exp['side']!r} half to refuse, got {got!r}")
     if "reason" in exp and reply.get("reason") != exp["reason"]:
         fail(f"expected reason {exp['reason']!r}, got {reply.get('reason')!r}")

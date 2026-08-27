@@ -20,9 +20,11 @@ expect:
   reboot: true
   closed_roster_sender: notes_a
   steps:
-    - name: a wing reaches its own memory on the structural baseline
+    # "not denied" is NOT "succeeded": a persist that failed for want of a store
+    # answers no denial at all, so the write is asserted on its own reply.
+    - name: a wing reaches its own memory, and the write actually lands
       reach: {from: wing_a, to: notes_a, send: {type: set, key: room, value: a}}
-      expect: {allow: true}
+      expect: {allow: true, contains: {set: true}}
     - name: a wing reaches its own file space on the structural baseline
       reach: {from: wing_b, to: space_b, send: {type: write, path: note.txt, content: from b}}
       expect: {allow: true}
@@ -38,7 +40,7 @@ expect:
     # The granted egress is not enough: the loader's byte store refuses a
     # grandchild on INGRESS, whichever namespace the payload names.
     - name: a granted reach to the byte store still dies at the loader's ingress
-      reach: {from: notes_a, to: kernel_state, send: {type: persist_blob, agent_id: notes_b, name: state.yaml, content: "room: forged\n"}}
+      reach: {from: notes_a, to: $root, send: {type: persist_blob, agent_id: notes_b, name: state.yaml, content: "room: forged\n"}}
       expect: {allow: false, side: ingress}
 
     # ── C20 · a namespace is OWNED, and owning it is the whole story ──

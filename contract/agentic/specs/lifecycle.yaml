@@ -21,7 +21,7 @@ expect:
   closed_roster_sender: warden
   steps:
     - name: the task table is readable through a granted edge
-      reach: {from: warden, to: kernel_state, send: {type: ps}}
+      reach: {from: warden, to: $root, send: {type: ps}}
       expect: {allow: true}
     - name: an open bundle answers a granted verb
       reach: {from: warden, to: open_fs, send: {type: list, path: ""}}
