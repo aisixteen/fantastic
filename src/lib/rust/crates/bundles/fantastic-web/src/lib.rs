@@ -1465,11 +1465,25 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
 
 /// Maximum size of a single binary WS frame's blob payload. Frames
 /// larger than this are rejected with an error reply.
+#[cfg(not(test))]
 const MAX_CHUNK_SIZE: usize = 1_048_576; // 1 MB
 
 /// Maximum total size of a reassembled chunked upload. Sum of all
 /// chunks; chunks that would push past this cap are rejected.
+#[cfg(not(test))]
 const MAX_UPLOAD_SIZE: usize = 100 * 1_048_576; // 100 MB
+
+// UNDER TEST THE CAPS ARE TINY. The cap check counts REAL bytes, so proving
+// the total cap fires meant actually pushing 101 MB across a websocket — and in
+// an unoptimised build, with every client byte masked, that ONE test cost 83
+// seconds of the rust suite's 123. What is under test is the ENFORCEMENT (does
+// the projected sum trip, does the frame get refused, is the entry dropped) —
+// never the constant's value, which no assertion reads. Shrinking it exercises
+// the identical branches for a few kilobytes.
+#[cfg(test)]
+const MAX_CHUNK_SIZE: usize = 4 * 1024; // 4 KB
+#[cfg(test)]
+const MAX_UPLOAD_SIZE: usize = 16 * 1024; // 16 KB
 
 /// Maximum concurrent in-flight chunked uploads per WS connection.
 const MAX_CONCURRENT_UPLOADS: usize = 16;
