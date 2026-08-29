@@ -1,0 +1,19 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/, so this same file runs
+# against any plug and the results stay comparable.
+id: plan
+group: agentic
+title: correct posture on all three — sealed, owned, reachable
+runner: probe.py
+# ONE probe, three kernels. `RUNTIME` is the plug the probe reads; the same
+# assertions run against each. python is in-process (its asserts read the live
+# tree); rust and swift are spawned and driven over REST.
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  idle_seconds: 40
+  max_turns: 40
+  no_progress_turns: 8
+  turn_chars: 120000
+  turn_seconds: 600
+env: {}

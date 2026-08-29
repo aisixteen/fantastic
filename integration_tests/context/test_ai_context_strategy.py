@@ -184,12 +184,17 @@ async def test_strategy_fires_and_keeps_durable_record(
     )
     _seed_ai(python_binary, wd, strategy)
 
+    # THE KEY RIDES THE ENVIRONMENT into the spawned kernel — backends read
+    # `NVIDIA_API_KEY` themselves and nothing delivers a key any more. It used
+    # to be pushed in over the wire with `set_api_key` AFTER boot, which also
+    # meant the bundle persisted the value.
+    if _BACKEND == "nvidia" and (_k := _nvapi()):
+        os.environ["NVIDIA_API_KEY"] = _k
+
     await python_kernel(wd, port)
     ai = "ai"
     client = "chat"
 
-    if _BACKEND == "nvidia":
-        await asyncio.wait_for(ws_call(port, ai, "set_api_key", api_key=_nvapi()), timeout=30.0)
 
     print(
         f"\n[backend={_BACKEND} model={_MODEL} strategy={strategy} "
@@ -294,10 +299,15 @@ async def test_model_reacts_to_compaction_notice(
     # the model the persist reaction path (the notice names it); it's discovered emergently.
     seed_create(python_binary, wd, handler_module="yaml_state.tools", agent_id="mem", mode="mem")
 
+    # THE KEY RIDES THE ENVIRONMENT into the spawned kernel — backends read
+    # `NVIDIA_API_KEY` themselves and nothing delivers a key any more. It used
+    # to be pushed in over the wire with `set_api_key` AFTER boot, which also
+    # meant the bundle persisted the value.
+    if _BACKEND == "nvidia" and (_k := _nvapi()):
+        os.environ["NVIDIA_API_KEY"] = _k
+
     await python_kernel(wd, port)
     ai, mem, client = "ai", "mem", "chat"
-    if _BACKEND == "nvidia":
-        await asyncio.wait_for(ws_call(port, ai, "set_api_key", api_key=_nvapi()), timeout=30.0)
 
     print(f"\n[reaction backend={_BACKEND} model={_MODEL} strategy={strategy}]")
 

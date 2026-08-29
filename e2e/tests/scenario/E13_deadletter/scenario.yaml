@@ -1,0 +1,48 @@
+# THE SCENARIO — shared data, one copy, every runtime.
+#
+# A `plant` whose pump is FLAKY (fails twice, then succeeds) and whose valve is
+# DEAD (always fails). The measurement is whether the model lets the KERNEL
+# retry — one send carrying a `retries` budget — rather than re-sending by hand.
+#
+# Re-sending by hand is the failure this exists to catch: it produces the right
+# answer for the pump and no dead-letter row for the valve, which is exactly the
+# state a caller cannot reason about later.
+
+id: deadletter
+title: a flaky call is retried by the kernel and mourned by the ledger
+
+task: >-
+  This kernel has a `plant` agent. Run its `pump` ONCE and its `valve` ONCE.
+  Both are unreliable, so let the KERNEL do the retrying for you rather than
+  re-sending the call yourself — a call can carry a retries budget. Afterwards,
+  find out what became of each of those two executions, and store
+  {'pump': <the pump result>, 'valve': {'status': <status>, 'attempts': <attempts>}}
+  under the key 'report' in the key/value store. Then say REPORT FILED.
+
+limits:
+  max_turns: 14
+  max_tokens: 4096
+  idle_seconds: 150
+
+roster:
+  - role: kv_store
+    id: yaml_store
+    sentence: A key/value store.
+    verbs:
+      read: "args: key — returns {key, value}"
+      set: "args: key, value — stores it"
+  - role: flaky_plant
+    id: plant
+  - role: render_sink
+    id: cli
+
+grants:
+  ai_can_call: [cli, yaml_store, plant]
+
+# `>= 3` pump runs proves the KERNEL re-ran it: one call, three handler
+# invocations. A model re-sending by hand would show the same total with a
+# different envelope count, which is why the probe also reads the report.
+expect:
+  - side_effects: {agent: plant, at_least: 3}
+  - read: {agent: yaml_store, key: report}
+    contains: "valve"

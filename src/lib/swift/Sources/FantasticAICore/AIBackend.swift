@@ -25,7 +25,9 @@
 // Wire contract (byte-identical to the Python reference, enforced by
 // FantasticParityTests):
 //
-//   send → {queued, stream_id, message_id, client_id}
+//   send → {response, final, client_id}   (py/rust parity; the pass runs
+//                                          INLINE. `{error, client_id}`
+//                                          when it does not finish.)
 //   token event → {type:token, stream_id, message_id, delta,
 //                  accumulated, client_id}
 //   done  event → {type:done, stream_id, message_id, accumulated?,
@@ -230,6 +232,22 @@ public final class AIBackend: @unchecked Sendable {
         return .object(fields)
     }
 
+/// The outcome of ONE provider pass.
+///
+/// `send` answers with the finished text on every runtime, so the reason a pass
+/// did NOT finish has to travel back with it rather than being flattened to a
+/// missing value.
+enum AIPassOutcome {
+    /// The RAW completion — what routing parses.
+    case ok(String)
+    /// Terminal failure (timeout, provider error, context failsafe). The string
+    /// is the message `send` reports as `{error: …}`.
+    case failed(String)
+    /// The KERNEL killed the task. The turn was already closed out for the
+    /// client by `onCancel`; nothing more should be emitted or routed.
+    case cancelled
+}
+
     // MARK: - send
 
     private func sendVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
@@ -295,87 +313,108 @@ public final class AIBackend: @unchecked Sendable {
 
         bumpInFlight(+1)
         let agentId = agent.id
-        // The generation OUTLIVES this dispatch (`send` acks `{queued:true}` and
-        // returns), so it is registered with the kernel as its own TASK: `ps`
-        // sees it, `cancel <task_id>` kills it, and it stays inside the caller's
-        // process group (the substrate re-parents it to this dispatch's parent
-        // when this dispatch retires — init-adoption). Cancellation is the
-        // KERNEL's now; the backend holds no interrupt machinery of its own.
-        kernel.spawnTask(agent: agent.id, verb: "send") { [weak self] in
-            guard let self = self else { return }
-            await st.fifo.acquire()
-            // Killed while queued: never became the current turn (so `onCancel`
-            // has nothing to close out) — drop the queue row and hand the lock on.
-            if Task.isCancelled {
-                st.dropQueued(sendId: sendId)
-                self.bumpInFlight(-1)
-                await st.fifo.release()
-                return
-            }
-            st.popToCurrent(
-                sendId: sendId, startedAt: self.nowSecs(), phase: "thinking",
-                streamId: streamId, messageId: messageId,
-                // The task we are running AS — how `onCancel` recognises its own turn.
-                taskId: KernelTaskLocals.currentTask?.value)
-            await self.emitStatus(
-                agentId: agent.id, clientId: clientId, phase: "thinking", st: st,
-                kernel: kernel)
-            let produced = await self.runStream(
-                provider: provider,
-                streamId: streamId,
-                messageId: messageId,
-                userMessageId: userMessageId,
-                agent: agent,
-                clientId: clientId,
-                st: st,
-                userText: text,
-                systemPrompt: systemPrompt,
-                kernel: kernel
-            )
-            // `onCancel` already cleared the entry on the killed path; clearing
-            // again is a no-op. The FIFO lock is released either way — a killed
-            // generation unwinds through here, it does not strand the agent.
-            st.clearCurrent()
-            await st.fifo.release()
 
-            // ROUTE the completion. `produced` is nil on EVERY non-ok exit
-            // (cancel, timeout, provider error, context failsafe) — python's
-            // `if not reply.get("error")` gate, expressed in the type: a failed
-            // pass is terminal, and a broken chain must not keep spending turns.
-            //
-            // The ORDER above this line is the invariant, not an accident:
-            // `runStream` persisted the assistant turn, `clearCurrent` retired
-            // the in-flight entry, `release()` freed the FIFO — so a
-            // self-addressed follow-up can take the lock immediately and reads a
-            // history that already contains the turn it is answering.
-            //
-            // Its OWN task row (`verb:"route_reply"`), not this one: `ps` must not
-            // label routing as `"send"`, and the row makes each hop of a chain
-            // individually visible and killable. Task-locals are already correct
-            // here — we are inside the generation's task — so the row nests under
-            // it with no re-stamping. NEVER `Task.detached`: that loses the
-            // locals and the row would land parentless, outside `cancel`'s reach.
-            guard let produced = produced else { return }
+        // RUN THE GENERATION INLINE — python/rust parity.
+        //
+        // This dispatch used to spawn the generation as its own task and ack
+        // `{queued:true, stream_id, message_id}` immediately, while python and
+        // rust both run the pass here and answer `{response, final, client_id}`.
+        // One verb, two contracts: a caller that reads `reply["response"]` got
+        // the text on two kernels and an empty ack on the third, so anything
+        // driving swift had to know it was driving swift.
+        //
+        // Cancellation stays the KERNEL's, exactly as in rust: this dispatch IS
+        // the task row, so `ps` sees it and `cancel <task_id>` drops this future,
+        // releasing the provider stream and the FIFO guard.
+        await st.fifo.acquire()
+        // Killed while queued: never became the current turn (so `onCancel` has
+        // nothing to close out) — drop the queue row and hand the lock on.
+        if Task.isCancelled {
+            st.dropQueued(sendId: sendId)
+            bumpInFlight(-1)
+            await st.fifo.release()
+            return .object([
+                "error": .string("send: cancelled"), "client_id": .string(clientId),
+            ])
+        }
+        st.popToCurrent(
+            sendId: sendId, startedAt: nowSecs(), phase: "thinking",
+            streamId: streamId, messageId: messageId,
+            // The task we are running AS — how `onCancel` recognises its own turn.
+            taskId: KernelTaskLocals.currentTask?.value)
+        await emitStatus(
+            agentId: agentId, clientId: clientId, phase: "thinking", st: st,
+            kernel: kernel)
+        let produced = await runStream(
+            provider: provider,
+            streamId: streamId,
+            messageId: messageId,
+            userMessageId: userMessageId,
+            agent: agent,
+            clientId: clientId,
+            st: st,
+            userText: text,
+            systemPrompt: systemPrompt,
+            kernel: kernel
+        )
+        // `onCancel` already cleared the entry on the killed path; clearing again
+        // is a no-op. The FIFO lock is released either way — a killed generation
+        // unwinds through here, it does not strand the agent.
+        //
+        // The ORDER here is the invariant, not an accident: `runStream` persisted
+        // the assistant turn, `clearCurrent` retires the in-flight entry, and
+        // `release()` frees the FIFO BEFORE routing is spawned — so a
+        // self-addressed follow-up takes the lock immediately and reads a history
+        // that already contains the turn it is answering.
+        st.clearCurrent()
+        await st.fifo.release()
+
+        let reply: JSON
+        switch produced {
+        case .ok(let textOut):
+            reply = .object([
+                "response": .string(textOut),
+                "final": .string(textOut),
+                "client_id": .string(clientId),
+            ])
+        case .failed(let why):
+            reply = .object(["error": .string(why), "client_id": .string(clientId)])
+        case .cancelled:
+            reply = .object([
+                "error": .string("send: cancelled"), "client_id": .string(clientId),
+            ])
+        }
+
+        // ROUTE this pass's output where it was addressed — only on the ok path.
+        // A failed pass is terminal (python's `if not reply.get("error")` gate),
+        // and a broken chain must not keep spending turns.
+        //
+        // DETACHED as its own task row (`verb:"route_reply"`), which is why
+        // chaining works: awaiting a self-addressed send inline would keep THIS
+        // dispatch from returning until the whole chain finished. `ps` must not
+        // label routing as `"send"` either, and the row makes each hop
+        // individually visible and killable. NEVER `Task.detached`: that loses
+        // the task-locals and the row would land parentless, outside `cancel`'s
+        // reach.
+        if case .ok(let textOut) = produced {
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
-                    selfId: agentId, kernel: kernel, text: produced,
+                    selfId: agentId, kernel: kernel, text: textOut,
                     clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
                     incoming: text)
             }
         }
-
-        return .object([
-            "queued": .bool(true),
-            "stream_id": .string(streamId),
-            "message_id": .string(messageId),
-            "client_id": .string(clientId),
-        ])
+        return reply
     }
 
     /// Run ONE provider pass. Returns the RAW completion when the pass finished
-    /// OK — that text is what routing parses — and `nil` at every other exit
-    /// (cancelled, timed out, provider error, context failsafe), which is how the
-    /// caller knows a failed pass is terminal and must not be routed.
+    /// OK — that text is what routing parses — and a FAILURE case at every other
+    /// exit (cancelled, timed out, provider error, context failsafe), which is how
+    /// the caller knows a failed pass is terminal and must not be routed.
+    ///
+    /// The reason travels WITH the outcome because `send` returns it: python and
+    /// rust both answer `{error, client_id}` when a pass does not finish, and a
+    /// bare `nil` could not say which of four things happened.
     private func runStream(
         provider: any AIProvider,
         streamId: String,
@@ -387,7 +426,7 @@ public final class AIBackend: @unchecked Sendable {
         userText: String,
         systemPrompt: String?,
         kernel: Kernel
-    ) async -> String? {
+    ) async -> AIPassOutcome {
         let agentId = agent.id
         defer { bumpInFlight(-1) }
 
@@ -447,7 +486,7 @@ public final class AIBackend: @unchecked Sendable {
                     kernel: kernel, agentId: agentId, streamId: streamId, messageId: messageId,
                     clientId: clientId, accumulated: "",
                     error: err["error"].asString ?? "context projection error")
-                return nil
+                return .failed(err["error"].asString ?? "context projection error")
             }
         }
 
@@ -469,7 +508,7 @@ public final class AIBackend: @unchecked Sendable {
                 // WITHOUT emitting anything more and WITHOUT persisting the
                 // partial turn; returning drops the provider stream, whose
                 // `onTermination` cancels the upstream HTTP task.
-                if Task.isCancelled { return nil }
+                if Task.isCancelled { return .cancelled }
                 if Date() > deadline {
                     await emitStatus(
                         agentId: agentId, clientId: clientId, phase: "done", st: st,
@@ -479,7 +518,7 @@ public final class AIBackend: @unchecked Sendable {
                         streamId: streamId, messageId: messageId,
                         clientId: clientId, accumulated: accumulated,
                         error: "send: timeout after \(Int(sendTimeoutSeconds))s")
-                    return nil
+                    return .failed("send: timeout after \(Int(sendTimeoutSeconds))s")
                 }
                 switch chunk {
                 case .token(let delta):
@@ -507,7 +546,7 @@ public final class AIBackend: @unchecked Sendable {
             // A cancelled task's stream throws as it is torn down — that is our
             // OWN kill, not a provider failure. `onCancel` already emitted the
             // terminal events; stay silent.
-            if Task.isCancelled { return nil }
+            if Task.isCancelled { return .cancelled }
             await emitStatus(
                 agentId: agentId, clientId: clientId, phase: "done", st: st,
                 extraDetail: ["reason": .string("error")], kernel: kernel)
@@ -516,12 +555,12 @@ public final class AIBackend: @unchecked Sendable {
                 streamId: streamId, messageId: messageId,
                 clientId: clientId, accumulated: accumulated,
                 error: "\(error)")
-            return nil
+            return .failed("\(error)")
         }
         // The stream can also FINISH (rather than throw) when the task is
         // cancelled — same contract: the turn is already closed out, persist
         // nothing.
-        if Task.isCancelled { return nil }
+        if Task.isCancelled { return .cancelled }
 
         // Persist the full chat: base (prior + user turn) + the assistant turn.
         // THE ONLY WRITE, and the only one python/rust make either. The error /
@@ -550,7 +589,7 @@ public final class AIBackend: @unchecked Sendable {
         // The RAW completion — markers in — is what routing parses: a call the
         // model wrote mid-thought still dispatches. Only the DURABLE turn above
         // is stripped.
-        return accumulated
+        return .ok(accumulated)
     }
 
     // MARK: - status (verb + phase events)

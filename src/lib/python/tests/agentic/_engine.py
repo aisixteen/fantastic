@@ -63,6 +63,8 @@ from kernel import sender_context
 
 # THE SHARED CORPUS, at the repo root. The rust and swift runners read these
 # same files: a scenario is DATA, and the runner is the only per-runtime part.
+# The corpus lives at the REPO ROOT, shared with the rust and swift runners —
+# it is not this runner's private data.
 CONTRACT_DIR = Path(__file__).resolve().parents[5] / "contract"
 
 

@@ -7,6 +7,10 @@ outside, so asserting it once as data beats asserting it four times in four
 languages — measured on the C21 corpus, which found four real rust drifts on its
 first run.
 
+A UNIT suite: free, no model, in process. It lives here rather than in `e2e/`
+because that is where the rust and swift copies live, and because it should run
+on every commit rather than only when someone invokes the paid harness.
+
 Each scenario pays two phases:
 
   CORE (`_core.py`, PC-1..PC-5) — the price of being a config at all: the
@@ -26,15 +30,11 @@ from __future__ import annotations
 import pytest
 
 from _core import CORE_AFTER, CORE_BEFORE, run_core
-from _engine import coverage_matrix, load_config, run_steps
+from _engine import config_paths, load_config, run_steps
 
-
-from _engine import config_paths
-
-# Discovery is a GLOB: adding a scenario is adding a file (openfga's
-# sample-stores model). Specs, not configs — a config is a deployable kernel
-# document and says nothing about being tested, so the suite is enumerated by
-# what ASSERTS, and each spec names the config it runs against.
+# Discovery is a GLOB: adding a scenario is adding a file. Specs, not configs —
+# a config is a deployable kernel document and says nothing about being tested,
+# so the suite is enumerated by what ASSERTS, and each spec names its config.
 _SPECS = config_paths() or [None]
 
 
@@ -75,8 +75,7 @@ def test_every_requirement_a_spec_claims_is_actually_pinned():
             continue
         cfg = load_config(spec_path)
         tagged = {s.because for s in cfg.expect.steps if s.because}
-        claimed = set(cfg.requirements)
-        missing = claimed - tagged
+        missing = set(cfg.requirements) - tagged
         assert not missing, (
             f"{spec_path.name}: `requirements:` claims {sorted(missing)},"
             f" but no step tags them (`because:`); tagged={sorted(tagged)}"

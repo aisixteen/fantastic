@@ -327,11 +327,14 @@ dependencies = [
  "async-trait",
  "fantastic-ai-core",
  "fantastic-bundle",
+ "fantastic-cli-bundle",
+ "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
  "reqwest",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "wiremock",
@@ -364,13 +367,16 @@ version = "0.1.0"
 dependencies = [
  "fantastic-anthropic-backend",
  "fantastic-bridge",
+ "fantastic-cli-bundle",
  "fantastic-core",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
+ "fantastic-llamacpp-backend",
  "fantastic-nvidia-nim-backend",
  "fantastic-ollama-backend",
  "fantastic-proxy-agent",
+ "fantastic-scenario-probes",
  "fantastic-scheduler",
  "fantastic-static-loader",
  "fantastic-terminal-backend",
@@ -384,6 +390,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fantastic-cli-bundle"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -448,6 +465,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-llamacpp-backend"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-ai-core",
+ "fantastic-bundle",
+ "fantastic-file",
+ "fantastic-kernel",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "fantastic-nvidia-nim-backend"
 version = "0.1.0"
 dependencies = [
@@ -489,6 +523,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "fantastic-scenario-probes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
 ]
 
 [[package]]

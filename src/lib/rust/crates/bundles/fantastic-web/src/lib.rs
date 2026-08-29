@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{ws::Message, ws::WebSocket, Json, Path as AxPath, Query, State, WebSocketUpgrade},
-    http::{header, Request, StatusCode},
+    http::{header, HeaderMap, Request, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -495,6 +495,10 @@ async fn build_router_from_siblings(
     }
 }
 
+/// Header carrying a caller-chosen execution id on a REST POST. Mirrors
+/// `X-Fantastic-Auth`: dispatch metadata rides the carrier, never the body.
+const EXEC_ID_HEADER: &str = "x-fantastic-execution-id";
+
 /// Translate a Python/FastAPI-style path with `{name}` placeholders
 /// into axum 0.7's `:name` syntax. Wildcards (`{name:path}`) become
 /// `*name` (axum's catch-all). Idempotent — already-axum paths pass
@@ -598,16 +602,27 @@ async fn serve_rest_post_dynamic(
     State(state): State<AppState>,
     axum::Extension(owner): axum::Extension<RestOwner>,
     AxPath(target_id): AxPath<String>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Response {
     let target = AgentId::from(target_id.as_str());
+    // NAMING an execution — python parity (`web_rest/tools.py`). The
+    // credential rides `X-Fantastic-Auth`; an execution id rides its own
+    // header for the same reason: it is dispatch metadata about the call, not
+    // part of the verb payload the target reads. With it, ensure-semantics
+    // reach the wire — an unknown id dispatches, an in-flight id JOINS, and a
+    // settled id returns the recorded outcome instead of running twice.
+    let exec_id = headers
+        .get(EXEC_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
-        state
-            .kernel
-            .send(vec![Item::new(target.clone(), payload)])
-            .await
-            .remove(0)
-            .result
+        let mut item = Item::new(target.clone(), payload);
+        if let Some(id) = exec_id {
+            item = item.with_id(id);
+        }
+        state.kernel.send(vec![item]).await.remove(0).result
     })
     .await;
     // Python parity: return 204 No Content if the verb's reply was

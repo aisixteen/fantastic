@@ -31,6 +31,25 @@ fn register_default_bundles() -> BundleRegistry {
     // dependency the kernel cares about; everything below is pure-Rust
     // async over axum/tokio.
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
+    // The render sink AI backends stream their turn to. Without it that
+    // stream had nowhere to land on rust.
+    reg.register(
+        fantastic_cli_bundle::HANDLER_MODULE,
+        fantastic_cli_bundle::CliBundle,
+    );
+    // TEST-ONLY. The shared e2e scenarios declare stateful fixture roles
+    // (`dispenser`, `flaky_plant`, `purchase_desk`) that python and js register
+    // in process. A compiled kernel can only run what is compiled in, and the
+    // e2e driver reaches this binary over REST, so without these three the
+    // scenarios naming them are SKIPPED. Behind a feature: a default build has
+    // none of it.
+    #[cfg(feature = "scenario-probes")]
+    {
+        use fantastic_scenario_probes as probes;
+        reg.register(probes::DISPENSER_MODULE, probes::DispenserProbe::default());
+        reg.register(probes::PLANT_MODULE, probes::PlantProbe::default());
+        reg.register(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
+    }
     reg.register("yaml_state.tools", fantastic_yaml_state::YamlStateBundle);
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
@@ -54,6 +73,10 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register(
         "nvidia_nim_backend.tools",
         fantastic_nvidia_nim_backend::NvidiaNimBundle,
+    );
+    reg.register(
+        fantastic_llamacpp_backend::HANDLER_MODULE,
+        fantastic_llamacpp_backend::LlamaCppBundle,
     );
     reg.register(
         fantastic_anthropic_backend::HANDLER_MODULE,

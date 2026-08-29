@@ -1,8 +1,8 @@
 """The engine's own tests — hydrate / dehydrate / reach / the ID registry.
 
-The runner in `test_manifest_contract.py` trusts these three primitives with
-every claim the suite makes, so they are pinned directly here rather than only
-through a scenario. Two properties matter most:
+The runner in `test_agentic.py` trusts these three primitives with every claim
+the suite makes, so they are pinned directly here rather than only through a
+scenario. Two properties matter most:
 
 - `reach()` must actually make the driver an AGENT. Outside a dispatch
   `_current_sender` is None and a bare `kernel.send` is an OPERATOR send, which
@@ -12,6 +12,8 @@ through a scenario. Two properties matter most:
   declared, because `create_agent` boots its child, discards the reply and
   swallows the exception: a half-built roster looks exactly like a healthy one
   from the create reply alone.
+
+These test the RUNNER, not the substrate — so they carry no requirement ids.
 """
 
 from __future__ import annotations
@@ -23,9 +25,9 @@ import pytest
 
 from _engine import (
     CORE_REQUIREMENTS,
+    SPEC_DIR,
     ConfigError,
     HydrationError,
-    SPEC_DIR,
     Requirement,
     _index,
     config_paths,
@@ -296,3 +298,5 @@ async def test_dehydrate_reports_the_persisted_tree_when_asked(hydrate_scenario)
     # Namespacing is POSITIONAL: a roster agent's record lives under its loader.
     assert "agents/static_loader/agents/memory/agent.json" in d["disk_files"]
     assert all("docs/" not in f for f in d["disk_files"])
+
+

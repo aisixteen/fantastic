@@ -12,7 +12,7 @@
 
 use crate::assembly::assemble_messages;
 use crate::events::{emit_status, to_caller, CallerRoute};
-use crate::history::save_history;
+use crate::history::append_history;
 use crate::provider::{Provider, ProviderEvent};
 use crate::state::BackendState;
 use crate::think::without_thinking;
@@ -157,6 +157,6 @@ pub async fn run_generation(
         // 2026-08-02).
         json!({"role": "assistant", "content": without_thinking(&last_text)}),
     ];
-    let _ = save_history(self_id, kernel, client_id, &new_turns).await;
+    let _ = append_history(self_id, kernel, client_id, &new_turns).await;
     Ok(last_text)
 }

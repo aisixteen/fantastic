@@ -9,11 +9,11 @@
 
 NVIDIA NIM LLM agent (OpenAI-compatible). Same surface as
 `ollama_backend` (send/history/status; an in-flight `send` is cancelled
-with the kernel's `ps` + `cancel`, not a bundle `interrupt`) plus `set_api_key`/
-`clear_api_key`. The api_key is a sidecar at
-`.fantastic/agents/<id>/api_key` via `file_agent_id` — never in
-`agent.json`, never returned by reflect. The failfast guards below
-run as one-shot CLI; AI generation needs a live daemon + WS.
+with the kernel's `ps` + `cancel`, not a bundle `interrupt`). The api key comes
+from the ENVIRONMENT (`NVIDIA_API_KEY`), read at call time — there is no
+key-storage verb and nothing on disk, so it is never in `agent.json` and never
+returned by reflect. The failfast guards below run as one-shot CLI; AI
+generation needs a live daemon + WS.
 
 ## Pre-flight
 
@@ -37,36 +37,28 @@ $FANTASTIC $NB2 send text=hi | jq -e '.error | contains("file_agent_id required"
 
 Expect: `{"error":"nvidia_nim_backend: file_agent_id required"}`.
 
-### Test 2: `set_api_key` failfast when `file_agent_id` unset
+### Test 2: `send` failfast when the key variable is unset — and it NAMES the var
 
 ```bash
-$FANTASTIC $NB2 set_api_key api_key=nvapi-x | jq -e '.error | contains("file_agent_id required")'
+env -u NVIDIA_API_KEY $FANTASTIC $NB send text=hi | jq -e '.error | contains("NVIDIA_API_KEY")'
 ```
 
-### Test 3: `send` failfast when api_key not set (bound, no key)
+Expect: `nvidia_nim_backend: no api key — set NVIDIA_API_KEY`.
 
-```bash
-$FANTASTIC $NB send text=hi | jq -e '.error | contains("api_key not set")'
-```
-
-Expect: `nvidia_nim_backend: api_key not set; call set_api_key first`.
-
-### Test 4: `set_api_key` writes sidecar; reflect flips `has_api_key`, never leaks the key
+### Test 3: reflect flips `has_api_key` with the var set, and never leaks the key
 
 Skip if `NVAPI_KEY` is unset.
 
 ```bash
 [ -n "$NVAPI_KEY" ] && {
-  $FANTASTIC $NB set_api_key api_key="$NVAPI_KEY" | jq -e '.ok == true'
-  test -f /tmp/nim_test/.fantastic/agents/$NB/api_key && echo "sidecar present"
-  $FANTASTIC $NB reflect | jq -e '.has_api_key == true and (tostring | contains("nvapi-") | not)'
-  $FANTASTIC $NB clear_api_key | jq -e '.ok == true and .deleted == true'
-  test ! -f /tmp/nim_test/.fantastic/agents/$NB/api_key && echo "sidecar removed"
+  NVIDIA_API_KEY="$NVAPI_KEY" $FANTASTIC $NB reflect \
+    | jq -e '.has_api_key == true and (tostring | contains("nvapi-") | not)'
+  test ! -e /tmp/nim_test/.fantastic/agents/$NB/api_key && echo "nothing written to disk"
 } || echo "SKIPPED (no NVAPI_KEY)"
 ```
 
-Expect: `{"ok":true}`, sidecar exists, `has_api_key:true` with no
-`nvapi-` substring anywhere in the reflect blob, then sidecar gone.
+Expect `has_api_key:true` with no `nvapi-` substring anywhere in the reflect
+blob, and NO sidecar file — the bundle stores nothing.
 
 ## Cleanup
 
@@ -82,6 +74,5 @@ rm -rf /tmp/nim_test
 | Test | Pass / Fail | Notes |
 |---|---|---|
 | 1. send failfast w/o file_agent_id |  |  |
-| 2. set_api_key failfast w/o file_agent_id |  |  |
-| 3. send failfast w/o api_key |  |  |
-| 4 (AI). set_api_key sidecar + reflect doesn't leak |  |  |
+| 2. send failfast w/o NVIDIA_API_KEY (names the var) |  |  |
+| 3 (AI). reflect flips has_api_key, leaks nothing, writes nothing |  |  |

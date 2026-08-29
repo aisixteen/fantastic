@@ -15,7 +15,33 @@ pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, client_id: &s
     serde_json::from_str::<Vec<Value>>(&raw).unwrap_or_default()
 }
 
-/// Persist a client's chat (pretty JSON).
+/// APPEND turns to a client's chat, preserving everything already stored.
+///
+/// The durable record is never trimmed — the projection shapes only what the
+/// model is shown, so compaction and `recall` need the FULL conversation on the
+/// next turn. This exists because the call site used to hand `save_history` a
+/// freshly-built two-element vec holding just the current user+assistant pair,
+/// which OVERWROTE the file: every rust agent came back to a history exactly
+/// two messages long, lost its context after one exchange, and abandoned any
+/// task needing more than a single pass. Python appends through the `chat`
+/// yaml_state's `append` verb; this is the same semantics for the file store.
+pub async fn append_history(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    client_id: &str,
+    new_turns: &[Value],
+) -> Result<(), String> {
+    if new_turns.is_empty() {
+        return Ok(());
+    }
+    let mut all = load_history(self_id, kernel, client_id).await;
+    all.extend_from_slice(new_turns);
+    save_history(self_id, kernel, client_id, &all).await
+}
+
+/// Persist a client's chat WHOLESALE (pretty JSON) — replaces what is stored.
+/// Callers adding turns want [`append_history`]; this is for a caller that has
+/// already computed the complete list (e.g. a compaction rewrite).
 pub async fn save_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,

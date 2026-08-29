@@ -2,18 +2,21 @@
 failfast, multi-step _run, key sidecar via file_bridge_id, rate-limit retry.
 
 Mirror of ollama_backend's test_handler.py with the provider stubbed
-out and the new api_key surface (set_api_key, clear_api_key,
-has_api_key flag in reflect) plus 429-retry behavior covered."""
+out and the api-key surface (the key comes from the ENVIRONMENT; only the
+has_api_key flag appears in reflect) plus 429-retry behavior covered."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import httpx
+import pytest
 
 import nvidia_nim_backend.tools as nt
+from nvidia_nim_backend.tools import KEY_VAR
 
 
 class _FakeProvider:
@@ -51,13 +54,25 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     )[0]["result"]
 
 
+@pytest.fixture(autouse=True)
+def _clean_key_env():
+    """The key is process-global env now, so a test that seeds it must not leak
+    into the next one — restore whatever was there."""
+    prev = os.environ.get(KEY_VAR)
+    os.environ.pop(KEY_VAR, None)
+    yield
+    if prev is None:
+        os.environ.pop(KEY_VAR, None)
+    else:
+        os.environ[KEY_VAR] = prev
+
+
 async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None):
     # `context_window` explicitly: the 4096 default leaves only ~1k for the conversation
     # once the reflect primer + howtos are in the system block, so these tests (about
     # queueing, history and status — not context math) would fail on
     # `context_insufficient` for reasons unrelated to what they assert.
-    # Deny-all: the backend streams its turn to `cli` via send (default client),
-    # and writes its api_key sidecar to its store directly — both explicit grants.
+    # Deny-all: the backend streams its turn to `cli` via send (default client).
     can_call = {"cli": "*"}
     meta = {
         "handler_module": "nvidia_nim_backend.tools",
@@ -85,21 +100,11 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
     # Two-sided deny-all: open each callee's reciprocal `callable_by`.
     for target in can_call:
         await _accept(kernel, target, nid)
-    if with_key and file_bridge_id is not None:
-        (
-            await kernel.send(
-                [
-                    {
-                        "target": file_bridge_id,
-                        "payload": {
-                            "type": "write",
-                            "path": f"agents/{nid}/api_key",
-                            "content": with_key,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+    # `with_key` puts the key in the ENVIRONMENT — the only place the bundle
+    # looks. It used to write a sidecar through the file agent; nothing is
+    # written to disk any more, so there is no sidecar to seed.
+    if with_key:
+        os.environ[KEY_VAR] = with_key
     return nid
 
 
@@ -115,11 +120,12 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
     ]["result"]
     assert r["file_bridge_id"] == store_agent
     assert "send" in r["verbs"]
-    assert "set_api_key" in r["verbs"]
-    assert "clear_api_key" in r["verbs"]
+    # The key-storage verbs are GONE — the key is read from the environment.
+    assert "set_api_key" not in r["verbs"]
+    assert "clear_api_key" not in r["verbs"]
 
 
-async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
+async def test_reflect_has_api_key_tracks_the_env(seeded_kernel, store_agent):
     """has_api_key reports the boolean — never the key value itself."""
     nid = await _make_nvidia(seeded_kernel, store_agent)
     r0 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
@@ -129,19 +135,7 @@ async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
     blob0 = json.dumps(r0)
     assert "nvapi-" not in blob0
 
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": nid,
-                    "payload": {
-                        "type": "set_api_key",
-                        "api_key": "nvapi-secret-xxxxxxxxxxxx",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    os.environ[KEY_VAR] = "nvapi-secret-xxxxxxxxxxxx"
     r1 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
         0
     ]["result"]
@@ -152,7 +146,7 @@ async def test_reflect_has_api_key_flips_after_set(seeded_kernel, store_agent):
 
 
 async def test_send_without_provider_failfasts(seeded_kernel):
-    # No file_bridge_id ⇒ no api_key sidecar ⇒ make_provider returns None ⇒ send failfasts
+    # No file_bridge_id and no key in the env ⇒ make_provider returns None ⇒ failfast
     # (chat history no longer needs file_bridge_id — it's a mounted chat yaml_state).
     nid = await _make_nvidia(seeded_kernel)
     r = (
@@ -164,7 +158,8 @@ async def test_send_without_provider_failfasts(seeded_kernel):
 
 
 async def test_send_requires_api_key(seeded_kernel, store_agent):
-    """No api_key sidecar → send failfasts before touching the network."""
+    """Key variable unset → send failfasts before touching the network, and the
+    refusal NAMES the variable so an unwired connector says what to set."""
     nid = await _make_nvidia(seeded_kernel, store_agent)
     r = (
         await seeded_kernel.send(
@@ -172,7 +167,7 @@ async def test_send_requires_api_key(seeded_kernel, store_agent):
         )
     )[0]["result"]
     assert "error" in r
-    assert "api_key" in r["error"]
+    assert KEY_VAR in r["error"]
 
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
@@ -189,125 +184,6 @@ async def test_unknown_verb_errors(seeded_kernel, store_agent):
         0
     ]["result"]
     assert "error" in r
-
-
-# ─── api_key verbs ─────────────────────────────────────────────
-
-
-async def test_set_api_key_writes_via_file_bridge(seeded_kernel, store_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": nid,
-                    "payload": {"type": "set_api_key", "api_key": "nvapi-abc"},
-                }
-            ]
-        )
-    )[0]["result"]
-    assert r == {"ok": True}
-    key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
-    assert key_path.exists()
-    assert key_path.read_text().strip() == "nvapi-abc"
-
-
-async def test_set_api_key_strips_whitespace(seeded_kernel, store_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": nid,
-                    "payload": {
-                        "type": "set_api_key",
-                        "api_key": "   nvapi-padded  \n",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
-    assert key_path.read_text() == "nvapi-padded"
-
-
-async def test_set_api_key_invalidates_cached_provider(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-old")
-    sentinel = object()
-    nt._providers[nid] = sentinel
-    try:
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": nid,
-                        "payload": {"type": "set_api_key", "api_key": "nvapi-new"},
-                    }
-                ]
-            )
-        )[0]["result"]
-        assert nt._providers.get(nid) is not sentinel
-    finally:
-        nt._providers.pop(nid, None)
-
-
-async def test_set_api_key_failfast_without_file_bridge_id(seeded_kernel):
-    nid = await _make_nvidia(seeded_kernel)
-    r = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "set_api_key", "api_key": "nvapi-x"}}]
-        )
-    )[0]["result"]
-    assert "error" in r
-    assert "file_bridge_id" in r["error"]
-
-
-async def test_set_api_key_rejects_empty(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent)
-    for bad in ("", "   ", None, 42):
-        r = (
-            await seeded_kernel.send(
-                [{"target": nid, "payload": {"type": "set_api_key", "api_key": bad}}]
-            )
-        )[0]["result"]
-        assert "error" in r, f"unexpected ok for api_key={bad!r}"
-
-
-async def test_clear_api_key_deletes_file(seeded_kernel, store_agent, tmp_path):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    key_path = tmp_path / ".fantastic" / "agents" / nid / "api_key"
-    assert key_path.exists()
-    r = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "clear_api_key"}}]
-        )
-    )[0]["result"]
-    assert r["ok"] is True
-    assert not key_path.exists()
-    # Now reflect reports no key, send refuses.
-    r2 = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
-        0
-    ]["result"]
-    assert r2["has_api_key"] is False
-    r3 = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "send", "text": "hi"}}]
-        )
-    )[0]["result"]
-    assert "api_key" in r3.get("error", "")
-
-
-async def test_clear_api_key_failfast_without_file_bridge_id(seeded_kernel):
-    nid = await _make_nvidia(seeded_kernel)
-    r = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "clear_api_key"}}]
-        )
-    )[0]["result"]
-    assert "error" in r
-
-
-# ─── history persistence (per-client) ─────────────────────────
 
 
 async def test_history_returns_messages(seeded_kernel, store_agent):
@@ -834,12 +710,6 @@ async def test_mid_stream_429_propagates_without_retry(seeded_kernel, store_agen
 
 
 # ─── housekeeping: assert key file path matches the design ────
-
-
-def test_key_path_lives_under_agent_dir():
-    p = nt._key_path("nvidia_xxx")
-    assert Path(p).parts[-2:] == ("nvidia_xxx", "api_key")
-    assert "agents/" in p and ".fantastic" not in p
 
 
 # ─── status pipeline (mirrors ollama_backend) ──────────────────

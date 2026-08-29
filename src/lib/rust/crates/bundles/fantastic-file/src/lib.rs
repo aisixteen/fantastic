@@ -842,13 +842,50 @@ fn mime_for_ext(ext_lower: &str) -> &'static str {
     }
 }
 
+/// A `code` / `content` value as text, accepting a LIST OF LINES.
+///
+/// A program written as one JSON string is the most fragile thing a model
+/// emits: every newline is an escape and every inner quote another, so one
+/// missed `\"` swallows the rest of the object and the call is lost entirely.
+/// Measured on gemma-4-12B, and again on the `subai_graph` probe, which burned
+/// three consecutive turns on it.
+///
+/// A list removes the failure rather than softening it: newlines become the
+/// array structure instead of escapes, and each element is short enough that a
+/// lost quote costs ONE line rather than the whole document.
+///
+/// A LIST is the only newly accepted shape — anything else returns `None` so
+/// the existing refusals still fire. A bare `42` is a mistake, not a one-line
+/// program, and quietly stringifying it would spawn an interpreter on nonsense.
+fn lines_or_str(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
+}
+
 fn write_reply(root: &Path, payload: &Value) -> Value {
     let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
         return json!({"error": "write requires path"});
     };
-    let Some(content) = payload.get("content").and_then(Value::as_str) else {
-        return json!({"error": "write requires content"});
+    // A LIST of lines is accepted and joined with newlines — see the note on
+    // `lines_or_str` in exec_bridge: a multi-line body as ONE JSON string is
+    // where a model loses a closing quote and the whole call with it.
+    let Some(content) = lines_or_str(payload.get("content")) else {
+        return json!({"error": "write requires content (str, or a list of lines)"});
     };
+    let content = content.as_str();
     let target = match resolve_safe(root, path_str) {
         Ok(p) => p,
         Err(e) => return json!({"error": e}),

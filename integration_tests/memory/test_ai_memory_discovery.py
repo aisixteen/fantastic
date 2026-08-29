@@ -173,13 +173,15 @@ async def test_ai_discovers_and_uses_memory_from_readmes(
         mode="mem",
     )
 
+    # THE KEY RIDES THE ENVIRONMENT into the spawned kernel — backends read
+    # `NVIDIA_API_KEY` themselves and nothing delivers a key any more. It used
+    # to be pushed in over the wire with `set_api_key` AFTER boot, which also
+    # meant the bundle persisted the value.
+    if _BACKEND == "nvidia" and (_k := _nvapi()):
+        os.environ["NVIDIA_API_KEY"] = _k
+
     await python_kernel(wd, port)
     ai, mem = "ai", "mem"
-
-    if _BACKEND == "nvidia":
-        await asyncio.wait_for(
-            ws_call(port, ai, "set_api_key", api_key=_nvapi()), timeout=30.0
-        )
 
     print(f"\n[backend={_BACKEND} model={_MODEL} num_ctx={os.environ.get('FANTASTIC_NUM_CTX')}]")
 

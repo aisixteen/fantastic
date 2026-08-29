@@ -1919,7 +1919,8 @@ def build(
       module_name: the calling bundle's tools module name (e.g.
         "ollama_backend.tools"), used to read the LIVE SEND_TIMEOUT off it.
       extra_verbs: extra {verb_name: async fn(id, payload, kernel)} merged
-        into VERBS (nvidia: set_api_key / clear_api_key).
+        into VERBS. No bundle uses it today — the key-storage verbs it
+        carried are gone (keys come from the environment).
       reflect_extra: fn(id, kernel) -> dict (sync OR async), merged into
         the reflect reply (nvidia: {"has_api_key": ...}).
       stream_wrapper: fn(provider, messages, kernel, id, client_id) ->

@@ -322,17 +322,44 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
 # ─── verbs ──────────────────────────────────────────────────────
 
 
+def _as_code(value) -> str:
+    """`code` as a string, accepting a LIST OF LINES.
+
+    A program written as one JSON string is the most fragile thing a model
+    emits: every newline is an escape and every inner quote is another, so one
+    missed `\"` swallows the rest of the object and the call is lost entirely.
+    That is not hypothetical — it is the measured gemma-4-12B failure, and it
+    burned three consecutive turns of `subai_graph`.
+
+    A list removes the failure instead of softening it: newlines become the
+    array structure rather than escapes, and each element is short enough that a
+    lost quote costs ONE line rather than the whole document.
+
+    A LIST is the only newly accepted shape. Everything else is handed back
+    untouched so the existing refusals still fire — a bare `42` is a mistake,
+    not a one-line program, and quietly stringifying it would spawn an
+    interpreter on nonsense.
+    """
+    if isinstance(value, (list, tuple)):
+        return "\n".join("" if v is None else str(v) for v in value)
+    return value
+
+
 async def _start(id, payload, kernel):
-    """args: code:str? (falls back to the record's `code`), args:any? (THIS CALL's
+    """args: code:str|list[str]? (falls back to the record's `code`; a LIST is
+    joined with newlines and is the safer shape for a real program), args:any? (THIS CALL's
     arguments, reaches the program as `kernel.args`, default {}), interpreter:str?
     (must be allowlisted), shim:str? (prepend a wire client), cwd:str?. Spawns in the
     BACKGROUND and returns {job_id, status:'running'} at once; streams `progress` per
     output line + a final `job_done`. Many run in parallel."""
     rec = kernel.get(id) or {}
-    code = payload.get("code") or rec.get("code") or ""
+    code = _as_code(payload.get("code") or rec.get("code") or "")
     if not isinstance(code, str) or not code:
         return {
-            "error": "exec_bridge: code (str) required (pass it or set it on the record)"
+            "error": (
+                "exec_bridge: code (str, or a list of lines) required "
+                "(pass it or set it on the record)"
+            )
         }
     cwd = payload.get("cwd") or rec.get("cwd") or None
 

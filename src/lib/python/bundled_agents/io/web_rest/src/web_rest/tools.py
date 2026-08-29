@@ -93,10 +93,19 @@ def _make_post_endpoint(self_id: str, kernel):
         # Tag the dispatch with this surface's id so telemetry rays
         # originate visually from this sprite. Without this an external
         # HTTP caller has no agent context and rays drop.
+        # NAMING an execution. The credential rides `X-Fantastic-Auth`; an
+        # execution id rides its own header for the same reason — it is
+        # dispatch metadata about the call, not part of the verb payload the
+        # target agent reads. With it, ensure-semantics reach the wire: an
+        # unknown id dispatches, an in-flight id JOINS, and a settled id
+        # returns the recorded outcome rather than running the verb twice.
+        # Without it an HTTP caller cannot express a safe repeat at all.
+        item = {"target": target_id, "payload": payload}
+        exec_id = request.headers.get("X-Fantastic-Execution-Id")
+        if exec_id:
+            item["id"] = exec_id
         with sender_context(self_id):
-            reply = (await kernel.send([{"target": target_id, "payload": payload}]))[0][
-                "result"
-            ]
+            reply = (await kernel.send([item]))[0]["result"]
         if reply is None:
             return Response(status_code=204)
         return JSONResponse(reply)

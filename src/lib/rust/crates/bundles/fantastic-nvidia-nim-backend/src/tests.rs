@@ -106,8 +106,41 @@ fn readme_present_and_titled() {
     assert!(README.contains("nvidia_nim_backend"));
 }
 
+/// THE KEY LIVES IN THE ENVIRONMENT, which is process-global — so the test that
+/// needs it ABSENT and the ones that need it PRESENT must not overlap. Every
+/// test touching the key takes this lock and restores what it found.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Set (or clear) the key var for the duration of a test, restoring on drop.
+struct KeyEnv {
+    prev: Option<String>,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl KeyEnv {
+    async fn set(value: Option<&str>) -> Self {
+        let guard = ENV_LOCK.lock().await;
+        let prev = std::env::var("NVIDIA_API_KEY").ok();
+        match value {
+            Some(k) => std::env::set_var("NVIDIA_API_KEY", k),
+            None => std::env::remove_var("NVIDIA_API_KEY"),
+        }
+        Self { prev, _guard: guard }
+    }
+}
+
+impl Drop for KeyEnv {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(x) => std::env::set_var("NVIDIA_API_KEY", x),
+            None => std::env::remove_var("NVIDIA_API_KEY"),
+        }
+    }
+}
+
 #[tokio::test]
-async fn reflect_shape_has_api_key_false_initially() {
+async fn reflect_shape_has_api_key_tracks_the_env() {
+    let _key = KeyEnv::set(None).await;
     let tmp = TempDir::new().unwrap();
     let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
@@ -118,90 +151,15 @@ async fn reflect_shape_has_api_key_false_initially() {
     assert_eq!(r["id"], nim.as_str());
     assert_eq!(r["has_api_key"], false);
     assert_eq!(r["model"], "test-model");
-    assert!(r["verbs"]["set_api_key"].is_string());
-    assert!(r["verbs"]["clear_api_key"].is_string());
-}
-
-#[tokio::test]
-async fn set_api_key_persists_via_file_agent_and_reflect_flips() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
-    let r = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-test-abc"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["ok"], true);
-    // Sidecar on disk via file agent.
-    let key_file = tmp
-        .path()
-        .join(format!(".fantastic/agents/{}/api_key", nim));
-    assert!(key_file.exists(), "api_key sidecar should exist");
-    let content = std::fs::read_to_string(&key_file).unwrap();
-    assert_eq!(content.trim(), "nvapi-test-abc");
-    let r2 = kernel
-        .send(vec![Item::new(nim.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r2["has_api_key"], true);
-    // The reflect MUST NOT leak the key value.
-    let serialized = serde_json::to_string(&r2).unwrap();
-    assert!(
-        !serialized.contains("nvapi-test-abc"),
-        "reflect must never include the api_key value"
-    );
-}
-
-#[tokio::test]
-async fn clear_api_key_leaves_no_secret_behind() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "k1"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let key_file = tmp
-        .path()
-        .join(format!(".fantastic/agents/{}/api_key", nim));
-    assert!(key_file.exists());
-    let r = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "clear_api_key"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["ok"], true);
-    assert_eq!(r["deleted"], true);
-    // CLEARED, not unlinked. The blob channel is a dumb byte authority with no
-    // delete verb (python has none either), so clearing writes the sidecar
-    // EMPTY. What must hold is that NO SECRET REMAINS.
-    assert_eq!(
-        std::fs::read_to_string(&key_file)
-            .unwrap_or_default()
-            .trim(),
-        "",
-        "the key survived the clear"
-    );
-    let r2 = kernel
-        .send(vec![Item::new(nim.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r2["has_api_key"], false);
+    // The key-storage verbs are GONE — the key is read from the environment and
+    // this bundle never persists it.
+    assert!(r["verbs"]["set_api_key"].is_null());
+    assert!(r["verbs"]["clear_api_key"].is_null());
 }
 
 #[tokio::test]
 async fn send_without_api_key_returns_clean_error() {
+    let _key = KeyEnv::set(None).await;
     let tmp = TempDir::new().unwrap();
     let (kernel, nim, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
@@ -214,7 +172,7 @@ async fn send_without_api_key_returns_clean_error() {
         .result;
     let err = r["error"].as_str().unwrap_or("");
     assert!(
-        err.contains("api_key not set"),
+        err.contains("NVIDIA_API_KEY"),
         "expected api_key-not-set error, got {err:?}",
     );
 }
@@ -225,14 +183,7 @@ async fn send_streams_tokens_via_sse() {
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
 
     let sse = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
@@ -353,14 +304,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
     let l1 = json!({"choices":[{"delta":{"reasoning_content":"deliberating"}}]}).to_string();
     let l2 = json!({"choices":[{"delta":{"content":"ack"}}]}).to_string();
     let sse = format!("data: {l1}\n\ndata: {l2}\n\ndata: [DONE]\n\n");
@@ -407,14 +351,7 @@ async fn rate_limit_retry_once_then_succeeds() {
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
 
     // First match: 429 with Retry-After=1 (one expected hit).
     Mock::given(method("POST"))
@@ -527,14 +464,7 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, nim, fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
 
     // Address the nvidia agent's OWN file agent: its write lands on disk, which is
     // proof the dispatch happened and not just that nothing crashed.
@@ -595,14 +525,7 @@ async fn kernel_cancel_kills_an_in_flight_send() {
     let tmp = TempDir::new().unwrap();
     let endpoint = format!("{}/v1", server.uri());
     let (kernel, nim, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            nim.clone(),
-            json!({"type": "set_api_key", "api_key": "nvapi-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("nvapi-x")).await;
     // Slow-loris SSE: server delays then streams. The cancel path should drop
     // the request before tokens land.
     let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"never\"}}]}\n\ndata: [DONE]\n\n";

@@ -205,3 +205,44 @@ mod tests {
         assert_eq!(w2.close_marker(), None);
     }
 }
+
+/// Decode ONE OpenAI-style streaming `delta` into text pieces, reading BOTH
+/// channels. `wrap` carries the per-TURN reasoning span across deltas.
+///
+/// SHARED because more than one backend speaks this wire: NVIDIA NIM and
+/// `llama-server` both expose `/v1/chat/completions` with the same streaming
+/// shape, so this is a property of the WIRE, not of either vendor. It lived
+/// inside the NIM crate until llama.cpp needed it; a copy would have drifted on
+/// exactly the detail it exists to get right.
+///
+/// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style models — and
+/// `llama-server` started with `--reasoning-format deepseek` — stream most
+/// tokens as `reasoning_content` and only the conclusion as `content`: measured
+/// 740 chars of reasoning to 129 of content on one NIM turn, and 602 to 176 on
+/// gemma-4-12B. Reading `content` alone silently drops whole turns — observed
+/// live, a model spent an entire pass reasoning, an EMPTY completion came back,
+/// and the chain died with no error anywhere.
+pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> Vec<String> {
+    let mut out = Vec::new();
+    let think = delta
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !think.is_empty() {
+        if let Some(m) = wrap.open_marker() {
+            out.push(m.to_string());
+        }
+        out.push(think.to_string());
+    }
+    let content = delta
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !content.is_empty() {
+        if let Some(m) = wrap.close_marker() {
+            out.push(m.to_string());
+        }
+        out.push(content.to_string());
+    }
+    out
+}

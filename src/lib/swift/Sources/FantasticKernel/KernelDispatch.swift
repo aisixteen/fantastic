@@ -622,6 +622,20 @@ extension Kernel {
         // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a manifest
         // could grant before is GONE.
         if Kernel.isSystemVerb(verb) && target.parentId == nil {
+            // ...but CONFERRAL still applies. `update_agent` is a system verb
+            // whose target is ALWAYS the root, so returning nil flat made
+            // `checkConferral` unreachable for the exact case it guards: any
+            // agent holding `<root>:update_agent` could rewrite its OWN
+            // can_call and grant itself egress to the whole tree — the
+            // deny-all gate defeated from below. Python runs the check on this
+            // path (`_agent.py`, `verb in _SYSTEM_VERBS and target.parent is
+            // None`); swift did not. Skipping INGRESS here is deliberate and
+            // unchanged — skipping conferral was not.
+            if verb == "create_agent" || verb == "update_agent" {
+                return checkConferral(
+                    sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
+                    loaderId: loaderId, payload: payload)
+            }
             return nil
         }
 

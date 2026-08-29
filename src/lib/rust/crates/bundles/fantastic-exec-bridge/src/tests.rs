@@ -730,3 +730,32 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
         "{r}"
     );
 }
+
+#[tokio::test]
+async fn code_may_be_a_list_of_lines() {
+    // A program written as ONE JSON string is the most fragile thing a model
+    // emits: every newline is an escape, every inner quote another, and one
+    // missed `\"` swallows the rest of the object. A list makes newlines the
+    // array structure instead — measured need, from a probe that burned three
+    // consecutive turns losing a closing quote.
+    assert_eq!(
+        lines_or_str(Some(&json!(["a", "b", "c"]))),
+        Some("a\nb\nc".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_plain_string_is_unchanged() {
+    assert_eq!(
+        lines_or_str(Some(&json!("x = 1"))),
+        Some("x = 1".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_bare_number_is_still_refused() {
+    // The list is the ONLY new shape. `42` is a mistake, not a one-line
+    // program, and stringifying it would spawn an interpreter on nonsense.
+    assert_eq!(lines_or_str(Some(&json!(42))), None);
+    assert_eq!(lines_or_str(None), None);
+}
