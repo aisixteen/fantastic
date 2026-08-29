@@ -15,6 +15,12 @@ roster:
   can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',
     ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', ''clock'':
     ''*'', ''brain'': ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*''}>'
+  callable_by:
+    $self: '*'
+    $parent: '*'
+    $children: '*'
+    rest: '*'
+    web: '*'
 - id: kernel_store
   handler_module: file_bridge.tools
   parent_id: <root.id>

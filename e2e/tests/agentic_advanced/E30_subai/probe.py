@@ -200,9 +200,9 @@ def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -
             "$self": "*",
             "$parent": "*",
             "$children": "*",
-            # THE ROOT, by whatever id this runtime gives it (python: kernel_state,
-        # rust/swift: core).
-        root.id: ["*", "create_agent", "update_agent", "delete_agent"],
+            # THE ROOT, by whatever id this runtime gives it (python:
+            # kernel_state, rust/swift: core).
+            root.id: ["*", "create_agent", "update_agent", "delete_agent"],
             "cli": "*",
             "readings": "*",
             "totals": "*",
@@ -213,6 +213,15 @@ def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -
         },
         # The AI agent is pinned to the server's real window; the builder gets its own.
         "context_window": CTX if agent_id == "brain" else BUILDER_CTX,
+        # THE WIRE FACES. On a spawned kernel the driver arrives as `rest` and a
+        # `watch` frame dispatches as `web` — both are AGENTS, gated like any
+        # other, so an agent that does not accept them refuses the very first
+        # send and emits to a watcher that was never allowed to subscribe. In
+        # process these ids do not exist and the grant is inert.
+        "callable_by": {
+            "$self": "*", "$parent": "*", "$children": "*",
+            "rest": "*", "web": "*",
+        },
     }
     if agent_id == "brain":
         meta["description"] = "A AI agent: one completion per send. No loop of its own."
@@ -521,7 +530,12 @@ async def run(
     `brain_backend` lets `brain` be a DIFFERENT model from the builder.
     """
     # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`) — see E20_build.
-    root, core, close_kernel = await open_kernel("subai_")
+    # The ids the FIXTURE builds — declared before boot, because a spawned
+    # kernel's legs are granted from ABOVE and cannot raise their own authority.
+    # `MINE` is that same set (minus the root ids it also carries), so the two
+    # cannot drift. Ignored in process, where the probe IS the operator.
+    root, core, close_kernel = await open_kernel(
+        "subai_", reach=sorted(MINE - {"kernel_state", "core"}))
     store = await build_fixture(root, interpreter=interpreter)
     if extra_agents is not None:
         await extra_agents(root)
