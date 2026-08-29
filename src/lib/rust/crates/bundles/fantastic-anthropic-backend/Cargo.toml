@@ -17,6 +17,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = { workspace = true }
 
 [dev-dependencies]
+# The SCENARIO runner reads the shared yaml and needs the roles a scenario
+# names — `cli` is the render sink an AI streams its turn to.
+serde_yaml = "0.9"
+fantastic-cli-bundle = { path = "../fantastic-cli-bundle" }
+fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 fantastic-file = { path = "../fantastic-file" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }

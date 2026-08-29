@@ -559,6 +559,12 @@ impl Kernel {
         };
 
         match outcome {
+            // `raised` marks a terminal handler failure (a bundle `Err`, or a
+            // panic below) — retryable, and a dead-letter row when the budget
+            // runs out. A plain error-shaped reply is a completed dispatch.
+            Ok(Some(v)) if v.get("raised").and_then(Value::as_bool) == Some(true) => {
+                (v, Status::Failed)
+            }
             Ok(Some(v)) => (v, Status::Completed),
             Ok(None) => {
                 if current_killed() {
@@ -850,7 +856,18 @@ fn dispatch(
         match bundle.handle(&target.id, &payload, &kernel).await {
             Ok(Some(v)) => v,
             Ok(None) => Value::Null,
-            Err(e) => json!({ "error": e.to_string() }),
+            // A BUNDLE ERROR IS A TERMINAL FAILURE, marked `raised` exactly as
+            // a panic is — python settles a handler raise as `failed`
+            // (`_agent.py`: "a handler raise settles as `failed`"). Without the
+            // marker this returned a perfectly successful reply that merely
+            // CONTAINED an error, so `status` was `Completed`,
+            // `Status::is_retryable` was false, and the retry engine exited
+            // after one attempt: `retries: N` was silently inert for every
+            // bundle failure in rust, and no execution could ever dead-letter.
+            // An `Ok(Some({"error": ...}))` — an unknown verb, a bad argument —
+            // is NOT this: it stays `Completed`, because the handler chose to
+            // answer rather than fail.
+            Err(e) => json!({ "error": e.to_string(), "raised": true }),
         }
     })
 }

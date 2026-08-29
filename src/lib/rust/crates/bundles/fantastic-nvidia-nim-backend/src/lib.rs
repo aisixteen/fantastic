@@ -14,9 +14,9 @@
 //! See `fantastic_ai_core`'s module header for the canonical LLM backend
 //! contract. NIM-local extras:
 //!
-//! - `set_api_key` args `{api_key:str}` → persists to sidecar via file agent
-//! - `clear_api_key` → deletes the sidecar
-//! - `reflect` includes `has_api_key: bool` (never the value)
+//! - the key is read from the ENVIRONMENT (`NVIDIA_API_KEY`) at call time.
+//!   There is no key-storage verb and no sidecar: a connector is inert until
+//!   the operator wires the variable, and an absent key fails loud NAMING it.
 //! - Bearer HTTP client cache (dropped on key change), 429 rate-limit retry.
 
 #![deny(missing_docs)]
@@ -102,15 +102,14 @@ fn build_client(api_key: &str) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("build client: {e}"))
 }
 
-async fn get_or_build_client(
-    self_id: &AgentId,
-    kernel: &Arc<Kernel>,
-) -> Result<Arc<reqwest::Client>, String> {
+/// The key comes from the ENVIRONMENT, so no kernel handle is needed here any
+/// more — this used to read a sidecar through the file agent.
+fn get_or_build_client(self_id: &AgentId) -> Result<Arc<reqwest::Client>, String> {
     if let Some(c) = HTTP_CLIENTS.lock().get(self_id).cloned() {
         return Ok(c);
     }
-    let Some(key) = read_api_key(self_id, kernel).await else {
-        return Err("api_key not set".to_string());
+    let Some(key) = read_api_key() else {
+        return Err(no_key_error());
     };
     let client = Arc::new(build_client(&key)?);
     HTTP_CLIENTS
@@ -123,52 +122,26 @@ fn drop_cached_client(self_id: &AgentId) {
     HTTP_CLIENTS.lock().remove(self_id);
 }
 
-// ── NIM-local: api_key sidecar ──────────────────────────────────────
+// ── the api key: ENVIRONMENT ONLY ───────────────────────────────────
 
-/// The api-key sidecar's FILENAME. A name, not a path — the loader owns where
-/// sidecars land, so this bundle no longer computes `agents/<id>/…`.
-fn key_path(_self_id: &AgentId) -> String {
-    "api_key".to_string()
+/// The variable that carries the key. Named in the failure text so an unwired
+/// connector says exactly what to set.
+const KEY_VAR: &str = "NVIDIA_API_KEY";
+
+/// Read the key from the environment. No sidecar, no agent record — the key is
+/// never written to disk by this bundle and never appears in `agent.json`.
+fn read_api_key() -> Option<String> {
+    std::env::var(KEY_VAR)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-async fn read_api_key(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
-    let raw = helpers::file_read(self_id, kernel, &key_path(self_id)).await?;
-    let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+/// The refusal for an unwired connector — names the variable to set.
+fn no_key_error() -> String {
+    format!("nvidia_nim_backend: no api key — set {KEY_VAR}")
 }
 
-async fn has_api_key(self_id: &AgentId, kernel: &Arc<Kernel>) -> bool {
-    read_api_key(self_id, kernel).await.is_some()
-}
-
-async fn set_api_key_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
-    }
-    let key = payload.get("api_key").and_then(Value::as_str).unwrap_or("");
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return json!({"error": "set_api_key: api_key must be a non-empty string"});
-    }
-    if let Err(e) = helpers::file_write(agent_id, kernel, &key_path(agent_id), trimmed).await {
-        return json!({"error": format!("set_api_key: file write failed: {e}")});
-    }
-    drop_cached_client(agent_id);
-    json!({"ok": true})
-}
-
-async fn clear_api_key_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
-    }
-    let deleted = helpers::file_delete(agent_id, kernel, &key_path(agent_id)).await;
-    drop_cached_client(agent_id);
-    json!({"ok": true, "deleted": deleted})
-}
 
 // ── NIM provider (Bearer + SSE + 429 retry) ─────────────────────────
 
@@ -212,7 +185,7 @@ impl Provider for NimProvider {
         // rate-limit say + status during the backoff.
         let mut attempt: u32 = 0;
         let resp = loop {
-            let client = get_or_build_client(&self.self_id, &self.kernel).await?;
+            let client = get_or_build_client(&self.self_id)?;
             let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
             let resp = client
                 .post(&url)
@@ -351,22 +324,11 @@ fn decode_delta_into(
     wrap: &mut ThinkWrap,
     out: &mut Vec<Result<ProviderEvent, String>>,
 ) {
-    let think = delta
-        .get("reasoning_content")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if !think.is_empty() {
-        if let Some(m) = wrap.open_marker() {
-            out.push(Ok(ProviderEvent::Token(m.to_string())));
-        }
-        out.push(Ok(ProviderEvent::Token(think.to_string())));
-    }
-    let content = delta.get("content").and_then(Value::as_str).unwrap_or("");
-    if !content.is_empty() {
-        if let Some(m) = wrap.close_marker() {
-            out.push(Ok(ProviderEvent::Token(m.to_string())));
-        }
-        out.push(Ok(ProviderEvent::Token(content.to_string())));
+    // DELEGATES to the shared decode: NIM and `llama-server` speak the same
+    // wire, and two copies would drift on the one thing this gets right —
+    // reading BOTH channels, not just `content`.
+    for piece in fantastic_ai_core::think::decode_openai_delta(delta, wrap) {
+        out.push(Ok(ProviderEvent::Token(piece)));
     }
 }
 
@@ -401,8 +363,6 @@ impl Bundle for NvidiaNimBundle {
             // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
             "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
-            "set_api_key" => set_api_key_reply(agent_id, payload, kernel).await,
-            "clear_api_key" => clear_api_key_reply(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("nvidia_nim_backend: unknown type {other:?}")}),
         };
@@ -437,8 +397,8 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     if helpers::file_bridge_id(agent_id, kernel).is_none() {
         return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
     }
-    if !has_api_key(agent_id, kernel).await {
-        return json!({"error": "nvidia_nim_backend: api_key not set; call set_api_key first"});
+    if read_api_key().is_none() {
+        return json!({ "error": no_key_error() });
     }
     let client_id = helpers::safe_client(
         payload
@@ -460,7 +420,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let endpoint = helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT);
     let model = helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL);
     let file_bridge_id_v = helpers::meta_string(agent_id, kernel, "file_bridge_id");
-    let has_key = has_api_key(agent_id, kernel).await;
+    let has_key = read_api_key().is_some();
     let generating = state::is_generating(agent_id);
     let meta = helpers::agent_meta(agent_id, kernel);
     let context_window = fantastic_ai_core::context::resolve_context_window(&meta);
@@ -480,14 +440,12 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "context_window": context_window,
         "context_strategy": context_strategy,
         "verbs": {
-            "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. The api_key value itself is NEVER returned — only the boolean.",
+            "reflect": "Identity + model + endpoint + has_api_key + generating + file_bridge_id binding. No args. `has_api_key` reports whether the ENV key is set; the value is NEVER returned.",
             "boot": "No-op. Returns null.",
-            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR api_key not set.",
+            "send": "args: text:str (req), client_id:str? (default 'cli'), system_prompt:str? (REPLACES the default system block), send_to:str? (hands this pass's TEXT to that agent id once, no propagation). Streams tokens to ONLY the caller. ONE provider pass; the model routes its own work with `reply_to` inside its <tool_call>s (default: back to itself). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Failfast if file_bridge_id unset OR no api key in the environment.",
             "history": "args: client_id:str? (default 'cli'). Returns {messages, client_id}.",
             "recall": "args: client_id:str?, query:str?, limit:int?, before:int?. Pages turns back from the durable store (lossless on demand after compaction). Returns {messages, total, truncated, client_id}.",
             "context_status": "No args. Context-budget posture + last compaction + derived reaction. Returns {context_window, output_reserve, budget, strategy, last_projection, last_reaction}.",
-            "set_api_key": "args: api_key:str (req). Persists to .fantastic/agents/<id>/api_key via file agent. Drops cached client.",
-            "clear_api_key": "No args. Deletes the api_key sidecar. Returns {ok:true, deleted:bool}.",
             "status": "args: client_id:str?. Privacy-filtered queue/in-flight snapshot.",
         },
         "cancel": fantastic_ai_core::CANCEL_DOC,
@@ -499,7 +457,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "done": "{type:'done', source, client_id} — back-compat end marker.",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called). Pull counterpart: the context_status verb.",
         },
-        "concurrency": "Per-backend FIFO lock around `send`. reflect/history/set_api_key/clear_api_key skip the lock.",
+        "concurrency": "Per-backend FIFO lock around `send`. reflect/history skip the lock.",
     })
 }
 

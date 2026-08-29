@@ -17,7 +17,10 @@ import FantasticFile
 import FantasticFoundationModelsBackend
 import FantasticJSON
 import FantasticKernel
+import FantasticScenarioProbes
 import FantasticKernelBridge
+import FantasticAnthropicBackend
+import FantasticLlamaCppBackend
 import FantasticNvidiaNimBackend
 import FantasticOllamaBackend
 import FantasticProxyAgent
@@ -42,6 +45,14 @@ import Foundation
 public func defaultBundleRegistry() -> BundleRegistry {
     let r = BundleRegistry()
     r.register("file_bridge.tools", FileBundle())
+    // TEST-ONLY. The shared e2e scenarios declare stateful fixture roles that
+    // python and js register in process; a compiled kernel can only run what is
+    // compiled in, so without these the scenarios naming them are SKIPPED.
+    #if SCENARIO_PROBES
+        r.register(DISPENSER_MODULE, DispenserProbe())
+        r.register(PLANT_MODULE, PlantProbe())
+        r.register(PURCHASE_MODULE, PurchaseProbe())
+    #endif
     r.register("yaml_state.tools", YamlStateBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
@@ -56,6 +67,8 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("web_rest.tools", WebRestBundle())
     r.register("ollama_backend.tools", OllamaBackendBundle())
     r.register("nvidia_nim_backend.tools", NvidiaNimBundle())
+    r.register("anthropic_backend.tools", AnthropicBundle())
+    r.register("llamacpp_backend.tools", LlamaCppBundle())
     r.register("foundation_models_backend.tools", FoundationModelsBackendBundle())
     // apple_kvs — synced KV (iCloud KVS). Apple-only: the bundle reports
     // unavailable on non-Apple, mirroring foundation_models_backend.

@@ -170,8 +170,46 @@ fn translate_messages_splits_system_and_text_turns() {
         .contains("<tool_response"));
 }
 
+/// THE KEY LIVES IN THE ENVIRONMENT, which is process-global — so the test that
+/// needs it ABSENT and the ones that need it PRESENT must not overlap. Every
+/// test touching the key takes this lock and restores what it found.
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Set (or clear) the key var for the duration of a test, restoring on drop.
+struct KeyEnv {
+    prev: Vec<(&'static str, Option<String>)>,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl KeyEnv {
+    async fn set(value: Option<&str>) -> Self {
+        let guard = ENV_LOCK.lock().await;
+        let vars = ["ANTHROPIC_KEY", "ANTHROPIC_API_KEY"];
+        let prev: Vec<_> = vars.iter().map(|v| (*v, std::env::var(v).ok())).collect();
+        for v in vars {
+            std::env::remove_var(v);
+        }
+        if let Some(k) = value {
+            std::env::set_var("ANTHROPIC_API_KEY", k);
+        }
+        Self { prev, _guard: guard }
+    }
+}
+
+impl Drop for KeyEnv {
+    fn drop(&mut self) {
+        for (v, old) in &self.prev {
+            match old {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
+    }
+}
+
 #[tokio::test]
-async fn reflect_shape_has_api_key_false_initially() {
+async fn reflect_shape_has_api_key_tracks_the_env() {
+    let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
@@ -183,89 +221,15 @@ async fn reflect_shape_has_api_key_false_initially() {
     assert_eq!(r["has_api_key"], false);
     assert_eq!(r["model"], "test-model");
     assert_eq!(r["max_tokens"], DEFAULT_MAX_TOKENS);
-    assert!(r["verbs"]["set_api_key"].is_string());
-    assert!(r["verbs"]["clear_api_key"].is_string());
-}
-
-#[tokio::test]
-async fn set_api_key_persists_via_file_agent_and_reflect_flips() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
-    let r = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-test-abc"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["ok"], true);
-    let key_file = tmp
-        .path()
-        .join(format!(".fantastic/agents/{}/api_key", ant));
-    assert!(key_file.exists(), "api_key sidecar should exist");
-    let content = std::fs::read_to_string(&key_file).unwrap();
-    assert_eq!(content.trim(), "sk-ant-test-abc");
-    let r2 = kernel
-        .send(vec![Item::new(ant.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r2["has_api_key"], true);
-    let serialized = serde_json::to_string(&r2).unwrap();
-    assert!(
-        !serialized.contains("sk-ant-test-abc"),
-        "reflect must never include the api_key value"
-    );
-}
-
-#[tokio::test]
-async fn clear_api_key_leaves_no_secret_behind() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "k1"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let key_file = tmp
-        .path()
-        .join(format!(".fantastic/agents/{}/api_key", ant));
-    assert!(key_file.exists());
-    let r = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "clear_api_key"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["ok"], true);
-    assert_eq!(r["deleted"], true);
-    // CLEARED, not unlinked. The blob channel is a dumb byte authority with no
-    // delete verb (python has none either), so clearing writes the sidecar
-    // EMPTY. What must hold is that NO SECRET REMAINS — which is the property
-    // this test exists for, and which the reflect below confirms.
-    assert_eq!(
-        std::fs::read_to_string(&key_file)
-            .unwrap_or_default()
-            .trim(),
-        "",
-        "the key survived the clear"
-    );
-    let r2 = kernel
-        .send(vec![Item::new(ant.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r2["has_api_key"], false);
+    // The key-storage verbs are GONE — the key is read from the environment and
+    // this bundle never persists it.
+    assert!(r["verbs"]["set_api_key"].is_null());
+    assert!(r["verbs"]["clear_api_key"].is_null());
 }
 
 #[tokio::test]
 async fn send_without_api_key_returns_clean_error() {
+    let _key = KeyEnv::set(None).await;
     let tmp = tempfile::TempDir::new().unwrap();
     let (kernel, ant, _fid) = mk_kernel(&tmp, None).await;
     let r = kernel
@@ -277,9 +241,11 @@ async fn send_without_api_key_returns_clean_error() {
         .remove(0)
         .result;
     let err = r["error"].as_str().unwrap_or("");
+    // NAMES THE VARIABLE — an unwired connector must say what to set, which a
+    // bare "api_key not set" never did.
     assert!(
-        err.contains("api_key not set"),
-        "expected api_key-not-set error, got {err:?}",
+        err.contains("ANTHROPIC_KEY") && err.contains("ANTHROPIC_API_KEY"),
+        "expected the refusal to name the env vars, got {err:?}",
     );
 }
 
@@ -287,16 +253,10 @@ async fn send_without_api_key_returns_clean_error() {
 async fn send_streams_tokens_via_event_typed_sse() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let endpoint = format!("{}/v1", server.uri());
+    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
+    let endpoint = format!("{}/v1/messages", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
 
     let body = sse(&[
         json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]}}),
@@ -378,16 +338,10 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
     // that never says anything else.
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let endpoint = format!("{}/v1", server.uri());
+    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
+    let endpoint = format!("{}/v1/messages", server.uri());
     let (kernel, ant, fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
 
     // Address the anthropic agent's OWN file agent: its write lands on disk, which
     // is proof the dispatch happened and not just that nothing crashed.
@@ -448,16 +402,10 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
 async fn rate_limit_retry_once_then_succeeds() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let endpoint = format!("{}/v1", server.uri());
+    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
+    let endpoint = format!("{}/v1/messages", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -556,16 +504,10 @@ async fn rate_limit_retry_once_then_succeeds() {
 async fn the_raw_route_declares_no_tools_by_default() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let endpoint = format!("{}/v1", server.uri());
+    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
+    let endpoint = format!("{}/v1/messages", server.uri());
     let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
     let body = sse(&[
         json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
@@ -600,18 +542,12 @@ async fn the_raw_route_declares_no_tools_by_default() {
 async fn the_tool_use_route_declares_send_and_translates_blocks_back_to_raw() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    let endpoint = format!("{}/v1", server.uri());
+    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
+    let endpoint = format!("{}/v1/messages", server.uri());
     let mut extra = Map::new();
     extra.insert("tool_use".into(), json!(true));
     let (kernel, ant, _fid) = mk_kernel_with(&tmp, Some(endpoint), extra).await;
-    let _ = kernel
-        .send(vec![Item::new(
-            ant.clone(),
-            json!({"type": "set_api_key", "api_key": "sk-ant-x"}),
-        )])
-        .await
-        .remove(0)
-        .result;
+    let _key = KeyEnv::set(Some("sk-ant-x")).await;
 
     // A native tool_use block, arguments split across `input_json_delta`
     // fragments exactly as the real endpoint streams them.

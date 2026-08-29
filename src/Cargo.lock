@@ -557,6 +557,7 @@ dependencies = [
  "async-trait",
  "base64",
  "dashmap",
+ "futures-util",
  "libc",
  "serde",
  "serde_json",
@@ -618,6 +619,7 @@ name = "fantastic-static-loader"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-file",
  "fantastic-kernel",
  "serde_json",
  "serde_yaml",

@@ -55,6 +55,8 @@ let package = Package(
             "FantasticWebRest",
             "FantasticOllamaBackend",
             "FantasticNvidiaNimBackend",
+            "FantasticAnthropicBackend",
+            "FantasticLlamaCppBackend",
             "FantasticFoundationModelsBackend",
             "FantasticAppleKVS",
         ]),
@@ -240,6 +242,26 @@ let package = Package(
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
                            .product(name: "NIOCore", package: "swift-nio")]
         ),
+        // TEST-ONLY fixture agents for the shared e2e scenarios. Registration
+        // is behind `-DSCENARIO_PROBES`, which only the e2e driver builds with.
+        .target(
+            name: "FantasticScenarioProbes",
+            dependencies: ["FantasticKernel", "FantasticJSON"]
+        ),
+        .target(
+            name: "FantasticLlamaCppBackend",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
+        .target(
+            name: "FantasticAnthropicBackend",
+            dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections"),
+                           .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                           .product(name: "NIOCore", package: "swift-nio")]
+        ),
         .target(
             name: "FantasticFoundationModelsBackend",
             dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
@@ -267,12 +289,17 @@ let package = Package(
         .target(
             name: "FantasticKernelStartup",
             dependencies: [
+                // TEST-ONLY fixtures; registration is behind -DSCENARIO_PROBES
+                // so a default build carries none of it.
+                "FantasticScenarioProbes",
                 "FantasticKernel", "FantasticJSON",
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
                 "FantasticYamlState", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
+                "FantasticAnthropicBackend",
+            "FantasticLlamaCppBackend", "FantasticLlamaCppBackend",
                 "FantasticFoundationModelsBackend",
                 "FantasticExecBridge", "FantasticTerminalBackend",
             ]
@@ -354,7 +381,8 @@ let package = Package(
             name: "FantasticAIBackendsTests",
             dependencies: [
                 "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
-                "FantasticJSON",
+                "FantasticAnthropicBackend",
+            "FantasticLlamaCppBackend", "FantasticJSON",
             ]
         ),
 
@@ -380,6 +408,11 @@ let package = Package(
                 // manifests name — and Yams to read the corpus itself.
                 .product(name: "Yams", package: "Yams"),
                 "FantasticExecBridge",
+                // The SCENARIO runner (ScenarioTests.swift) reads the shared
+                // scenarios at `e2e/tests/scenario/` and drives a live model,
+                // so it needs the anthropic backend and ordered maps.
+                "FantasticAnthropicBackend",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),
     ]

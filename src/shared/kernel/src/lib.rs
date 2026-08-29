@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use fantastic_kernel::bootstrap::{self, BootstrapOptions};
-use fantastic_kernel::{AgentId, BundleRegistry, Kernel};
+use fantastic_kernel::{AgentId, BundleRegistry, Item, Kernel};
 use serde_json::{json, Map, Value};
 
 pub mod gateway;
@@ -205,15 +205,41 @@ pub fn hydrate_ai_env() {
             std::env::set_var("FANTASTIC_NUM_CTX", n.to_string());
         }
     }
-    // Load the connector's key from the OS keychain into the env (if unset there),
-    // so the brain provisioner's `api_key_from_env` picks it up. The key is NEVER
-    // read from settings.json — only the keychain.
-    if std::env::var_os("FANTASTIC_AI_KEY").is_none() {
-        if let Some(b) = backend.filter(|b| !b.is_empty()) {
-            if let Some(key) = secret::get_key(b) {
-                std::env::set_var("FANTASTIC_AI_KEY", key);
+    // Load the connector's key from the OS keychain into the PROVIDER-CONVENTIONAL
+    // variable — the one the backend bundle itself reads. The key is NEVER read
+    // from settings.json, only the keychain.
+    //
+    // The backends used to be HANDED the key through a `set_api_key` verb, which
+    // then persisted it (a sidecar in python/rust, the agent's own `agent.json`
+    // in swift). They now read the environment and store nothing, so the host's
+    // whole job is to put the key where the backend will look. A generic
+    // `FANTASTIC_AI_KEY` still wins, so an operator can override without knowing
+    // the provider's variable name.
+    if let Some(b) = backend.filter(|b| !b.is_empty()) {
+        if let Some(var) = key_var_for(b) {
+            if std::env::var_os(var).is_none() {
+                if let Some(key) = std::env::var("FANTASTIC_AI_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+                    .or_else(|| secret::get_key(b))
+                {
+                    std::env::set_var(var, key);
+                }
             }
         }
+    }
+}
+
+/// The environment variable a backend reads its key from. `None` for a
+/// keyless connector (ollama, llamacpp) — there is nothing to provision.
+///
+/// This is the ONE place the host encodes provider key-variable names; each
+/// bundle names the same variable in its own refusal text.
+pub fn key_var_for(backend: &str) -> Option<&'static str> {
+    match backend {
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "nvidia" => Some("NVIDIA_API_KEY"),
+        _ => None,
     }
 }
 
@@ -320,8 +346,15 @@ pub async fn compose_manager_in_memory() -> Result<(Arc<Kernel>, Vec<AgentId>)> 
 }
 
 async fn boot_loaded(kernel: &Arc<Kernel>, loaded: &[AgentId]) {
-    for id in loaded {
-        let _ = kernel.send(id, json!({"type":"boot"})).await;
+    // ONE batch: the kernel's `send` is batch-only (`Vec<Item>` → `Vec<Outcome>`),
+    // and booting every loaded agent together is exactly what it is for. This
+    // crate still called the older one-target form and had stopped compiling.
+    let items: Vec<Item> = loaded
+        .iter()
+        .map(|id| Item::new(id.clone(), json!({"type":"boot"})))
+        .collect();
+    if !items.is_empty() {
+        let _ = kernel.send(items).await;
     }
 }
 

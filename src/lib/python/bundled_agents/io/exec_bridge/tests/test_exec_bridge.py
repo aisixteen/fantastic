@@ -443,3 +443,47 @@ async def test_oversized_args_are_refused_with_the_reason(seeded_kernel):
     )[0]["result"]
     assert "too large" in r["error"] and "agent" in r["error"]
     assert "job_id" not in r
+
+
+async def test_code_may_be_a_list_of_lines(seeded_kernel, tmp_path):
+    """A program written as ONE JSON string is the most fragile thing a model
+    emits: every newline is an escape, every inner quote another, and one missed
+    `\\"` swallows the rest of the object. A list makes newlines the array
+    structure instead — measured need, from a probe that burned three
+    consecutive turns losing a closing quote."""
+    xid = await _wired(seeded_kernel)
+    out = tmp_path / "lines.txt"
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": xid,
+                    "payload": {
+                        "type": "start",
+                        "code": [
+                            "with open(%r, 'w') as f:" % str(out),
+                            "    f.write('from a list')",
+                        ],
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "job_id" in r, r
+    for _ in range(200):
+        await asyncio.sleep(0.05)
+        if out.exists():
+            break
+    assert out.read_text() == "from a list"
+
+
+async def test_a_bare_number_is_still_refused(seeded_kernel):
+    """The list is the ONLY new shape. `42` is a mistake, not a one-line
+    program, and stringifying it would spawn an interpreter on nonsense."""
+    xid = await _wired(seeded_kernel)
+    r = (
+        await seeded_kernel.send(
+            [{"target": xid, "payload": {"type": "start", "code": 42}}]
+        )
+    )[0]["result"]
+    assert "error" in r and "job_id" not in r

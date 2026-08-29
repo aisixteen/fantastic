@@ -111,6 +111,25 @@ impl Kernel {
         // `<root>:[ps,cancel]` can kill ANY task; the per-victim edge a
         // manifest could grant before is GONE.
         if is_kernel_verb(verb) && target.parent_id.is_none() {
+            // ...but CONFERRAL still applies. `update_agent` is a kernel verb
+            // whose target is ALWAYS the root, so returning flat here made
+            // `check_conferral` unreachable for the exact case it guards: any
+            // agent holding `<root>:update_agent` could rewrite its OWN
+            // can_call and grant itself egress to the whole tree, which is the
+            // deny-all gate defeated from below. Python runs the check on this
+            // path (`_agent.py`, `verb in _SYSTEM_VERBS and target.parent is
+            // None`); rust did not. Skipping INGRESS here is deliberate and
+            // unchanged — skipping conferral was not.
+            if verb == "create_agent" || verb == "update_agent" {
+                return self.check_conferral(
+                    sender_id,
+                    &s_can,
+                    s_parent.as_deref(),
+                    &s_kids,
+                    loader_id.as_deref(),
+                    payload,
+                );
+            }
             return None;
         }
 

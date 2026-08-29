@@ -242,13 +242,38 @@ async def _read(id, payload, kernel):
     return {"path": path, "content": content, **window}
 
 
+def _as_text(value) -> str:
+    """`content` as a string, accepting a LIST OF LINES.
+
+    A multi-line program written as one JSON string is the single most fragile
+    thing an LLM emits: every newline is an escape and every inner quote is
+    another, so one missed `\"` swallows the rest of the object and the whole
+    call is lost. Measured on gemma-4-12B, and again on `subai_graph`, which
+    burned three consecutive turns on it.
+
+    A list sidesteps the failure rather than mitigating it: newlines are the
+    array structure, not escapes, and each element is short enough that a lost
+    quote breaks ONE line instead of the document.
+
+    A LIST is the only newly accepted shape. Everything else is handed back
+    untouched so the existing refusals still fire — a bare `42` is a mistake,
+    not a one-line program, and quietly stringifying it would spawn an
+    interpreter on nonsense.
+    """
+    if isinstance(value, (list, tuple)):
+        return "\n".join("" if v is None else str(v) for v in value)
+    return value
+
+
 async def _write(id, payload, kernel):
-    """args: path:str (req), content:str (req). Returns {path, written:true, bytes}. Creates parent dirs. Refused if readonly."""
+    """args: path:str (req), content:str|list[str] (req — a LIST is joined with
+    newlines, which is the safer shape for anything with lines in it). Returns
+    {path, written:true, bytes}. Creates parent dirs. Refused if readonly."""
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
     path = payload.get("path", "")
-    content = payload.get("content", "")
+    content = _as_text(payload.get("content", ""))
     try:
         fs.write_text(_root_str(rec), path, content)
     except (ValueError, OSError) as e:

@@ -1,0 +1,50 @@
+# THE SCENARIO — shared data, one copy, every runtime.
+#
+# The model may PROPOSE a purchase but must not make one: it holds no grant on
+# the desk. A simulated human then presses the button TWICE — the clumsy
+# double-click — using the execution id the model minted, and the ledger must
+# make that buy exactly once.
+#
+# Two properties pull in opposite directions here, deliberately: the model must
+# name an execution it will never run itself, and the SUBSTRATE must honour that
+# name for a caller who is not the model.
+
+id: user_actions
+title: proposed, clicked twice, bought once — user actions are idempotent
+
+task: >-
+  The user wants to buy one rocket from the `purchase` desk. You may NOT buy it
+  yourself — only the person can press the button. PROPOSE the action instead:
+  emit a single line of JSON of the form
+  {"type":"question","kind":"confirm","question":"<what you are asking>",
+  "action":{"target":"purchase","payload":{"type":"buy","item":"rocket"},"id":"<an execution id you mint>"}}
+  and then stop. The button may be pressed more than once by accident, so the id
+  you mint must make the SECOND press harmless.
+
+limits:
+  max_turns: 4
+  max_tokens: 4096
+  idle_seconds: 60
+
+roster:
+  - role: kv_store
+    id: yaml_store
+    sentence: A key/value store.
+    verbs:
+      read: "args: key — returns {key, value}"
+      set: "args: key, value — stores it"
+  - role: purchase_desk
+    id: purchase
+  - role: render_sink
+    id: cli
+
+# NOTE the asymmetry: `purchase` is deliberately ABSENT. The AI must not be able
+# to buy — that it holds no grant on the desk is half the measurement.
+grants:
+  ai_can_call: [cli, yaml_store]
+
+# The runner presses the button twice with the model's own id, then checks the
+# desk sold exactly one.
+expect:
+  - human_double_click: {from_proposal: true}
+  - side_effects: {agent: purchase, exactly: 1}

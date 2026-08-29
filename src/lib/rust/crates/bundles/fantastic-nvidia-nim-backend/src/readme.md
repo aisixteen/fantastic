@@ -47,7 +47,7 @@ CALLER's own `client_id` inbox — NOT the backend agent's own inbox.
 A watcher of the backend agent's id does NOT see these events.
 
 Verbs: `send` · `history` · `status` ·
-`boot` · `shutdown` · `reflect` · `set_api_key` · `clear_api_key`.
+`boot` · `shutdown` · `reflect`.
 
 There is NO `interrupt` verb: an in-flight `send` IS a kernel task. Cancel a
 turn with the substrate's universal system verbs — `send "kernel" {type:"ps"}`,
@@ -59,10 +59,11 @@ lock are released, and the blocked caller's `send` resolves to
 
 Extras beyond the contract:
 
-- `set_api_key {api_key}` — persists `api_key` to the store-relative
-  `agents/{id}/api_key` (wire `file_bridge_id` to the `.fantastic` store) via the
-  file agent. Drops the cached HTTP client so the next `send` reads fresh.
-- `clear_api_key` — deletes the sidecar via the file agent.
+- THE API KEY COMES FROM THE ENVIRONMENT (`NVIDIA_API_KEY`), read at call time.
+  There is no key-storage verb and no sidecar: this bundle never writes the key
+  anywhere, so it cannot leak through a record, a reflect or `kernel.list()`.
+  An unset variable fails loud NAMING it — a connector stays inert until the
+  operator wires it.
 - `reflect` reports `has_api_key: bool` only — never the value.
 
 On HTTP 429 BEFORE any chunk has been yielded, the bundle retries

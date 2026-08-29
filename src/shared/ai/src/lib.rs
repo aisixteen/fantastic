@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use fantastic_kernel::{AgentId, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -55,6 +55,20 @@ fn backend() -> Result<(&'static str, String), String> {
     backend_for(b.as_deref(), m.as_deref())
 }
 
+/// ONE dispatch through the kernel's batch `send`, unwrapped to its result.
+///
+/// The kernel's `send` is batch-only (`Vec<Item>` → `Vec<Outcome>`) — a model
+/// turn that fans out N calls gets its answers together. This crate still spoke
+/// the older one-target form and had stopped compiling against it; this is the
+/// adapter, kept in one place rather than at each call site.
+async fn one(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
+    kernel
+        .send(vec![Item::new(AgentId::from(target), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
 fn err_of(v: &Value) -> Option<String> {
     v.get("error").and_then(Value::as_str).map(String::from)
 }
@@ -84,18 +98,16 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     // backend/model isn't set, BEFORE creating any agents. Nothing is guessed.
     let (handler, model) = backend()?;
     let label = format!("{} · {}", handler.trim_end_matches(".tools"), model);
-    let probe = kernel
-        .send(&AgentId::from(BRAIN_ID), json!({"type": "reflect"}))
-        .await;
+    let probe = one(kernel, BRAIN_ID, json!({"type": "reflect"})).await;
     if err_of(&probe).is_none() {
         return Ok(label);
     }
-    let fs = kernel
-        .send(
-            &AgentId::from("kernel"),
-            json!({"type":"create_agent","handler_module":"file_bridge.tools","id":FS_ID,"root":".fantastic","ingress_rule":"allow_all"}),
-        )
-        .await;
+    let fs = one(
+        kernel,
+        "kernel",
+        json!({"type":"create_agent","handler_module":"file_bridge.tools","id":FS_ID,"root":".fantastic","ingress_rule":"allow_all"}),
+    )
+    .await;
     if let Some(e) = err_of(&fs) {
         return Err(format!("file_bridge: {e}"));
     }
@@ -113,64 +125,15 @@ pub async fn ensure_brain(kernel: &Arc<Kernel>) -> Result<String, String> {
     if let Some(endpoint) = endpoint_from_env() {
         create["endpoint"] = json!(endpoint);
     }
-    let brain = kernel.send(&AgentId::from("kernel"), create).await;
+    let brain = one(kernel, "kernel", create).await;
     if let Some(e) = err_of(&brain) {
         return Err(format!("brain: {e}"));
     }
-    // Key-requiring backends (nvidia/anthropic): provision the api_key from the
-    // environment if present. No fallback — if the key is absent we leave it
-    // unset and the first `send` returns a clean "api_key not set" error in the
-    // pane. ollama needs no key.
-    if let Some(key) = api_key_from_env() {
-        let r = kernel
-            .send(
-                &AgentId::from(BRAIN_ID),
-                json!({"type":"set_api_key","api_key":key}),
-            )
-            .await;
-        if let Some(e) = err_of(&r) {
-            return Err(format!("set_api_key: {e}"));
-        }
-    }
+    // NOTHING TO PROVISION. The backend reads its key from the environment
+    // itself (`hydrate_ai_env` put the keychain key in the provider's variable),
+    // so there is no key to hand over and nothing that persists one. An unwired
+    // connector's first `send` returns a clean refusal NAMING the variable.
     Ok(label)
-}
-
-/// Pure core of [`api_key_from_env`]: the generic key wins (if non-blank), else
-/// the provider-conventional key for key-requiring backends; `None` for ollama
-/// or when nothing usable is set. Blank/whitespace values are ignored.
-fn api_key_for(
-    generic: Option<&str>,
-    backend: Option<&str>,
-    anthropic: Option<&str>,
-    nvidia: Option<&str>,
-) -> Option<String> {
-    if let Some(k) = generic {
-        if !k.trim().is_empty() {
-            return Some(k.to_string());
-        }
-    }
-    let key = match backend {
-        Some("anthropic") => anthropic,
-        Some("nvidia") => nvidia,
-        _ => return None,
-    };
-    key.filter(|k| !k.trim().is_empty()).map(String::from)
-}
-
-/// The api_key for the selected backend, read from the environment. A generic
-/// `FANTASTIC_AI_KEY` wins; otherwise the provider-conventional var. `None` for
-/// ollama (no key) or when nothing is set.
-fn api_key_from_env() -> Option<String> {
-    let generic = std::env::var("FANTASTIC_AI_KEY").ok();
-    let backend = std::env::var("FANTASTIC_AI_BACKEND").ok();
-    let anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
-    let nvidia = std::env::var("NVIDIA_API_KEY").ok();
-    api_key_for(
-        generic.as_deref(),
-        backend.as_deref(),
-        anthropic.as_deref(),
-        nvidia.as_deref(),
-    )
 }
 
 /// Run one user turn through the brain; `tx` receives the rendered result.
@@ -179,12 +142,12 @@ pub async fn run_turn(kernel: Arc<Kernel>, text: String, tx: UnboundedSender<Str
         let _ = tx.send(format!("✗ {e}"));
         return;
     }
-    let reply = kernel
-        .send(
-            &AgentId::from(BRAIN_ID),
-            json!({"type":"send","text":text,"client_id":"fantastic"}),
-        )
-        .await;
+    let reply = one(
+        &kernel,
+        BRAIN_ID,
+        json!({"type":"send","text":text,"client_id":"fantastic"}),
+    )
+    .await;
     let out = reply
         .get("response")
         .and_then(Value::as_str)

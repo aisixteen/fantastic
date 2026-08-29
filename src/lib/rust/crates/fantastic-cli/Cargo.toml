@@ -24,6 +24,11 @@ fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
 fantastic-bridge = { path = "../bundles/fantastic-bridge" }
 fantastic-nvidia-nim-backend = { path = "../bundles/fantastic-nvidia-nim-backend" }
 fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
+fantastic-llamacpp-backend = { path = "../bundles/fantastic-llamacpp-backend" }
+fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
+# TEST-ONLY fixture agents the shared e2e scenarios name. OPTIONAL and
+# off by default — a production binary carries none of it.
+fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", optional = true }
 fantastic-proxy-agent = { path = "../bundles/fantastic-proxy-agent" }
 fantastic-tools = { path = "../bundles/fantastic-tools" }
 # Full-tier-only bundles — subprocess-using; only compiled into the
@@ -56,6 +61,10 @@ full = [
 # Building the CLI under this feature is unusual but supported (e.g.
 # an iOS-tier dev binary that refuses to register full-tier bundles).
 embedded = []
+
+# Compile the e2e scenario fixtures into the binary. `e2e/runners/host.py`
+# builds with this; nothing else does, so a default build carries none of it.
+scenario-probes = ["dep:fantastic-scenario-probes"]
 
 [dev-dependencies]
 tempfile = "3"

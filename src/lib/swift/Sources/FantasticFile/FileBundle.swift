@@ -343,9 +343,12 @@ public struct FileBundle: AgentBundle {
     private func writeFile(root: URL, agent: Agent, payload: JSON) -> JSON {
         if let ro = readonlyError(agent: agent) { return ro }
         guard let relative = payload["path"].asString,
-            let content = payload["content"].asString
+            // A LIST of lines is accepted and joined with newlines.
+            let content = linesOrString(payload["content"])
         else {
-            return .object(["error": .string("write requires path + content")])
+            return .object([
+                "error": .string("write requires path + content (str, or a list of lines)")
+            ])
         }
         guard let target = resolve(root: root, path: relative) else {
             return .object(["error": .string("path escapes root")])

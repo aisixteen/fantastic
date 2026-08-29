@@ -1,0 +1,47 @@
+# THE SCENARIO — shared data, one copy, every runtime.
+#
+# The classic double-fire trap. A dispenser that must issue EXACTLY one coin, a
+# caller told its replies may be lost, and an instruction to repeat the call.
+# Without a named execution the repeat dispenses a second coin; with an `id` the
+# repeat returns the FIRST run's recorded outcome. Whether the model reaches for
+# that under "must not double-fire" is the measurement — the kernel's
+# ensure-semantics are not in doubt, the model's use of them is.
+
+id: ledger
+title: the double-fire trap — one coin, proven twice
+
+task: >-
+  The `dispenser` agent issues one coin per `dispense` call, and a coin must
+  NEVER be issued twice for one job — a double dispense is the one failure that
+  matters. Replies to you sometimes get lost, so work as if yours might be.
+  Get exactly ONE coin for the job 'alpha': make the dispense call in a way that
+  is SAFE TO REPEAT, then repeat that exact call once and compare the two
+  receipts. Store {'receipt': <receipt>, 'match': <true/false>} under the key
+  'coin' in the key/value store. Then say COIN SECURED.
+
+limits:
+  max_turns: 14
+  max_tokens: 4096
+  idle_seconds: 150
+
+roster:
+  - role: kv_store
+    id: yaml_store
+    sentence: A key/value store.
+    verbs:
+      read: "args: key — returns {key, value}"
+      set: "args: key, value — stores it"
+  - role: dispenser
+    id: dispenser
+  - role: render_sink
+    id: cli
+
+grants:
+  ai_can_call: [cli, yaml_store, dispenser]
+
+# Scored on the DISPENSER's own count, not on the model's prose: `side_effects`
+# asks the runner how many times the side effect actually ran.
+expect:
+  - side_effects: {agent: dispenser, exactly: 1}
+  - read: {agent: yaml_store, key: coin}
+    contains: "match"

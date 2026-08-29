@@ -270,12 +270,19 @@ public final class WebServer: @unchecked Sendable {
         for (k, v) in params { paramsObj[k] = .string(v) }
         var queryObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in query { queryObj[k] = .string(v) }
+        // Request headers, LOWERCASED, so a route owner can read the carrier
+        // and not just the body. py/rust already hand their REST surface the
+        // headers; swift did not, which is why `auth_token` was a stated
+        // follow-on here and why an execution id had nowhere to ride.
+        var headerObj: OrderedDictionary<String, JSON> = [:]
+        for (k, v) in request.headers { headerObj[k.lowercased()] = .string(v) }
         let reply = await kernel.send([Item(spec.ownerId, .object([
                 "type": .string("handle_route"),
                 "method": .string(request.method),
                 "path": .string(request.path),
                 "params": .object(paramsObj),
                 "query": .object(queryObj),
+                "headers": .object(headerObj),
                 "body": .string(bodyStr),
             ]))])[0].result
         let status = Int(reply["status"].asInt ?? 200)

@@ -62,18 +62,19 @@ struct FoundationModelsBackendTests {
         let kernel = try await freshKernelWithFm()
         // On the CI / dev host (macOS < 26 OR no Apple Intelligence),
         // send should refuse with `foundation_models_unavailable`.
-        // On a fully-enabled macOS 26 host this test would instead
-        // observe `queued: true` — both shapes are documented.
+        // On a fully-enabled macOS 26 host it instead returns the completed
+        // text — `send` runs the pass INLINE and answers `{response, final}`,
+        // py/rust parity. Both shapes are documented.
         let r = await kernel.send([Item(AgentId("fm"), .object([
                 "type": .string("send"),
                 "text": .string("hello"),
             ]))])[0].result
-        if r["queued"].asBool == true {
-            #expect(r["stream_id"].asString != nil)
-            #expect(r["message_id"].asString != nil)
-        } else {
-            #expect(r["error"].asString == "foundation_models_unavailable")
+        if r["error"].asString == "foundation_models_unavailable" {
             #expect(r["reason"].asString != nil)
+        } else {
+            #expect(r["response"].asString != nil)
+            #expect(r["final"].asString == r["response"].asString)
+            #expect(r["client_id"].asString != nil)
         }
     }
 

@@ -52,11 +52,16 @@ private func substRoot(_ v: JSON) -> JSON {
 
 /// Yams' `Any` tree → our `JSON`, walked by hand.
 ///
+/// `internal`, not `private`: the SCENARIO runner in this same target reads the
+/// shared scenarios and needs exactly this walk. One copy — a second would drift
+/// on the case that motivated it (a bare null, which `JSONSerialization`
+/// refuses and the corpus relies on).
+///
 /// Not via `JSONSerialization`: a YAML document carries values it will not
 /// represent (a bare null, a non-string key, a top-level scalar), and the corpus
 /// is full of `side: null` — the matcher that tells an io seal from the call
 /// gate. Going through JSONSerialization threw on exactly that.
-private func anyToJSON(_ v: Any?) -> JSON {
+func anyToJSON(_ v: Any?) -> JSON {
     switch v {
     case nil, is NSNull: return .null
     case let b as Bool: return .bool(b)

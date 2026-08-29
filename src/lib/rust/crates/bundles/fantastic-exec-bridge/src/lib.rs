@@ -522,14 +522,48 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
 ///
 /// The `code` is persisted onto the record, so `boot` revives it after a reboot; the
 /// LOADER lays that down as `main.py` beside `agent.json`.
+/// A `code` / `content` value as text, accepting a LIST OF LINES.
+///
+/// A program written as one JSON string is the most fragile thing a model
+/// emits: every newline is an escape and every inner quote another, so one
+/// missed `\"` swallows the rest of the object and the call is lost entirely.
+/// Measured on gemma-4-12B, and again on the `subai_graph` probe, which burned
+/// three consecutive turns on it.
+///
+/// A list removes the failure rather than softening it: newlines become the
+/// array structure instead of escapes, and each element is short enough that a
+/// lost quote costs ONE line rather than the whole document.
+///
+/// A LIST is the only newly accepted shape — anything else returns `None` so
+/// the existing refusals still fire. A bare `42` is a mistake, not a one-line
+/// program, and quietly stringifying it would spawn an interpreter on nonsense.
+pub fn lines_or_str(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
+}
+
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    let code = payload_str(payload, "code")
-        .or_else(|| meta_str(&meta, "code"))
+    let code = lines_or_str(payload.get("code"))
+        .or_else(|| lines_or_str(meta.get("code")))
         .unwrap_or_default();
     if code.is_empty() {
         return json!({"error":
-            "exec_bridge: code (str) required (pass it or set it on the record)"});
+            "exec_bridge: code (str, or a list of lines) required \
+             (pass it or set it on the record)"});
     }
     // PER-CALL ARGUMENTS, explicit field — implicit capture of unknown payload keys
     // would silently swallow a typo'd `cwd` and hand it over as an argument.
@@ -551,7 +585,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     };
     // The OPTIONAL shim — unknown names refuse, absent means the raw wire.
     let shim = payload_str(payload, "shim").or_else(|| meta_str(&meta, "shim"));
-    let program = match apply_shim(shim, code) {
+    let program = match apply_shim(shim, &code) {
         Ok(p) => p,
         Err(e) => return json!({ "error": e }),
     };

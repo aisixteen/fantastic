@@ -202,13 +202,17 @@
         /// the LOADER lays that down as `main.py` beside `agent.json`.
         private func startReply(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
             let agent = kernel.agent(agentId)
+            // A LIST of lines is accepted and joined — see `linesOrString`: a
+            // multi-line program as ONE JSON string is where a model loses a
+            // closing quote and the whole call with it.
             let code =
-                payload["code"].asString
-                ?? agent?.metaValue(forKey: "code")?.asString ?? ""
+                linesOrString(payload["code"])
+                ?? agent?.metaValue(forKey: "code").flatMap(linesOrString) ?? ""
             if code.isEmpty {
                 return .object([
                     "error": .string(
-                        "exec_bridge: code (str) required (pass it or set it on the record)")
+                        "exec_bridge: code (str, or a list of lines) required "
+                            + "(pass it or set it on the record)")
                 ])
             }
             // PER-CALL ARGUMENTS. A missing `args` serializes to "null"; the script

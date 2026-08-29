@@ -44,14 +44,18 @@ struct AIBackendTests {
         #expect(r["error"].asString == "unknown verb nope")
     }
 
-    @Test func sendReturnsQueuedShape() async throws {
+    /// `send` answers with the FINISHED text — python/rust parity. It used to
+    /// ack `{queued, stream_id, message_id}` and run the pass on its own task,
+    /// so a caller reading `response` got the text on two kernels and an empty
+    /// ack on the third.
+    @Test func sendReturnsTheCompletedText() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
         let r = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("hi")]))])[0].result
-        #expect(r["queued"].asBool == true)
-        #expect(r["stream_id"].asString?.hasPrefix("stm_") == true)
-        #expect(r["message_id"].asString?.hasPrefix("msg_") == true)
+        #expect(r["response"].asString == "Hello")
+        #expect(r["final"].asString == r["response"].asString)
         #expect(r["client_id"].asString == "cli")
+        #expect(r["queued"].asBool == nil)
     }
 
     @Test func sendWithoutTextErrors() async throws {
@@ -275,15 +279,18 @@ struct AIBackendTests {
         let pump = Task { for await ev in inbox { sink.add(ev) } }
         defer { pump.cancel() }
 
-        let queued = await kernel.send([Item(id, .object([
-                "type": .string("send"), "text": .string("hi"),
-                "client_id": .string("c"),
-            ]))])[0].result
-        #expect(queued["queued"].asBool == true)
+        // The pass runs INLINE (py/rust parity), so the send is launched on its
+        // own task here and the kill is driven from the test body.
+        let running = Task {
+            await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("hi"),
+                    "client_id": .string("c"),
+                ]))])[0].result
+        }
 
-        // The generation OUTLIVES the `send` dispatch (which has already acked
-        // and retired), so it stands in the table as its own row — that is what
-        // makes it killable at all.
+        // The `send` DISPATCH is the generation, so it stands in the table as
+        // its own row — that is what makes it killable at all. (It used to be a
+        // separate task that outlived an already-retired dispatch.)
         let taskId = try await waitForTask(kernel: kernel, agent: id, verb: "send")
         #expect(taskId.hasPrefix("\(id.value):"))  // a pid: "<agent_id>:<n>"
         let before = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c")]))])[0].result
@@ -326,13 +333,13 @@ struct AIBackendTests {
                 "type": .string("send"), "text": .string("again"),
                 "client_id": .string("c2"),
             ]))])[0].result
-        #expect(next["queued"].asBool == true)
-        try await waitUntil("the next generation to take the lock") {
-            let s = await kernel.send([Item(id, .object(["type": .string("status"), "client_id": .string("c2")]))])[0].result
-            return s["generating"].asBool == true
-        }
-        let live = try await waitForTask(kernel: kernel, agent: id, verb: "send")
-        _ = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string(live)]))])[0].result
+        // That it RETURNED AT ALL is the proof: an inline send cannot answer
+        // until it has taken the FIFO, so a lock stranded by the killed
+        // generation would hang here rather than fail.
+        #expect(next["response"].asString != nil)
+
+        // The killed send's own dispatch unwinds as cancelled.
+        _ = await running.value
     }
 
     @Test func historyIsPerClient() async throws {
@@ -416,10 +423,15 @@ struct AIBackendTests {
                 .provider(
                     MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
             })
-        _ = await kernel.send([Item(id, .object([
-                "type": .string("send"), "text": .string("hi there"),
-                "client_id": .string("c"),
-            ]))])[0].result
+        // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
+        // dispatch does not return until the generation is done. Observing it
+        // in flight means launching it on another task and polling from here.
+        let running = Task {
+            _ = await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("hi there"),
+                    "client_id": .string("c"),
+                ]))])[0].result
+        }
         // Poll until the generation is in-flight.
         var snap: JSON = .null
         for _ in 0..<50 {
@@ -435,6 +447,7 @@ struct AIBackendTests {
         #expect(cur["is_mine"].asBool == true)
         #expect(cur["text"].asString == "hi there")  // owner sees own text
         #expect(["thinking", "streaming", "tool_calling"].contains(cur["phase"].asString ?? ""))
+        _ = await running.value
     }
 
     @Test func statusRedactsOtherClientsText() async throws {
@@ -442,10 +455,15 @@ struct AIBackendTests {
             config: baseConfig {
                 .provider(MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000))
             })
-        _ = await kernel.send([Item(id, .object([
-                "type": .string("send"), "text": .string("secret"),
-                "client_id": .string("owner"),
-            ]))])[0].result
+        // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
+        // dispatch does not return until the generation is done. Observing it
+        // in flight means launching it on another task and polling from here.
+        let running = Task {
+            _ = await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("secret"),
+                    "client_id": .string("owner"),
+                ]))])[0].result
+        }
         // A DIFFERENT client polls — must not see the owner's text.
         var cur: JSON = .null
         for _ in 0..<50 {
@@ -459,6 +477,7 @@ struct AIBackendTests {
         #expect(cur["is_mine"].asBool == false)
         #expect(cur["text"].asString == nil)  // redacted
         #expect(cur["phase"].asString != nil)  // phase still visible
+        _ = await running.value
     }
 
     @Test func fifoSerializesConcurrentSendsKeepingHistoryIntact() async throws {

@@ -5,13 +5,12 @@ pattern). Same surface as ollama_backend (send/history/status/recall/
 context_status/reflect) PLUS the NIM-specific bits, all wired through
 `ai_core.build()`:
 
-- API key required, stored OUT-OF-BAND at the store-relative `agents/<id>/api_key`
-  via `file_bridge_id` (never in agent.json). Verbs `set_api_key` /
-  `clear_api_key` (passed as `extra_verbs`); `reflect` reports
-  `has_api_key:bool` only (via `reflect_extra`). The key/sidecar logic
-  stays HERE — ai_core never sees it.
-- `make_provider` is ASYNC (reads the sidecar) and returns None when no
-  key is set; `require_provider=True` makes `send` failfast cleanly.
+- API key required, read from the ENVIRONMENT (`NVIDIA_API_KEY`) at call time.
+  There is no key-storage verb and no sidecar: nothing in this bundle writes the
+  key to disk, so it cannot leak through `kernel.list()` or any reflect.
+  `reflect` reports `has_api_key:bool` only (via `reflect_extra`).
+- `make_provider` returns None when the variable is unset; `require_provider=True`
+  makes `send` failfast cleanly, NAMING the variable.
 - Free tier rate-limits at ~40 RPM/model. `_stream_with_rate_limit_retry`
   (passed as `stream_wrapper`) retries once on a pre-stream HTTP 429.
 - Tool-calling is RAW (owned by ai_core): the provider streams plain text and
@@ -21,7 +20,7 @@ context_status/reflect) PLUS the NIM-specific bits, all wired through
 
 The shared state dicts + `SEND_TIMEOUT` / `MAX_CALL_DEPTH` are re-exported
 from `ai_core.core` so the existing monkeypatch seams keep working on the
-shared path; `_parse_retry_after` / `RATE_LIMIT_*` / `_key_path` are
+shared path; `_parse_retry_after` / `RATE_LIMIT_*` / `KEY_VAR` are
 nvidia-local (the tests patch/read them here). `on_cancel` — the shared
 bundle CANCEL hook — is re-exported too, so the substrate discovers it on
 this module (there is no `interrupt` verb: an in-flight `send` is a kernel
@@ -31,6 +30,7 @@ TASK, killed with the universal `ps` → `cancel` system verbs).
 from __future__ import annotations
 
 import asyncio
+import os
 
 import httpx
 
@@ -69,39 +69,28 @@ def _parse_retry_after(resp: "httpx.Response") -> int:
     return min(n, RATE_LIMIT_MAX_WAIT)
 
 
-# ─── api_key sidecar (nvidia-local; routed through file_bridge_id) ──
+# ─── the api key: ENVIRONMENT ONLY ─────────────────────────────
 
 
-def _key_path(self_id: str) -> str:
-    """Sidecar file holding the API key, STORE-RELATIVE (`agents/<id>/…`): wired to the
-    `.fantastic` store it lands next to the agent's own agent.json (no double-nest).
-    Kept out of agent.json so it never leaks through `kernel.list()` or any reflect."""
-    return f"agents/{self_id}/api_key"
+#: The variable carrying the key. Named in the failure text so an unwired
+#: connector says exactly what to set.
+KEY_VAR = "NVIDIA_API_KEY"
 
 
-async def _read_api_key(self_id: str, kernel) -> str | None:
-    fid = _file_bridge_id(self_id, kernel)
-    if not fid:
-        return None
-    r = (
-        await kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": _key_path(self_id)}}]
-        )
-    )[0]["result"]
-    if not r or "content" not in r:
-        return None
-    key = (r.get("content") or "").strip()
-    return key or None
+def _read_api_key() -> str | None:
+    """The key, from the environment. Nothing else is consulted — not a
+    sidecar, not the agent record."""
+    return (os.environ.get(KEY_VAR) or "").strip() or None
 
 
-async def _has_api_key(self_id: str, kernel) -> bool:
-    return bool(await _read_api_key(self_id, kernel))
+def _no_key_error() -> str:
+    return f"nvidia_nim_backend: no api key — set {KEY_VAR}"
 
 
 async def make_provider(id, kernel):
-    """Async provider builder — reads the api_key sidecar; returns None
-    (→ clean failfast) when no key is set yet."""
-    key = await _read_api_key(id, kernel)
+    """Provider builder — reads the key from the environment; returns None
+    (→ clean failfast) when the variable is unset."""
+    key = _read_api_key()
     if not key:
         return None
     from nvidia_nim_backend.provider import (
@@ -173,54 +162,9 @@ def _map_error(e: Exception) -> str | None:
     return None
 
 
-# ─── api_key verbs (nvidia-local; merged via extra_verbs) ──────
-
-
-async def _set_api_key(id, payload, kernel):
-    """args: api_key:str (req). Persists the key to `.fantastic/agents/<id>/api_key` via file_bridge_id. Drops the cached provider so the next send reads fresh. Failfast if file_bridge_id unset or key empty."""
-    if not _file_bridge_id(id, kernel):
-        return {"error": "nvidia_nim_backend: file_bridge_id required"}
-    key = payload.get("api_key", "")
-    if not isinstance(key, str) or not key.strip():
-        return {"error": "set_api_key: api_key must be a non-empty string"}
-    fid = _file_bridge_id(id, kernel)
-    r = (
-        await kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {
-                        "type": "write",
-                        "path": _key_path(id),
-                        "content": key.strip(),
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    if r and r.get("error"):
-        return {"error": f"set_api_key: file write failed: {r['error']}"}
-    _providers.pop(id, None)
-    return {"ok": True}
-
-
-async def _clear_api_key(id, payload, kernel):
-    """No args. Deletes the api_key sidecar via file_bridge_id and drops the cached provider. Returns {ok:true, deleted:bool}."""
-    if not _file_bridge_id(id, kernel):
-        return {"error": "nvidia_nim_backend: file_bridge_id required"}
-    fid = _file_bridge_id(id, kernel)
-    r = (
-        await kernel.send(
-            [{"target": fid, "payload": {"type": "delete", "path": _key_path(id)}}]
-        )
-    )[0]["result"]
-    _providers.pop(id, None)
-    return {"ok": True, "deleted": bool((r or {}).get("deleted", False))}
-
-
 async def _reflect_extra(id, kernel):
     """Merged into reflect: has_api_key boolean (never the key value)."""
-    return {"has_api_key": await _has_api_key(id, kernel)}
+    return {"has_api_key": _read_api_key() is not None}
 
 
 def _build():
@@ -233,11 +177,10 @@ def _build():
         make_provider=make_provider,
         name="nvidia_nim_backend",
         module_name=__name__,
-        extra_verbs={"set_api_key": _set_api_key, "clear_api_key": _clear_api_key},
         reflect_extra=_reflect_extra,
         stream_wrapper=_stream_with_rate_limit_retry,
         require_provider=True,
-        provider_missing_error="nvidia_nim_backend: api_key not set; call set_api_key first",
+        provider_missing_error=_no_key_error(),
         error_mapper=_map_error,
     )
 
