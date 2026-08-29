@@ -737,8 +737,8 @@ async fn oversized_chunk_rejected() {
         .await
         .expect("ws connect");
 
-    // 2 MB blob — past MAX_CHUNK_SIZE (1 MB).
-    let big_blob = vec![0u8; 2 * 1_048_576];
+    // Past MAX_CHUNK_SIZE, which is 4 KB under test (see the consts in `lib.rs`).
+    let big_blob = vec![0u8; 2 * super::MAX_CHUNK_SIZE];
     let header = json!({"target": "nonexistent", "type": "noop", "id": "big1"});
     let frame = build_binary_frame(&header, &big_blob);
     let frames = send_binary_and_drain(&mut ws, frame).await;
@@ -774,12 +774,12 @@ async fn oversized_total_rejected() {
         .await
         .expect("ws connect");
 
-    // 101 chunks × 1 MB each → 101 MB, past the 100 MB total cap.
-    // Send chunks until the server rejects. Each chunk is at the per-
-    // chunk cap so cumulative trips the total cap on chunk #101.
+    // Chunks AT the per-chunk cap, enough of them that the cumulative sum trips
+    // the total cap one chunk before the last. Both caps are tiny under test, so
+    // this is a few KB rather than the 101 MB it used to push across the socket.
     let upload_id = "u_huge";
-    let chunk_size = 1_048_576;
-    let total_chunks: u32 = 101;
+    let chunk_size = super::MAX_CHUNK_SIZE;
+    let total_chunks: u32 = (super::MAX_UPLOAD_SIZE / chunk_size) as u32 + 1;
     let one_mb = vec![0u8; chunk_size];
 
     let mut saw_total_error = false;

@@ -55,6 +55,15 @@ struct Row {
     /// execution does not settle its intermediate attempts, so a joiner never
     /// sees an answer that was later retried away.
     outcome: Option<Outcome>,
+    /// Does this row survive a JSON round-trip? Decided ONCE, at settle, because
+    /// a settled row never changes again.
+    ///
+    /// It used to be re-decided for EVERY row on EVERY snapshot, and a snapshot
+    /// is taken on every settle — so an agentic run re-serialized and re-parsed
+    /// its whole history each time a call completed. Sampled on `agentic.plan`:
+    /// the kernel sat at ~125% CPU with a single send in flight, and half the
+    /// samples were in this check.
+    json_ok: bool,
     /// How joiners wait. `watch` (not `Notify`) because it carries the value and
     /// cannot miss an edge: a joiner that subscribes after the settle still
     /// reads it immediately.
@@ -169,6 +178,8 @@ impl Ledger {
                 named,
                 origin,
                 outcome: None,
+                // Decided at settle; an in-flight row is never snapshotted.
+                json_ok: false,
                 tx,
             },
         );
@@ -203,10 +214,19 @@ impl Ledger {
     /// Record the FINAL outcome and wake every joiner. Stamps `attempts`, so a
     /// caller can see what its work actually cost.
     pub fn settle(&self, exec_id: &str, mut outcome: Outcome) -> Outcome {
+        // STRICT-JSON FIDELITY, decided HERE: a row that does not survive a
+        // round-trip is skipped by the snapshot rather than silently mangled —
+        // rehydrating a lie is worse than rehydrating less. The verdict cannot
+        // change afterwards, so it is taken once instead of on every flush.
+        let json_ok = {
+            let v = outcome.to_value();
+            serde_json::from_str::<Value>(&v.to_string()).ok().as_ref() == Some(&v)
+        };
         let mut g = self.inner.lock().expect("ledger poisoned");
         if let Some(row) = g.rows.get_mut(exec_id) {
             outcome.attempts = row.attempts.max(1);
             row.outcome = Some(outcome.clone());
+            row.json_ok = json_ok;
             // Ignore the send error: no subscribers is the normal case.
             let _ = row.tx.send(Some(outcome.clone()));
         }
@@ -269,14 +289,9 @@ impl Ledger {
                 "origin": r.origin.as_ref().map(|o| o.0.clone()),
                 "outcome": out.to_value(),
             });
-            // STRICT-JSON FIDELITY: a row that does not survive a round-trip is
-            // SKIPPED, not silently mangled. Rehydrating a lie is worse than
-            // rehydrating less.
-            if serde_json::from_str::<Value>(&row.to_string())
-                .ok()
-                .as_ref()
-                == Some(&row)
-            {
+            // Fidelity was decided when the row settled (see `settle`); a
+            // settled row never changes, so the snapshot only assembles.
+            if r.json_ok {
                 rows.insert(id.clone(), row);
             }
         }
@@ -330,6 +345,10 @@ impl Ledger {
                     named: r.get("named").and_then(Value::as_bool).unwrap_or(true),
                     origin: r.get("origin").and_then(Value::as_str).map(AgentId::from),
                     outcome: Some(outcome),
+                    // It was READ from the sidecar, so it round-trips by
+                    // construction — re-proving that would be the same wasted
+                    // work this field exists to remove.
+                    json_ok: true,
                     tx,
                 },
             );
