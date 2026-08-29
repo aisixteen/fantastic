@@ -18,6 +18,7 @@ four real product bugs until the two were unified.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Any
@@ -42,10 +43,19 @@ class WireRoot:
     async def send(self, items: list[dict]) -> list[dict]:
         """The batch shape `connect()`/`drive()` use. One POST per item — the
         REST face takes a single target per request, so a batch is a loop; the
-        callers only ever send one."""
+        callers only ever send one.
+
+        OFF THE EVENT LOOP. `HostKernel.send` is blocking `urllib`, and awaiting
+        it inline froze the whole drive loop — its tripwires, its idle counter
+        and its `ps` check all stop ticking while one request is outstanding.
+        Measured on `plan:rust`: a turn started an exec_bridge script that
+        POSTed back into the kernel, the next poll blocked on the driver's
+        300-second default, and a probe with `idle_seconds: 40` sat still for
+        eleven minutes without ever capping.
+        """
         out = []
         for i in items:
-            r = self.k.send(i["target"], i["payload"])
+            r = await asyncio.to_thread(self.k.send, i["target"], i["payload"])
             # KEEP THE BODY. The REST face answers a refusal as HTTP 400 with the
             # reason in the body; collapsing that to "HTTP 400" loses the only
             # part worth reading, and callers print `result["error"]`.
@@ -83,7 +93,11 @@ class WireTranscript:
         if time.monotonic() - self._last_poll < 1.0:
             return
         self._last_poll = time.monotonic()
-        h = self.k.send(self.aid, {"type": "history", "client_id": self.client_id})
+        # BOUNDED. A poll is a status check, not the work — it must fail fast
+        # and let the loop keep counting rather than inherit the driver's
+        # 300-second default (see `WireRoot.send`).
+        h = self.k.send(
+            self.aid, {"type": "history", "client_id": self.client_id}, timeout=15)
         msgs = h.get("messages") if isinstance(h, dict) else None
         if not isinstance(msgs, list):
             return

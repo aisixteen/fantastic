@@ -173,7 +173,14 @@ _progress_count = distinct_calls
 
 async def main():
     # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`) — see E20_build.
-    root, core, close_kernel = await open_kernel("plan_")
+    # The ids this probe's FIXTURE builds, plus the peers it grants the AI —
+    # declared before boot because a spawned kernel's legs are granted from
+    # ABOVE and cannot raise their own authority. Ignored in process.
+    root, core, close_kernel = await open_kernel(
+        "plan_",
+        reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "web"]
+              + ['assets', 'transcripts', 'secrets'],
+    )
 
     # The store the loader persists through — open, and NOT one of the three guards.
     store = (await root.send([{"target": root.id, "payload": {
@@ -280,7 +287,11 @@ async def main():
         CAN_CALL[_gid] = "*"
     # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
     # that branches on `BACKEND ==` is a probe that has stopped being agnostic.
-    EXTRA = {"file_bridge_id": store["id"]} if BK.needs_file_bridge else {}
+    # ...and the RUNTIME: python's anthropic backend persists through the loader,
+    # rust's and swift's refuse `send` without a `file_bridge_id`. One bundle,
+    # two contracts — recorded, not branched on by name.
+    EXTRA = ({"file_bridge_id": store["id"]}
+             if (BK.needs_file_bridge or core is None) else {})
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own
