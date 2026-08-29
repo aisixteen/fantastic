@@ -89,11 +89,26 @@ class WireTranscript:
             for m in msgs
             if m.get("role") == "assistant"
         ]
-        # Append-only: history is never trimmed, so what is already recorded
-        # cannot change under us.
+        # EXTEND IN PLACE — never rebind. Callers capture the list ONCE
+        # (`transcript = spy.transcript`) and read it for the rest of the run,
+        # exactly as they do with the in-process reader, which appends. Assigning
+        # a fresh list here left every captured reference empty forever: a run
+        # scored 8 passes with a 0-char transcript and no planning markers, which
+        # reads as a model that produced nothing.
+        #
+        # Append-only is safe: history is never trimmed, so what is already
+        # recorded cannot change under us.
         if len(turns) > len(self.transcript):
-            self.transcript = turns
-            self.n = len(turns)
+            fresh = turns[len(self.transcript):]
+            self.transcript.extend(fresh)
+            self.n = len(self.transcript)
+            # PRINT THE TURN, as the in-process reader does. Without this a wire
+            # run's log carries a verdict and nothing to explain it — the whole
+            # transcript is on the far side of a socket.
+            from helpers.proxy import box
+
+            for i, t in enumerate(fresh, start=self.n - len(fresh) + 1):
+                box(f"-- turn {i} - ASSISTANT <-", t, ">")
 
     @property
     def text(self) -> str:
