@@ -19,7 +19,8 @@
 //! param + alternating user/assistant TEXT turns. NO native tools — Fantastic
 //! NEVER uses Anthropic `tool_use`; tool-calling is RAW prompt-and-parse owned
 //! by ai-core (the model emits a `<tool_call>` envelope in the text). Response
-//! `content_block_delta`(`text_delta`) → `ProviderEvent::Token`.
+//! `content_block_delta`(`text_delta` + `thinking_delta`) → `ProviderEvent::Token`;
+//! the reasoning channel is wrapped once per turn in `<think>…</think>`.
 
 #![deny(missing_docs)]
 
@@ -357,7 +358,8 @@ impl Provider for AnthropicProvider {
 
 /// Drain the event-typed SSE body. Anthropic frames each event as an
 /// `event:` line + a `data:` JSON line; the JSON carries its own `type`, so we
-/// dispatch on that. PURE RAW TEXT — only `text_delta` tokens are emitted; no
+/// dispatch on that. PURE RAW TEXT — both `text_delta` and `thinking_delta` are
+/// emitted (the latter wrapped in `<think>…</think>`); no
 /// native `tool_use` is read (ai-core parses the `<tool_call>` envelope).
 async fn consume_sse(
     resp: reqwest::Response,
@@ -374,6 +376,15 @@ async fn consume_sse(
     // and re-emitted as ONE text envelope when the block closes (#16).
     let mut tool_name: Option<String> = None;
     let mut tool_args = String::new();
+    // BOTH CHANNELS ARE READ. A reasoning model streams its thought as
+    // `thinking_delta` and its answer as `text_delta`; reading only the latter
+    // drops the thought entirely — and with it any tool call the model wrote
+    // MID-THOUGHT, which ai-core is explicitly built to still dispatch. Python
+    // and swift both surface it; this bundle was the only rust backend that did
+    // not (llamacpp, ollama and nvidia all use `ThinkWrap` already). The thought
+    // is wrapped once per turn in `<think>…</think>`: parsed for tool calls,
+    // stripped before the turn persists.
+    let mut wrap = fantastic_ai_core::think::ThinkWrap::new();
 
     while let Some(chunk_res) = stream.next().await {
         let bytes = match chunk_res {
@@ -439,9 +450,23 @@ async fn consume_sse(
                             tool_args.push_str(t);
                         }
                     }
+                    if delta.get("type").and_then(Value::as_str) == Some("thinking_delta") {
+                        if let Some(t) = delta.get("thinking").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                if let Some(m) = wrap.open_marker() {
+                                    out.push(Ok(ProviderEvent::Token(m.to_string())));
+                                }
+                                out.push(Ok(ProviderEvent::Token(t.to_string())));
+                            }
+                        }
+                    }
                     if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
                         if let Some(t) = delta.get("text").and_then(Value::as_str) {
                             if !t.is_empty() {
+                                // Content starting IS the end of the thought.
+                                if let Some(m) = wrap.close_marker() {
+                                    out.push(Ok(ProviderEvent::Token(m.to_string())));
+                                }
                                 out.push(Ok(ProviderEvent::Token(t.to_string())));
                             }
                         }
@@ -464,6 +489,11 @@ async fn consume_sse(
                         .or(stop_reason);
                 }
                 "message_stop" => {
+                    // Balance a span the model never closed itself, so the text
+                    // the parser sees is well-formed.
+                    if let Some(m) = wrap.close_marker() {
+                        out.push(Ok(ProviderEvent::Token(m.to_string())));
+                    }
                     stop = true;
                     break;
                 }

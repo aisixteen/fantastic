@@ -31,6 +31,9 @@ class WireRoot:
 
     #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
     leg_id = "rest"
+    #: The agent a `watch` frame is dispatched AS — the web host itself, not the
+    #: ws leg that carried the frame. It needs the target's ingress like anyone.
+    watch_id = "web"
 
     def __init__(self, k: Any):
         self.k = k
