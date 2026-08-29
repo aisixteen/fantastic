@@ -135,7 +135,12 @@ TASK = (
 EXECUTOR_LEG = "runner"
 
 MINE = {
+    # BOTH root ids: python's root IS the persistence loader (`kernel_state`),
+    # rust's and swift's is `core`. This set marks what the FIXTURE built, so
+    # naming an id the runtime does not use costs nothing — and missing the
+    # live one would score the root as something the model authored.
     "kernel_state",
+    "core",
     "kernel_store",
     "brain",
     "clock",
@@ -183,7 +188,7 @@ def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -
     backend = backend or BACKEND
     meta: dict = {
         "type": "create_agent",
-        "parent_id": "kernel_state",
+        "parent_id": root.id,
         "id": agent_id,
         "file_bridge_id": store["id"],
         # Two-sided deny-all: the operator grants the BUILDER its toolset. Written
@@ -195,7 +200,9 @@ def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -
             "$self": "*",
             "$parent": "*",
             "$children": "*",
-            "kernel_state": ["*", "create_agent", "update_agent", "delete_agent"],
+            # THE ROOT, by whatever id this runtime gives it (python: kernel_state,
+        # rust/swift: core).
+        root.id: ["*", "create_agent", "update_agent", "delete_agent"],
             "cli": "*",
             "readings": "*",
             "totals": "*",

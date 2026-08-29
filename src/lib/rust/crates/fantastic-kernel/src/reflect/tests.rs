@@ -376,6 +376,11 @@ async fn self_extension_names_no_executor_when_none_is_registered() {
         se.contains("NO script executor"),
         "must say the build ships none: {se}"
     );
+    // The example keeps the PLACEHOLDER rather than inventing a module.
+    assert!(
+        se.contains("handler_module:'<an executor below>'"),
+        "with none registered the example must not name a module: {se}"
+    );
 }
 
 /// A registered executor that is NOT in the table changes nothing, and a
@@ -385,7 +390,13 @@ async fn self_extension_advertises_the_intersection_only() {
     // A registered bundle NOT in the table (yaml_state) adds nothing, and the
     // table's one entry only shows when its module is actually registered.
     let se = self_extension_with(&["exec_bridge.tools"]).await;
-    assert_eq!(handler_module_tokens(&se), vec!["exec_bridge.tools"]);
+    // WHICH modules appear, not how many times: the registered executor is now
+    // named twice on purpose — interpolated into the `create_agent` example so
+    // it is copy-pasteable, and again in the tail with its receive shape.
+    let mut seen = handler_module_tokens(&se);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen, vec!["exec_bridge.tools"]);
     assert!(!se.contains("yaml_state.tools"));
 }
 

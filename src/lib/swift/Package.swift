@@ -289,6 +289,9 @@ let package = Package(
         .target(
             name: "FantasticKernelStartup",
             dependencies: [
+                // The root record's persisted meta is an ordered JSON object —
+                // startup carries it onto the root agent verbatim.
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 // TEST-ONLY fixtures; registration is behind -DSCENARIO_PROBES
                 // so a default build carries none of it.
                 "FantasticScenarioProbes",

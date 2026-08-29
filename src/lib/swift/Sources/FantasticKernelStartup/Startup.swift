@@ -16,6 +16,7 @@ import FantasticCliBundle
 import FantasticFile
 import FantasticFoundationModelsBackend
 import FantasticJSON
+import OrderedCollections
 import FantasticKernel
 import FantasticScenarioProbes
 import FantasticKernelBridge
@@ -176,6 +177,28 @@ public func startKernel(
     // BOTH the virgin-dir and already-exists-but-guidless cases. Mirrors the relay
     // guid idiom in KernelBridge.bootRelay + py write_record / rust.
     let rootGuid: String
+    // EVERYTHING ELSE the root record carries — `callable_by`, `can_call`, and any
+    // operator-authored field. This used to read the file for its `guid` ALONE and
+    // drop the rest, so a root whose record granted `callable_by: {rest: "*"}` came
+    // up with only the three `$` baseline tokens: the grant was on disk, ignored in
+    // memory, and every non-kernel verb from that agent was refused at ingress.
+    // Measured 2026-08-29 against the seeded e2e workdir — `reflect` on the root was
+    // refused on swift and allowed on rust from a byte-identical record, which hid
+    // swift's entire root identity block (`self_extension` included) behind a
+    // refusal. The comment below is why it went unnoticed: `kernel.load` replaces
+    // the root only from a record under `agents/`, and the ROOT's record is not
+    // there — it is `.fantastic/agent.json`.
+    var rootMeta: OrderedDictionary<String, JSON> = [:]
+    if fm.fileExists(atPath: rootRecordFile.path),
+        let data = try? Data(contentsOf: rootRecordFile),
+        let parsed = try? JSON.parse(data),
+        case .object(let obj0) = parsed
+    {
+        // Structural fields are the record's identity, not meta.
+        for (k, v) in obj0 where !["id", "handler_module", "parent_id", "guid"].contains(k) {
+            rootMeta[k] = v
+        }
+    }
     if fm.fileExists(atPath: rootRecordFile.path),
         let data = try? Data(contentsOf: rootRecordFile),
         let parsed = try? JSON.parse(data),
@@ -201,11 +224,12 @@ public func startKernel(
     // Register a bare `core` root agent carrying the persisted guid. If the
     // workdir has a persisted `core` record under agents/, `kernel.load()` below
     // will replace this one with the disk-backed shape (carrying meta etc.).
+    rootMeta["guid"] = .string(rootGuid)
     let root = Agent(
         id: AgentId("core"),
         handlerModule: nil,
         parentId: nil,
-        meta: ["guid": .string(rootGuid)],
+        meta: rootMeta,
         rootPath: dotFantastic
     )
     kernel.register(root)
@@ -222,16 +246,22 @@ public func startKernel(
     let records = Persistence.readAllAgentRecords(from: agentsDir)
     if !records.isEmpty {
         // Ensure a root exists in the snapshot — `kernel.load`
-        // requires exactly one parent_id == nil entry. If the
-        // workdir lacks one (rare; happens if a user wipes core
-        // but leaves children), reuse the in-memory `core` we
-        // just registered.
+        // requires exactly one parent_id == nil entry. The root's record is
+        // NOT under `agents/` (it is `.fantastic/agent.json`), so this branch
+        // is the NORMAL path, not the rare one: every boot with any child
+        // rebuilds the root from here.
+        //
+        // It must carry `rootMeta`. With `meta: [:]` the load REPLACED the
+        // hydrated root with a blank one, so the grants read off
+        // `.fantastic/agent.json` moments earlier were discarded and the root
+        // came back with only its `$` baseline tokens — a `callable_by` an
+        // operator had written was silently inert.
         var fullRecords = records
         let hasRoot = records.contains { $0.parentId == nil }
         if !hasRoot {
             fullRecords.insert(
                 AgentRecord(
-                    id: "core", handlerModule: nil, parentId: nil, meta: [:]),
+                    id: "core", handlerModule: nil, parentId: nil, meta: rootMeta),
                 at: 0)
         }
         let state = KernelState(agents: fullRecords)

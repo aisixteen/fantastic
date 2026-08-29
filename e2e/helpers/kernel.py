@@ -29,7 +29,7 @@ def runtime_name() -> str:
     return rt
 
 
-async def open_kernel(prefix: str = "probe_"):
+async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     """`(root, core, close)` for the named runtime.
 
     `core` is the in-process `ai_core.core` module when there is one and `None`
@@ -58,9 +58,10 @@ async def open_kernel(prefix: str = "probe_"):
     spec = ensure_runtime(repo, rt)
     wd = Path(tempfile.mkdtemp(prefix=f"{rt}_{prefix}"))
     os.chdir(wd)
-    # Every id a probe creates must be declared: authority flows from ABOVE and
-    # the REST leg may not raise its own (see driver docstring).
-    reach = [s for s in os.environ.get("REACH", "").split(",") if s]
-    k = HostKernel(spec, wd, reach=reach).boot()
+    # Every id the probe will touch must be DECLARED: authority flows from above
+    # and the REST leg may not raise its own (see the driver docstring). In
+    # process this is free — the probe is the operator — so only the wire needs
+    # it, and the probe passes the same list it already writes into `CAN_CALL`.
+    k = HostKernel(spec, wd, reach=list(reach or [])).boot()
     root = WireRoot(k)
     return root, None, root.close

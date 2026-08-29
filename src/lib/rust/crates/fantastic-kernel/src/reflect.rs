@@ -279,7 +279,7 @@ pub fn apply_reflect_flags(
         // registry by `executor_clause` — never hand-written, see `EXECUTORS`.
         obj.insert(
             "self_extension".to_string(),
-            json!(format!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {{type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'}}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits - put the work at module level. To handle later sends, keep the script running and take each turn from kernel.on_message - each executor's exact shape is named below. USE - send the tool a turn by its id; a LIVE script acks {{queued:true}} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {{type:'delete_agent', id:'<name>'}}. LEARN - before writing `code`, send 'kernel' the payload {{type:'reflect', readme:'self-extension'}} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. {}", executor_clause(kernel))),
+            json!(format!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {{type:'create_agent', handler_module:'{}', id:'<name>', code:'<your program as one JSON string>'}}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits - put the work at module level. To handle later sends, keep the script running and take each turn from kernel.on_message - each executor's exact shape is named below. USE - send the tool a turn by its id; a LIVE script acks {{queued:true}} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {{type:'delete_agent', id:'<name>'}}. LEARN - before writing `code`, send 'kernel' the payload {{type:'reflect', readme:'self-extension'}} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. {}", executor_for_example(kernel), executor_clause(kernel))),
         );
         // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
         // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
@@ -492,6 +492,26 @@ fn registered_executors(kernel: &Arc<Kernel>) -> Vec<(&'static str, &'static str
         .copied()
         .filter(|(module, _)| installed.iter().any(|hm| hm == module))
         .collect()
+}
+
+/// The module to SHOW in the `create_agent` example: the first executor this
+/// build registered, else the first known one.
+///
+/// The slot used to hold the literal `'<an executor below>'`, which left the
+/// example uncopyable — a model had to join it to the tail sentence to learn
+/// the real name. Python interpolates the module here (`_executor_for_example`)
+/// and that is the string a weak model actually reads: measured 2026-08-05,
+/// given a name it could not use, claude-opus-5 authored
+/// `handler_module:"local_runner.script"` and built nothing.
+fn executor_for_example(kernel: &Arc<Kernel>) -> &'static str {
+    // NO EXECUTOR REGISTERED → name NOTHING. Falling back to the first table
+    // entry would advertise a module this build cannot run, which is the exact
+    // defect the derivation exists to prevent; the tail then says the build
+    // ships none. The placeholder is honest here and only here.
+    registered_executors(kernel)
+        .first()
+        .map(|(m, _)| *m)
+        .unwrap_or("<an executor below>")
 }
 
 /// The root `self_extension`'s closing clause. Empty intersection → say the

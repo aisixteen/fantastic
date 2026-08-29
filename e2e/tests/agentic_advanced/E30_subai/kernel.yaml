@@ -11,8 +11,8 @@
 # run.py before every run. Edit the probe, not this file.
 roster:
 - id: <agent_id>
-  parent_id: kernel_state
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', ''kernel_state'': [''*'', ''create_agent'',
+  parent_id: <root.id>
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',
     ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', ''clock'':
     ''*'', ''brain'': ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*''}>'
 - id: kernel_store
