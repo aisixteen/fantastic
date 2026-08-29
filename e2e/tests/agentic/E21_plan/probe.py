@@ -267,7 +267,9 @@ async def main():
         "$self": "*",
         "$parent": "*",
         "$children": "*",
-        "kernel_state": ["*", "create_agent", "update_agent", "delete_agent"],
+        # THE ROOT, by whatever id this runtime gives it (python: kernel_state,
+        # rust/swift: core).
+        root.id: ["*", "create_agent", "update_agent", "delete_agent"],
         "cli": "*",
         mem["id"]: "*",
         store["id"]: "*",

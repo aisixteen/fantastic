@@ -625,6 +625,23 @@ extension Kernel {
         return Kernel.scriptExecutors.filter { registered.contains($0.handlerModule) }
     }
 
+    /// The module to SHOW in the `create_agent` example: the first executor this
+    /// build registered, else the first known one.
+    ///
+    /// The slot used to hold the literal `'<an executor below>'`, which left the
+    /// example uncopyable — a model had to join it to the tail sentence to learn
+    /// the real name. Python interpolates the module here
+    /// (`_executor_for_example`) and that is the string a weak model actually
+    /// reads: measured 2026-08-05, given a name it could not use, claude-opus-5
+    /// authored `handler_module:"local_runner.script"` and built nothing.
+    func executorForExample() -> String {
+        // NO EXECUTOR REGISTERED → name NOTHING. Falling back to a table entry
+        // would advertise a module this build cannot run, which is the exact
+        // defect the derivation exists to prevent; the tail then says the build
+        // ships none. The placeholder is honest here and only here.
+        scriptExecutorsHere().first?.handlerModule ?? "<an executor below>"
+    }
+
     /// The `self_extension` tail naming this build's executor(s). Empty
     /// intersection is stated, not papered over: with no executor registered
     /// there is no handler_module that runs authored `code`, and a caller

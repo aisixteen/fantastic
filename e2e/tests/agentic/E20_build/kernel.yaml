@@ -32,6 +32,6 @@ roster:
     ai: '*'
 - id: ai
   created_by: helpers.ai.connect
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', ''kernel_state'': [''*'', ''create_agent'',
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',
     ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', EXECUTOR_LEG:
     ''*'', store[''id'']: ''*''}>'

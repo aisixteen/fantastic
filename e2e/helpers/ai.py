@@ -92,7 +92,15 @@ async def connect(
         # A fixture that opens only the egress half builds a wire that carries
         # nothing in the direction it was drawn — measured here as a probe whose
         # push-back never arrived, scoring a model failure that never happened.
-        **({"callable_by": callable_by} if callable_by else {}),
+        # THE DRIVER'S OWN INGRESS, on the wire only. In process the probe is
+        # the OPERATOR and its sends are ungated; across REST it arrives as the
+        # `rest` leg — an agent, gated like any other — so the AI must accept it
+        # or the very first `send` is refused at ingress. Granted at CREATE
+        # time, from above, because the leg may not raise its own authority.
+        **({"callable_by": {**(callable_by or {}),
+                            getattr(root, "leg_id", "rest"): "*"}}
+           if getattr(root, "leg_id", None) else
+           ({"callable_by": callable_by} if callable_by else {})),
         **backend.record(),
         **(record or {}),
     }

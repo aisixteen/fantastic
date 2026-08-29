@@ -29,6 +29,9 @@ _ROUTED = re.compile(r"^\[(reply to|no call was dispatched|context-notice)")
 class WireRoot:
     """`root`-shaped adapter over a spawned kernel's REST face."""
 
+    #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
+    leg_id = "rest"
+
     def __init__(self, k: Any):
         self.k = k
         self.id = k.root_id
@@ -37,7 +40,16 @@ class WireRoot:
         """The batch shape `connect()`/`drive()` use. One POST per item — the
         REST face takes a single target per request, so a batch is a loop; the
         callers only ever send one."""
-        return [{"result": self.k.send(i["target"], i["payload"])} for i in items]
+        out = []
+        for i in items:
+            r = self.k.send(i["target"], i["payload"])
+            # KEEP THE BODY. The REST face answers a refusal as HTTP 400 with the
+            # reason in the body; collapsing that to "HTTP 400" loses the only
+            # part worth reading, and callers print `result["error"]`.
+            if isinstance(r, dict) and r.get("error") and r.get("body"):
+                r = {**r, "error": f"{r['error']}: {r['body']}"}
+            out.append({"result": r})
+        return out
 
     def watch(self, *_a, **_kw) -> None:
         """No-op. Status-event spying needs an inbox subscription this face does

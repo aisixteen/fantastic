@@ -331,7 +331,14 @@ async def run(
     # model is a plug in `backends/`. In process for python; spawned and driven
     # over REST otherwise. `core` is None on the wire and the connector reads
     # the transcript from the agent's history instead of wrapping a provider.
-    root, core, close_kernel = await open_kernel("build_")
+    # The ids this probe's FIXTURE builds, plus the peers it grants the AI.
+    # Declared here because a spawned kernel's REST leg is granted from ABOVE,
+    # before boot — it cannot raise its own authority later. In process the
+    # probe IS the operator and the list is ignored.
+    root, core, close_kernel = await open_kernel(
+        "build_",
+        reach=["kernel_store", "readings", "totals", EXECUTOR_LEG, "ai", "cli"],
+    )
 
     store = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
@@ -388,7 +395,9 @@ async def run(
         "$self": "*",
         "$parent": "*",
         "$children": "*",
-        "kernel_state": ["*", "create_agent", "update_agent", "delete_agent"],
+        # THE ROOT, by whatever id this runtime gives it — python's root IS the
+        # persistence loader (`kernel_state`), rust's and swift's is `core`.
+        root.id: ["*", "create_agent", "update_agent", "delete_agent"],
         "cli": "*",
         "readings": "*",
         "totals": "*",
@@ -397,7 +406,14 @@ async def run(
     }
     # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
     # that branches on `BACKEND ==` is a probe that has stopped being agnostic.
-    EXTRA = {"file_bridge_id": store["id"]} if BK.needs_file_bridge else {}
+    # ...and the RUNTIME, which is a separate question the plug cannot answer:
+    # python's anthropic backend persists its history through the loader and
+    # needs no leg, while rust's and swift's refuse `send` outright with
+    # "file_bridge_id required". One bundle, two contracts — recorded here
+    # rather than papered over, and the store exists either way so binding it
+    # costs nothing.
+    EXTRA = ({"file_bridge_id": store["id"]}
+             if (BK.needs_file_bridge or core is None) else {})
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own
@@ -509,7 +525,7 @@ async def run(
     # --- HARD 1: an ARTIFACT exists ---
     rec = (await root.send([{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]))[0]["result"]
     mine = {
-        "kernel_state",
+        root.id,
         "kernel_store",
         "readings",
         "totals",
