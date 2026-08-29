@@ -191,9 +191,25 @@ class HostKernel:
         root["callable_by"] = {**BASE, "rest": "*"}
         root["can_call"] = {**BASE, "rest": "*"}
         (w / "agent.json").write_text(json.dumps(root, indent=2))
+        # `web` NEEDS EGRESS OF ITS OWN. A `watch` frame is dispatched as the
+        # WEB agent, not as the ws leg that carried it, so without this every
+        # subscription is refused `web may not call "watch" on <id>` — and a
+        # watcher that is refused looks exactly like a stream with no events,
+        # which is worse than no watcher at all.
         (w / "agents/web/agent.json").write_text(json.dumps(
             {"id": "web", "handler_module": "web.tools",
-             "parent_id": self.root_id, "port": port}, indent=2))
+             "parent_id": self.root_id, "port": port,
+             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
+                          **{t: "*" for t in self.reach}}}, indent=2))
+        # The WS leg — the EVENT face. REST cannot push, so a failed pass (which
+        # announces itself as a `status` event on the agent's own stream) is
+        # invisible without this; see `helpers/host/ws.py`.
+        (w / "agents/web/agents/ws").mkdir(parents=True, exist_ok=True)
+        (w / "agents/web/agents/ws/agent.json").write_text(json.dumps(
+            {"id": "ws", "handler_module": "web_ws.tools", "parent_id": "web",
+             "ingress_rule": "allow_all_ingress",
+             "can_call": {**BASE, self.root_id: ROOT_VERBS, "kernel": "*",
+                          **{t: "*" for t in self.reach}}}, indent=2))
         (w / "agents/web/agents/rest/agent.json").write_text(json.dumps(
             {"id": "rest", "handler_module": "web_rest.tools", "parent_id": "web",
              # SEALED BY DEFAULT: an io leg with no rule denies every inbound

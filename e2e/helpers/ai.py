@@ -98,7 +98,12 @@ async def connect(
         # or the very first `send` is refused at ingress. Granted at CREATE
         # time, from above, because the leg may not raise its own authority.
         **({"callable_by": {**(callable_by or {}),
-                            getattr(root, "leg_id", "rest"): "*"}}
+                            getattr(root, "leg_id", "rest"): "*",
+                            # ...and the EVENT face, which dispatches a `watch`
+                            # as itself. The gate is two-sided: without this the
+                            # subscription is refused at ingress and the stream
+                            # reads as an agent that simply never emits.
+                            getattr(root, "watch_id", "web"): "*"}}
            if getattr(root, "leg_id", None) else
            ({"callable_by": callable_by} if callable_by else {})),
         **backend.record(),
@@ -160,18 +165,37 @@ async def connect(
             await backend.provider(aid, root), L, trips=conn.trips, watch=watch)
         core._providers[aid] = conn.proxy
 
+    # SEE A DEAD CHAIN — subscribe to the AI's own status events. A failed
+    # handoff announces itself this way; with nobody listening, a chain that died
+    # mid-flight looks exactly like a model that chose to stop.
     # SEE A DEAD CHAIN — a failed handoff announces itself as status(error) on
     # the agent's own stream, and with nobody listening it goes nowhere.
     def _failed(msg: str) -> None:
         print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
         conn.trips.append(f"turn failed: {msg}")
 
-    # SEE A DEAD CHAIN — subscribe to the AI's own status events. A failed
-    # handoff announces itself this way; with nobody listening, a chain that died
-    # mid-flight looks exactly like a model that chose to stop.
     if core is None:
-        # No inbox tap across the wire — a dead chain is caught by the drive
-        # loop's `ps` check, which works on every runtime.
+        # THE SAME EVENTS, over the socket. A failed pass announces itself as a
+        # `status` carrying `detail.error`; with nobody listening a chain that
+        # died mid-flight looks exactly like a model that chose to stop.
+        from helpers.host.ws import WSWatcher
+
+        async def _wire_errspy() -> None:
+            watcher = WSWatcher(root.k.port, aid)
+            try:
+                await watcher.connect()
+                async for ev in watcher.events():
+                    det = ev.get("detail") or {}
+                    if ev.get("type") == "status" and det.get("error"):
+                        _failed(str(det["error"]))
+                    if ev.get("type") == "context" and ev.get("phase") == "too_small":
+                        _failed(f"context too_small: {det}")
+            except Exception as e:  # the watcher must never kill the run
+                print(f"  ** event watch unavailable: {e} **", flush=True)
+            finally:
+                await watcher.close()
+
+        conn._tasks.append(asyncio.create_task(_wire_errspy()))
         return conn
 
     inbox = f"{aid}_errspy"
