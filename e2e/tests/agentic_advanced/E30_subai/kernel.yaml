@@ -12,13 +12,15 @@
 roster:
 - id: <agent_id>
   parent_id: <root.id>
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',
-    ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', ''clock'':
-    ''*'', ''brain'': ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*''}>'
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'', ''update_agent'',
+    ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', ''clock'': ''*'', ''brain'': ''*'', EXECUTOR_LEG:
+    ''*'', store[''id'']: ''*''}>'
   callable_by:
     $self: '*'
     $parent: '*'
     $children: '*'
+    ai: '*'
+    brain: '*'
     rest: '*'
     web: '*'
 - id: kernel_store
@@ -27,27 +29,37 @@ roster:
   callable_by:
     ai: '*'
     brain: '*'
+    rest: '*'
+    web: '*'
 - id: readings
   handler_module: file_bridge.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
     brain: '*'
+    rest: '*'
+    web: '*'
 - id: totals
-  handler_module: yaml_state.tools
+  handler_module: durable_memory.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
     brain: '*'
+    rest: '*'
+    web: '*'
 - id: clock
   handler_module: scheduler.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
     brain: '*'
+    rest: '*'
+    web: '*'
 - id: <EXECUTOR_LEG>
-  handler_module: <executor>
+  handler_module: <EXEC_MODULE>
   parent_id: <root.id>
   callable_by:
     ai: '*'
     brain: '*'
+    rest: '*'
+    web: '*'

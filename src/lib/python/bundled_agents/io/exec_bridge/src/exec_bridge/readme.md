@@ -1,24 +1,29 @@
 # exec_bridge — process edge
 
-Spawns a program in the BACKGROUND and hands it a kernel wire. Crossing kernel↔process is
+Spawns a COMMAND in the BACKGROUND and hands it a kernel wire. Crossing kernel↔process is
 an IO edge, so this leg is gated exactly like `file_bridge`/`web_ws`: **sealed by default**,
-and the interpreter it may run comes from an operator **allowlist**.
+and the commands it may run come from an operator **allowlist** of regexes.
+
+It is a GENERAL-PURPOSE command runner, not a code runner: there is no `code` field, no
+`interpreters`, no shim. A program is a FILE some process (or a `write_stream`) put on disk;
+running it is `command` + `args`, exactly like anything else.
 
 Verbs: `start` · `status` · `stop` · `interrupt` · `clear` · `reflect` · `boot`.
 Any verb NOT in that list is **MAIL** for the running program (see below).
 
-- `start(code?, args?, interpreter?, shim?, cwd?)` → `{job_id, status:'running'}` at once —
-  non-blocking, many jobs in parallel. `code` falls back to the record's `code`; `args` is
-  THIS call's arguments and reaches the program as `kernel.args` (they ride the process env,
-  so they are capped at 256 KB — put bulk data in an agent and pass its id). There is no
-  blocking run-and-wait verb: output streams as `progress` events on this agent's inbox
-  (one per line, `{n, line, stream}`) with a final `job_done` (`{exit_code, ok, stdout,
-  stderr}`), after a `job_started`.
+- `start(command, args?, env?, cwd?)` → `{job_id, status:'running'}` at once — non-blocking,
+  many jobs in parallel. `command` is the program/binary; `args` is its argv (a list of
+  strings). The FULL line (`command` + `args`, shell-joined) must fullmatch one of the
+  record's `allowed` regexes or the start is refused, naming the patterns. `env` adds
+  environment vars; `cwd` overrides the record's. There is no blocking run-and-wait verb:
+  output streams as `progress` events on this agent's inbox (one per line, `{n, line,
+  stream}`) with a final `job_done` (`{exit_code, ok, stdout, stderr}`), after a
+  `job_started`.
 - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr, or every job of
   this agent as summaries.
 - `stop(job_id?)` SIGKILL · `interrupt(job_id?)` SIGINT · `clear(job_id?)` forget finished
   rows. Omit `job_id` and it applies to all of this agent's jobs.
-- `boot` — idempotent; re-runs the record's `code` after a kernel restart.
+- `boot` — no-op. Nothing auto-restarts: a command is started by a caller, not by the record.
 
 Every running job is a row in the kernel TASK TABLE (`task_id` in each `status` snapshot,
 listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS process is SIGKILLed
@@ -36,48 +41,47 @@ update_agent <id> ingress_rule=password_ingress       # require group token ($FA
 
 ## The allowlist is the law
 
-Even open, this leg spawns ONLY an interpreter the operator listed on the record:
+Even open, this leg spawns ONLY a command line matching one of the operator's `allowed`
+regexes on the record:
 
 ```
-update_agent <id> interpreters='["~/.venvs/tools/bin/python"]'
+update_agent <id> allowed='["/usr/bin/python3 .*", "ffmpeg .*"]'
 ```
 
-`reflect` advertises the live list as `interpreters` — read it, then name one per record or
-per `start` (`interpreter=<one of them>`; naming none is legal only when the list holds
-exactly one). There is **no default interpreter** and no per-call override: a request for
-something not on the list is refused, with the list in the message. An empty list is a legal
-state — the leg then runs nothing and says so. The list is PER RECORD (nothing is inherited
-from a parent), and a write that names `interpreter` must carry `interpreters` in the SAME
-call — write-time validation reads the patch, not the merged record. Non-CPython
-interpreters also want an `argv_template` on the record (`<interp>`/`<program>` are
-substituted; the default is the CPython `["<interp>", "-u", "-c", "<program>"]`, and `-u` is
-what makes output line-live).
+`reflect` advertises the live list as `allowed` — read it, then send a `start` whose
+`command` + `args` shell-join into a line that fullmatches one. There is **no default** and
+no per-call override: a request that matches nothing is refused, with the patterns in the
+message. An empty list is a legal state — the leg then runs nothing and says so. The list is
+PER RECORD (nothing is inherited from a parent). Which interpreter/binary may run is the
+operator's decision, never the caller's — that is exactly why the gate is a record field a
+caller cannot edit.
 
-## Your `code` is a SCRIPT
+## Build a durable program: a FILE plus a command
 
-Give a record `code` + an interpreter and it becomes a durable tool:
-`create_agent parent_id=<owner> handler_module=exec_bridge.tools id=<name>
-interpreters='["<abs path to an interpreter>"]' shim=python code='<program as one JSON
-string>'` — one entry needs no `interpreter` field to pick it (`code` is ONE JSON string, so
-escape newlines as `\n` and quotes as `\"`).
+A program that persists and re-runs is a FILE you write plus a command that runs it — with
+no `code` field at all:
 
-**The `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it
-survives reboot. A bare `def` only defines and exits — put the work at module level. To
-handle later sends, call `kernel.on_message(cb)` and keep running** (block at the end, e.g.
-`threading.Event().wait()`; if the code falls off the end the process exits and the tool is
-dead). `delete_agent` removes it. A running program has the full wire, so it can itself
-`create_agent` more agents — tools compose into tools. To change a live tool: `update_agent`
-its `code`, then `stop` + `boot` (no hot-swap).
+1. **Write the program to a file** on a `file_bridge` leg, its bytes carried over a STREAM so
+   nothing is escaped: `write_stream {path, bytes, truncate:true}` (or `send_binary`, which writes the
+   program RAW in its last `bytes` field — nothing escaped). A program squeezed into a JSON string is lost to one stray quote.
+2. **Run it** here: `start {command:'<interp>', args:['<your file>']}`, past the `allowed`
+   gate.
+3. **Re-run** the SAME command later — the file is durable on disk, so it re-executes the
+   same program against whatever the inputs hold THEN. That is what "a thing that keeps
+   itself up to date" means.
+
+A running program has the full wire, so it can itself `create_agent` more agents, read memory
+anywhere, call an AI, or spawn more jobs — tools compose into tools.
 
 ## Mail — `{queued:true}`
 
 Send a running program a turn by sending THIS agent any verb the bundle does not own; it is
 delivered to the program's `on_message` and ACKed `{queued:true}`. With no live job it is an
-ERROR, not a queue — a script that only defined something already exited before your turn
-arrived. Results come back as whatever the program emits on this agent's id (tag `say`/`done`
-with the caller's `client_id` and `watch` the id).
+ERROR, not a queue — a program that exited already has no inbox. Results come back as whatever
+the program emits on this agent's id (tag `say`/`done` with the caller's `client_id` and
+`watch` the id).
 
-## The wire (`shim` is optional sugar over it)
+## The wire (a program speaks it, or ignores it)
 
 The published contract is the WIRE. The child inherits three env vars:
 
@@ -92,11 +96,11 @@ Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
 `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
 back untouched. **EOF on the fd means the kernel is GONE** — exit, or become an orphan
 nothing can reach. Traffic goes child → spawner → kernel only: a job never dials a host and
-never knows a URL.
+never knows a URL. A command that never reads the fd runs exactly like any OS process.
 
-Name `shim:'<name>'` on `start` (or on the record) and a client for that language is
-prepended to your program for you — pure convenience. `reflect` lists the available names in
-`shims`; `python` gives a `kernel` global:
+A program that wants a `kernel` global rather than raw frames includes the reference wire
+client (`exec_bridge/_connector.py`, `CONNECTOR_SRC`) at the top of its own source — it is a
+library the program bundles, not something the bridge prepends. It exposes:
 
 ```python
 kernel.send(target, payload) -> reply      # request/reply to any agent by id
@@ -108,17 +112,15 @@ off = kernel.on_message(cb)                # PUSH: turns on THIS agent's inbox
 kernel.self_id · kernel.args               # your agent id · this call's args
 ```
 
-Name no shim and your program speaks the frames itself — that is the generic path, and it is
-why adding a language here is adding a blob, not a code path. So a job is a first-class
-routine: read memory anywhere, call an AI, spawn another job, push to any peer — all by id.
-A step written as code and a step written as an LLM call are substitutable.
+So a job is a first-class routine: read memory anywhere, call an AI, spawn another job, push
+to any peer — all by id. A step written as a program and a step written as an LLM call are
+substitutable.
 
 ## Not a sandbox
 
-An allowlisted interpreter is a NAMED interpreter, not a sandbox. A python on the list still
-has `open()`, `socket` and `subprocess`. What the allowlist buys is that the operator chose
-WHICH runtime and WHICH environment (a pre-created venv with a known dependency set) instead
-of the kernel guessing, and that a program cannot pick a different one. Anything stronger
-needs an OS mechanism (`sandbox-exec`, a separate uid, a container) and none of it is
-reachable in-process. Stated plainly rather than reassuringly: opening this leg grants local
-code execution to whoever can reach it.
+An allowlisted command is a NAMED command, not a sandbox. A python it permits still has
+`open()`, `socket` and `subprocess`. What the allowlist buys is that the operator chose WHICH
+commands may run instead of the kernel guessing, and that a program cannot pick a different
+one. Anything stronger needs an OS mechanism (`sandbox-exec`, a separate uid, a container)
+and none of it is reachable in-process. Stated plainly rather than reassuringly: opening this
+leg grants local code execution to whoever can reach it.

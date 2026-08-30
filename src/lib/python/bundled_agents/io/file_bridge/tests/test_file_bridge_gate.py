@@ -36,8 +36,8 @@ async def _make(kernel, **meta):
 async def test_sealed_by_default_denies_verbs(seeded_kernel):
     fid = await _make(seeded_kernel)  # NO ingress_rule — the seal
     for payload in (
-        {"type": "read", "path": "x.txt"},
-        {"type": "write", "path": "x.txt", "content": "x"},
+        {"type": "read_stream", "path": "x.txt"},
+        {"type": "write_stream", "path": "x.txt", "bytes": b"x", "truncate": True},
         {"type": "list", "path": ""},
     ):
         r = (await seeded_kernel.send([{"target": fid, "payload": payload}]))[0][
@@ -69,21 +69,22 @@ async def test_open_leg_reads_and_writes(seeded_kernel, tmp_path):
                 {
                     "target": fid,
                     "payload": {
-                        "type": "write",
+                        "type": "write_stream",
                         "path": "open.txt",
-                        "content": "through the door",
+                        "bytes": b"through the door",
+                        "truncate": True,
                     },
                 }
             ]
         )
     )[0]["result"]
-    assert w.get("written") is True
+    assert w.get("written") == 16  # write_stream reports BYTES written
     r = (
         await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "open.txt"}}]
+            [{"target": fid, "payload": {"type": "read_stream", "path": "open.txt"}}]
         )
     )[0]["result"]
-    assert r["content"] == "through the door"
+    assert bytes(r["bytes"]) == b"through the door"
     listing = (
         await seeded_kernel.send(
             [{"target": fid, "payload": {"type": "list", "path": ""}}]
@@ -98,8 +99,8 @@ async def test_open_leg_reads_and_writes(seeded_kernel, tmp_path):
 async def test_relative_root_escaping_cwd_refuses(seeded_kernel):
     fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", root="../x")
     for payload in (
-        {"type": "read", "path": "a.txt"},
-        {"type": "write", "path": "a.txt", "content": "x"},
+        {"type": "read_stream", "path": "a.txt"},
+        {"type": "write_stream", "path": "a.txt", "bytes": b"x", "truncate": True},
         {"type": "list", "path": ""},
     ):
         r = (await seeded_kernel.send([{"target": fid, "payload": payload}]))[0][
@@ -123,7 +124,12 @@ async def test_dotdot_path_on_open_in_cwd_bridge_refuses(seeded_kernel):
     fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = (
         await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "../../etc/passwd"}}]
+            [
+                {
+                    "target": fid,
+                    "payload": {"type": "read_stream", "path": "../../etc/passwd"},
+                }
+            ]
         )
     )[0]["result"]
     assert "escape" in r.get("error", "")
@@ -136,7 +142,12 @@ async def test_symlink_pointing_outside_cwd_refuses(seeded_kernel, tmp_path):
     fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress")
     r = (
         await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "innocent.txt"}}]
+            [
+                {
+                    "target": fid,
+                    "payload": {"type": "read_stream", "path": "innocent.txt"},
+                }
+            ]
         )
     )[0]["result"]
     assert "escape" in r.get("error", ""), f"symlink escape served: {r!r}"

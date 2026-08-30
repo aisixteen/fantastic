@@ -150,6 +150,9 @@ def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="ua_ai",
         context_window=32768,
+        # The chat store inherits ITS OWNER'S leg — the refusal turn this test
+        # polls history for has nowhere durable to land without one.
+        file_bridge_id=store_agent,
         # THE WALL: no ua_buy anywhere in the AI's reach
         can_call={"cli": "*"},
         callable_by={"ua_leg": ["send"], "ua_buy": ["send"]},

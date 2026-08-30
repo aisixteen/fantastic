@@ -7,7 +7,7 @@ name: sealed_by_default
 description: >
   A freshly declared io leg denies, and opening it is a conscious act. Five
   file_bridge legs and one exec_bridge leg differing ONLY in posture, plus a
-  yaml_state whose persistence was never wired — so every refusal below is
+  durable_memory whose persistence was never wired — so every refusal below is
   attributable to one declared fact and nothing else.
 
   The manifest declares NO grants at all. Every roster agent is a child of the
@@ -25,7 +25,7 @@ expect:
     # Runs first on purpose: it is what creates `data/`, and it is the baseline
     # every seal below is measured against.
     - name: an open writable leg moves a byte
-      reach: {from: static_loader, to: rw, send: {type: write, path: baseline.txt, content: "x"}}
+      reach: {from: static_loader, to: rw, send: {type: write_stream, path: baseline.txt, bytes_utf8: "x", truncate: true}}
       expect: {allow: true}
     - name: a sealed leg refuses the same caller the same directory
       reach: {from: static_loader, to: sealed_fs, send: {type: list, path: ""}}
@@ -66,7 +66,10 @@ expect:
       expect: {reason: unauthorized, side: null}
       because: C23
     - name: and a write over the same sealed edge is refused the same way
-      operator: {to: sealed_fs, send: {type: write, path: nope.txt, content: "x"}}
+      # `write_stream` — the string `write` verb died with the envelope-escaping
+      # failure it invited. The SEAL is what is under test, and it refuses
+      # before the payload is even examined, so no bytes are needed here.
+      operator: {to: sealed_fs, send: {type: write_stream, path: nope.txt}}
       expect: {reason: unauthorized, side: null}
       because: C23
     - name: the refusal was not a quiet no-op — the byte never reached the disk
@@ -89,7 +92,7 @@ expect:
       expect: {contains: {files.*.name: baseline.txt}}
       because: C20
     - name: and refuses to write, without the call gate being involved at all
-      operator: {to: ro, send: {type: write, path: blocked.txt, content: "x"}}
+      operator: {to: ro, send: {type: write_stream, path: blocked.txt, bytes_utf8: "x", truncate: true}}
       expect: {reason: unauthorized}
       because: C20
     - name: which the disk confirms
@@ -104,7 +107,7 @@ expect:
     # looking — caught 2026-08-28 when the matcher was taught to refuse a path
     # that resolves to nothing.
     - name: a file written through one leg is invisible to a leg rooted elsewhere
-      operator: {to: vault, send: {type: write, path: vault_only.txt, content: "v"}}
+      operator: {to: vault, send: {type: write_stream, path: vault_only.txt, bytes_utf8: "v", truncate: true}}
       expect: {contains: {written: true}}
       because: C20
     - name: the vault leg sees its own file

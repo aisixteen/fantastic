@@ -463,7 +463,7 @@ async def test_cli_context_renders_both_phases(capsys):
 
 # ─── the GOAL must survive every strategy ───────────────────────
 #
-# MEASURED FAILURE (2026-08-20, live qwen3.8-27b on the `live_plan` probe, four runs).
+# MEASURED FAILURE (2026-08-20, live the model on the `live_plan` probe, four runs).
 # The task is stated ONCE, in the first user turn. On a long run the body overflows and
 # `compact` — the DEFAULT — splits at `recent_n` and replaces the whole overflow with an
 # LLM summary. The oldest turn IS the task framing, so the goal is the FIRST thing at

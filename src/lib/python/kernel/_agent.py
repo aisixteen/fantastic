@@ -230,7 +230,7 @@ class Agent:
 
         `root_path` is a DERIVED ADDRESS ONLY — the loader agent owns
         all disk I/O; an Agent never reads or writes it. Sidecar bundles
-        (file / yaml_state / readme) compute their paths under it, and
+        (file / durable_memory / readme) compute their paths under it, and
         the loader maps `<root_path>/agent.json` ←→ this record. Children
         address at `<root_path>/agents/<child_id>/`.
         """
@@ -644,7 +644,9 @@ class Agent:
                 joiner = _current_sender.get()
                 if joiner is not None:
                     orig_verb = (entry.get("payload") or {}).get("type")
-                    denial = self._gate(joiner, orig_verb, target, entry.get("payload") or {})
+                    denial = self._gate(
+                        joiner, orig_verb, target, entry.get("payload") or {}
+                    )
                     if denial is not None:
                         return outcome(None, FAILED, denial)
                 dispatched.append(
@@ -1158,10 +1160,10 @@ class Agent:
         # in the router's view above all else.
         if a.description is not None:
             node["description"] = a.description
-        # Purpose comes from the agent's REFLECT, not its record: `mode` is often
-        # a bundle default (yaml_state is "data" unless told otherwise), so a
-        # record-only read reports nothing for exactly the agents whose purpose
-        # you most need — and would be a second source of truth.
+        # Purpose comes from the agent's REFLECT, not its record: much of what an
+        # agent is FOR lives in its reflect (its `sentence`, its verbs), not as a
+        # record field, so a record-only read reports nothing for exactly the agents
+        # whose purpose you most need — and would be a second source of truth.
         for k in self._PURPOSE_KEYS:
             if raw.get(k) is not None:
                 node[k] = raw[k]
@@ -1579,7 +1581,7 @@ class Agent:
                 # doc naming only its arguments, so "send it to X" could mean X
                 # performs it, X is created under something, or X is the parent —
                 # and only the last was true. Measured 2026-08-24 (`live_subai`,
-                # qwen3.8-27b): the model asked "But how do I invoke create_agent?
+                # the model): the model asked "But how do I invoke create_agent?
                 # Which target?", never resolved it, and finished 16 turns with
                 # `agents_created: []`.
                 #
@@ -1843,10 +1845,10 @@ class Agent:
 
         `record` is the agent's CURRENT record (`{}` at create, where none exists yet),
         so a bundle validates the state the write WILL produce rather than the patch in
-        isolation. Without it a cross-field rule is unenforceable: `exec_bridge` refuses
-        an `interpreter` that is not in `interpreters`, and validating the patch alone
-        rejected `update_agent id=x interpreter=<already on x's allowlist>` — a legal
-        write refused because the key it must be checked against was not in the same
+        isolation. Without it a cross-field rule is unenforceable: a rule that reads two
+        record fields together cannot judge a patch that names only one, and validating
+        the patch alone rejects a legal write because the field it must be checked
+        against lives on the existing record and was not in the same
         payload. A false refusal is worse than no check: it makes the correct operation
         look impossible.
 
@@ -1913,8 +1915,8 @@ class Agent:
         # payload rides in `meta` and merges over the baseline at construction.
         # Refuse BEFORE the agent exists, so a bad wiring value never becomes a record
         # that boots, half-works, and fails three calls later somewhere else.
-        # No record exists yet, so the merged view IS the patch — an `interpreter`
-        # with no `interpreters` beside it genuinely cannot run and is refused here.
+        # No record exists yet, so the merged view IS the patch — a create that
+        # omits a field its handler requires genuinely cannot run and is refused here.
         if why := self._refuse_meta(handler_module, meta, {}):
             return refusal(INVALID_META, why)
         rec = parent.create(handler_module, id=payload.get("id"), **meta)
@@ -1954,7 +1956,7 @@ class Agent:
         severs the agent from its own parent and children and still answers
         `{"updated": true}`. Send the map WHOLE.
 
-        Measured 2026-08-24 (`live_subai`, qwen3.8-27b): the model reasoned the
+        Measured 2026-08-24 (`live_subai`, the model): the model reasoned the
         danger out correctly — "if update_agent does a shallow merge ... I'd lose
         the baseline grants" — could not settle it from `reflect`, chose to
         establish it empirically, and lost the run to a repetition loop while
@@ -2168,7 +2170,7 @@ class Agent:
     # The CALL gate belongs here too. It was left out, and the omission is not
     # cosmetic: `can_call`/`callable_by` decide whether a send is even attempted,
     # and with them absent an agent cannot read its OWN authority — it can only
-    # discover it by trying. Measured 2026-08-24 (`live_subai`, qwen3.8-27b): the
+    # discover it by trying. Measured 2026-08-24 (`live_subai`, the model): the
     # model wrote "the key question is: what are MY (ai's) can_call grants? The
     # full reflect didn't include can_call/callable_by", and across the day it
     # spent whole turns probing empirically — a throwaway `_probe_script` agent, a

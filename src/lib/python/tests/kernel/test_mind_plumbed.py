@@ -13,7 +13,6 @@ mind just sends text turns and teaches its tool convention via `system_prompt`.
 from __future__ import annotations
 
 import asyncio
-import sys
 import json
 import secrets
 import time
@@ -142,8 +141,7 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
                                 "parent_id": "kernel_state",
                                 "handler_module": "exec_bridge.tools",
                                 "id": "the_mind",
-                                "interpreters": [sys.executable],
-                                "shim": "python",
+                                **__import__("_testkit").py_runner_meta(),
                                 "ingress_rule": "allow_all_ingress",
                                 # Deny-all: the mind drives the AI — an explicit lateral grant.
                                 "can_call": {"the_ai": "*"},
@@ -155,7 +153,12 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
         )["id"]
         r = (
             await k.send(
-                [{"target": mind, "payload": {"type": "start", "code": MIND_CODE}}]
+                [
+                    {
+                        "target": mind,
+                        "payload": __import__("_testkit").py_start_payload(MIND_CODE),
+                    }
+                ]
             )
         )[0]["result"]
         jid = r["job_id"]
@@ -351,8 +354,7 @@ async def _spawn_plan_mind(k, store_agent, scripts):
                             "parent_id": "kernel_state",
                             "handler_module": "exec_bridge.tools",
                             "id": "the_mind",
-                            "interpreters": [sys.executable],
-                            "shim": "python",
+                            **__import__("_testkit").py_runner_meta(),
                             "ingress_rule": "allow_all_ingress",
                             # Deny-all: the mind drives the AI — an explicit lateral grant.
                             "can_call": {"the_ai": "*"},
@@ -364,7 +366,12 @@ async def _spawn_plan_mind(k, store_agent, scripts):
     )["id"]
     r = (
         await k.send(
-            [{"target": mind, "payload": {"type": "start", "code": PLAN_MIND_CODE}}]
+            [
+                {
+                    "target": mind,
+                    "payload": __import__("_testkit").py_start_payload(PLAN_MIND_CODE),
+                }
+            ]
         )
     )[0]["result"]
     await _wait_ready(k, mind, r["job_id"])

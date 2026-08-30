@@ -47,6 +47,9 @@ def make_provider(id, kernel):
         # choice — `ai_core` is unchanged either way.
         tool_use=bool(rec.get("tool_use", False)),
         max_tokens=int(rec.get("max_tokens") or MAX_TOKENS),
+        # RUNNER (meta) params — sampling/budget knobs saved on the record, distinct
+        # from connection (endpoint/key/model). Merged verbatim into the request body.
+        sampling=rec.get("sampling"),
     )
 
 

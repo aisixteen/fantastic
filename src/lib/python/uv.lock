@@ -7,6 +7,7 @@ members = [
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cli",
+    "fantastic-durable-memory",
     "fantastic-exec-bridge",
     "fantastic-file-bridge",
     "fantastic-io-bridge",
@@ -23,7 +24,6 @@ members = [
     "fantastic-web-rest",
     "fantastic-web-ws",
     "fantastic-ws-bridge",
-    "fantastic-yaml-state",
 ]
 
 [[package]]
@@ -226,6 +226,17 @@ version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
 
 [[package]]
+name = "fantastic-durable-memory"
+version = "0.1.0"
+source = { editable = "bundled_agents/durable_memory" }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
+
+[[package]]
 name = "fantastic-exec-bridge"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/exec_bridge" }
@@ -260,6 +271,7 @@ dependencies = [
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
+    { name = "fantastic-durable-memory" },
     { name = "fantastic-exec-bridge" },
     { name = "fantastic-file-bridge" },
     { name = "fantastic-io-bridge" },
@@ -275,7 +287,6 @@ dependencies = [
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
     { name = "fantastic-ws-bridge" },
-    { name = "fantastic-yaml-state" },
 ]
 
 [package.dev-dependencies]
@@ -292,6 +303,7 @@ requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
+    { name = "fantastic-durable-memory", editable = "bundled_agents/durable_memory" },
     { name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" },
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
@@ -307,7 +319,6 @@ requires-dist = [
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
     { name = "fantastic-ws-bridge", editable = "bundled_agents/io/ws_bridge" },
-    { name = "fantastic-yaml-state", editable = "bundled_agents/yaml_state" },
 ]
 
 [package.metadata.requires-dev]
@@ -486,17 +497,6 @@ requires-dist = [
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
     { name = "websockets", specifier = ">=12,<17" },
 ]
-
-[[package]]
-name = "fantastic-yaml-state"
-version = "0.1.0"
-source = { editable = "bundled_agents/yaml_state" }
-dependencies = [
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
 
 [[package]]
 name = "fastapi"

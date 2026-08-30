@@ -16,7 +16,7 @@ roster:
   callable_by:
     ai: '*'
 - id: yaml_store
-  handler_module: yaml_state.tools
+  handler_module: durable_memory.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
@@ -25,7 +25,7 @@ roster:
   parent_id: <root.id>
   callable_by:
     ai: '*'
-- id: web
+- id: probe_web
   handler_module: web.tools
   parent_id: <root.id>
   can_call: '<{gid: [''read_stream''] for gid, *_ in GUARDS}>'

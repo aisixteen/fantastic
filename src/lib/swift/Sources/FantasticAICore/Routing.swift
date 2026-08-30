@@ -322,7 +322,7 @@ func routeReply(
         // PID, then target AND verb. Target+verb alone is NOT unique either: with two
         // calls in flight to one agent `[reply to kernel_state set]` is unmatchable —
         // measured 2026-08-07 (opus re-issued both deletes, then theorised "duplicate
-        // delivery" about its own retries) and again 2026-08-20 (qwen: "the reply queue
+        // delivery" about its own retries) and again 2026-08-20 (the model: "the reply queue
         // is running ahead of me", then re-polled forever). The PID is the same id
         // `ps`/`cancel` use, so a reply names a row the model can act on.
         let verb = payload["type"]?.asString ?? "?"

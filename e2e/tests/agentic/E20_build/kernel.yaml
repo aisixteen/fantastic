@@ -11,8 +11,10 @@
 # run.py before every run. Edit the probe, not this file.
 roster:
 - id: <agent_id>
-  handler_module: <executor>
+  handler_module: exec_bridge.tools
   parent_id: <root.id>
+  can_call:
+    totals: '*'
   callable_by:
     ai: '*'
 - id: kernel_store
@@ -26,10 +28,9 @@ roster:
   callable_by:
     ai: '*'
 - id: totals
-  handler_module: yaml_state.tools
+  handler_module: durable_memory.tools
   parent_id: <root.id>
-  callable_by:
-    ai: '*'
+  callable_by: '<{''ai'': ''*'', EXECUTOR_LEG: ''*''}>'
 - id: ai
   created_by: helpers.ai.connect
   can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',

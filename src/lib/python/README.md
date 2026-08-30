@@ -81,23 +81,25 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   serves a tree-shape index at `/` (with ↗ visit links for HTML-
   serving agents and ⊙ reflect popups). The browser frontend brings
   its own typed WS bridge — see the TypeScript frontend kernel below.
-- **exec_bridge** — the PROCESS edge of the io family, and the executor
-  the root reflect advertises. Gated like any io_bridge leg and **SEALED
-  BY DEFAULT** (`ingress_rule=allow_all_ingress` to open), it spawns ONLY an
-  interpreter the record allowlists in `interpreters` — one spawn surface
-  (`proc`), no per-call override, no default, no PATH fallback, so an
-  unlisted `interpreter` is refused at write time and again at `start`.
-  The interpreter is a FIELD, so "a python agent" is a record, not a
-  bundle: `start` / `status` / `stop` / `interrupt` / `clear` / `boot`,
+- **exec_bridge** — the PROCESS edge of the io family, a general-purpose
+  COMMAND runner. Gated like any io_bridge leg and **SEALED BY DEFAULT**
+  (`ingress_rule=allow_all_ingress` to open), it spawns ONLY a command line
+  matching one of the record's `allowed` regexes — one spawn surface
+  (`proc`), no per-call override, no default, no PATH fallback, so a line
+  that matches nothing is refused, naming the patterns. It is NOT a code
+  runner: no `code` field, no `interpreters`, no shim. A durable program is
+  a FILE (written over a stream) plus a command that runs it: `start
+  {command, args}` / `status` / `stop` / `interrupt` / `clear` / `boot`,
   the job table, the connector relay and the mail contract are all
   language-blind. A program speaks the kernel over the inherited
-  `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); `shim:'python'`
-  prepends the wire client, and the shim is optional because the WIRE is
-  the contract. An allowlisted interpreter is a NAMED interpreter, not a
-  sandbox — the operator chose which runtime and environment, nothing
+  `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); to get a `kernel` global
+  it includes the reference wire client (`exec_bridge/_connector.py`) in
+  its own source — the bridge prepends nothing. An allowlisted command is a
+  NAMED command, not a sandbox — the operator chose which commands may run,
+  nothing
   more.
-- **yaml_state** — durable YAML key-value memory agent; mount anywhere
-  (`mode=mem|data`). Persists `state.yaml` THROUGH a gated `file_bridge`
+- **durable_memory** — modeless durable key-value memory agent; mount anywhere
+  (no `mode` — the key names its purpose). Persists `state.yaml` THROUGH a gated `file_bridge`
   agent (`file_bridge_id`, deny-all by default) — owns no disk surface of
   its own; failfast until wired. Reached like any other unit by id
   (`send(<id>, {...})`), so compute, inference, and memory share one
@@ -294,8 +296,8 @@ uv run pytest -n auto
     ├── cli/                                  # stdout renderer (ephemeral — composed when isatty)
     ├── web/                                  # HTTP+WS transport (uvicorn) + favicon
     ├── file/, scheduler/                     # filesystem + recurring tasks
-    ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default subprocess spawner, interpreter ALLOWLIST (`interpreters`), one spawn surface (proc.py), wire + optional shim; THE one executor
-    ├── yaml_state/                           # durable YAML key-value memory (yaml_state.tools)
+    ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default command runner, regex command ALLOWLIST (`allowed`), one spawn surface (proc.py), control wire; a program is a FILE + a command
+    ├── durable_memory/                       # modeless durable key-value memory (durable_memory.tools)
     ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
     ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core

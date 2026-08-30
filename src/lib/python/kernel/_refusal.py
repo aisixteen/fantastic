@@ -139,5 +139,9 @@ def guard_agent_id(verb: str, agent_id: object) -> dict | None:
     if ":" in agent_id:
         # The minted-pid namespace. An id carrying a colon would collide with
         # `<agent>:<hex>` in the one id space the ledger and task table share.
-        return bad(verb, "id", f"a name without ':' (the minted-pid namespace); got {agent_id!r}")
+        return bad(
+            verb,
+            "id",
+            f"a name without ':' (the minted-pid namespace); got {agent_id!r}",
+        )
     return None

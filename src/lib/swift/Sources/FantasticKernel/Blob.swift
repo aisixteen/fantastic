@@ -245,9 +245,54 @@ extension Kernel {
     public func installLedgerPersistence() async {
         let n = await rehydrateLedger()
         if n > 0 { print("  [ledger] rehydrated \(n) settled execution(s)") }
+        let gate = LedgerFlushGate()
         setLedgerFlusher { [weak self] in
             guard let self else { return }
-            Task { await self.flushLedger() }
+            Task {
+                // ONE writer, and always a pass AFTER the last settle.
+                guard await gate.mark() else { return }
+                repeat {
+                    await gate.beginPass()
+                    await self.flushLedger()
+                } while await gate.needsAnother()
+            }
         }
+    }
+}
+
+/// Serialises ledger flushing: one writer at a time, and a final pass after the
+/// last settle.
+///
+/// `flushLedger` rewrites the WHOLE settled map, so spawning one per settle —
+/// which is what `Task { await flushLedger() }` did — means an agentic run
+/// stacks O(n) concurrent rewrites of an O(n) snapshot. Rust had the same shape
+/// with a flag it cleared before awaiting, and it saturated multiple cores on
+/// `agentic.plan` until the writer was serialised.
+///
+/// An actor rather than two atomics: `mark` and `needsAnother` must decide
+/// together, and the actor gives that for free — a settle observed after
+/// `needsAnother` releases the writer starts a fresh one, and one observed
+/// before it is caught by the next lap.
+actor LedgerFlushGate {
+    private var dirty = false
+    private var running = false
+
+    /// Record a change. Returns true if THIS caller becomes the writer.
+    func mark() -> Bool {
+        dirty = true
+        if running { return false }
+        running = true
+        return true
+    }
+
+    /// Clear the flag BEFORE snapshotting, so a settle landing during the pass
+    /// re-dirties and is caught rather than dropped.
+    func beginPass() { dirty = false }
+
+    /// True if more arrived during the pass. When false, the writer is released.
+    func needsAnother() -> Bool {
+        if dirty { return true }
+        running = false
+        return false
     }
 }

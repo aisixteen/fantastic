@@ -77,7 +77,6 @@ CONTRACT_DIR = Path(__file__).resolve().parents[5] / "contract"
 # a coverage hole instead of a red build.
 
 
-
 @dataclass(frozen=True)
 class Requirement:
     """One named invariant this suite can pin. `level` decides what a failure
@@ -206,28 +205,37 @@ _EXPECT_KEYS = frozenset(
     {"hydration", "error_contains", "reboot", "steps", "closed_roster_sender"}
 )
 # One step = exactly one verb key + optional `expect`/`because`/`name`.
-_STEP_VERBS = frozenset({
-    "reach",      # send AS an agent — gated; the reachability primitive
-    "operator",   # send with OPERATOR authority — setup, and side-effect reads
-    "grant",      # sugar: operator update_agent on can_call / callable_by
-    "revoke",     # sugar: the same, removing an entry
-    "reboot",     # persist + rehydrate
-    "assert_tree",# the dehydrated shape
-    "start",      # fire a send WITHOUT awaiting it, bound to a name
-    "await_task", # block until a bound send is visible in `ps`
-    "collect",    # await a bound send and assert its Outcome
-    # COMPUTED SWEEPS — derived from the manifest, not hand-listed. A hand
-    # written probe list can only confirm the edges its author thought of; these
-    # walk what the config actually declares, so a grant somebody added and
-    # forgot to assert is still probed.
-    "reconcile_grants",   # every declared (sender,target,verb) triple
-    "sweep_undeclared",   # every ordered pair: nothing rides along
-})
+_STEP_VERBS = frozenset(
+    {
+        "reach",  # send AS an agent — gated; the reachability primitive
+        "operator",  # send with OPERATOR authority — setup, and side-effect reads
+        "grant",  # sugar: operator update_agent on can_call / callable_by
+        "revoke",  # sugar: the same, removing an entry
+        "reboot",  # persist + rehydrate
+        "assert_tree",  # the dehydrated shape
+        "start",  # fire a send WITHOUT awaiting it, bound to a name
+        "await_task",  # block until a bound send is visible in `ps`
+        "collect",  # await a bound send and assert its Outcome
+        # COMPUTED SWEEPS — derived from the manifest, not hand-listed. A hand
+        # written probe list can only confirm the edges its author thought of; these
+        # walk what the config actually declares, so a grant somebody added and
+        # forgot to assert is still probed.
+        "reconcile_grants",  # every declared (sender,target,verb) triple
+        "sweep_undeclared",  # every ordered pair: nothing rides along
+    }
+)
 _STEP_META = frozenset({"expect", "because", "name"})
-_EXPECT_MATCHERS = frozenset({
-    "allow", "side", "reason", "status",
-    "contains", "not_contains", "error_contains",
-})
+_EXPECT_MATCHERS = frozenset(
+    {
+        "allow",
+        "side",
+        "reason",
+        "status",
+        "contains",
+        "not_contains",
+        "error_contains",
+    }
+)
 
 # `<bundle>_<6 hex>` — the shape `Agent.create` mints when a spec carries no id
 # (`kernel/_agent.py:885-892`). An id-less manifest entry duplicates on EVERY
@@ -374,9 +382,7 @@ def _parse_steps(raw) -> tuple[Step, ...]:
                 f" verbs {sorted(_STEP_VERBS)}, meta {sorted(_STEP_META)}"
             )
         if len(verbs) != 1:
-            raise ConfigError(
-                f"{where}: needs exactly ONE verb, got {verbs or 'none'}"
-            )
+            raise ConfigError(f"{where}: needs exactly ONE verb, got {verbs or 'none'}")
         kind = verbs[0]
         args = item[kind]
         if args is None:
@@ -393,9 +399,7 @@ def _parse_steps(raw) -> tuple[Step, ...]:
                 f" known {sorted(_EXPECT_MATCHERS)}"
             )
         if exp.get("allow") is True and exp.get("side") is not None and "side" in exp:
-            raise ConfigError(
-                f"{where}: `side:` only means something on a denial"
-            )
+            raise ConfigError(f"{where}: `side:` only means something on a denial")
         if kind in ("reach", "start"):
             for req in ("from", "to", "send"):
                 if req not in args:
@@ -803,6 +807,22 @@ async def dehydrate(kernel, *, disk: bool = False) -> dict:
 # ─── reach: THE reachability primitive ──────────────────────────
 
 
+def _decode_bytes_fields(payload: dict) -> dict:
+    """`bytes_utf8: "text"` in a spec becomes real `bytes: b"text"` at dispatch.
+
+    The corpus is YAML — cross-runtime DATA — and YAML/JSON cannot carry bytes,
+    but the stream verbs (`write_stream`) take nothing else. This is the one
+    translation, applied at the engine's dispatch points, so a spec stays
+    expressible in every runtime's runner without a string body ever crossing
+    an envelope.
+    """
+    if "bytes_utf8" in payload:
+        out = {k: v for k, v in payload.items() if k != "bytes_utf8"}
+        out["bytes"] = str(payload["bytes_utf8"]).encode("utf-8")
+        return out
+    return payload
+
+
 async def reach(kernel, sender: str, target: str, payload: dict) -> dict:
     """Send `payload` to `target` AS `sender` and return the raw reply.
 
@@ -816,6 +836,7 @@ async def reach(kernel, sender: str, target: str, payload: dict) -> dict:
     A handler that answers `None` is reported as `{}` — a non-denial. Denials
     are always dicts, so `.get("reason")` stays the one question a caller asks.
     """
+    payload = _decode_bytes_fields(payload)
     with sender_context(sender):
         reply = (await kernel.send([{"target": target, "payload": payload}]))[0][
             "result"
@@ -952,6 +973,18 @@ def _match(step: Step, reply: dict, outcome: dict | None = None) -> None:
         if got != exp["status"]:
             fail(f"expected status {exp['status']!r}, got {got!r}")
     for path, want in (exp.get("contains") or {}).items():
+        # The stream verbs answer BYTES; a YAML spec can only write text. The
+        # mirror of `bytes_utf8` on the send side: a contains path ending in
+        # `bytes` compares against the utf-8 decoding, so a spec can assert on
+        # streamed content without a string body ever crossing an envelope.
+        if path.split(".")[-1] == "bytes":
+            got = [
+                v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else v
+                for v in _dig(reply, path)
+            ]
+            if not any(want in g for g in got if isinstance(g, str)):
+                fail(f"{path} does not contain {want!r} (got {got!r})")
+            continue
         if want not in _dig(reply, path):
             fail(f"{path} does not contain {want!r} (got {_dig(reply, path)!r})")
     for path, unwanted in (exp.get("not_contains") or {}).items():
@@ -1026,7 +1059,12 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
             # about an agent's reach, which is what `reach` is for.
             out = (
                 await h.kernel.ctx.send(
-                    [{"target": args["to"], "payload": args.get("send") or {}}]
+                    [
+                        {
+                            "target": args["to"],
+                            "payload": _decode_bytes_fields(args.get("send") or {}),
+                        }
+                    ]
                 )
             )[0]
             outcome = out
@@ -1047,9 +1085,7 @@ async def run_steps(h: "Hydration", steps: tuple[Step, ...]) -> "Hydration":
                     raise ConfigError(
                         f"{step}: `same_as: before_reboot` with no preceding reboot"
                     )
-                if _canon_tree(got.get("tree")) != _canon_tree(
-                    tree_before.get("tree")
-                ):
+                if _canon_tree(got.get("tree")) != _canon_tree(tree_before.get("tree")):
                     raise StepFailure(
                         f"{step}: the roster did not come back identical\n"
                         f"  before: {tree_before.get('tree')!r}\n"
@@ -1141,7 +1177,11 @@ async def reach_outcome(kernel, sender: str, target: str, payload: dict) -> dict
     """`reach`, but returning the whole OUTCOME rather than just the result —
     `start`/`collect` assert on `status`, which only the outcome carries."""
     with sender_context(sender):
-        return (await kernel.send([{"target": target, "payload": payload}]))[0]
+        return (
+            await kernel.send(
+                [{"target": target, "payload": _decode_bytes_fields(payload)}]
+            )
+        )[0]
 
 
 # ─── the computed sweeps ────────────────────────────────────────
@@ -1156,8 +1196,7 @@ async def reach_outcome(kernel, sender: str, target: str, payload: dict) -> dict
 def _manifest_specs(cfg) -> dict[str, dict]:
     """The manifest entries by id — the DECLARATION, never evidence."""
     return {
-        spec["id"]
-        : spec
+        spec["id"]: spec
         for ln in cfg.loaders
         for spec in ln.declared_agents
         if spec.get("id")

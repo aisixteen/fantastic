@@ -14,8 +14,7 @@ from kernel import sender_context
 MANIFEST = """\
 agents:
   - id: memory
-    handler_module: yaml_state.tools
-    mode: mem
+    handler_module: durable_memory.tools
   - id: worker
     handler_module: file_bridge.tools
     ingress_rule: allow_all_ingress

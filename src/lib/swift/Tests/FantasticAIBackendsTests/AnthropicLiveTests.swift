@@ -11,7 +11,7 @@
 //   ANTHROPIC_LIVE=1 \
 //   ANTHROPIC_ENDPOINT=http://127.0.0.1:4000/cc/v1 \
 //   ANTHROPIC_API_KEY=keyless \
-//   ANTHROPIC_MODEL=qwen3.8-27b \
+//   ANTHROPIC_MODEL=<your tool-calling model> \
 //   swift test --filter AnthropicLive
 //
 // Skipped otherwise, so `swift test` stays hermetic and free.

@@ -15,7 +15,6 @@ on disk via `boot_root`→`write_record`).
 
 from __future__ import annotations
 
-import re
 
 from pathlib import Path
 
@@ -192,17 +191,12 @@ async def test_no_doc_desc_is_truncated_mid_sentence(kernel):
 
 
 async def test_self_extension_DOC_states_the_execution_model(kernel):
-    """The doc the pointer SENDS YOU TO must carry the contract, not just the pointer.
+    """The doc the pointer SENDS YOU TO must carry the CURRENT contract.
 
-    Measured 2026-08-06: the distilled `self_extension` was corrected to say the `code`
-    is a script run top to bottom, but THIS doc — the one that string tells a model to
-    read before writing `code` — still said only "the `code` IS the tool". `top to
-    bottom` existed in three places repo-wide and none of them was here, so a model
-    that DID follow the pointer still learned nothing about execution. gemma-4-12B
-    authored `def run(payload): …` twice and shipped two inert agents.
-
-    The reflect string is for the model that never reads the manual; this is for the
-    one that does. Both have to say it."""
+    The `code` field is gone. The doc must state the model that DOES work — a
+    durable program is a FILE (written over streams) plus a command that runs it —
+    plainly enough that a model builds instead of declaring the task impossible,
+    and must NOT teach the recipe that is now refused at `create_agent`."""
     r = (
         await kernel.send(
             [
@@ -214,9 +208,15 @@ async def test_self_extension_DOC_states_the_execution_model(kernel):
         )
     )[0]["result"]
     body = r["readme"]["body"].lower()
-    assert "top to bottom" in body, "the doc must state HOW the code runs"
-    assert "def " in body, "the doc must warn that a bare def does nothing"
-    assert "module level" in body, "the doc must say where the work goes"
+    # The live model, stated plainly: a durable program is a FILE plus a command,
+    # no `code` field, and the two live paths named.
+    assert "no `code` field" in body or "there is no `code`" in body, (
+        "must say the code field is gone"
+    )
+    assert "durable program is a file" in body, "must state the file+command model"
+    assert "write_stream" in body, "must teach the stream verbs for files"
+    assert "command" in body, "must point at the command runner"
+    assert "code:'" not in body, "must NOT teach the dead inline-code recipe"
 
 
 async def test_readme_nested_key_reachable(kernel):
@@ -296,27 +296,15 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
 
     This test used to assert `self_extension not in r`, on the theory that naming the
     affordance in `more` was enough. It is not, and the failure is measured, not
-    theoretical: on 2026-08-05 claude-opus-5 was given only the distilled reflect,
-    read `more`, understood that it could author durable tools — and then invented
-    `handler_module:"local_runner.script"`, a module that does not exist, because
-    nothing had ever told it the real one. The executor's actual module name appeared
-    ZERO times in a 38 KB session. It built nothing.
+    theoretical: a model given only the distilled reflect, which understood it could
+    build a durable tool but was not told the SHAPE, invented a recipe that could not
+    run and built nothing (2026-08-05/06, opus-5 and gemma-4-12B in separate runs).
 
-    So the rule is sharper than "keep the pointer": an affordance you cannot NAME is
-    not discoverable. The prose may leave; the executor's name may not.
-
-    A SECOND fact joined it on 2026-08-06, for the same reason and with the same kind
-    of evidence. The line used to say only "the `code` IS the tool" — which reads as
-    "the code DEFINES the tool", so the callable is a function inside it.
-    gemma-4-12B authored `def run(payload): ...` and sent `{type:'run'}` expecting a
-    call, TWICE in separate runs. Both agents were inert (one was even valid Python),
-    nothing was ever written, and `queued:true` never appeared because no job stayed
-    alive. It had planned the structure correctly and lost on the contract.
-
-    The split is by WHO READS WHAT: opus-5 opened `readme='self-extension'` and got
-    this right; gemma never opened it and had only this string. A fact the readme owns
-    is a fact weak models do not have — so an affordance whose CONTRACT you do not
-    know is not usable, and the execution model stays here too."""
+    So the rule is sharper than "keep the pointer": a contract you do not know is not
+    usable, and the weak models are exactly the ones that never follow the pointer to
+    read it. The prose may leave; the SHAPE of a durable program may not — the
+    distilled string must name the live paths (write a FILE over `write_stream`, run
+    it with a `command`) and must not resurrect the withdrawn `code` field."""
     r = (await kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0][
         "result"
     ]
@@ -325,80 +313,30 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
 
     se = r.get("self_extension")
     assert se, "distilled reflect must still carry a self_extension pointer"
-    assert len(se) < 700, (
+    assert len(se) < 900, (
         f"pointer must stay a pointer, not the prose ({len(se)} chars)"
     )
-    # THE POINT: a real, registered executor module, not a hint that one exists.
-    m = re.search(r"handler_module:'([a-z_]+\.[a-z_]+)'", se)
-    assert m, f"the pointer must NAME the executor; got {se!r}"
-    # It must be an executor this build actually INSTALLED — derived from the live
-    # entry-point registry, not a hand-written const. Advertising a module that is not
-    # installed is the same defect as naming none: on 2026-08-05 opus-5, given a name it
-    # could not use, authored `local_runner.script` and built nothing.
-    installed = {b["handler_module"] for b in Agent._available_bundles()}
-    assert m.group(1) in installed, (
-        f"pointer names {m.group(1)!r}, which is not installed. installed={sorted(installed)}"
-    )
-    assert "create_agent" in se, "must show how to author, not just that you may"
-    # THE SECOND POINT: the EXECUTION MODEL, not only the affordance and its name.
-    # `def run(): ...` is what a model writes when told the code "is the tool".
-    low = se.lower()
-    assert "script" in low, f"must say the code is a SCRIPT; got {se!r}"
-    assert "top to bottom" in low, f"must say HOW it runs; got {se!r}"
-    assert "def" in low, f"must warn that a bare def does nothing; got {se!r}"
-    # THE THIRD POINT, same class as the first: the fields WITHOUT WHICH NOTHING RUNS.
-    # The advertised executor is an io leg with an interpreter ALLOWLIST, so a
-    # `create_agent` carrying only `code` produces an agent that is created, reported
-    # created, and inert — no interpreter to spawn, and a sealed gate that denies the
-    # `boot` whose reply `create_agent` discards. Unguessable + never mentioned is
-    # exactly what cost the 2026-08-05 run when the executor itself was unnamed.
-    assert "interpreters" in se or "interpreter" in se, (
-        f"must name the interpreter field the executor cannot run without; got {se!r}"
-    )
-    assert "ingress_rule" in se, (
-        f"must name the gate, or the authored agent is silently sealed; got {se!r}"
-    )
-
-    more = r["more"]
-    assert "readme:'index'" in more, "must name the escalation payload"
-    assert "detail:'full'" in more, "must name the full view"
-    assert "self-extension" in more and "durable tools" in more
+    # It must not resurrect the dead recipe, and it must name the live paths.
+    assert "code:'" not in se, "pointer must not teach the withdrawn `code` field"
+    assert "write_stream" in se, "pointer must name the stream write path"
 
 
-async def test_full_reflect_advertises_only_installed_executors(kernel):
-    """Both directions, derived: every executor NAMED is installed, and every known
-    executor that IS installed gets named. python was the last runtime whose list was
-    hand-written — rust (`reflect.rs::registered_executors`) and swift
-    (`SystemVerbs.swift::scriptExecutorsHere`) intersect with their registries, so this
-    pins the same property here rather than leaving one runtime able to drift.
-
-    The scan is a HANDLER-MODULE shape, not an executor NAME. It used to be
-    `[a-z_]+_runtime\\.tools`, which encodes the naming convention of the bundle that
-    happened to hold the role: when `exec_bridge.tools` took it over, that regex matched
-    nothing, `named` came out empty, and the test went green on a kernel advertising an
-    executor it had never checked. Same scar as the probes' `"runtime" in
-    handler_module` — assert the property (named ⇔ installed), never the name."""
-    from kernel_state.tools import _EXECUTORS
-
+async def test_full_reflect_names_no_dead_authoring_recipe(kernel):
+    """Self-authoring is withdrawn, so the full reflect must not advertise the old
+    `code`/interpreter/shim recipe — a model following a dead recipe burns turns
+    on a `create_agent` now refused. Replaces the old advertised-executors test,
+    whose invariant is moot while nothing is advertised."""
     r = (
         await kernel.send(
             [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
         )
     )[0]["result"]
     se = r["self_extension"]
-    installed = {b["handler_module"] for b in Agent._available_bundles()}
-
-    named = set(re.findall(r"\b([a-z_]+\.tools)\b", se))
-    assert named <= installed, (
-        f"advertised but not installed: {sorted(named - installed)}"
-    )
-    expected = {m for m in _EXECUTORS if m in installed}
-    assert named == expected, f"named={sorted(named)} expected={sorted(expected)}"
-    for module in named:
-        assert _EXECUTORS[module] in se, f"{module} named without its receive shape"
-
-
-# ─── non-root bundle: keyed-fetchable, no root frame ───────────
+    for dead in ("code:'", "code=", "interpreters:", "shim:"):
+        assert dead not in se, (
+            f"full reflect still teaches the withdrawn recipe: {dead!r}"
+        )
+    assert "write_stream" in se and "command" in se.lower()
 
 
 async def test_non_root_bundle_no_frame_but_keyed(seeded_kernel):

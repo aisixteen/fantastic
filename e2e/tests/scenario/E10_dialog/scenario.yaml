@@ -22,7 +22,7 @@ limits:
   idle_seconds: 100
 
 # The fixture, by ROLE rather than by bundle name: a compiled kernel can only
-# run bundles compiled into it, so `store` is `yaml_state` on rust/swift and an
+# run bundles compiled into it, so `store` is `durable_memory` on python, `yaml_state` on rust/swift, and an
 # in-process handler on python/js. The role is the contract; the runner picks
 # the implementation it has.
 roster:

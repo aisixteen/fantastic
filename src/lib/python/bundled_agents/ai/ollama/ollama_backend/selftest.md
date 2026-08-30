@@ -2,7 +2,7 @@
 
 > scopes: kernel, ai, persistence, http
 > requires: `uv sync`; live ollama at a reachable endpoint with a
-> tool-calling model (gemma4:e2b, llama3.1+, qwen2.5+); tests run
+> tool-calling model (gemma4:e2b, llama3.1+); tests run
 > against a running `fantastic` so the provider HTTP client +
 > in-flight tasks stay alive across calls
 > out-of-scope: HTTP routes (covered by webapp selftest), browser
@@ -19,7 +19,7 @@ process-memory. Multi-step tests would lose state between separate
 
 ASK USER which provider + model:
 - ollama endpoint (default `http://localhost:11434`)
-- model name (e.g. `gemma4:e2b`, `qwen2.5:3b`, `llama3.1:8b`)
+- model name (e.g. `gemma4:e2b`, `llama3.1:8b`)
 
 Verify reachable BEFORE wiping state:
 ```bash
@@ -68,7 +68,7 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/s.log
 ### Test 1: send works without file_bridge_id (history auto-mounts)
 
 ollama has no api_key sidecar, so it needs NO `file_bridge_id`. Its
-per-client history auto-mounts as a `chat` yaml_state persisted THROUGH
+per-client history auto-mounts as a `chat` durable_memory persisted THROUGH
 the loader (the AI writes no disk itself).
 
 ```bash
@@ -93,7 +93,7 @@ is a string (default `compact`).
 ### Test 3: simple send streams tokens, persists history
 
 The default caller is `client_id="cli"` (REPL/daemon flow). History is
-per-client, persisted THROUGH the loader in a mounted chat yaml_state —
+per-client, persisted THROUGH the loader in a mounted chat durable_memory —
 the AI writes no disk itself. Read it back via the `history` verb (NOT a
 chat_<client>.json sidecar — that path is gone). A different `client_id`
 addresses a different thread.
@@ -149,7 +149,7 @@ call $OB '{"type":"send","text":"my favorite color is teal, remember it"}' >/dev
 call $OB '{"type":"send","text":"what color did I just say?"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final','').lower())"
 ```
 Expected: response mentions "teal" — proves the history round-trip via the
-mounted chat yaml_state (persisted through the loader).
+mounted chat durable_memory (persisted through the loader).
 
 ### Test 6: history verb returns messages
 

@@ -1,6 +1,6 @@
 """The no-call nudge — one runtime reminder when a CHAIN turn dispatched nothing.
 
-Measured 2026-08-25 (`live_subai` / `live_subai_graph`, qwen3.8-27b, twice each):
+Measured 2026-08-25 (`live_subai` / `live_subai_graph`, the model, twice each):
 mid-task the model wrote "Let me send {type:'list_agents'} to kernel" INSIDE its
 thinking, ended the completion without the envelope, and the no-call turn ended
 the chain — runs whose gate, premise and delivery were all clean died on a single

@@ -15,8 +15,7 @@ loaders:
           root: .fantastic
           ingress_rule: allow_all_ingress
         - id: memory
-          handler_module: yaml_state.tools
-          mode: data
+          handler_module: durable_memory.tools
           callable_by:
             worker: [set, read]
         - id: worker

@@ -15,7 +15,7 @@ dependencies = [
   "fantastic-web-rest",
   "fantastic-scheduler",
   "fantastic-file-bridge",
-  "fantastic-yaml-state",
+  "fantastic-durable-memory",
   "fantastic-kernel-state",
   "fantastic-terminal-backend",
   "fantastic-ollama-backend",
@@ -64,7 +64,7 @@ testpaths = [
   "bundled_agents/io/web_rest/tests",
   "bundled_agents/scheduler/tests",
   "bundled_agents/io/file_bridge/tests",
-  "bundled_agents/yaml_state/tests",
+  "bundled_agents/durable_memory/tests",
   "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/terminal/tests",
   "bundled_agents/ai/ai_core/tests",
@@ -101,7 +101,7 @@ members = [
   "bundled_agents/io/ws_bridge",
   "bundled_agents/io/relay_connector",
   "bundled_agents/io/exec_bridge",
-  "bundled_agents/yaml_state",
+  "bundled_agents/durable_memory",
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
   "installed_agents/*",
@@ -114,7 +114,7 @@ fantastic-web-ws = { workspace = true }
 fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
 fantastic-file-bridge = { workspace = true }
-fantastic-yaml-state = { workspace = true }
+fantastic-durable-memory = { workspace = true }
 fantastic-terminal-backend = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-llamacpp-backend = { workspace = true }

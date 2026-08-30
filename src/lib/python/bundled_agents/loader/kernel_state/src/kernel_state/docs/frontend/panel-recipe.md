@@ -38,8 +38,8 @@ kernel — no import, no URL:
       job = r.job_id;                                         // output streams as `progress` events
     };
 
-`exec_bridge` is an ASYNC job spawner: `start` runs your `code` under one of its
-allowlisted interpreters in the background (many in parallel) and returns
+`exec_bridge` is an ASYNC job spawner: `start {command, args}` runs a command
+from its `allowed` allowlist in the background (many in parallel) and returns
 `{job_id}` at once; it streams
 stdout/stderr as `progress` events + a final `job_done` (with the collected
 output); use `status`/`stop` by job_id. There is no blocking "run-and-wait" —

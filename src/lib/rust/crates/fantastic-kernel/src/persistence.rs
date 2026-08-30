@@ -553,18 +553,52 @@ pub async fn install_ledger_persistence(kernel: &Arc<Kernel>) {
         println!("  [ledger] rehydrated {n} settled execution(s)");
     }
     let k = Arc::clone(kernel);
-    let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // ONE flush at a time, and always one AFTER the last settle.
+    //
+    // `dirty` says the ledger changed since the last snapshot; `running` says a
+    // worker owns the writing. The worker loops until it observes a clean
+    // ledger, so any number of settles arriving mid-flush fold into exactly one
+    // follow-up pass.
+    //
+    // This used to clear its `pending` flag as the FIRST thing the spawned task
+    // did, before awaiting the flush — so the flag only covered the gap before
+    // the task started, not the write itself. Every settle that landed while a
+    // flush was in flight therefore spawned ANOTHER concurrent full-map
+    // rewrite. On an agentic run that is a fan-out of O(n) rewrites of an
+    // O(n) snapshot, all at once: measured on `agentic.plan`, the kernel
+    // saturated multiple cores (199% CPU) with a single send in flight.
+    let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
     kernel.set_ledger_flusher(Box::new(move || {
         use std::sync::atomic::Ordering;
-        // Already scheduled? Fold into that pass.
-        if pending.swap(true, Ordering::SeqCst) {
+        dirty.store(true, Ordering::SeqCst);
+        // A worker already owns the writing — it will see `dirty` and loop.
+        if running.swap(true, Ordering::SeqCst) {
             return;
         }
         let k2 = Arc::clone(&k);
-        let p2 = Arc::clone(&pending);
+        let d2 = Arc::clone(&dirty);
+        let r2 = Arc::clone(&running);
         tokio::spawn(async move {
-            p2.store(false, Ordering::SeqCst);
-            flush_ledger(&k2).await;
+            loop {
+                // Clear BEFORE snapshotting: a settle that lands during this
+                // pass re-dirties and is caught by the next lap, never dropped.
+                d2.store(false, Ordering::SeqCst);
+                flush_ledger(&k2).await;
+                if !d2.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            r2.store(false, Ordering::SeqCst);
+            // A settle can land between the break and releasing `running`; it
+            // set `dirty` and saw us still running, so nobody is coming for it.
+            // Take it ourselves rather than leave it unwritten until the next
+            // settle — the ledger's whole job is to be durable at settle time.
+            if d2.load(Ordering::SeqCst) && !r2.swap(true, Ordering::SeqCst) {
+                d2.store(false, Ordering::SeqCst);
+                flush_ledger(&k2).await;
+                r2.store(false, Ordering::SeqCst);
+            }
         });
     }));
 }

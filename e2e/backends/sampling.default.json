@@ -1,0 +1,5 @@
+{
+  "_note": "Runner (meta) params merged verbatim into the request body by the anthropic-wire provider — sampling knobs, SEPARATE from connection (endpoint/key/model). The proxy whitelists these and silently drops anything unlisted. These two are the proven fix for the CoT-repetition loop (verbatim-repeat rate 48x -> 0) and do not degrade the tool envelope. Copy this file to `sampling.json` (gitignored) to override or add knobs for a sweep — e.g. `thinking_token_budget` to bound CoT length, `top_p`/`top_k`. Do NOT add `min_p` (rejected 400 under speculative decoding) or presence/frequency_penalty (measured worse). Leave temperature at the proxy default.",
+  "no_repeat_ngram_size": 3,
+  "repetition_penalty": 1.05
+}

@@ -49,7 +49,9 @@ from web_rest.tools import _make_post_endpoint
 # same file. It is JSON so every runtime parses it with what it already has (the
 # ts kernel ships zero runtime deps); JSON is valid YAML, so nothing was lost in
 # the move from `c21_cases.yaml`.
-_CORPUS = Path(__file__).resolve().parents[5] / "contract" / "conformance" / "cases.json"
+_CORPUS = (
+    Path(__file__).resolve().parents[5] / "contract" / "conformance" / "cases.json"
+)
 _DOC = json.loads(_CORPUS.read_text())
 # `$root` means THIS runtime's root id. Parity asserts the per-runtime value,
 # never equality — python's root is `kernel_state`, rust's and swift's is `core`.
@@ -196,8 +198,7 @@ async def wired(tmp_path, monkeypatch):
             "handler_module": "exec_bridge.tools",
             "id": "c21_exec",
             "ingress_rule": "allow_all_ingress",
-            "shim": "python",
-            "interpreters": [sys.executable],
+            **__import__("_testkit").py_runner_meta(),
             "can_call": {
                 "c21_probe": "*",
                 "kernel_state": [
@@ -333,7 +334,12 @@ async def _leg_exec(ka, kb, bridge_a, relay_a):
     )
     r = (
         await kb.send(
-            [{"target": "c21_exec", "payload": {"type": "start", "code": lines}}]
+            [
+                {
+                    "target": "c21_exec",
+                    "payload": __import__("_testkit").py_start_payload(lines),
+                }
+            ]
         )
     )[0]["result"]
     assert r.get("job_id"), f"exec leg refused: {r!r}"

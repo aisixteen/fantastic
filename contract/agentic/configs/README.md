@@ -53,7 +53,7 @@ loaders:                           # one or more static_loader agents
     manifest:                      # ← exactly ONE of these three:
       agents:
         - id: memory
-          handler_module: yaml_state.tools
+          handler_module: durable_memory.tools
           callable_by: {worker: [set, read]}
     # manifest_text: "agents: [ this is : not : valid"   # verbatim bytes (malformed-yaml cases)
     # missing_manifest: true                             # nothing written — the path is not there

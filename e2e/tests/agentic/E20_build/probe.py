@@ -4,26 +4,26 @@
 
 Harder than `live_plan.py` in the direction that matters: `live_plan` asked for a
 CHANGE (a record edit the model could make with one verb). This asks for an
-ARTIFACT — a durable script agent whose persisted `code` IS a working program —
-and then refuses to believe it exists until it has been watched doing its job on
-input it has never seen.
+ARTIFACT — a durable program (a FILE the model wrote, plus a command that ran it)
+that totals the readings and stores the total — and then refuses to believe it
+exists until it has been watched doing its job on input it has never seen.
 
 Nothing about the API is given. The task names a CAPABILITY the way a person would.
-Which executor this runtime has, how `code` is persisted, how a script receives a
-turn, how it reaches another agent — all of it is in the kernel's own docs
+Which command executor this runtime has, how a program's bytes reach a file, how a
+running program reaches another agent — all of it is in the kernel's own docs
 (`reflect readme:'self-extension'`), and DISCOVERING that is half the task. Spelling
 it out here would be dictation, and dictation is not emergence.
 
 SCORING is three HARD checks, and the third is the one with teeth:
 
-  1. AN ARTIFACT EXISTS — a script agent the model created, carrying non-empty
-     `code`. Not "it said it built one".
+  1. AN ARTIFACT EXISTS — a program file the model wrote into the store, and a
+     command that actually ran it. Not "it said it built one".
   2. THE ANSWER IS RIGHT — the memory agent holds the true total. The numbers are
      minted with `secrets` at test time, so the total cannot be known, guessed, or
      recalled from training; a model that fabricates cannot land on it.
   3. THE CANARY — the harness writes a FOURTH file with a fresh random number and
-     RE-RUNS the persisted program (`{"type":"start"}` falls back to the record's own
-     `code`). The stored total must become the NEW true total. This separates the two
+     RE-RUNS the program (the same `start` command, against the file on disk). The
+     stored total must become the NEW true total. This separates the two
      ways to satisfy (2): a model that read the three files in its own turns and wrote
      the sum itself passes (1) and (2) and FAILS HERE, and so does a program that
      hardcoded the number it happened to see.
@@ -42,9 +42,9 @@ import json
 import os
 import re
 import secrets
+import shlex
 import sys
 import time
-import tempfile
 from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
@@ -65,7 +65,7 @@ NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
 LLAMACPP_ENDPOINT = os.environ.get(
     "FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1"
 )
-CTX = int(os.environ.get("CTX", "32768"))
+CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 IDLE = float(os.environ.get("IDLE", "60" if BACKEND == "anthropic" else "240"))
 # A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
@@ -94,18 +94,19 @@ READINGS = {f"reading_{i}.txt": secrets.randbelow(9000) + 1000 for i in range(1,
 CANARY_FILE = "canary_reading.txt"
 CANARY_VALUE = secrets.randbelow(9000) + 1000
 
-# The pre-wired executor leg — the operator's half of self-extension (see
-# `wire_executor_leg`). It is FIXTURE, so scoring must never mistake it for the
-# artifact the model built: its handler_module is the executor's, which is exactly what
-# HARD 1 looks for.
+# The pre-wired command-runner leg — the operator's half of self-extension (see
+# `wire_executor_leg`). The model does not build this; it DISCOVERS it and runs its
+# program on it. HARD 1 looks for the program FILE + a job on this leg, so the leg
+# itself is never mistaken for the artifact.
 EXECUTOR_LEG = "runner"
 
 TASK = (
     "Your goal is to build something durable in this kernel that totals a directory "
     "of sensor readings and remembers the total. This kernel has an agent holding "
     "that directory — one number per file — and a memory agent for durable state. "
-    "DONE means all three: (1) what you build PERSISTS as an agent in this kernel, "
-    "not as a one-off action you performed yourself; (2) the correct total is stored "
+    "DONE means all three: (1) what you build PERSISTS in this kernel — a program "
+    "that stays and can be run again, not a one-off action you performed yourself by "
+    "hand; (2) the correct total is stored "
     "in the memory agent; (3) when a new reading file appears later and the thing you "
     "built is run again, the stored total updates to include it. Work out how to "
     "build that here, build it, make sure it really runs, and tell me what you made. "
@@ -145,119 +146,81 @@ def _served_model() -> str:
     return served[0].get("id", "<unnamed>") if served else "<no model loaded>"
 
 
-async def advertised_executors(root) -> set[str]:
-    """The executor module(s) this kernel ADVERTISES, read the way a MODEL reads them.
+async def discover_command_runner(root) -> tuple[str, list[str]]:
+    """The command-runner leg and the commands it permits, found the way a MODEL finds them.
 
-    This used to be `"runtime" in handler_module`, and that is the
-    harness-asserts-the-wrong-surface scar the emergence README records: it encodes a
-    NAMING CONVENTION, so renaming the bundle scores a working system FAIL. Worse here
-    than elsewhere — HARD 3 (the canary, the point of this probe) is gated on HARD 1, so
-    a missed match means the canary never runs and still reports NO.
-
-    Read the DISTILLED reflect: only it interpolates a real module name (the full one says
-    `'<an executor below>'`), and it is the same string the model is given, so the harness
-    and the model discover the executor by the same path.
+    A durable program here is a FILE plus a command that runs it. The command runner
+    is a general-purpose executor gated by `allowed` regexes over the full command
+    line (no default — `start` refuses when the record lists none). So "who runs
+    commands" and "what may run" are two unguessable facts a model discovers by the
+    same two hops it always has: `list_agents` for the tree, then each agent's own
+    `reflect`, which advertises `allowed`. The ONE leg advertising a non-empty
+    `allowed` IS the runner — no naming convention, no handler_module sniff (that was
+    the harness-asserts-the-wrong-surface scar the emergence README records).
     """
-    se = ((await root.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0]["result"]).get("self_extension") or ""
-    found = set(re.findall(r"handler_module:'([a-z_]+\.[a-z_]+)'", se))
-    if not found:
-        # NOT A HARNESS FAILURE — a kernel that advertises no executor cannot be
-        # self-extended by a model, which is the whole subject of this probe.
-        # Measured 2026-08-29: python interpolates the real module
-        # (`exec_bridge.tools`); rust ships the PLACEHOLDER `'<an executor
-        # below>'` uninterpolated; swift's `self_extension` is empty. Scored as
-        # a plain FAIL naming what is missing, rather than crashing the runner
-        # with a traceback that reads as a broken test.
-        print("\n  ** the kernel's DEFAULT reflect names no executor **")
-        print(f"  self_extension={se[:300]!r}")
-        verdict(False, "kernel advertises no executor — self-extension undiscoverable")
-        raise SystemExit(1)
-    return found
-
-
-async def advertised_interpreters(root) -> list[str]:
-    """The interpreter paths this kernel will spawn, read the way a MODEL reads them.
-
-    The advertised executor is an io leg with an interpreter ALLOWLIST and NO default —
-    `start` refuses when the record lists none — so "which interpreter" is a second
-    unguessable fact next to the executor's name. Two hops, both of them a model's:
-    `list_agents` to find who carries the advertised executor's handler_module (the
-    DISTILLED tree does not carry it — only id/sentence/description, and the leg's
-    sentence is what points a reading model at it), then that agent's own `reflect`,
-    which is where the allowlist is advertised.
-
-    NOT `sys.executable`. That is a fact about the harness process, and hardcoding it
-    would prove the task is SOLVABLE while stepping over whether the interpreter is
-    FINDABLE — the same half-measure that let this selftest pass while the probe it
-    validates was unwinnable.
-    """
-    execs = await advertised_executors(root)
     listing = ((await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]).get("agents") or []
-    out: list[str] = []
     for rec in listing:
-        if rec.get("handler_module") not in execs:
-            continue
         r = (await root.send([{"target": rec["id"], "payload": {"type": "reflect"}}]))[0]["result"]
-        out.extend(r.get("interpreters") or [])
-    assert out, (
-        "no executor agent in this kernel advertises an interpreter — the kernel "
-        "refuses to guess one, so a model cannot author a tool and this probe is "
-        "unwinnable. Wire an executor leg with `interpreters` first."
+        allowed = r.get("allowed") or []
+        if allowed:
+            return rec["id"], list(allowed)
+    raise AssertionError(
+        "no agent in this kernel advertises an `allowed` command — nothing can run a "
+        "program, so this probe is unwinnable. Wire a command runner with "
+        "`allowed=[<regex>, ...]` first."
     )
-    return out
+
+
+async def advertised_commands(root) -> list[str]:
+    """The command regexes this kernel will run — the patterns alone (see discover_command_runner)."""
+    _leg, pats = await discover_command_runner(root)
+    return pats
 
 
 async def wire_executor_leg(
     root, agent_id: str = EXECUTOR_LEG, interpreter: str | None = None
 ) -> str:
-    """The OPERATOR's half of self-extension: ONE open executor leg with an allowlist.
+    """The OPERATOR's half: ONE command-runner leg with an interpreter allowlist.
 
-    Choosing which interpreter may run is not the model's decision and never was — the
-    bundle refuses per-call overrides for exactly that reason. So the fixture makes the
-    choice a fixture makes it: `sys.executable`, which is a FACT about this harness
-    process rather than a guess at a path on disk. The model's job is to FIND it
-    (`advertised_interpreters` reads it back the same way) and author against it.
+    Which interpreter may run is the operator's call, never the model's (the doc says
+    so; the bundle refuses a per-call interpreter choice). The fixture makes the
+    choice a fixture makes — `sys.executable`, a FACT about this harness process, not
+    a guess at a path — and allowlists running it against a program FILE. The model's
+    job is to FIND the leg (`discover_command_runner` reads it the same way), WRITE a
+    program file into the store, and run `<interp> <file>` past the gate.
 
-    `interpreter` overrides that choice — used by `live_graph_shape.py` (historically, to allowlist a
-    side venv). It is the ONLY fixture difference between that probe's
-    two arms, which is what makes the comparison single-variable.
+    `cwd` is pinned to the run dir so the file the model writes into the store and the
+    program's own `readings/` both resolve by relative name — store and readings agent
+    are rooted in this same dir. `interpreter` overrides the choice (the side-venv arm
+    of `live_graph_shape`).
     """
-    executor = sorted(await advertised_executors(root))[0]
+    interp = interpreter or sys.executable
     r = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": executor,
+            "handler_module": "exec_bridge.tools",
             "id": agent_id,
+            "cwd": os.getcwd(),
             "ingress_rule": "allow_all_ingress",
-            # Two-sided deny-all: opening the IO seal is not enough — the CALL gate
-            # still has to accept the AI, or the one step self-extension mandates
-            # ("reflect an existing executor for its `interpreters` allowlist") is
-            # refused. Measured 2026-08-24: every `reflect runner` came back
-            # `ai may not call 'reflect' on runner` with no dispatch, and the model
-            # re-read the self-extension doc four times looking for another way.
+            # Two-sided deny-all: the AI reflects + starts on this leg.
             "callable_by": {"ai": "*"},
-            "interpreters": [interpreter or sys.executable],
-            "shim": "python",
-            "description": "Process edge: the interpreter(s) this kernel may spawn.",
+            # THE GATE: run THIS interpreter against a file argument. A model reflects
+            # the leg, reads the exact interpreter path here, and runs `<interp> <file>`.
+            "allowed": [rf"{re.escape(interp)} \S+"],
+            # The running program reaches the memory agent over its control wire; that
+            # send lands FROM this leg (its owner), so the leg needs egress to totals.
+            "can_call": {"totals": "*"},
+            "description": "Process edge: the command(s) this kernel may spawn.",
         }}]))[0]["result"]
-    assert not r.get("error"), f"could not wire the executor leg: {r}"
+    assert not r.get("error"), f"could not wire the command runner: {r}"
     return r["id"]
-
-
-def find_node(node: dict, pred) -> dict | None:
-    if pred(node):
-        return node
-    for c in node.get("children", []):
-        if (f := find_node(c, pred)) is not None:
-            return f
-    return None
 
 
 def _disk_total() -> int:
     """The CURRENT sum of the readings directory — truth recomputed at check time.
 
     Grading against the seed-time snapshot scored a WORKING system FAIL on
-    2026-08-25 (qwen3.8-27b): the model's own plan said "write a new reading
+    2026-08-25 (the model): the model's own plan said "write a new reading
     file to test requirement 3", it added one worth 500, and its stored total
     honestly included it — 18268 vs the frozen 17768. The task's words are
     "keep the total up to date"; the correct total is whatever the directory
@@ -271,6 +234,22 @@ def _disk_total() -> int:
         except (ValueError, OSError):
             continue
     return out
+
+
+def _last_successful_job(jobs: list[dict]) -> dict | None:
+    """The runner's most recent job that exited 0, carrying its own `command`/`args`.
+
+    The durable artifact is "the command the model ran and proved works", not "a
+    file on disk" — a model may write several programs (an exploratory probe, then
+    the real one), so guessing by filename picks the wrong one. The runner records
+    each job's exact invocation (`status` reports `command`/`args`); the LAST one
+    that succeeded is what the model most recently demonstrated, and it is what the
+    canary re-issues verbatim — no filename heuristic, no interpreter assumption."""
+    done = [
+        j for j in jobs
+        if j.get("exit_code") == 0 and j.get("command")
+    ]
+    return max(done, key=lambda j: j.get("started_at", 0), default=None)
 
 
 async def find_value(
@@ -292,7 +271,7 @@ async def find_value(
         if first == (None, None):
             first = (k, sv)
         # A RICH result counts. Measured 2026-08-05 (opus-5) and again 2026-08-25
-        # (qwen3.8-27b, batch kernel): the model stored
+        # (the model, batch kernel): the model stored
         # {'details': {...}, 'files': 3, 'total': 14567} — the right number,
         # nested. `live_subai_selftest` recorded this scar; this scorer never got
         # the fix, so a correct answer scored NO. The number anywhere in the
@@ -345,7 +324,10 @@ async def run(
             "parent_id": root.id,
             "handler_module": "file_bridge.tools",
             "id": "kernel_store",
-            "root": ".fantastic",
+            # The RUN DIR itself: a program written here lands beside readings/ and in
+            # the command runner's cwd, so `<interp> <file>` and open('readings/..') both
+            # resolve by relative name. (The store also holds the AI's chat sidecars.)
+            "root": ".",
             "ingress_rule": "allow_all_ingress",
             # Two-sided deny-all: the AI (and its authored tools, which it opens via
             # its own update_agent grant) reach this store — accept the AI directly.
@@ -370,11 +352,13 @@ async def run(
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "yaml_state.tools",
+            "handler_module": "durable_memory.tools",
             "id": "totals",
             "file_bridge_id": store["id"],
             "description": "Durable store for computed results.",
-            "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
+            # Two-sided deny-all: accept the AI directly, AND the command runner — the
+            # program's `set` lands from the runner leg (its owner) over the control wire.
+            "callable_by": {"ai": "*", EXECUTOR_LEG: "*"},
         }}]))[0]["result"]
     # The executor leg, open, with an interpreter allowlist. Without it there is no
     # allowlisted interpreter anywhere in the kernel and NOTHING can be authored — the
@@ -401,7 +385,7 @@ async def run(
         "cli": "*",
         "readings": "*",
         "totals": "*",
-        EXECUTOR_LEG: "*",  # to READ its interpreters allowlist, per self-extension
+        EXECUTOR_LEG: "*",  # to reflect its `allowed` gate + start the program
         store["id"]: "*",
     }
     # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
@@ -412,8 +396,12 @@ async def run(
     # "file_bridge_id required". One bundle, two contracts — recorded here
     # rather than papered over, and the store exists either way so binding it
     # costs nothing.
-    EXTRA = ({"file_bridge_id": store["id"]}
-             if (BK.needs_file_bridge or core is None) else {})
+    # ALWAYS. The AI's chat store persists through ITS OWNER'S leg and nothing
+    # else — the loader path died with yaml_state — so an AI without a
+    # `file_bridge_id` runs AMNESIAC: every turn starts with empty history.
+    # Measured 2026-08-30 on plan:python — turn 6 said "I don't see any prior
+    # conversation context" and walked away from a task it had been doing.
+    EXTRA = {"file_bridge_id": store["id"]}
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own
@@ -523,29 +511,19 @@ async def run(
     print(f"  passes: {spy.n}\n")
 
     # --- HARD 1: an ARTIFACT exists ---
-    rec = (await root.send([{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]))[0]["result"]
-    mine = {
-        root.id,
-        "kernel_store",
-        "readings",
-        "totals",
-        "ai",
-        "cli",
-        EXECUTOR_LEG,  # fixture, and it carries the executor's handler_module
-    }
-    execs = await advertised_executors(root)
-    built = find_node(
-        rec["tree"],
-        lambda n: (n.get("id") not in mine and n.get("handler_module") in execs),
-    )
-    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
-    records = {a["id"]: a for a in (listing.get("agents") or [])}
-    code = (records.get(built["id"], {}).get("code") or "") if built else ""
-    # An artifact is a script agent WITH a program in it. An empty shell is not a tool.
-    has_artifact = built is not None and bool(code.strip())
+    # A durable program is a FILE the model wrote plus a COMMAND that ran it — not a
+    # new agent (nothing carries `code` any more). The evidence is a job the runner
+    # actually completed successfully, WHOSE COMMAND it records: that command IS the
+    # artifact, and the canary re-issues it verbatim.
+    runner_id, _pats = await discover_command_runner(root)
+    st = (await root.send([{"target": runner_id, "payload": {"type": "status"}}]))[0]["result"]
+    jobs = (st or {}).get("jobs") or []
+    job = _last_successful_job(jobs)
+    has_artifact = job is not None
+    program = None if job is None else shlex.join([job["command"], *(job.get("args") or [])])
     print(
         f"    1. artifact exists          {'OK' if has_artifact else 'NO'} "
-        f"id={(built or {}).get('id')!r} code={len(code)} chars"
+        f"ran={program!r} runner={runner_id!r} jobs={len(jobs)}"
     )
 
     # --- HARD 2: the answer is right ---
@@ -569,14 +547,17 @@ async def run(
     # changed in between (see CANARY_FILE).
     new_total = _disk_total()
     if has_artifact:
-        # RE-RUN the persisted program. `start` with no `code` falls back to the
-        # record's own `code` (the advertised executor's `_start`), so this proves THE
-        # CODE works. It deliberately does NOT require the tool to be a live service:
-        # the task asked for a program, not a daemon, and demanding one would be the
-        # harness inventing a requirement and then grading against it.
-        _cs = (await root.send([{"target": built["id"], "payload": {"type": "start"}}]))[0][
-            "result"
-        ]
+        # RE-RUN exactly what the model last ran — the runner recorded the job's
+        # `command`/`args`, so this re-issues that invocation verbatim (no filename
+        # guess, no interpreter assumption). It proves THE PROGRAM works against the
+        # new file and does NOT require a live service: the task asked for a program,
+        # not a daemon, and demanding one would be the harness inventing a requirement
+        # and grading against it.
+        _cs = (await root.send([{"target": runner_id, "payload": {
+            "type": "start",
+            "command": job["command"],
+            "args": job.get("args") or [],
+        }}]))[0]["result"]
         waited = 0.0
         while waited < CANARY_WAIT and not canary_ok:
             await asyncio.sleep(3.0)
@@ -592,7 +573,7 @@ async def run(
                     await root.send(
                         [
                             {
-                                "target": built["id"],
+                                "target": runner_id,
                                 "payload": {"type": "status", "job_id": _cs["job_id"]},
                             }
                         ]
