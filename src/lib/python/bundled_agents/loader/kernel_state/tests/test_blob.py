@@ -11,7 +11,7 @@ import pytest
 
 
 async def _mk_target(kernel, mode="mem"):
-    """A live child agent to own the sidecars (yaml_state is the real consumer)."""
+    """A live child agent to own the sidecars (durable_memory is the real consumer)."""
     rec = (
         await kernel.send(
             [
@@ -20,7 +20,7 @@ async def _mk_target(kernel, mode="mem"):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "yaml_state.tools",
+                        "handler_module": "durable_memory.tools",
                         "mode": mode,
                     },
                 }

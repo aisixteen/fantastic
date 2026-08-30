@@ -20,11 +20,10 @@ Manifest shape (`fantastic.yaml`):
 
     agents:
       - id: memory                     # explicit ids (idempotent across reboots)
-        handler_module: yaml_state.tools
-        mode: mem
+        handler_module: durable_memory.tools
       - id: worker
         handler_module: exec_bridge.tools
-        interpreters: [python3]
+        allowed: ['python3 .*']
         can_call:                      # explicit lateral grants (deny-all)
           memory: [set, read]
 """
@@ -163,5 +162,9 @@ VERBS = {
 async def handler(id: str, payload: dict, agent) -> dict | None:
     fn = VERBS.get(payload.get("type"))
     if fn is None:
-        return refusal(UNHANDLED, f"static_loader: unknown type {payload.get('type')!r}", verb=payload.get("type"))
+        return refusal(
+            UNHANDLED,
+            f"static_loader: unknown type {payload.get('type')!r}",
+            verb=payload.get("type"),
+        )
     return await fn(id, payload, agent)

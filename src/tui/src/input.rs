@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn filter_models_prefix_then_substring_case_insensitive() {
-        let opts: Vec<String> = ["gemma3:12b", "gemma3:4b", "llama-gemma", "qwen2.5"]
+        let opts: Vec<String> = ["gemma3:12b", "gemma3:4b", "llama-gemma", "mistral"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -414,7 +414,7 @@ mod tests {
             ]
         );
         // Case-insensitive.
-        assert_eq!(filter_models(&opts, "QWEN"), vec!["qwen2.5".to_string()]);
+        assert_eq!(filter_models(&opts, "MISTRAL"), vec!["mistral".to_string()]);
         // No match → empty.
         assert!(filter_models(&opts, "zzz").is_empty());
     }
@@ -423,7 +423,7 @@ mod tests {
     fn autocomplete_navigates_the_filtered_view() {
         let mut c = Control::Autocomplete {
             title: "Model".into(),
-            options: ["gemma3:12b", "gemma3:4b", "qwen2.5"]
+            options: ["gemma3:12b", "gemma3:4b", "mistral"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),

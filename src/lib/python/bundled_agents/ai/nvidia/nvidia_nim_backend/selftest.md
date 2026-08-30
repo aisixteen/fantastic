@@ -68,7 +68,7 @@ kill -9 $SPID 2>/dev/null; rm -rf .fantastic /tmp/n.log
 ### Test 1: `_send` failfast when no api_key (no `file_bridge_id` ⇒ no sidecar)
 
 History no longer needs `file_bridge_id` (it auto-mounts a chat
-yaml_state through the loader), but the nvidia api_key sidecar still
+durable_memory through the loader), but the nvidia api_key sidecar still
 rides `file_bridge_id` — with none wired there is no key, so send
 failfasts on the missing provider before any network call.
 
@@ -124,7 +124,7 @@ SSE stream + auth + model selection round-trip.
 
 Skip if `NVAPI_KEY` is unset.
 
-History persists THROUGH the loader in a mounted chat yaml_state (the AI
+History persists THROUGH the loader in a mounted chat durable_memory (the AI
 writes no disk itself); read each thread back via the `history` verb.
 
 ```bash

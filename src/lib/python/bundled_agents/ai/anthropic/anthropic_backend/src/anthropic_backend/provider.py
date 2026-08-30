@@ -43,7 +43,7 @@ RETRIES = 2
 BACKOFF = 1.5
 # Per-turn OUTPUT budget. A FIELD, not a constant, because it is a per-model
 # property: the thought of a reasoning model is spent from this same budget, so a
-# value that leaves Opus room to finish truncates qwen3.8-27b mid-thought. Measured
+# value that leaves Opus room to finish truncates the model mid-thought. Measured
 # 2026-08-23 on `/cc`: with 8192 the run died at turn 20 with
 # `stop_reason='max_tokens' blocks=['thinking']` — a whole turn of thinking, no
 # content, no tool call. Its own turns ran median ~2.3k / p90 ~5.9k tokens.
@@ -101,11 +101,17 @@ class AnthropicProvider:
         *,
         tool_use: bool = False,
         max_tokens: int = MAX_TOKENS,
+        sampling: dict | None = None,
         transport=None,
     ):
         self._endpoint = endpoint
         self._model = model
         self._max_tokens = max_tokens
+        # Extra body params merged verbatim into the request (endpoint-whitelisted
+        # sampling knobs — repetition_penalty, no_repeat_ngram_size,
+        # thinking_token_budget, top_p/top_k, …). A record edit, not an ai_core
+        # concern. Unlisted params the proxy silently drops; None values are omitted.
+        self._sampling = {k: v for k, v in (sampling or {}).items() if v is not None}
         # Test seam, same as LlamaCppProvider's: an httpx transport to hand the
         # client. None = the real network.
         self._transport = transport
@@ -117,7 +123,7 @@ class AnthropicProvider:
         # provider speaking its own endpoint's dialect.
         #
         # Why it exists: an endpoint may parse a model's NATIVE syntax better
-        # than we can from raw text. qwen3.8 reverts to
+        # than we can from raw text. the model reverts to
         # `<|im_start|>function=NAME>` under load; on the raw route that is a
         # silent no-op turn, while the `/cc` route recovers it server-side
         # (measured by the proxy's own A/B: 1 turn / 0 calls -> 5 turns with real
@@ -155,6 +161,8 @@ class AnthropicProvider:
             body["system"] = system
         if self._tool_use:
             body["tools"] = [SEND_TOOL]
+        # Endpoint-whitelisted sampling knobs, merged last so an explicit value wins.
+        body.update(self._sampling)
         headers = {
             "x-api-key": key,
             "anthropic-version": API_VERSION,
@@ -242,7 +250,7 @@ class AnthropicProvider:
                                 # nvidia/ollama/llamacpp providers already guard. Anthropic's
                                 # wire puts the thought in `thinking_delta` blocks and only the
                                 # conclusion in `text_delta`; a model served through an
-                                # anthropic-compatible proxy (qwen3.8-27b via `/raw`) does this
+                                # anthropic-compatible proxy (the model via `/raw`) does this
                                 # constantly. Reading `text_delta` alone silently drops whole
                                 # turns: a pass spent entirely reasoning arrives as an EMPTY
                                 # completion and the chain dies with no error anywhere — and a

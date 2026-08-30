@@ -2,7 +2,7 @@
 
 > scopes: ai, kernel, persistence, http
 > requires: `cargo build --release --bin fantastic_kernel`; live ollama at a
-> reachable endpoint with a tool-calling model (qwen2.5+, llama3.1+);
+> reachable endpoint with a tool-calling model (a tool-calling model);
 > a LIVE daemon + WS — this bundle caches the HTTP client + in-flight
 > tasks in process-memory, so multi-step state would be lost between
 > separate one-shot `fantastic` calls. Drive via the WS surface.
@@ -32,7 +32,7 @@ mkdir -p /tmp/ob_test/root
 cd /tmp/ob_test
 FANTASTIC=/path/to/rust/target/release/fantastic_kernel
 PORT=18911
-MODEL=qwen2.5:3b
+MODEL=<your tool-calling model>
 
 $FANTASTIC core create_agent handler_module=web.tools id=w port=$PORT
 $FANTASTIC w create_agent handler_module=web_ws.tools id=wws

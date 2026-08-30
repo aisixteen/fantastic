@@ -59,7 +59,12 @@ class Limits:
     no_progress: int = 8
     turn_chars: int = 120_000
     turn_seconds: float = 600.0
-    ctx: int = 32768
+    #: The model's REAL window. 32768 was a third of what the endpoint serves,
+    #: and the shortfall did not read as "too small" — it read as the model
+    #: failing: `subai` was killed at turn 18 by ai_core's `too_small` failsafe
+    #: with half the window already spent on `max_tokens` output reserve.
+    #: A budget is a knob to set correctly, not a limit to write a failsafe for.
+    ctx: int = 262144
     show_system: bool = False
 
     @classmethod
@@ -72,7 +77,7 @@ class Limits:
             no_progress=g("NO_PROGRESS", int, d.get("no_progress", 8)),
             turn_chars=g("TURN_CHARS", int, d.get("turn_chars", 120_000)),
             turn_seconds=g("TURN_SECONDS", float, d.get("turn_seconds", 600.0)),
-            ctx=g("CTX", int, d.get("ctx", 32768)),
+            ctx=g("CTX", int, d.get("ctx", 262144)),
             show_system=env.get("SHOW_SYSTEM") == "1",
         )
 

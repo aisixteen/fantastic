@@ -413,7 +413,7 @@ fn list_models_parses_tag_names_in_order() {
             {"name": "gemma3:12b", "size": 8_000_000_000_u64},
             {"name": "llama3:8b"},
             {"no_name": true},
-            {"name": "qwen2.5:7b"}
+            {"name": "mistral:7b"}
         ]
     });
     assert_eq!(
@@ -421,7 +421,7 @@ fn list_models_parses_tag_names_in_order() {
         vec![
             "gemma3:12b".to_string(),
             "llama3:8b".to_string(),
-            "qwen2.5:7b".to_string()
+            "mistral:7b".to_string()
         ]
     );
     // Absent/empty `models` → an empty list, not an error.

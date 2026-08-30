@@ -77,7 +77,7 @@ async def file_bridge(seeded_kernel):
 async def store_agent(seeded_kernel):
     """The canonical persistence STORE: a file_bridge rooted at `.fantastic`, OPENED.
     The loader (`kernel_state`) DISCOVERS it as its provider (root resolves to `.fantastic`)
-    and persists records — AND internal-state agents (yaml_state, scheduler) — THROUGH it
+    and persists records — AND internal-state agents (durable_memory, scheduler) — THROUGH it
     via `persist_blob`, landing sidecars at `.fantastic/agents/<id>/` next to their
     agent.json (one shared store, no nest). Tests just need this fixture present so the
     loader has a store. (The ai backends still wire `file_bridge_id` to it directly — their

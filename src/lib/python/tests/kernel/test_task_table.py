@@ -307,10 +307,7 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": "kernel_state",
-                        "handler_module": "exec_bridge.tools",
-                        "interpreters": [sys.executable],
-                        "shim": "python",
-                        "ingress_rule": "allow_all_ingress",
+                        **__import__("_testkit").py_runner_meta(),
                     },
                 }
             ]
@@ -333,7 +330,12 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
     )
     started = (
         await seeded_kernel.send(
-            [{"target": runner, "payload": {"type": "start", "code": code}}]
+            [
+                {
+                    "target": runner,
+                    "payload": __import__("_testkit").py_start_payload(code),
+                }
+            ]
         )
     )[0]["result"]
     assert "job_id" in started, started

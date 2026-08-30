@@ -17,7 +17,7 @@ class _FakeProvider:
 
 async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
     """ollama_backend.send persists its per-client chat THROUGH the loader (a mounted
-    chat yaml_state — the AI writes no disk itself); read it back via the `history` verb."""
+    chat durable_memory — the AI writes no disk itself); read it back via the `history` verb."""
     ob = (
         (
             await seeded_kernel.send(

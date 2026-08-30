@@ -5,7 +5,7 @@ assertions, different substrate. Which kernel is a PLUG — `KERNEL=rust` or
 `KERNEL=swift` — exactly as the model is a plug in `backends/`.
 
 ROLES, NOT BUNDLE NAMES. A compiled kernel runs only what is compiled into it,
-so `kv_store` is `yaml_state` here while python and js register a handler in
+so `kv_store` is `durable_memory` here while js registers a handler in
 process. The scenario declares the role; each runner supplies the implementation
 it has. That is what lets one scenario be shared across four kernels rather than
 copied four times — and a role with no shipped equivalent is refused BY NAME,
@@ -34,7 +34,7 @@ REPO = E2E.parent
 #: bespoke verbs — python and js register them in process; a compiled kernel
 #: would need a probe bundle compiled in. That is a REAL boundary.
 ROLE_BUNDLE = {
-    "kv_store": "yaml_state.tools",
+    "kv_store": "durable_memory.tools",
     "render_sink": "cli.tools",
     "compute": "exec_bridge.tools",
     # STATEFUL FIXTURES. TEST-ONLY on every runtime, and gated so a default
@@ -160,9 +160,9 @@ def main(scenario_id: str) -> int:
             if entry["role"] == "kv_store":
                 meta["file_bridge_id"] = store["id"]
             if entry["role"] == "compute":
-                # The interpreter ALLOWLIST is the only set that can be spawned
-                # — no default, no PATH lookup — so the runner names one.
-                meta["interpreters"] = [sys.executable]
+                # The COMMAND allowlist is the only gate — regexes over the
+                # full command line; the runner permits its own python.
+                meta["allowed"] = [f"{sys.executable} -c .*"]
                 meta["ingress_rule"] = "allow_all_ingress"
             rec = k.create(**meta)
             assert rec.get("id"), rec

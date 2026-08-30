@@ -110,7 +110,7 @@ async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
                         "payload": {
                             "type": "create_agent",
                             "parent_id": root.id,
-                            "handler_module": "yaml_state.tools",
+                            "handler_module": "durable_memory.tools",
                             "mode": "mem",
                         },
                     }

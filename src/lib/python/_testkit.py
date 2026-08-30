@@ -54,3 +54,34 @@ def persist(root) -> None:
     for a in list(root.ctx.agents.values()):
         if not type(a).ephemeral:
             write_record(a._root_path, a.record)
+
+
+# ─── running a PYTHON helper on the command runner ──────────────────────────
+#
+# exec_bridge is a general-purpose COMMAND runner: no `code`, no `shim`, no
+# interpreter allowlist. A test that wants a python child speaking the kernel
+# wire composes it itself — the wire client is DATA (`CONNECTOR_SRC`), so the
+# test prepends it and runs `python -c <program>` like any other command.
+import sys as _sys
+
+
+def py_runner_meta(**extra) -> dict:
+    """create_agent meta for an exec_bridge leg permitted to run `python -c …`."""
+    return {
+        "handler_module": "exec_bridge.tools",
+        "allowed": [f"{_sys.executable} -c .*"],
+        "ingress_rule": "allow_all_ingress",
+        **extra,
+    }
+
+
+def py_start_payload(code: str, **extra) -> dict:
+    """`start` payload running `code` under the python wire client."""
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    return {
+        "type": "start",
+        "command": _sys.executable,
+        "args": ["-c", CONNECTOR_SRC + code],
+        **extra,
+    }

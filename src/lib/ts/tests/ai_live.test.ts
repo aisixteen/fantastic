@@ -10,7 +10,7 @@
 //
 //   AI_LIVE=1 \
 //   AI_ENDPOINT=http://127.0.0.1:4000/openai/v1 \
-//   AI_MODEL=qwen3.8-27b \
+//   AI_MODEL=<your tool-calling model> \
 //   AI_KEY=keyless \
 //   npm test
 //

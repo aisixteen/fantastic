@@ -25,3 +25,4 @@ container/head/index.html
 src/lib/swift/fantastic-sched-*/
 src/lib/swift/fantastic-schedfire-*/
 src/lib/swift/fantastic-wsbrstream-*/
+e2e/backends/sampling.json

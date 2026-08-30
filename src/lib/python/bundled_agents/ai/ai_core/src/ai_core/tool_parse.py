@@ -379,6 +379,47 @@ def _mint_id() -> str:
     return f"call_{secrets.token_hex(4)}"
 
 
+_SB_BYTES = re.compile(r'"bytes"\s*:\s*"')
+
+
+def _send_binary_raw(inner: str) -> dict | None:
+    """`send_binary` whose `bytes` field is a program that must NOT be JSON-escaped.
+
+    The whole reason a program-in-JSON fails is that `json.loads` demands every quote,
+    newline and backslash be escaped, and a model can't do that reliably on a big
+    program. But the PROGRAM is not data we need parsed — it is a string we read. So
+    for `send_binary` we lift `bytes` out RAW: everything from `"bytes":"` to the final
+    `"` in the envelope is the program, verbatim (no unescaping), and only the STRUCTURE
+    around it is JSON-parsed. `bytes` must be the LAST field (nothing but closing braces
+    after its value) so its end is unambiguous — that is the whole contract.
+    """
+    if '"send_binary"' not in inner:
+        return None
+    m = _SB_BYTES.search(inner)
+    if not m:
+        return None
+    val_start = m.end()  # first char of the raw program
+    val_end = inner.rfind('"')  # bytes is last, so its closing quote is the last quote
+    if val_end <= val_start:
+        return None
+    raw = inner[val_start:val_end]  # the program, exactly as written
+    # Re-close the JSON with an EMPTY bytes value → a well-formed object we can parse
+    # for the structure (name, target_id, payload metadata) without touching `raw`.
+    skeleton = inner[:val_start] + inner[val_end:]
+    try:
+        obj = json.loads(skeleton)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or obj.get("name") != "send_binary":
+        return None
+    args = obj.get("arguments")
+    if not isinstance(args, dict):
+        return None
+    payload = args.get("payload")
+    (payload if isinstance(payload, dict) else args)["bytes"] = raw
+    return {"id": _mint_id(), "name": "send_binary", "arguments": args}
+
+
 def parse_one(inner: str) -> dict | None:
     """Parse the JSON between one tag pair into `{id, name, arguments}`.
 
@@ -387,6 +428,10 @@ def parse_one(inner: str) -> dict | None:
     (stringified) arguments. Returns None on unparseable JSON.
     """
     inner = inner.strip()
+    # send_binary carries a RAW program in `bytes` (no escaping) — read it as a string
+    # rather than forcing it through json.loads. See `_send_binary_raw`.
+    if (sb := _send_binary_raw(inner)) is not None:
+        return sb
     try:
         obj = json.loads(inner)
         rest = ""

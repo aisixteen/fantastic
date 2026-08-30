@@ -134,12 +134,12 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/io/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
 | `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, history.jsonl, file_bridge_id failfast |
 | `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
-| `bundled_agents/yaml_state/selftest.md` | kernel, persistence | durable YAML memory agent — read/keys/set/delete/replace/state_yaml, mode (mem/data), disk-is-truth, cascade cleanup |
+| `bundled_agents/durable_memory/selftest.md` | kernel, persistence | modeless durable memory agent — set/read/append/keys/delete, persists through file_bridge_id (failfast until wired), disk-is-truth, cascade cleanup |
 | `bundled_agents/terminal/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |
 | `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws, ssh | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS + SSH+WS transports; streaming via `watch_remote` |
-| `bundled_agents/io/exec_bridge/selftest.md` | kernel | sealed-by-default process edge — interpreter allowlist (refusal names the legal set), start/status/stop/interrupt/clear/boot, wire + optional shim, mail to a live program, task-table row + cancel |
+| `bundled_agents/io/exec_bridge/selftest.md` | kernel | sealed-by-default command runner — regex `allowed` allowlist (refusal names the patterns), start/status/stop/interrupt/clear/boot, control wire, mail to a live program, task-table row + cancel |
 
 The root selftest is the `kernel_state` one (id `"kernel_state"`) — the
 persistence/hydration root that owns `.fantastic/`; there's no `core`

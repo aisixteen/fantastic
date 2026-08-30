@@ -69,7 +69,11 @@ async def _list_peers(id, payload, kernel):
     relay's own `relay` agent (target:"relay"), not the partner. Boot first."""
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return refusal(NOT_CONNECTED, "relay_connector.list_peers: not connected", hint="call boot first")
+        return refusal(
+            NOT_CONNECTED,
+            "relay_connector.list_peers: not connected",
+            hint="call boot first",
+        )
     return await st.transport.list_peers(timeout=float(payload.get("timeout", 30.0)))
 
 

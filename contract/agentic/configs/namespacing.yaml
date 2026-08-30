@@ -23,8 +23,10 @@ loaders:
         # grandchild is not one of them. The defence is position, not a check of
         # the claimed id.
         - id: notes_a
-          handler_module: yaml_state.tools
-          mode: data
+          handler_module: durable_memory.tools
+          # memory persists THROUGH its wing's own file leg — durable_memory has
+          # no fs and no loader path of its own.
+          file_bridge_id: space_a
           can_call:
             $root: [persist_blob]
         - id: space_a
@@ -40,8 +42,8 @@ loaders:
     manifest:
       agents:
         - id: notes_b
-          handler_module: yaml_state.tools
-          mode: data
+          handler_module: durable_memory.tools
+          file_bridge_id: space_b
         - id: space_b
           handler_module: file_bridge.tools
           root: rooms/b

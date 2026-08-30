@@ -274,7 +274,7 @@ async def test_dehydrate_reads_the_running_system_back_through_one_reflect(
     # walks the subtree, so declaring it in the manifest is enough.
     assert d["agents"]["store"]["parent_id"] == "static_loader"
     assert d["agents"]["memory"]["parent_id"] == "static_loader"
-    assert d["agents"]["memory"]["handler_module"] == "yaml_state.tools"
+    assert d["agents"]["memory"]["handler_module"] == "durable_memory.tools"
     assert set(d["children"]["static_loader"]) == {
         "store",
         "memory",
@@ -298,5 +298,3 @@ async def test_dehydrate_reports_the_persisted_tree_when_asked(hydrate_scenario)
     # Namespacing is POSITIONAL: a roster agent's record lives under its loader.
     assert "agents/static_loader/agents/memory/agent.json" in d["disk_files"]
     assert all("docs/" not in f for f in d["disk_files"])
-
-

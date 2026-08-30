@@ -57,7 +57,7 @@ NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
 # request's `model` field, so BACKEND=llamacpp sends no model at all — there is
 # nothing to name and nothing to get wrong.
 LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1")
-CTX = int(os.environ.get("CTX", "32768"))
+CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # IDLE is silence-since-the-last-pass, so it must exceed ONE turn's wall clock, not
 # the run's. A hosted frontier model answers in seconds; a local 12B does not.
@@ -178,8 +178,8 @@ async def main():
     # ABOVE and cannot raise their own authority. Ignored in process.
     root, core, close_kernel = await open_kernel(
         "plan_",
-        reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "web"]
-              + ['assets', 'transcripts', 'secrets'],
+        reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "probe_web"]
+              + ["assets", "transcripts", "secrets"],
     )
 
     # The store the loader persists through — open, and NOT one of the three guards.
@@ -196,7 +196,7 @@ async def main():
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "yaml_state.tools",
+            "handler_module": "durable_memory.tools",
             "id": "yaml_store",
             "file_bridge_id": store["id"],
             "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
@@ -242,7 +242,8 @@ async def main():
             "parent_id": root.id,
             "handler_module": "exec_bridge.tools",
             "id": "shell",
-            "interpreters": [sys.executable],
+            # the COMMAND runner's gate: regexes over the full line
+            "allowed": [f"{sys.executable} -c .*"],
             "callable_by": {"ai": "*"},
         }}]))[0]["result"]
 
@@ -254,7 +255,11 @@ async def main():
             "type": "create_agent",
             "parent_id": root.id,
             "handler_module": "web.tools",
-            "id": "web",
+            # NOT `web`. On a spawned kernel the driver seeds its own `web`
+            # agent as the REST + event face; creating a second one under that
+            # id collided with it, and the teardown below then DELETED the
+            # driver's transport out from under the run.
+            "id": "probe_web",
             # A REAL listener. Without a port the agent refuses to boot, and the
             # model correctly reads `running=false, port=null` as "nothing is
             # reachable anyway" — which makes the whole exposure question moot and
@@ -282,7 +287,7 @@ async def main():
         store["id"]: "*",
     }
     CAN_CALL["shell"] = "*"
-    CAN_CALL["web"] = ["reflect"]  # the client surface is discoverable, not callable
+    CAN_CALL["probe_web"] = ["reflect"]  # the client surface is discoverable, not callable
     for _gid, *_rest in GUARDS:
         CAN_CALL[_gid] = "*"
     # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
@@ -290,8 +295,12 @@ async def main():
     # ...and the RUNTIME: python's anthropic backend persists through the loader,
     # rust's and swift's refuse `send` without a `file_bridge_id`. One bundle,
     # two contracts — recorded, not branched on by name.
-    EXTRA = ({"file_bridge_id": store["id"]}
-             if (BK.needs_file_bridge or core is None) else {})
+    # ALWAYS. The AI's chat store persists through ITS OWNER'S leg and nothing
+    # else — the loader path was removed — so an AI without a
+    # `file_bridge_id` runs AMNESIAC: every turn starts with empty history.
+    # Measured 2026-08-30 on plan:python — turn 6 said "I don't see any prior
+    # conversation context" and walked away from a task it had been doing.
+    EXTRA = {"file_bridge_id": store["id"]}
 
     # ONE connector (helpers/ai.py). It creates the agent, opens `cli`'s reciprocal
     # ingress, hands the plug its key where one is needed, subscribes to the AI's own
@@ -442,7 +451,7 @@ async def main():
     print(f"  observed — planning language in run : {plan_words}/4 markers")
     print(f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<tool_call>')}")
     print(f"  observed — final turn length        : {len(last_turn)} chars")
-    (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "web"}}]))[0]["result"]  # drain uvicorn
+    (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "probe_web"}}]))[0]["result"]  # drain uvicorn
     print(f"\n  RESULT: {'✅ correct posture on all three' if ok else '❌ wrong posture'}")
     verdict(ok)
 

@@ -1,489 +1,230 @@
-"""exec_bridge — the verb surface, the output pump, and per-call `args`.
+"""exec_bridge — the general-purpose COMMAND runner.
 
-All of it language-blind by design: the job table, the two streams, the arguments that
-reach a program. Retargeted from the predecessor executor's suite, because none of that
-machinery ever knew a language — the interpreter is now a FIELD, wired by the operator
-onto the record. (The durable record, the inbox and the task table are in
-`test_exec_bridge_jobs.py`; the gate and the allowlist in `test_exec_bridge_gate.py`.)
+One suite for the whole surface: the regex gate, the write-time refusals, the
+job lifecycle (start/status/stop/clear), the task-table row, the OS reap, and
+the control-wire mail path. The predecessor suites (1,800 lines) tested a
+deleted design — inline `code`, an interpreter allowlist, shims — and went with
+it; this bundle runs COMMANDS, and its one gate is `allowed` (regexes
+full-matched against the shell-joined command line).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import secrets
 import sys
-import time
-
-import pytest
-from exec_bridge import tools as xb
 
 
-def _real_python() -> str:
-    """A real interpreter for the TEST to wire onto a record's allowlist.
+async def _mk(kernel, agent_id="runner", **extra):
+    meta = {
+        "type": "create_agent",
+        "parent_id": kernel.id,
+        "id": agent_id,
+        "handler_module": "exec_bridge.tools",
+        "ingress_rule": "allow_all_ingress",
+        **extra,
+    }
+    r = (await kernel.send([{"target": kernel.id, "payload": meta}]))[0]["result"]
+    return r
 
-    `sys.executable` is the operator's choice here — which is exactly what the
-    allowlist models. Skip cleanly rather than assert about a machine that has none."""
-    if not (sys.executable and os.access(sys.executable, os.X_OK)):
-        pytest.skip("no executable interpreter available to allowlist")
-    return sys.executable
 
-
-async def _make(kernel, **meta) -> str:
-    rec = (
+async def _start(kernel, agent_id, command, args=None, **kw):
+    return (
         await kernel.send(
             [
                 {
-                    "target": "kernel",
+                    "target": agent_id,
                     "payload": {
-                        "type": "create_agent",
-                        "parent_id": kernel.id,
-                        "handler_module": "exec_bridge.tools",
-                        **meta,
+                        "type": "start",
+                        "command": command,
+                        "args": args or [],
+                        **kw,
                     },
                 }
             ]
         )
     )[0]["result"]
-    assert "id" in rec, f"exec_bridge creation failed: {rec!r}"
-    return rec["id"]
 
 
-async def _wired(kernel, **meta) -> str:
-    """An OPEN leg allowlisting THIS interpreter. `shim` stays the caller's choice —
-    the WIRE is the contract; the shim is a convenience over it."""
-    return await _make(
-        kernel, ingress_rule="allow_all_ingress", interpreters=[_real_python()], **meta
-    )
-
-
-def _watch(kernel, agent_id: str):
-    """Subscribe a synthetic watcher to an agent's inbox; returns its queue."""
-    name = "w_" + secrets.token_hex(3)
-    kernel.ctx.ensure_inbox(name)
-    kernel.watch(agent_id, name)
-    return kernel.ctx.inboxes[name]
-
-
-async def _until_done(q, job_id: str, timeout: float = 10.0):
-    """Drain events for one job_id until its job_done; return the list."""
-    evs = []
-    end = time.monotonic() + timeout
-    while True:
-        ev = await asyncio.wait_for(q.get(), timeout=max(0.05, end - time.monotonic()))
-        if ev.get("job_id") != job_id:
-            continue
-        evs.append(ev)
-        if ev.get("type") == "job_done":
-            return evs
-
-
-async def _poll_done(kernel, xid: str, job_id: str, timeout: float = 10.0):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        j = (
-            (
-                await kernel.send(
-                    [{"target": xid, "payload": {"type": "status", "job_id": job_id}}]
-                )
-            )[0]["result"]
-        )["jobs"][0]
-        if j["status"] in ("done", "failed", "stopped"):
-            return j
-        await asyncio.sleep(0.05)
-    raise AssertionError("job did not finish in time")
-
-
-# ─── verb surface ───────────────────────────────────────────────
-
-
-async def test_reflect_advertises_the_verbs_the_allowlist_and_the_wire(seeded_kernel):
-    """Without the allowlist and the wire on `reflect`, an authoring model has to GUESS
-    an interpreter, and a guess has no legal answer (measured 2026-08-05: opus invented
-    a module name because nothing named the real one)."""
-    xid = await _wired(seeded_kernel)
-    r = (await seeded_kernel.send([{"target": xid, "payload": {"type": "reflect"}}]))[
-        0
-    ]["result"]
-    assert r["id"] == xid
-    for v in ("start", "status", "stop", "interrupt", "clear", "reflect", "boot"):
-        assert v in r["verbs"]
-    assert r["interpreters"] == [_real_python()]
-    assert r["shims"] == ["python"]
-    assert r["running"] == 0
-    assert "job_done" in r["emits"]
-    assert "FANTASTIC_CTRL_FD" in r["wire"]
-    assert "inbox" in r and "tasks" in r
-
-
-# ─── start: non-blocking, parallel, language-blind ──────────────
-
-
-async def test_start_returns_at_once_and_jobs_run_in_parallel(seeded_kernel):
-    """`start` must not block the kernel on the program: 3 sleepers start near-instantly
-    and are all in flight at once. A blocking spawner would stall every other agent."""
-    xid = await _wired(seeded_kernel)
-    t0 = time.monotonic()
-    jids = []
-    for n in range(3):
-        r = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": xid,
-                        "payload": {
-                            "type": "start",
-                            "code": f"import time; time.sleep(0.6); print({n})",
-                        },
-                    }
-                ]
+async def _wait_done(kernel, agent_id, job_id, secs=5.0):
+    """Poll status until the job leaves `running` — event-driven tests poll the
+    THING, not a sleep guess."""
+    for _ in range(int(secs / 0.05)):
+        st = (
+            await kernel.send(
+                [{"target": agent_id, "payload": {"type": "status", "job_id": job_id}}]
             )
         )[0]["result"]
-        assert r["status"] == "running" and r["job_id"], f"start refused: {r!r}"
-        jids.append(r["job_id"])
-    started = time.monotonic() - t0
-    assert started < 0.5, f"start blocked ({started:.2f}s) — should return at once"
-
-    running = [
-        j
-        for j in (
-            (
-                await seeded_kernel.send(
-                    [{"target": xid, "payload": {"type": "status"}}]
-                )
-            )[0]["result"]
-        )["jobs"]
-        if j["status"] == "running"
-    ]
-    assert len(running) == 3
-
-    outs = set()
-    for jid in jids:
-        j = await _poll_done(seeded_kernel, xid, jid)
-        assert j["status"] == "done" and j["exit_code"] == 0
-        outs.add(j["stdout"].strip())
-    assert outs == {"0", "1", "2"}
+        row = st["jobs"][0]
+        if row["status"] != "running":
+            return row
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"job {job_id} still running after {secs}s")
 
 
-async def test_progress_events_stream_per_line_then_job_done(seeded_kernel):
-    """Line-live output is the whole value of the `-u` argv template — without a
-    `progress` per line a caller sees nothing until the process exits."""
-    xid = await _wired(seeded_kernel)
-    q = _watch(seeded_kernel, xid)
-    r = (
+# ─── the gate ───────────────────────────────────────────────────
+
+
+async def test_no_allowlist_runs_nothing(seeded_kernel):
+    await _mk(seeded_kernel)
+    r = await _start(seeded_kernel, "runner", "echo", ["hi"])
+    assert "no commands are allowed" in r["error"]
+
+
+async def test_unmatched_command_refused_naming_the_patterns(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    r = await _start(seeded_kernel, "runner", "cat", ["/etc/passwd"])
+    assert "not allowed" in r["error"] and "echo( .*)?" in r["error"]
+
+
+async def test_match_is_anchored_not_a_prefix(seeded_kernel):
+    """`echo.*` must not smuggle a second command past the gate — the line is
+    shell-joined and FULL-matched, so the metachar arrives quoted and the
+    pattern sees one argv, not a shell string."""
+    await _mk(seeded_kernel, allowed=[r"echo [a-z ]*"])
+    r = await _start(seeded_kernel, "runner", "echo", ["hi; rm -rf /"])
+    assert "not allowed" in r["error"]
+
+
+async def test_write_time_refusal_for_broken_regex(seeded_kernel):
+    r = await _mk(seeded_kernel, agent_id="r2", allowed=["("])
+    assert "broken regex" in r["error"]
+
+
+async def test_write_time_refusal_for_dead_fields(seeded_kernel):
+    for field in ("code", "shim", "interpreter", "interpreters", "argv_template"):
+        r = await _mk(seeded_kernel, agent_id=f"r_{field}", **{field: "x"})
+        assert "is not a field" in r["error"], (field, r)
+
+
+# ─── the job lifecycle ──────────────────────────────────────────
+
+
+async def test_command_runs_and_captures_output(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    r = await _start(seeded_kernel, "runner", "echo", ["hello", "world"])
+    assert r.get("status") == "running", r
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["exit_code"] == 0
+    assert row["last_line"] == "hello world"
+
+
+async def test_nonzero_exit_is_failed(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r".*"])
+    r = await _start(seeded_kernel, "runner", "false")
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["status"] == "failed" and row["exit_code"] != 0
+
+
+async def test_stop_kills_a_running_job(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"sleep .*"])
+    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    s = (
         await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {"type": "start", "code": "for i in range(3): print(i)"},
-                }
-            ]
+            [{"target": "runner", "payload": {"type": "stop", "job_id": r["job_id"]}}]
         )
     )[0]["result"]
-    evs = await _until_done(q, r["job_id"])
-    progress = [
-        e["line"] for e in evs if e["type"] == "progress" and e["stream"] == "stdout"
-    ]
-    assert progress == ["0", "1", "2"]
-    done = evs[-1]
-    assert done["type"] == "job_done" and done["ok"] is True
-    assert done["exit_code"] == 0 and done["stdout"] == "0\n1\n2\n"
+    assert s.get("killed"), s
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["status"] != "running"
 
 
-async def test_stderr_stays_separate_and_a_nonzero_exit_reads_failed(seeded_kernel):
-    """Merging the streams would make a program's diagnostics indistinguishable from
-    its result, and a non-zero exit must not read as `done`."""
-    xid = await _wired(seeded_kernel)
-    r = (
+async def test_env_reaches_the_child(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"])
+    r = await _start(
+        seeded_kernel, "runner", "/bin/sh", ["-c", "echo $MARK"], env={"MARK": "x42"}
+    )
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["last_line"] == "x42"
+
+
+async def test_many_jobs_run_in_parallel(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    ids = []
+    for i in range(3):
+        r = await _start(seeded_kernel, "runner", "echo", [str(i)])
+        ids.append(r["job_id"])
+    for i, j in enumerate(ids):
+        row = await _wait_done(seeded_kernel, "runner", j)
+        assert row["exit_code"] == 0 and row["last_line"] == str(i)
+
+
+# ─── kernel integration ─────────────────────────────────────────
+
+
+async def test_a_job_holds_a_task_row_and_cancel_reaps_it(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"sleep .*"])
+    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    st = (
         await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": 'import sys\nsys.stderr.write("oops")\nsys.exit(7)',
-                    },
-                }
-            ]
+            [{"target": "runner", "payload": {"type": "status", "job_id": r["job_id"]}}]
         )
     )[0]["result"]
-    j = await _poll_done(seeded_kernel, xid, r["job_id"])
-    assert "oops" in j["stderr"] and "oops" not in j["stdout"]
-    assert j["exit_code"] == 7 and j["status"] == "failed"
-
-
-async def test_stop_kills_and_interrupt_signals_a_running_job(seeded_kernel):
-    """`stop` (SIGKILL) and `interrupt` (SIGINT) are the two ways a caller ends a job it
-    started; a job that survived either would be unreachable and unowned."""
-    xid = await _wired(seeded_kernel)
-    r = (
+    task_id = st["jobs"][0]["task_id"]
+    assert task_id
+    c = (
         await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {"type": "start", "code": "import time\ntime.sleep(30)"},
-                }
-            ]
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": task_id}}]
         )
     )[0]["result"]
-    k = (
-        await seeded_kernel.send(
-            [{"target": xid, "payload": {"type": "stop", "job_id": r["job_id"]}}]
-        )
-    )[0]["result"]
-    assert k["killed"] == 1
-    j = await _poll_done(seeded_kernel, xid, r["job_id"])
-    assert j["status"] == "stopped" and j["exit_code"] != 0
+    assert c.get("cancelled"), c
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["status"] != "running"
 
-    r2 = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {"type": "start", "code": "import time\ntime.sleep(30)"},
-                }
-            ]
-        )
+
+async def test_delete_agent_reaps_running_jobs(seeded_kernel):
+    import exec_bridge.tools as ebt
+
+    await _mk(seeded_kernel, allowed=[r"sleep .*"])
+    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    proc = ebt._jobs[r["job_id"]]["proc"]
+    await seeded_kernel.send(
+        [
+            {
+                "target": seeded_kernel.id,
+                "payload": {"type": "delete_agent", "id": "runner"},
+            }
+        ]
+    )
+    for _ in range(60):
+        if proc.returncode is not None:
+            break
+        await asyncio.sleep(0.05)
+    assert proc.returncode is not None, "OS subprocess survived delete_agent"
+
+
+# ─── the control wire ───────────────────────────────────────────
+
+_WIRE_CHILD = (
+    "import os,socket,struct,json,sys\n"
+    "fd=int(os.environ['FANTASTIC_CTRL_FD'])\n"
+    "s=socket.socket(fileno=fd)\n"
+    "def frame(o):\n"
+    "  b=json.dumps(o).encode(); s.sendall(struct.pack('>I',len(b))+b)\n"
+    "frame({'op':'onmessage'})\n"
+    "hdr=s.recv(4); n=struct.unpack('>I',hdr)[0]; m=json.loads(s.recv(n))\n"
+    "print('got', m['payload']['type']); sys.stdout.flush()\n"
+)
+
+
+async def test_mail_reaches_a_live_job_over_the_wire(seeded_kernel):
+    """A command may still speak the control wire — the fd survives the redesign.
+    The child here is `python -c <program>`: just a COMMAND with args, which is
+    the whole point of the general-purpose runner."""
+    py = sys.executable
+    await _mk(seeded_kernel, allowed=[rf"{py} -c .*"])
+    r = await _start(seeded_kernel, "runner", py, ["-c", _WIRE_CHILD])
+    await asyncio.sleep(0.4)  # let it register on_message
+    ack = (
+        await seeded_kernel.send([{"target": "runner", "payload": {"type": "ping"}}])
     )[0]["result"]
-    n = (await seeded_kernel.send([{"target": xid, "payload": {"type": "interrupt"}}]))[
+    assert ack == {"queued": True}, ack
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert "got ping" in (row.get("last_line") or "")
+
+
+async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    r = (await seeded_kernel.send([{"target": "runner", "payload": {"type": "ping"}}]))[
         0
     ]["result"]
-    assert n["interrupted"] == 1
-    j2 = await _poll_done(seeded_kernel, xid, r2["job_id"])
-    assert j2["exit_code"] != 0
-
-
-async def test_clear_forgets_finished_jobs_only(seeded_kernel):
-    """`clear` is the one caller that wants the status LABEL, not process liveness — it
-    decides what is finished enough to forget, and must not drop a live row."""
-    xid = await _wired(seeded_kernel)
-    done = (
-        await seeded_kernel.send(
-            [{"target": xid, "payload": {"type": "start", "code": "print(1)"}}]
-        )
-    )[0]["result"]
-    await _poll_done(seeded_kernel, xid, done["job_id"])
-    live = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {"type": "start", "code": "import time\ntime.sleep(30)"},
-                }
-            ]
-        )
-    )[0]["result"]
-    c = (await seeded_kernel.send([{"target": xid, "payload": {"type": "clear"}}]))[0][
-        "result"
-    ]
-    assert c["cleared"] == 1
-    jobs = (
-        (await seeded_kernel.send([{"target": xid, "payload": {"type": "status"}}]))[0][
-            "result"
-        ]
-    )["jobs"]
-    assert [j["job_id"] for j in jobs] == [live["job_id"]]
-    (await seeded_kernel.send([{"target": xid, "payload": {"type": "stop"}}]))[0][
-        "result"
-    ]
-
-
-async def test_start_refuses_a_missing_or_non_string_code(seeded_kernel):
-    """With no code and none on the record there is nothing to run — refuse instead of
-    spawning an interpreter with an empty program."""
-    xid = await _wired(seeded_kernel)
-    for bad in ({"type": "start"}, {"type": "start", "code": ""}):
-        r = (await seeded_kernel.send([{"target": xid, "payload": bad}]))[0]["result"]
-        assert "error" in r and "code" in r["error"], f"{bad!r} → {r!r}"
-        assert "job_id" not in r
-    r = (
-        await seeded_kernel.send(
-            [{"target": xid, "payload": {"type": "start", "code": 42}}]
-        )
-    )[0]["result"]
-    assert "error" in r and "job_id" not in r
-
-
-async def test_cwd_comes_from_the_payload_or_the_record(seeded_kernel, tmp_path):
-    """A tool that runs in the wrong directory reads/writes the wrong files; both the
-    per-call and the persisted form must reach the process."""
-    xid = await _wired(seeded_kernel)
-    sub = tmp_path / "work"
-    sub.mkdir()
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": "import os; print(os.getcwd())",
-                        "cwd": str(sub),
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert str(sub) in (await _poll_done(seeded_kernel, xid, r["job_id"]))["stdout"]
-
-    onrec = tmp_path / "recwork"
-    onrec.mkdir()
-    xid2 = await _wired(seeded_kernel, cwd=str(onrec))
-    r2 = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid2,
-                    "payload": {
-                        "type": "start",
-                        "code": "import os; print(os.getcwd())",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert str(onrec) in (await _poll_done(seeded_kernel, xid2, r2["job_id"]))["stdout"]
-    assert (
-        (await seeded_kernel.send([{"target": xid2, "payload": {"type": "reflect"}}]))[
-            0
-        ]["result"]
-    )["cwd"] == str(onrec)
-
-
-# ─── per-call arguments (kernel.args) ───────────────────────────
-
-
-async def test_start_passes_per_call_args_to_the_program(seeded_kernel):
-    """Every agent takes its arguments in the payload. Without this the executor is the
-    one place the payload is discarded, so a tool can only know what was baked into its
-    `code` — it cannot be a pure function, nor be told where to send its result."""
-    xid = await _wired(seeded_kernel, shim="python")
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": "import json; print(json.dumps(kernel.args))",
-                        "args": {"reply_to": "notes", "n": 3, "deep": {"ok": True}},
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    j = await _poll_done(seeded_kernel, xid, r["job_id"])
-    assert json.loads(j["stdout"].strip()) == {
-        "reply_to": "notes",
-        "n": 3,
-        "deep": {"ok": True},
-    }
-
-
-async def test_args_default_to_empty_when_the_caller_passes_none(seeded_kernel):
-    """`{}` — not absent, not `null`: a program may read `kernel.args` unconditionally."""
-    xid = await _wired(seeded_kernel, shim="python")
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": "import json; print(json.dumps(kernel.args))",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    j = await _poll_done(seeded_kernel, xid, r["job_id"])
-    assert json.loads(j["stdout"].strip()) == {}
-
-
-async def test_unserializable_args_are_refused_loudly(seeded_kernel):
-    """They ride the process env as JSON; an object that cannot be encoded must fail
-    with its reason BEFORE a process exists, not as a mangled env var."""
-    xid = await _wired(seeded_kernel, shim="python")
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": "pass",
-                        "args": {"f": object()},
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert "JSON-serializable" in r["error"]
-    assert "job_id" not in r
-
-
-async def test_oversized_args_are_refused_with_the_reason(seeded_kernel):
-    """The whole env block caps near 1 MB; past it `execve` fails with a cryptic E2BIG.
-    Refuse early and say where bulk data belongs (an agent, passed by id)."""
-    xid = await _wired(seeded_kernel, shim="python")
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": "pass",
-                        "args": {"blob": "x" * (xb.MAX_ARGS_BYTES + 10)},
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert "too large" in r["error"] and "agent" in r["error"]
-    assert "job_id" not in r
-
-
-async def test_code_may_be_a_list_of_lines(seeded_kernel, tmp_path):
-    """A program written as ONE JSON string is the most fragile thing a model
-    emits: every newline is an escape, every inner quote another, and one missed
-    `\\"` swallows the rest of the object. A list makes newlines the array
-    structure instead — measured need, from a probe that burned three
-    consecutive turns losing a closing quote."""
-    xid = await _wired(seeded_kernel)
-    out = tmp_path / "lines.txt"
-    r = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": xid,
-                    "payload": {
-                        "type": "start",
-                        "code": [
-                            "with open(%r, 'w') as f:" % str(out),
-                            "    f.write('from a list')",
-                        ],
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    assert "job_id" in r, r
-    for _ in range(200):
-        await asyncio.sleep(0.05)
-        if out.exists():
-            break
-    assert out.read_text() == "from a list"
-
-
-async def test_a_bare_number_is_still_refused(seeded_kernel):
-    """The list is the ONLY new shape. `42` is a mistake, not a one-line
-    program, and stringifying it would spawn an interpreter on nonsense."""
-    xid = await _wired(seeded_kernel)
-    r = (
-        await seeded_kernel.send(
-            [{"target": xid, "payload": {"type": "start", "code": 42}}]
-        )
-    )[0]["result"]
-    assert "error" in r and "job_id" not in r
+    assert "error" in r

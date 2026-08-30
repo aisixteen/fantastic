@@ -54,7 +54,7 @@ def _ws_call(ws, cid, target, payload):
 
 _MINT = {
     "type": "create_agent",
-    "handler_module": "yaml_state.tools",
+    "handler_module": "durable_memory.tools",
     "id": "adv4_minted",
 }
 

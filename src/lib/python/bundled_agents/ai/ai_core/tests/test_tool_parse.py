@@ -508,7 +508,7 @@ async def test_reply_tag_names_pid_target_and_verb():
     flight, and a bare `[reply to kernel_state]` cannot be matched to WHICH call it
     answers — the model re-issued both deletes, then theorized "duplicate delivery"
     from its own retries. Target+verb narrowed it but is still NOT unique (two
-    identical calls in flight); measured again 2026-08-20 (qwen: "the reply queue is
+    identical calls in flight); measured again 2026-08-20 (the model: "the reply queue is
     running ahead of me", then re-polled forever). The PID — minted at dispatch, the
     same id `ps`/`cancel` use — is the one unambiguous correlation.
     """

@@ -249,7 +249,7 @@ async def test_private_but_internally_readable_is_expressible(
                         "id": "in_kernel_reader",
                         "handler_module": "file_bridge.tools",
                         "root": ".",
-                        "can_call": {"transcripts": ["read"]},
+                        "can_call": {"transcripts": ["read_stream"]},
                     },
                 }
             ]
@@ -261,7 +261,7 @@ async def test_private_but_internally_readable_is_expressible(
         id="transcripts",
         root=".",
         ingress_rule="allow_all_ingress",
-        callable_by={"in_kernel_reader": ["read"]},
+        callable_by={"in_kernel_reader": ["read_stream"]},
     )
     await _grant_serving(seeded_kernel, web_agent, "transcripts")  # egress granted…
 
@@ -280,7 +280,7 @@ async def test_private_but_internally_readable_is_expressible(
                 [
                     {
                         "target": "transcripts",
-                        "payload": {"type": "read", "path": "chat.txt"},
+                        "payload": {"type": "read_stream", "path": "chat.txt"},
                     }
                 ]
             )
@@ -288,7 +288,7 @@ async def test_private_but_internally_readable_is_expressible(
     finally:
         _current_sender.reset(token)
     assert got.get("reason") != "unauthorized", f"in-kernel read was denied: {got!r}"
-    assert "private chat history" in str(got.get("content", ""))
+    assert b"private chat history" in bytes(got.get("bytes") or b"")
 
 
 async def test_gate_denial_404_carries_the_hint_but_a_missing_file_does_not(

@@ -93,7 +93,7 @@ Python, rust and swift run `agentic/`. The ts kernel does not, and that is a
 decision, not a gap.
 
 Measured: **no scenario applies to it.** Every config builds its roster from
-`file_bridge` / `yaml_state` / `exec_bridge`, and the browser kernel has only
+`file_bridge` / `durable_memory` / `exec_bridge`, and the browser kernel has only
 view bundles (canvas, html_agent, terminal_view, gl_agent, ai_view, loader). It
 also owns no tree-CRUD verbs and no manifest loader — its tree is built by its
 bundles and persisted through the HOST loader — so hydrating a declared roster

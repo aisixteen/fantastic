@@ -90,7 +90,7 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
 
 
 async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
-    # History is auto-mounted (a `chat` yaml_state, persisted through the loader) — the
+    # History is auto-mounted (a `chat` durable_memory, persisted through the loader) — the
     # AI needs NO file_bridge_id. (store_agent gives the loader a store to persist to.)
     oid = await _make_ollama(seeded_kernel)  # NO file_bridge_id
     fp = _FakeProvider([["ok"]])
@@ -115,7 +115,7 @@ async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
 
 
 async def test_history_returns_messages(seeded_kernel, store_agent):
-    oid = await _make_ollama(seeded_kernel)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["hello"]])
     ot._providers[oid] = fp
     try:
@@ -135,7 +135,7 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
 
 async def test_history_per_client(seeded_kernel, store_agent):
     """Two clients = two separate threads; history reads only the asked-for one."""
-    oid = await _make_ollama(seeded_kernel)
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:
@@ -313,8 +313,8 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
 
 
 async def test_run_persists_history(seeded_kernel, store_agent):
-    """Default caller (no client_id) persists user+assistant to the chat yaml_state."""
-    oid = await _make_ollama(seeded_kernel)
+    """Default caller (no client_id) persists user+assistant to the chat durable_memory."""
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
     try:
@@ -337,8 +337,8 @@ async def test_run_persists_history(seeded_kernel, store_agent):
 
 
 async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
-    """Two client_ids → two distinct threads in the chat yaml_state."""
-    oid = await _make_ollama(seeded_kernel)
+    """Two client_ids → two distinct threads in the chat durable_memory."""
+    oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp
     try:

@@ -2,7 +2,51 @@
 
 from __future__ import annotations
 
-import base64
+
+async def _ws(kernel, fb, path, data: bytes, truncate=True):
+    return (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": path,
+                        "bytes": data,
+                        "truncate": truncate,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+
+
+async def _rs(kernel, fb, path) -> dict:
+    """Read the whole file via stream chunks; returns {'content': str} or the error."""
+    chunks, offset = [], 0
+    while True:
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": fb,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": path,
+                            "offset": offset,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return r
+        b = r.get("bytes") or b""
+        chunks.append(bytes(b))
+        if r.get("eof") or not b:
+            break
+        offset = r.get("next_offset", offset + len(b))
+    return {"content": b"".join(chunks).decode()}
 
 
 async def test_reflect(seeded_kernel, file_bridge):
@@ -16,112 +60,24 @@ async def test_reflect(seeded_kernel, file_bridge):
 
 
 async def test_write_then_read(seeded_kernel, file_bridge, tmp_path):
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": file_bridge,
-                    "payload": {
-                        "type": "write",
-                        "path": "hello.txt",
-                        "content": "hi there",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    r = (
-        await seeded_kernel.send(
-            [{"target": file_bridge, "payload": {"type": "read", "path": "hello.txt"}}]
-        )
-    )[0]["result"]
+    """The STREAM verbs are the only byte path — the string `read`/`write` died
+    (a program in a JSON string is the measured envelope-escaping failure)."""
+    w = await _ws(seeded_kernel, file_bridge, "hello.txt", b"hi there")
+    assert w.get("written"), w
+    r = await _rs(seeded_kernel, file_bridge, "hello.txt")
     assert r["content"] == "hi there"
     assert (tmp_path / "hello.txt").read_text() == "hi there"
 
 
 async def test_write_creates_parent_dirs(seeded_kernel, file_bridge, tmp_path):
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": file_bridge,
-                    "payload": {
-                        "type": "write",
-                        "path": "a/b/c.txt",
-                        "content": "deep",
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    w = await _ws(seeded_kernel, file_bridge, "a/b/c.txt", b"deep")
+    assert w.get("written"), w
     assert (tmp_path / "a" / "b" / "c.txt").read_text() == "deep"
 
 
 async def test_read_missing_file_errors(seeded_kernel, file_bridge):
-    r = (
-        await seeded_kernel.send(
-            [{"target": file_bridge, "payload": {"type": "read", "path": "nope.txt"}}]
-        )
-    )[0]["result"]
+    r = await _rs(seeded_kernel, file_bridge, "nope.txt")
     assert "error" in r
-
-
-async def test_read_image_returns_base64(seeded_kernel, file_bridge, tmp_path):
-    img_data = b"\x89PNG\r\n\x1a\nfake-png-bytes"
-    (tmp_path / "img.png").write_bytes(img_data)
-    r = (
-        await seeded_kernel.send(
-            [{"target": file_bridge, "payload": {"type": "read", "path": "img.png"}}]
-        )
-    )[0]["result"]
-    assert "image_base64" in r
-    assert base64.b64decode(r["image_base64"]) == img_data
-    assert r["mime"] == "image/png"
-
-
-async def test_read_pdf_returns_raw_bytes_with_mime(
-    seeded_kernel, file_bridge, tmp_path
-):
-    """Generic binary (PDF, archive, font, etc.) returns raw bytes +
-    mime so the webapp /file/ proxy can serve it as a real download.
-    Bytes ride the kernel binary protocol over WS; zero-copy in-process.
-    Without this, every non-image binary 404s."""
-    pdf_data = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj\n<<>>\nendobj\nxref\n0 1\ntrailer\n<<>>\n%%EOF\n"
-    (tmp_path / "doc.pdf").write_bytes(pdf_data)
-    r = (
-        await seeded_kernel.send(
-            [{"target": file_bridge, "payload": {"type": "read", "path": "doc.pdf"}}]
-        )
-    )[0]["result"]
-    assert "error" not in r, f"PDF read errored: {r}"
-    assert isinstance(r.get("bytes"), (bytes, bytearray)), (
-        "PDF must return raw bytes, not error / base64"
-    )
-    assert bytes(r["bytes"]) == pdf_data
-    assert r["mime"] == "application/pdf"
-    # Sanity: NOT base64 — that would be wasteful + change shape.
-    assert "bytes_b64" not in r
-
-
-async def test_read_unknown_binary_falls_back_to_octet_stream(
-    seeded_kernel, file_bridge, tmp_path
-):
-    """Files with no recognizable extension still come back as bytes —
-    just with application/octet-stream as the mime."""
-    # Real non-UTF-8 bytes: lone high-bytes that fail strict utf-8 decode.
-    # `\x00\x01\x02` are valid utf-8 codepoints — using them would route
-    # through the text branch.
-    blob = b"\xff\xfe\xfd\xfc binary blob"
-    # `.bin` (and many short ones) aren't in mimetypes' DB → octet-stream.
-    (tmp_path / "blob.bin").write_bytes(blob)
-    r = (
-        await seeded_kernel.send(
-            [{"target": file_bridge, "payload": {"type": "read", "path": "blob.bin"}}]
-        )
-    )[0]["result"]
-    assert isinstance(r.get("bytes"), (bytes, bytearray))
-    assert bytes(r["bytes"]) == blob
-    assert r["mime"] == "application/octet-stream"
 
 
 async def test_list(seeded_kernel, file_bridge, tmp_path):
@@ -202,7 +158,7 @@ async def test_path_safety_rejects_escape(seeded_kernel, file_bridge):
             [
                 {
                     "target": file_bridge,
-                    "payload": {"type": "read", "path": "../../etc/passwd"},
+                    "payload": {"type": "read_stream", "path": "../../etc/passwd"},
                 }
             ]
         )
@@ -231,7 +187,12 @@ async def test_readonly_refuses_write(seeded_kernel, file_bridge):
             [
                 {
                     "target": file_bridge,
-                    "payload": {"type": "write", "path": "x.txt", "content": "x"},
+                    "payload": {
+                        "type": "write_stream",
+                        "path": "x.txt",
+                        "bytes": b"x",
+                        "truncate": True,
+                    },
                 }
             ]
         )
@@ -337,131 +298,3 @@ async def _fb(kernel, tmp_path, **meta) -> str:
         )
     )[0]["result"]
     return rec["id"]
-
-
-async def test_a_small_read_is_unchanged(seeded_kernel, tmp_path):
-    """The window must not alter the ordinary case: a file inside it returns `content`
-    and NOTHING else, so every existing caller and assertion is untouched."""
-    fid = await _fb(seeded_kernel, tmp_path)
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {"type": "write", "path": "s.txt", "content": "hello"},
-                }
-            ]
-        )
-    )[0]["result"]
-    r = (
-        await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "s.txt"}}]
-        )
-    )[0]["result"]
-    assert r["content"] == "hello"
-    assert set(r) == {"path", "content"}, f"window leaked keys on a small read: {r}"
-
-
-async def test_a_large_read_is_windowed_and_says_so(seeded_kernel, tmp_path):
-    """MEASURED 2026-08-07: an AI agent read an 86 KB file, its context reached 21k
-    tokens, and the next turn was cancelled mid-prefill — prefill outran the backend's
-    180s send timeout. The 32k window was never exceeded, so compaction never fired and
-    `context_insufficient` never appeared: the turn became un-completable on TIME while
-    legal on SIZE. A read must therefore be bounded, and must SAY it was bounded — a
-    caller that cannot tell a whole file from its first page reasons about the wrong
-    content."""
-    from file_bridge.tools import DEFAULT_MAX_READ_CHARS as CAP
-
-    fid = await _fb(seeded_kernel, tmp_path)
-    total = CAP * 2 + 77
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {
-                        "type": "write",
-                        "path": "big.txt",
-                        "content": "x" * total,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    r = (
-        await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "big.txt"}}]
-        )
-    )[0]["result"]
-    assert len(r["content"]) == CAP
-    assert r["truncated"] is True
-    assert r["total_chars"] == total and r["next_offset"] == CAP
-    assert "offset" in r["hint"], "the hint must name how to continue"
-
-
-async def test_paging_reassembles_the_whole_file(seeded_kernel, tmp_path):
-    """The tail must be REACHABLE, or the window is just data loss with a label."""
-    from file_bridge.tools import DEFAULT_MAX_READ_CHARS as CAP
-
-    fid = await _fb(seeded_kernel, tmp_path)
-    body = "".join(chr(97 + (i % 26)) for i in range(CAP + 500))
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {"type": "write", "path": "p.txt", "content": body},
-                }
-            ]
-        )
-    )[0]["result"]
-    out, offset = "", 0
-    while True:
-        r = (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": fid,
-                        "payload": {"type": "read", "path": "p.txt", "offset": offset},
-                    }
-                ]
-            )
-        )[0]["result"]
-        out += r["content"]
-        if not r.get("truncated"):
-            break
-        offset = r["next_offset"]
-    assert out == body
-
-
-async def test_the_leg_can_widen_its_own_window(seeded_kernel, tmp_path):
-    """An operator serving small config files may raise it; `limit` above the leg's cap
-    is clamped, so a caller cannot talk its way past the operator's bound."""
-    fid = await _fb(seeded_kernel, tmp_path, max_read_chars=64)
-    (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {"type": "write", "path": "c.txt", "content": "y" * 200},
-                }
-            ]
-        )
-    )[0]["result"]
-    r = (
-        await seeded_kernel.send(
-            [{"target": fid, "payload": {"type": "read", "path": "c.txt"}}]
-        )
-    )[0]["result"]
-    assert len(r["content"]) == 64 and r["truncated"] is True
-    over = (
-        await seeded_kernel.send(
-            [
-                {
-                    "target": fid,
-                    "payload": {"type": "read", "path": "c.txt", "limit": 10_000},
-                }
-            ]
-        )
-    )[0]["result"]
-    assert len(over["content"]) == 64, "limit must clamp to the leg's cap"

@@ -309,7 +309,7 @@ async def test_a_sidecar_round_trips_whatever_its_size(kernel, size):
 
 
 async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
-    """The same defect at the level it actually bites: a `yaml_state` agent
+    """The same defect at the level it actually bites: a `durable_memory` agent
     whose accumulated memory outgrew one chunk silently forgot the tail on its
     next read."""
     (
@@ -337,9 +337,9 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "yaml_state.tools",
+                        "handler_module": "durable_memory.tools",
                         "id": "memory",
-                        "mode": "data",
+                        "file_bridge_id": "store",
                     },
                 }
             ]
@@ -477,23 +477,30 @@ def test_operator_context_escalations_are_fixed_and_self_scoped():
     SUBSTRATE enters `operator_context()` on a caller's behalf sends something
     FIXED — a hardcoded target and verb, scoped to the caller itself.
 
-    `yaml_state._load` / `._persist` send to a literal `"kernel_state"` with a
-    literal verb and `agent_id=agent.id` — the caller controls only its own
-    content. This test reads the source and fails if a caller-controlled target
-    or verb appears inside an escalation, because that is the shape that turns
-    bookkeeping into a confused deputy.
+    `durable_memory._load` / `._persist` send to the leg named by the agent's
+    OWN record (`file_bridge_id` — operator-set at create, never taken from a
+    payload) with a literal stream verb and a literal path. The caller controls
+    only its own content. This test reads the source and fails if a
+    caller-controlled target, verb or path appears inside an escalation,
+    because that is the shape that turns bookkeeping into a confused deputy.
     """
     import inspect
 
-    from yaml_state import tools as ys
+    from durable_memory import tools as dm
 
-    for fn in (ys._load, ys._persist):
+    for fn, verb in ((dm._load, '"read_stream"'), (dm._persist, '"write_stream"')):
         src = inspect.getsource(fn)
         assert "operator_context()" in src
-        assert '"kernel_state"' in src, f"{fn.__name__}: target is not literal"
-        assert "agent_id" not in src.split("payload")[0] or "agent.id" in src, (
-            f"{fn.__name__}: namespace must be self-scoped"
+        # target: the record's own binding, resolved by _fbid(agent) — never
+        # payload-derived. verb + path: literals.
+        assert "_fbid(agent)" in src, (
+            f"{fn.__name__}: target is not the record's own leg"
         )
+        assert "payload.get" not in src and "payload[" not in src, (
+            f"{fn.__name__}: escalation must not read a caller payload"
+        )
+        assert verb in src, f"{fn.__name__}: verb is not literal"
+        assert "STATE_PATH" in src, f"{fn.__name__}: path is not fixed"
 
 
 async def test_a_bare_test_driver_is_an_operator_and_that_is_deliberate(kernel):

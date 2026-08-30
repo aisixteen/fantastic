@@ -4,8 +4,8 @@ The failure it exists to prevent, measured three times and fatal each time: a tu
 emits several calls, each reply comes back as its own turn, and the model cannot
 tell "the rest are still in flight" from "the kernel answered the wrong one".
 2026-08-07 opus re-issued both deletes and theorised duplicate delivery;
-2026-08-20 qwen decided the reply queue was running ahead of it and re-polled
-forever; 2026-08-24 qwen made two parallel reflects, got the first back, wrote
+2026-08-20 the model decided the reply queue was running ahead of it and re-polled
+forever; 2026-08-24 the model made two parallel reflects, got the first back, wrote
 "I sent a reflect to file_bridge but the reply came back from exec_bridge",
 re-sent it and gave up without doing the task.
 

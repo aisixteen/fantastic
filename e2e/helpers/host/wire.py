@@ -86,9 +86,12 @@ class WireTranscript:
         self.k, self.aid, self.client_id = k, aid, client_id
         self.n = 0
         self.transcript: list[str] = []
+        self._seen_user = 0
         self._last_poll = 0.0
 
     def _refresh(self) -> None:
+        from helpers.proxy import box
+
         # The drive loop ticks every 2s; polling faster only burns requests.
         if time.monotonic() - self._last_poll < 1.0:
             return
@@ -101,6 +104,21 @@ class WireTranscript:
         msgs = h.get("messages") if isinstance(h, dict) else None
         if not isinstance(msgs, list):
             return
+        # PRINT BOTH SIDES, count ONE. `n` and `transcript` stay assistant-only so
+        # the tripwires and `distinct_calls` see exactly what the in-process
+        # reader sees — but a routed reply arrives as a USER turn, and without
+        # showing it there is no way to tell "the model got its answer and chose
+        # to stop" from "the answer never came back". Both end the chain with
+        # nothing in flight and no error.
+        incoming = [
+            str(m.get("content") or "")
+            for m in msgs
+            if m.get("role") == "user"
+        ]
+        if len(incoming) > self._seen_user:
+            for t in incoming[self._seen_user:]:
+                box("-- USER ->", t, "<")
+            self._seen_user = len(incoming)
         turns = [
             str(m.get("content") or "")
             for m in msgs
@@ -122,8 +140,6 @@ class WireTranscript:
             # PRINT THE TURN, as the in-process reader does. Without this a wire
             # run's log carries a verdict and nothing to explain it — the whole
             # transcript is on the far side of a socket.
-            from helpers.proxy import box
-
             for i, t in enumerate(fresh, start=self.n - len(fresh) + 1):
                 box(f"-- turn {i} - ASSISTANT <-", t, ">")
 

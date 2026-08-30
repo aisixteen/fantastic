@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
 
 import httpx
 import pytest
@@ -147,7 +146,7 @@ async def test_reflect_has_api_key_tracks_the_env(seeded_kernel, store_agent):
 
 async def test_send_without_provider_failfasts(seeded_kernel):
     # No file_bridge_id and no key in the env ⇒ make_provider returns None ⇒ failfast
-    # (chat history no longer needs file_bridge_id — it's a mounted chat yaml_state).
+    # (chat history no longer needs file_bridge_id — it's a mounted chat durable_memory).
     nid = await _make_nvidia(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -274,7 +273,7 @@ async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
 
 
 async def test_run_persists_history(seeded_kernel, store_agent):
-    # History lands in the mounted chat yaml_state (persisted THROUGH the loader),
+    # History lands in the mounted chat durable_memory (persisted THROUGH the loader),
     # NOT a chat_<client>.json the AI writes itself — read it back via `history`.
     nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
     fp = _FakeProvider([["reply"]])

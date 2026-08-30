@@ -17,8 +17,7 @@ loaders:
         # Carries a sidecar (`state.yaml`), so the cascade has more to remove
         # than one agent.json.
         - id: a_notes
-          handler_module: yaml_state.tools
-          mode: data
+          handler_module: durable_memory.tools
           callable_by:
             a_head: [set, read]
         - id: a_leaf

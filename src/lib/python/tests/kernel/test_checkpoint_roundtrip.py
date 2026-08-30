@@ -50,7 +50,7 @@ async def _seed(kernel) -> None:
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "yaml_state.tools",
+                        "handler_module": "durable_memory.tools",
                         "id": "memory",
                         "file_bridge_id": "store",
                         "callable_by": {"store": ["read"]},

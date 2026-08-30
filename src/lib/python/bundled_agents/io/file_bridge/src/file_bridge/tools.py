@@ -13,8 +13,6 @@ every verb resolves `root/path` and refuses if the result escapes `root`.
 Verbs:
   reflect            -> {sentence, root, readonly, hidden_count, ingress, egress, sealed, see}
   list   path?       -> {files: [{name, path, type, size?}, ...]}
-  read   path        -> {path, content} | {path, image_base64, mime}
-  write  path text   -> {path, written: true}            (refused if readonly)
   read_stream  path offset? length?        -> {bytes, next_offset, eof, size} (SOURCE)
   write_stream path bytes offset? truncate? -> {written, offset, size}        (SINK)
   pump   source? source_path sink? sink_path? -> {bytes, chunks}  (server-side copy)
@@ -25,9 +23,6 @@ Verbs:
 
 from __future__ import annotations
 
-import base64
-import mimetypes
-from pathlib import PurePosixPath
 
 from file_bridge import fs
 from io_bridge import describe as _describe
@@ -73,49 +68,6 @@ def _is_hidden(name: str, hidden: list[str]) -> bool:
 # the offset to continue from, because a caller that cannot tell a whole file from its
 # first page will reason about the wrong content.
 DEFAULT_MAX_READ_CHARS = 16384
-
-
-def _max_read_chars(rec: dict) -> int:
-    """The leg's text-read window. Per-record like `hidden` — an operator serving small
-    config files can raise it; the default protects a conversation from one call."""
-    try:
-        n = int(rec.get("max_read_chars", DEFAULT_MAX_READ_CHARS))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_READ_CHARS
-    return n if n > 0 else DEFAULT_MAX_READ_CHARS
-
-
-def _window_text(rec: dict, payload: dict, text: str) -> tuple[str, dict]:
-    """(slice, reply-extras). `offset`/`limit` page a large file explicitly."""
-    total = len(text)
-    try:
-        offset = max(0, int(payload.get("offset", 0)))
-    except (TypeError, ValueError):
-        offset = 0
-    cap = _max_read_chars(rec)
-    try:
-        limit = int(payload.get("limit", cap))
-    except (TypeError, ValueError):
-        limit = cap
-    limit = min(max(1, limit), cap)
-    chunk = text[offset : offset + limit]
-    end = offset + len(chunk)
-    if offset == 0 and end >= total:
-        return chunk, {}
-    extras = {
-        "total_chars": total,
-        "offset": offset,
-        "returned_chars": len(chunk),
-        "truncated": end < total,
-    }
-    if end < total:
-        extras["next_offset"] = end
-        extras["hint"] = (
-            f"{total - end} of {total} chars unread — continue with "
-            f"{{type:'read', path:…, offset:{end}}} (max {cap} per call, raise the "
-            "leg's `max_read_chars` to widen it)"
-        )
-    return chunk, extras
 
 
 def _readonly_or_none(rec: dict) -> dict | None:
@@ -198,87 +150,6 @@ async def _list(id, payload, kernel):
                 sz = -1
             files.append({"name": entry.name, "path": rel, "type": "file", "size": sz})
     return {"path": path, "files": files}
-
-
-async def _read(id, payload, kernel):
-    """args: path:str (req), offset:int? (0), limit:int? (the leg's max_read_chars, default 16384). Returns {path, content:str} for text — WINDOWED: a file longer than the window also carries {total_chars, offset, returned_chars, truncated, next_offset, hint} so the tail is fetchable and never silently dropped. {path, image_base64, mime} for images, {path, bytes:bytes, mime} for any other binary (PDF, fonts, archives) — raw bytes ride the kernel's binary protocol over WS, zero-copy in-process. Refuses paths outside root."""
-    rec = kernel.get(id) or {}
-    root = _root_str(rec)
-    path = payload.get("path", "")
-    ext = PurePosixPath(path).suffix.lower()
-    try:
-        if not fs.is_file(root, path):
-            return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
-        if ext in IMAGE_EXT:
-            data = fs.read_bytes(root, path)
-            mime = {
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".gif": "image/gif",
-                ".webp": "image/webp",
-                ".svg": "image/svg+xml",
-            }.get(ext, "application/octet-stream")
-            return {
-                "path": path,
-                "image_base64": base64.b64encode(data).decode("ascii"),
-                "mime": mime,
-            }
-        try:
-            content, window = _window_text(rec, payload, fs.read_text(root, path))
-        except UnicodeDecodeError:
-            # Generic binary: PDF, font, archive, audio, video. Raw bytes — over WS
-            # the kernel's binary protocol ships a binary frame; in-process the
-            # webapp's /file/ route pipes them straight to the HTTP response.
-            data = fs.read_bytes(root, path)
-            mime, _ = mimetypes.guess_type(path)
-            return {
-                "path": path,
-                "bytes": data,
-                "mime": mime or "application/octet-stream",
-            }
-    except (ValueError, OSError) as e:
-        return refusal(TRANSPORT_ERROR, str(e))
-    return {"path": path, "content": content, **window}
-
-
-def _as_text(value) -> str:
-    """`content` as a string, accepting a LIST OF LINES.
-
-    A multi-line program written as one JSON string is the single most fragile
-    thing an LLM emits: every newline is an escape and every inner quote is
-    another, so one missed `\"` swallows the rest of the object and the whole
-    call is lost. Measured on gemma-4-12B, and again on `subai_graph`, which
-    burned three consecutive turns on it.
-
-    A list sidesteps the failure rather than mitigating it: newlines are the
-    array structure, not escapes, and each element is short enough that a lost
-    quote breaks ONE line instead of the document.
-
-    A LIST is the only newly accepted shape. Everything else is handed back
-    untouched so the existing refusals still fire — a bare `42` is a mistake,
-    not a one-line program, and quietly stringifying it would spawn an
-    interpreter on nonsense.
-    """
-    if isinstance(value, (list, tuple)):
-        return "\n".join("" if v is None else str(v) for v in value)
-    return value
-
-
-async def _write(id, payload, kernel):
-    """args: path:str (req), content:str|list[str] (req — a LIST is joined with
-    newlines, which is the safer shape for anything with lines in it). Returns
-    {path, written:true, bytes}. Creates parent dirs. Refused if readonly."""
-    rec = kernel.get(id) or {}
-    if err := _readonly_or_none(rec):
-        return err
-    path = payload.get("path", "")
-    content = _as_text(payload.get("content", ""))
-    try:
-        fs.write_text(_root_str(rec), path, content)
-    except (ValueError, OSError) as e:
-        return refusal(TRANSPORT_ERROR, str(e))
-    return {"path": path, "written": True, "bytes": len(content.encode("utf-8"))}
 
 
 async def _delete(id, payload, kernel):
@@ -462,8 +333,6 @@ VERBS = {
     "reflect": _reflect,
     "boot": _boot,
     "list": _list,
-    "read": _read,
-    "write": _write,
     "read_stream": _read_stream,
     "write_stream": _write_stream,
     "pump": _pump,

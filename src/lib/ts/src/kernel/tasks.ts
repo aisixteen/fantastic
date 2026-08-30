@@ -52,7 +52,7 @@ export class TaskTable {
    * nothing); the hash only hides the ordering. A VISIBLE counter invites an
    * ordering inference that is false — the sequence increments on EVERY
    * dispatch, so a caller sees gaps it did not cause. Measured 2026-08-20
-   * (qwen3.8-27b): given `[reply to file_bridge_830365:10]` after issuing what
+   * (the model): given `[reply to file_bridge_830365:10]` after issuing what
    * it thought was `:5`, the model spent a whole turn reconciling the gap
    * instead of doing the task.
    */

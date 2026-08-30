@@ -84,7 +84,7 @@ class _FakeProvider:
 @pytest.fixture
 async def wired(seeded_kernel, store_agent):
     seeded_kernel.create(
-        "yaml_state.tools",
+        "durable_memory.tools",
         id="c1_store",
         file_bridge_id=store_agent,
         callable_by={"c1_ai": "*"},
@@ -93,6 +93,10 @@ async def wired(seeded_kernel, store_agent):
         "ollama_backend.tools",
         id="c1_ai",
         context_window=32768,
+        # The chat store inherits ITS OWNER'S leg — without one, history has
+        # nowhere durable to land and the recorded ask this test reads back
+        # never persists.
+        file_bridge_id=store_agent,
         can_call={"cli": "*", "c1_store": "*"},
     )
     fp = _FakeProvider()

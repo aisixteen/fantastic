@@ -147,7 +147,7 @@ async def _intro_booting(id, payload, kernel):
     )
     print(
         "  REACH one call by id, any unit: "
-        "compute(exec_bridge) · infer(ai) · memory(yaml_state) · shell(terminal_backend)"
+        "compute(exec_bridge) · infer(ai) · memory(durable_memory) · shell(terminal_backend)"
     )
     return None
 

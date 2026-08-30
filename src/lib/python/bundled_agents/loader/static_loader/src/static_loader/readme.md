@@ -20,11 +20,10 @@ Manifest:
 ```yaml
 agents:
   - id: memory
-    handler_module: yaml_state.tools
-    mode: mem
+    handler_module: durable_memory.tools
   - id: worker
     handler_module: exec_bridge.tools
-    interpreters: [python3]
+    allowed: ['python3 .*']   # the command(s) this leg may spawn
     can_call:            # deny-all: name the lateral edges this agent may use
       memory: [set, read]
 ```

@@ -4,7 +4,7 @@ A subprocess is OUTSIDE the trust domain: crossing kernel↔process is an IO edg
 exactly like a bridge leg — SEALED BY DEFAULT (absent `ingress_rule` ⇒ every verb except
 `reflect` denies with the teaching shape). Open it consciously with
 `ingress_rule=allow_all_ingress`. Even open, the LAW is the ALLOWLIST: only an interpreter the
-operator listed in `interpreters` can be spawned, and that choice is not overridable per
+operator allowed by regex can be spawned, and that choice is not overridable per
 call. The spawn primitive lives in `proc` — the ONE process surface. This agent is the
 GATE + verb shape over it; it never spawns directly.
 
@@ -20,12 +20,10 @@ record. Everything that is not language-specific — the job table, the pump, th
 the fd passing, the task-table integration, the mail contract — is the same code it
 always was, because none of it ever knew a language.
 
-## The wire is the contract; a shim is a convenience
+## The wire is the contract
 
-This bridge publishes a control fd and a frame format (see `shims`). A program may name
-`shim:'python'` and have the client prepended, or name nothing and speak the wire itself.
-That is the difference between generic and python-shaped: adding a language is adding a
-blob to `shims.SHIMS`, not a code path here.
+A spawned command MAY speak the control fd (see `proc`); one that never reads it
+runs exactly like any OS process.
 
 ## Verbs
 
@@ -53,7 +51,7 @@ import socket
 import struct
 import time
 
-from exec_bridge import proc, shims
+from exec_bridge import proc
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
 from kernel._refusal import NOT_FOUND, TRANSPORT_ERROR, bad, refusal
@@ -319,88 +317,101 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             pass
 
 
+# ─── the command gate: a REGEX allowlist ────────────────────────
+
+
+def _allowed_patterns(rec: dict) -> list[str]:
+    """The record's `allowed` — regexes a command line must match to run."""
+    raw = rec.get("allowed")
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(x) for x in raw] if isinstance(raw, list) else []
+
+
+def _command_permitted(rec: dict, line: str) -> str | None:
+    """None when `line` matches an allowed pattern; else the refusal text.
+
+    The FULL command line (command + args, shell-joined) is matched, anchored —
+    `re.fullmatch`, so `echo.*` cannot smuggle `echo; rm -rf /` past a prefix.
+    An empty allowlist runs nothing: the leg is inert until an operator states
+    what it may run, the same no-defaults posture the interpreter allowlist had.
+    """
+    import re as _re
+
+    pats = _allowed_patterns(rec)
+    if not pats:
+        return (
+            "exec_bridge: no commands are allowed on this leg — an operator must "
+            "set `allowed=[<regex>, ...]` naming what may run"
+        )
+    for pat in pats:
+        try:
+            # DOTALL: an argv element may legitimately contain newlines (a
+            # `-c` program, a heredoc) and the shell-join preserves them, so
+            # `.` must span lines or `.*` silently refuses any multi-line arg.
+            if _re.fullmatch(pat, line, _re.DOTALL):
+                return None
+        except _re.error:
+            continue  # a broken pattern permits nothing; validate_meta refuses new ones
+    return f"exec_bridge: command not allowed: {line!r} — this leg permits: {pats}"
+
+
 # ─── verbs ──────────────────────────────────────────────────────
 
 
-def _as_code(value) -> str:
-    """`code` as a string, accepting a LIST OF LINES.
-
-    A program written as one JSON string is the most fragile thing a model
-    emits: every newline is an escape and every inner quote is another, so one
-    missed `\"` swallows the rest of the object and the call is lost entirely.
-    That is not hypothetical — it is the measured gemma-4-12B failure, and it
-    burned three consecutive turns of `subai_graph`.
-
-    A list removes the failure instead of softening it: newlines become the
-    array structure rather than escapes, and each element is short enough that a
-    lost quote costs ONE line rather than the whole document.
-
-    A LIST is the only newly accepted shape. Everything else is handed back
-    untouched so the existing refusals still fire — a bare `42` is a mistake,
-    not a one-line program, and quietly stringifying it would spawn an
-    interpreter on nonsense.
-    """
-    if isinstance(value, (list, tuple)):
-        return "\n".join("" if v is None else str(v) for v in value)
-    return value
-
-
 async def _start(id, payload, kernel):
-    """args: code:str|list[str]? (falls back to the record's `code`; a LIST is
-    joined with newlines and is the safer shape for a real program), args:any? (THIS CALL's
-    arguments, reaches the program as `kernel.args`, default {}), interpreter:str?
-    (must be allowlisted), shim:str? (prepend a wire client), cwd:str?. Spawns in the
-    BACKGROUND and returns {job_id, status:'running'} at once; streams `progress` per
-    output line + a final `job_done`. Many run in parallel."""
+    """args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra
+    env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the
+    record's `allowed` regexes or the start is refused naming the patterns.
+    Spawns in the BACKGROUND and returns {job_id, status:'running'} at once;
+    streams `progress` per output line + a final `job_done`. Many run in parallel.
+
+    A GENERAL-PURPOSE runner: it runs COMMANDS. It is not a code runner and not
+    an interpreter runner — no `code`, no `interpreters`, no shims. A program is
+    a file some process (or stream) put on disk; running it is `command` +
+    `args`, exactly like anything else.
+    """
+    import shlex
+
     rec = kernel.get(id) or {}
-    code = _as_code(payload.get("code") or rec.get("code") or "")
-    if not isinstance(code, str) or not code:
-        return {
-            "error": (
-                "exec_bridge: code (str, or a list of lines) required "
-                "(pass it or set it on the record)"
-            )
-        }
+    if payload.get("code") is not None:
+        return {"error": "exec_bridge: `code` is not a field — run a command instead"}
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return {"error": "exec_bridge: command (str) required"}
+    raw_args = payload.get("args", [])
+    if not isinstance(raw_args, list) or any(
+        not isinstance(a, (str, int, float)) for a in raw_args
+    ):
+        return bad("start", "args", "a list of strings")
+    argv = [command, *[str(a) for a in raw_args]]
+    line = shlex.join(argv)
+    if why := _command_permitted(rec, line):
+        return {"error": why}
     cwd = payload.get("cwd") or rec.get("cwd") or None
 
-    try:
-        program = shims.apply(payload.get("shim") or rec.get("shim"), code)
-    except KeyError as e:
-        return refusal(TRANSPORT_ERROR, f"exec_bridge: {e}")
-
-    try:
-        args_json = json.dumps(payload.get("args", {}))
-    except (TypeError, ValueError) as e:
-        return bad("start", "args", f"JSON-serializable ({e})")
-    if len(args_json.encode("utf-8")) > MAX_ARGS_BYTES:
-        return {
-            "error": (
-                f"exec_bridge: args too large ({len(args_json)} > {MAX_ARGS_BYTES}) — "
-                "they ride the process env, which caps near 1 MB. Put bulk data in an "
-                "agent and pass its id."
-            )
-        }
+    env_extra_user = payload.get("env") or {}
+    if not isinstance(env_extra_user, dict) or any(
+        not isinstance(k, str) or not isinstance(v, (str, int, float))
+        for k, v in env_extra_user.items()
+    ):
+        return bad("start", "env", "a dict of str -> str")
 
     job_id = secrets.token_hex(4)
     parent_sock, child_sock = socket.socketpair()
     try:
-        process = await proc.spawn(
-            rec,
-            interpreter=payload.get("interpreter") or rec.get("interpreter"),
-            program=program,
+        process = await proc.spawn_argv(
+            argv,
             cwd=cwd,
             env_extra={
+                **{str(k): str(v) for k, v in env_extra_user.items()},
                 "FANTASTIC_CTRL_FD": str(child_sock.fileno()),
                 # The OWNER AGENT id (the tool's public id), NOT the ephemeral job id —
                 # so a tool can address and tag itself by the id others use.
                 "FANTASTIC_SELF_ID": id,
-                "FANTASTIC_ARGS": args_json,
             },
             pass_fd=child_sock.fileno(),
         )
-    except proc.InterpreterRefused as e:
-        parent_sock.close()
-        return refusal(TRANSPORT_ERROR, f"exec_bridge: {e}")
     except Exception as e:
         parent_sock.close()
         return refusal(TRANSPORT_ERROR, f"exec_bridge: spawn failed: {e}")
@@ -412,6 +423,12 @@ async def _start(id, payload, kernel):
     _jobs[job_id] = {
         "owner": id,
         "proc": process,
+        # The exact invocation, so `status` can report WHAT ran — a caller that
+        # wants to re-run a job re-issues these verbatim rather than reconstructing
+        # a command line by guesswork.
+        "command": command,
+        "args": [str(a) for a in raw_args],
+        "cwd": cwd,
         "status": "running",
         "started_at": time.time(),
         "exit_code": None,
@@ -430,7 +447,6 @@ async def _start(id, payload, kernel):
     task = asyncio.create_task(_pump(id, job_id, process, kernel))
     _jobs[job_id]["task"] = task
     _jobs[job_id]["task_id"] = kernel.ctx.spawn_task(id, "start", task)
-    kernel.update(id, code=code)
     await kernel.emit(id, {"type": "job_started", "job_id": job_id})
     return {"job_id": job_id, "status": "running"}
 
@@ -447,10 +463,14 @@ def _snap(job_id: str, full: bool = False) -> dict:
         "started_at": j["started_at"],
         "lines": j["lines"],
         "last_line": j["last_line"],
+        # WHAT ran — so a caller can re-issue this job verbatim.
+        "command": j.get("command"),
+        "args": j.get("args"),
     }
     if full:
         s["stdout"] = j["stdout"]
         s["stderr"] = j["stderr"]
+        s["cwd"] = j.get("cwd")
     return s
 
 
@@ -519,23 +539,19 @@ async def _clear(id, payload, kernel):
 
 
 async def _reflect(id, payload, kernel):
-    """Identity + allowlist + shims + running job count + auth posture. No args."""
+    """Identity + running job count + auth posture. No args."""
     rec = kernel.get(id) or {}
     running = sum(1 for v in _jobs.values() if v["owner"] == id and _alive(v))
     return {
         "id": id,
         "sentence": (
-            "Process edge of the io family — sealed by default, allowlisted "
-            "interpreters only. Spawns a program in the background; it gets a kernel "
-            "wire over a private control fd."
+            "Process edge of the io family — a general-purpose COMMAND runner, "
+            "sealed by default, gated by the `allowed` regexes. Spawns commands in "
+            "the background; a child may speak the kernel over a private control fd."
         ),
         "cwd": rec.get("cwd") or "<process default>",
-        # THE ALLOWLIST, advertised. Without this an authoring model has to GUESS an
-        # interpreter path, and a guess has no legal answer — the same defect as an
-        # unnamed executor module (measured 2026-08-05: opus invented
-        # `local_runner.script` because nothing named the real one).
-        "interpreters": proc.allowed(rec),
-        "shims": shims.names(),
+        # THE GATE, advertised: a caller must see what it may run.
+        "allowed": _allowed_patterns(rec),
         "running": running,
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
@@ -546,11 +562,15 @@ async def _reflect(id, payload, kernel):
             "job_done": "{type:'job_done', job_id, exit_code, ok, stdout, stderr}",
         },
         "wire": (
-            "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD: "
-            "[4-byte BE length | JSON]. Name `shim:'<one of shims>'` on `start` and a "
-            "client is prepended for you (python: a `kernel` global with "
-            "send/emit/reflect/watch/on_message + self_id + args). Name none and speak "
-            "it yourself — reflect readme=true for the frame vocabulary."
+            "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, "
+            "a BIDIRECTIONAL socket (one end of a socketpair): frame is "
+            "[4-byte BE length | JSON], both directions. To CALL another agent: "
+            "write {op:'send', rid:<your id>, target, payload} and the reply COMES "
+            "BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is "
+            "not one-way. It is not inline, though: read frames in a loop and skip "
+            "any whose rid isn't yours (event/inbox frames can arrive first) until "
+            "you see your reply. ops: send/emit/reflect/watch/on_message. A command "
+            "that never reads the fd runs exactly like any OS process."
         ),
         "inbox": (
             "Any verb NOT listed in `verbs` is MAIL for the running program, delivered "
@@ -565,33 +585,16 @@ async def _reflect(id, payload, kernel):
             "hook before the kernel aborts the task, so nothing is orphaned."
         ),
         "authoring": (
-            "This agent's persisted `code` is a durable tool and a SCRIPT: it runs TOP "
-            "TO BOTTOM, once per `start` and again on `boot`. A bare `def` only defines "
-            "and exits — put the work at module level, and keep the program running if "
-            "it must receive later sends. create_agent with `code` + an allowlisted "
-            "`interpreter`; `delete_agent` removes it. A running program can itself "
-            "create_agent more agents."
+            "A general-purpose command runner: `start {command, args}`, gated by "
+            "the `allowed` regexes on the full command line."
         ),
         **_describe(rec),
     }
 
 
 async def _boot(id, payload, kernel):
-    """Idempotent. If the record carries `code` and no job is running, RE-STARTS it —
-    the program survives reboot. Returns the start error if it could not."""
-    rec = kernel.get(id) or {}
-    code = rec.get("code")
-    if not (isinstance(code, str) and code) or _has_running_job(id):
-        return None
-    reply = await _start(id, {"code": code}, kernel)
-    # PROPAGATE. The predecessor executor's `_boot` discarded this, and with an allowlist
-    # that is a silent-success hole: a record naming a non-allowlisted interpreter would boot,
-    # fail to spawn, and still look created — indistinguishable from a program that ran
-    # and did nothing. `create_agent` discards a boot REPLY too, which is why the
-    # allowlist is ALSO enforced at write time by `validate_meta`; this covers the
-    # reboot path, where no write happens.
-    if isinstance(reply, dict) and "error" in reply:
-        return reply
+    """No-op. Nothing auto-restarts: a command is started by a caller, not by the
+    record — the `code`-field auto-run died with the code field."""
     return None
 
 
@@ -611,19 +614,11 @@ UNGATED = {"reflect"}  # discovery must work on a sealed bridge
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse a write this bundle cannot honour, at the WRITE, next to the typo.
 
-    Called by `create_agent` AND `update_agent` before the record changes (duck-typed —
-    the substrate never imports this module). Naming the legal set is the point: on
-    2026-08-06 gemma-4-12B tried `ingress_rule="deny_all"`, the write-time refusal named
-    the legal values, and it used `deny_inbound` on its very next turn. A refusal that
-    does not say what WOULD work only teaches that something is wrong.
-
-    Validates the MERGED state — `record` (empty at create) with `meta` applied — not the
-    patch alone. Checking the patch alone made `interpreter` unenforceable in the one
-    place it matters: `update_agent id=x interpreter=<already on x's allowlist>` was
-    REFUSED, because `interpreters` was not in that same payload. A false refusal on a
-    correct operation is worse than no check — it makes the right thing look impossible.
+    Validates the MERGED state — `record` (empty at create) with `meta` applied —
+    and names the legal set in every refusal.
     """
     merged = {**record, **meta}
+    del merged  # kept for symmetry with other bundles; nothing merged-scoped left
     if "ingress_rule" in meta:
         spec = meta["ingress_rule"]
         if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
@@ -631,29 +626,27 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                 f"ingress_rule={spec!r} is not a rule this bundle implements — "
                 "legal values: allow_all, deny_inbound, password"
             )
-    if "shim" in meta and meta["shim"]:
-        if str(meta["shim"]) not in shims.SHIMS:
+    for gone in ("code", "shim", "interpreter", "interpreters", "argv_template"):
+        if gone in meta and meta[gone] is not None:
             return (
-                f"shim={meta['shim']!r} is unknown — this bridge serves {shims.names()}"
+                f"exec_bridge: `{gone}` is not a field — this is a general-purpose "
+                "COMMAND runner; gate it with `allowed=[<regex>, ...]`"
             )
-    if "interpreters" in meta:
-        raw = meta["interpreters"]
+    if "allowed" in meta and meta["allowed"] is not None:
+        import re as _re
+
+        raw = meta["allowed"]
         if isinstance(raw, str):
             raw = [raw]
-        if not isinstance(raw, list) or any(not str(p).strip() for p in raw):
+        if not isinstance(raw, list) or not raw:
             return (
-                "interpreters must be a list of interpreter paths, e.g. "
-                "interpreters=['~/.venvs/x/bin/python']"
+                "allowed must be a non-empty list of regexes, e.g. allowed=['ls( .*)?']"
             )
-    # `interpreter` against the allowlist the record WILL have. At create the merged view
-    # IS the patch, so naming an interpreter with no `interpreters` beside it is refused —
-    # correctly, since that agent could never run. At update the record's existing
-    # allowlist is in scope, so naming one already on it is allowed.
-    if "interpreter" in merged and merged["interpreter"]:
-        try:
-            proc.resolve(merged, merged["interpreter"])
-        except proc.InterpreterRefused as e:
-            return str(e)
+        for pat in raw:
+            try:
+                _re.compile(str(pat))
+            except _re.error as e:
+                return f"allowed contains a broken regex {pat!r}: {e}"
     return None
 
 

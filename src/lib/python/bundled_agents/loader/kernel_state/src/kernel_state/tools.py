@@ -51,29 +51,6 @@ from kernel._refusal import guard_agent_id, missing
 # `fs`, so nothing here escapes the running dir.
 
 
-# A record field that is PROGRAM TEXT, not metadata. It round-trips through its own
-# file beside `agent.json` instead of being embedded as an escaped JSON string:
-#
-#     agents/<id>/agent.json      the record
-#     agents/<id>/main.py         the program
-#
-# Nothing about the in-memory record changes — a bundle still does
-# `kernel.update(id, code=...)` and still reads `record["code"]`. This is purely how
-# the loader lays it down, which is the loader's own business. So a storeless kernel
-# behaves exactly as before (the record lives in RAM, nothing reaches disk), and a
-# program on disk is greppable, diffable, and editable by anything.
-CODE_FIELD = "code"
-CODE_FILE = "main.py"
-
-
-def _split_code(record: dict) -> tuple[dict, str | None]:
-    """(record without `code`, the code) — what goes in agent.json vs its own file."""
-    code = record.get(CODE_FIELD)
-    if not isinstance(code, str) or not code:
-        return record, None
-    return {k: v for k, v in record.items() if k != CODE_FIELD}, code
-
-
 def read_tree(root_dir: Path) -> list[dict]:
     """Walk a `.fantastic` tree → flat list of records (root + descendants).
     `parent_id` comes from disk position (authoritative). Pure read; the
@@ -85,7 +62,6 @@ def read_tree(root_dir: Path) -> list[dict]:
         root_rec = json.loads(fs.read_text(rd, "agent.json"))
     except (json.JSONDecodeError, OSError, ValueError):
         return []
-    _join_code(rd, "", root_rec)
     # The root record declares the children-dir name (declared config; default
     # "agents"). A self-describing layout sets e.g. "host_agents" / "web_agents".
     cd = root_rec.get("children_dir")
@@ -118,21 +94,8 @@ def _walk(
         except (json.JSONDecodeError, OSError, ValueError):
             continue  # corrupt sibling → skip
         rec["parent_id"] = parent_id  # disk position is authoritative
-        _join_code(root_dir, rel, rec)
         out.append(rec)
         _walk(root_dir, f"{rel}/{children_dir}", rec.get("id"), out, children_dir)
-
-
-def _join_code(root_dir: str, rel: str, rec: dict) -> None:
-    """Fold `main.py` back onto the record as `code`. Absent file ⇒ the field simply
-    isn't there, exactly as if it had never been set."""
-    cf = f"{rel}/{CODE_FILE}".lstrip("/") if rel else CODE_FILE
-    if not fs.exists(root_dir, cf):
-        return
-    try:
-        rec[CODE_FIELD] = fs.read_text(root_dir, cf)
-    except (OSError, ValueError):
-        pass  # unreadable program → record loads without it, loudly empty
 
 
 def write_record(root_path: Path, record: dict) -> None:
@@ -149,11 +112,8 @@ def write_record(root_path: Path, record: dict) -> None:
                 on_disk = existing
         except (json.JSONDecodeError, OSError, ValueError):
             pass
-    meta, code = _split_code(record)
-    on_disk.update(meta)
+    on_disk.update(record)
     fs.write_text(rp, "agent.json", json.dumps(on_disk, indent=2))  # atomic
-    if code is not None:
-        fs.write_text(rp, CODE_FILE, code)
     _seed_readme(rp, record.get("handler_module"))
 
 
@@ -338,8 +298,7 @@ async def _persist_via_store(
                 existing = parsed
         except (ValueError, json.JSONDecodeError):
             existing = {}
-    meta, code = _split_code(record)
-    existing.update(meta)
+    existing.update(record)
     body = json.dumps(existing, indent=2).encode("utf-8")
     (
         await kernel.send(
@@ -356,23 +315,6 @@ async def _persist_via_store(
             ]
         )
     )[0]["result"]
-    if code is not None:
-        cf = f"{reldir}/{CODE_FILE}" if reldir else CODE_FILE
-        (
-            await kernel.send(
-                [
-                    {
-                        "target": store_id,
-                        "payload": {
-                            "type": "write_stream",
-                            "path": cf,
-                            "bytes": code.encode("utf-8"),
-                            "truncate": True,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
     await _seed_readme_via_store(agent, store_id, reldir, record.get("handler_module"))
 
 
@@ -586,54 +528,40 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # the long self_extension prose) that `readme=index` serves on demand, and
         # the reply's `more` line names it.
         #
-        # But TWO facts cannot be left to a readme, because a model that lacks
-        # either one writes something that cannot work — and the weak models are
-        # exactly the ones that do not follow the pointer to go read it.
+        # But the SHAPE of a durable program cannot be left to a readme, because a
+        # model that lacks it writes something that cannot work — and the weak models
+        # are exactly the ones that do not follow the pointer to go read it. A durable
+        # program is a FILE plus a command; the two halves a model has to get right:
         #
-        # 1. The EXECUTOR'S NAME. Unguessable, and a model that lacks it invents
-        #    one. MEASURED 2026-08-05 on claude-opus-5: given only the distilled
-        #    reflect it authored `handler_module:"local_runner.script"` — a module
-        #    that does not exist — while the executor's REAL module name never
-        #    appeared once in a 38 KB session, because nothing had ever said it.
+        # 1. THE FILE IS BYTES, NOT JSON. A program squeezed into a JSON string is
+        #    lost to one stray quote (the old `code` field's whole failure). The
+        #    program's bytes ride a STREAM — `write_stream`, or `send_binary` — so
+        #    nothing is escaped. A model told only "write the program" reaches for a
+        #    JSON string; the string names the stream path so it does not.
         #
-        # 2. The EXECUTION MODEL. `code` is a SCRIPT, run top to bottom. This line
-        #    used to say only "the `code` IS the tool", which reads as "the code
-        #    DEFINES the tool" — so the callable is a function inside it. MEASURED
-        #    2026-08-06 on gemma-4-12B, twice: it authored
-        #    `def run(payload): ...` and sent `{type:'run'}` expecting a call. Both
-        #    agents were inert (one even valid Python), nothing was ever written,
-        #    and `queued:true` never appeared because no job stayed alive. It had
-        #    planned the whole structure correctly.
+        # 2. RUNNING IT IS A COMMAND. The executor is a general-purpose COMMAND runner
+        #    gated by `allowed` regexes (no default — `start` refuses when the record
+        #    lists none) plus `ingress_rule` (a leg is SEALED by default, so a leg
+        #    created without it is silently inert — `create_agent` discards its `boot`
+        #    reply, so the denial is never even seen). The WHICH-interpreter and the
+        #    allowlist are the operator's, not ours, so the pointer names WHERE to
+        #    read the gate (`reflect` the leg) instead of inventing a path.
         #
-        # The split is by WHO READS WHAT: opus-5 opened `readme=self-extension` and
-        # got this right; gemma never opened it and had only this string. A fact the
-        # readme owns is a fact weak models do not have.
-        #
-        # 3. The FIELDS WITHOUT WHICH IT CANNOT RUN. The executor is an io leg with an
-        #    interpreter ALLOWLIST: `interpreters` (nothing runs until one is named —
-        #    there is no default interpreter and the kernel refuses to guess a path)
-        #    and `ingress_rule` (a leg is SEALED by default, so an agent created
-        #    without it is silently inert — `create_agent` discards its `boot` reply,
-        #    so the denial is never even seen). Same class of defect as (1): a field
-        #    whose value cannot be guessed, that a model is never told to write.
-        #    The VALUE of an interpreter path is the operator's, not ours, so the
-        #    pointer names WHERE to read the allowlist instead of inventing one.
-        #
-        # An affordance you cannot NAME is not discoverable; an affordance whose
-        # CONTRACT you do not know is not usable. Both cost a whole run. Prose stays
-        # behind `readme:'self-extension'`; these facts do not.
+        # An affordance whose CONTRACT you do not know is not usable, and that costs a
+        # whole run. Prose stays behind `readme:'self-extension'`; this shape does not.
         base["self_extension"] = (
-            "Author your own durable tools as script agents: send 'kernel' "
-            f"{{type:'create_agent', parent_id:'<yours — the OWNER>', "
-            f"handler_module:'{_executor_for_example(agent)}', id:'<name>', "
-            "code:'<program>', interpreters:['<allowlisted path>'], shim:'python', "
-            "ingress_rule:'allow_all_ingress'} — `code` is a SCRIPT: it runs top to "
-            "bottom when created and again on reboot. A bare `def` only defines and "
-            "exits — put the work at module level; to take later sends call "
-            "kernel.on_message(cb) and keep running. No field defaults: reflect an "
-            "executor for its `interpreters`; with no `ingress_rule` the agent is "
-            "sealed and never runs. Read {type:'reflect', readme:'self-extension'} "
-            "BEFORE writing `code`."
+            "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE "
+            "it to a file: {write_stream, path, bytes, truncate:true}, or "
+            "`send_binary` (program RAW in the LAST `bytes` field, nothing escaped). "
+            "(2) RUN it on the COMMAND runner: `start {command, args}`, gated by its "
+            "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
+            "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
+            "file — NOT a new handler_module (you can't add modules). To wire your "
+            "worker to a SIBLING (`totals`): grant it `can_call:{totals}` AND "
+            "`update_agent id='totals'` to add it to `totals.callable_by` — you may "
+            "open ANY agent's ingress if you hold `update_agent`; only editing your "
+            "OWN grants is refused. Read {type:'reflect', readme:'self-extension'} "
+            "for the fd wire + detail."
         )
         return base
     return {
@@ -649,84 +577,44 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "`readme` (a string) - not 'readme_key'. Read only what a task needs."
         ),
         "self_extension": (
-            "You can extend yourself: author your own durable tools as script "
-            "agents. ADD - send 'kernel' {type:'create_agent', "
-            "parent_id:'<your own id — the new agent becomes YOUR child>', "
-            "handler_module:'<an executor below>', id:'<name>', code:'<your "
-            "program as one JSON string>', interpreters:['<an allowlisted "
-            "interpreter>'], shim:'python', ingress_rule:'allow_all_ingress'}; the `code` is "
-            "a SCRIPT that runs top to "
-            "bottom - it persists across reboot and auto-runs. Neither the "
-            "interpreter nor the gate has a default: reflect an executor agent that "
-            "already exists to read its `interpreters` allowlist, and an agent "
-            "created without an `ingress_rule` is SEALED and never runs. A bare "
-            "`def` only "
-            "defines and exits; put the work at module level, and call "
-            "kernel.on_message(cb) if it must stay alive to receive sends. USE - "
-            "send the tool a turn by its id; a LIVE script acks {queued:true} and "
-            "streams results back as emitted say/done "
-            "events tagged with your client_id (watch its id). REMOVE - send "
-            "'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing "
-            "`code`, send 'kernel' the payload {type:'reflect', "
-            "readme:'self-extension'} (readme is a plain string field; do NOT "
-            "invent a 'readme_key' field) to fetch the authoring doc - it has a "
-            "COMPLETE copy-pasteable example plus each executor's exact script "
-            "API, receive pattern, and code-escaping rules. A running script "
-            "can itself create_agent more "
-            "agents - tools compose into more tools. " + _executor_clause(agent)
+            "A DURABLE PROGRAM is a FILE you write plus a command that runs it — "
+            "not a `code`-carrying agent. There is no `code` field: a program used "
+            "to be embedded as a JSON string, which is exactly how a call gets lost "
+            "to escaping. Assemble these THREE pieces and you have built something "
+            "that persists and re-runs, with no `code` field at all:\n"
+            "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON "
+            "string. Use the file leg's STREAM verbs — {type:'write_stream', path, "
+            "bytes, truncate:true} to write, {type:'read_stream', path, offset} to "
+            "read, one raw chunk at a time — or `send_binary` (same call, but write "
+            "the program RAW in the LAST `bytes` field, nothing escaped). That is "
+            "the only byte path; the string read/write verbs are gone.\n"
+            "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect "
+            "it, read its `allowed` regexes, then send "
+            "{type:'start', command:'<path>', args:[...]}; poll {type:'status'}. "
+            "It runs commands, not inline programs.\n"
+            "3. RE-RUN: the file is durable on disk, so the SAME `start` command run "
+            "again later re-executes the SAME program against whatever the inputs "
+            "hold THEN — that is how a thing 'keeps itself up to date'.\n"
+            "A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING "
+            "command runner) that owns a program file — you never author a new "
+            "handler_module (you cannot add modules to the catalog and do not need "
+            "to). 'A specialist with child workers' = a parent agent whose children "
+            "are exec_bridge runners, each with its own program file.\n"
+            "WIRING TO A SIBLING: you cannot raise your OWN authority, but if you "
+            "hold `update_agent` (e.g. on the root) you may open ANY agent's ingress "
+            "— including a sibling like `totals`/`readings` that is not your child. "
+            "To let your worker call `totals`: grant the worker `can_call:{totals}` "
+            "AND `update_agent id='totals'` to add the worker to `totals.callable_by` "
+            "(send the WHOLE map — update replaces, not merges).\n"
+            "A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket "
+            "(FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply "
+            "comes back on the SAME fd as {op:'reply', rid, data}. It is not inline "
+            "— read frames until one carries your `rid`, skipping event/inbox frames.\n"
+            "COMPOSE the agents you were given for everything else (`list_agents`, "
+            "reflect each, send). CREATE/DELETE plain agents (create_agent with a "
+            "handler_module and grants, delete_agent) work as before."
         ),
     }
-
-
-# The script executors this runtime KNOWS ABOUT, module -> receive-shape sentence.
-# Named ONCE: the distilled pointer and the full prose must never name different
-# modules.
-#
-# The per-language runtimes are DELETED (2026-08-07) and are deliberately NOT listed:
-# `exec_bridge` is the executor this kernel ADVERTISES, because it is the one whose
-# process edge is a sealed io leg with an interpreter allowlist. Adding a second
-# executor back here would advertise another, ungated way to author the same thing —
-# two truths for one affordance, and the weaker one wins by being first.
-_EXECUTORS = {
-    "exec_bridge.tools": (
-        "its program must stay alive to take turns, and receives them through the shim "
-        "it named — with shim:'python', kernel.on_message(callback)"
-    ),
-}
-
-
-def _registered_executors(agent) -> list[str]:
-    """The entries of `_EXECUTORS` this build actually INSTALLED, in table order.
-
-    Derived, not asserted. Advertising an executor that is not installed is the same
-    defect as not naming one at all: measured 2026-08-05, claude-opus-5 given a name it
-    could not use authored `handler_module:"local_runner.script"` and built nothing. So
-    the list is intersected with the live entry-point registry — the same source
-    `bundles=all` renders from — and an absent bundle simply is not offered.
-
-    rust and swift derive theirs the same way (`reflect.rs::registered_executors`,
-    `SystemVerbs.swift::scriptExecutorsHere`); python was the last hand-written one.
-    """
-    installed = {b["handler_module"] for b in agent._available_bundles()}
-    return [m for m in _EXECUTORS if m in installed]
-
-
-def _executor_clause(agent) -> str:
-    """`Executor(s) here: <module> (<receive shape>), …`, or a plain statement that this
-    build ships none — never the name of something that would fail to create."""
-    here = _registered_executors(agent)
-    if not here:
-        return "This build registers NO script executor, so `code` cannot be authored."
-    label = "Executor here" if len(here) == 1 else "Executors here"
-    return label + ": " + ", ".join(f"{m} ({_EXECUTORS[m]})" for m in here) + "."
-
-
-def _executor_for_example(agent) -> str:
-    """The module to show in the `create_agent` example. First installed, else the
-    first known — an example still has to be readable on a build that ships none, and
-    `_executor_clause` is what says so."""
-    here = _registered_executors(agent)
-    return here[0] if here else next(iter(_EXECUTORS))
 
 
 # ─── the DURABLE execution ledger (C9 across restart) ───────────
@@ -927,7 +815,9 @@ async def _persist_record(id, payload, agent):
     # directory, so an unvalidated one writes wherever it points.
     if (bad_id := guard_agent_id("persist_record", record["id"])) is not None:
         return bad_id
-    if (bad_pid := _guard_parent_chain("persist_record", record.get("parent_id"))) is not None:
+    if (
+        bad_pid := _guard_parent_chain("persist_record", record.get("parent_id"))
+    ) is not None:
         return bad_pid
     a = agent.ctx.get_agent(record["id"])
     write_record(
@@ -949,7 +839,9 @@ async def _forget_record(id, payload, agent):
     # directory outside the store entirely.
     if (bad_id := guard_agent_id("forget_record", target)) is not None:
         return bad_id
-    if (bad_pid := _guard_parent_chain("forget_record", payload.get("parent_id"))) is not None:
+    if (
+        bad_pid := _guard_parent_chain("forget_record", payload.get("parent_id"))
+    ) is not None:
         return bad_pid
     a = agent.ctx.get_agent(target)
     if a is not None:
@@ -1012,7 +904,7 @@ def _guard_blob_owner(aid: str) -> str | None:
     an operator creates at the root is a direct child. Position bounds who can
     reach the verb; it says nothing about which namespace they may name.
 
-    An OPERATOR send (`sender` is None: the loader's own flush, `yaml_state`
+    An OPERATOR send (`sender` is None: the loader's own flush, `durable_memory`
     persisting itself under `operator_context`, the CLI) is the bookkeeping this
     verb exists for and stays ungated — that is the origin root of trust, and an
     agent cannot forge it. An AGENT may only name ITSELF.

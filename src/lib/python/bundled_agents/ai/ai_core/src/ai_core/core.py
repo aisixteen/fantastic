@@ -33,7 +33,7 @@ AI rehaul backlog (TODO — not in scope for the current decoupling).
 These items will need a coordinated redesign across all LLM
 backends + the TS ai_view before the next major bump:
   1. Cross-backend conversation portability — history now lives in a
-     mounted chat yaml_state (per-client key, persisted THROUGH the
+     mounted chat durable_memory (per-client key, persisted through its
      loader; the AI writes no disk itself), but it is a child of THIS
      agent, so switching upstream_id still starts a fresh conversation.
      Future: history travels with the chat tile, backends become
@@ -116,7 +116,7 @@ _projection: dict[str, dict] = {}
 # for the model's recall/persist reaction. Internal; never surfaced in a verb reply.
 _compaction_mark: dict[str, dict] = {}
 
-# The AI's mounted `chat` yaml_state id (its durable history store), keyed by agent id.
+# The AI's chat-store id (`<self>_chat`, a durable_memory child), keyed by agent id.
 # The conversation lives there (persisted THROUGH the loader) — the AI writes NO disk.
 _chat_agent: dict[str, str] = {}
 
@@ -331,13 +331,13 @@ def _safe_client(client_id: str) -> str:
 
 def _file_bridge_id(self_id: str, kernel) -> str | None:
     """Still used by the nvidia backend for its api_key sidecar. Chat history NO LONGER
-    uses it — that lives in a mounted `chat` yaml_state (below), persisted via the loader."""
+    uses it — that lives in a `durable_memory` child (below), persisted via its file leg."""
     rec = kernel.get(self_id) or {}
     return rec.get("file_bridge_id")
 
 
 async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
-    """The AI's mounted `chat` yaml_state — its durable conversation store, which
+    """The AI's chat store — a `durable_memory` child, its durable conversation log, which
     persists THROUGH the loader (the AI writes NO disk itself). Discovered among this
     agent's children, or created (idempotent + cached). None only if creation fails."""
     cached = _chat_agent.get(self_id)
@@ -352,15 +352,15 @@ async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
         )[0]["result"]
     except Exception:
         online = {}
-    for a in online.get("agents", []) if isinstance(online, dict) else []:
-        rec = kernel.get(a.get("id")) or {}
-        if (
-            rec.get("parent_id") == self_id
-            and rec.get("handler_module") == "yaml_state.tools"
-            and rec.get("mode") == "chat"
-        ):
-            _chat_agent[self_id] = a["id"]
-            return a["id"]
+    # BOUND BY ID, not discovered by flag. The store's id is deterministic
+    # (`<self>_chat`), so finding it back is a lookup — the old path scanned the
+    # tree for `handler_module==<kv>.tools and mode=="chat"`, a magic-string
+    # sniff that died with the store's modes.
+    want = f"{self_id}_chat"
+    if kernel.get(want):
+        _chat_agent[self_id] = want
+        return want
+    del online  # the listing was only needed by the scan
     # BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as `persist_blob`.
     # This store is the AI's own conversation state, not an operator composition
     # decision, and the agent does not choose to have one. It used to be a
@@ -380,15 +380,20 @@ async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
                             # `$children` baseline with no grant. `create_agent` is kernel-owned,
                             # so the placement is stated rather than implied by the address.
                             "parent_id": self_id,
-                            "handler_module": "yaml_state.tools",
-                            "mode": "chat",
+                            "id": f"{self_id}_chat",
+                            "handler_module": "durable_memory.tools",
+                            # The store persists through the SAME file leg as its
+                            # owner — durable_memory has no fs of its own.
+                            "file_bridge_id": (kernel.get(self_id) or {}).get(
+                                "file_bridge_id"
+                            ),
                             # SAY WHAT IT IS. This store is an implementation detail of the AI
-                            # agent, but in the tree it is a bare `yaml_state_<hex>` — and a
+                            # agent, but an anonymous child id advertises "key/value store" — and a
                             # type-derived id advertises "key/value store" far louder than a
                             # purposeful name like `notes` does. Measured 2026-08-24
-                            # (`live_compose`, qwen3.8-27b): asked to store a digest in "this
+                            # (`live_compose`, the model): asked to store a digest in "this
                             # kernel's key/value store", the model saw both, reasoned
-                            # "yaml_state_4b9f9f sounds like a state agent that could be a KV
+                            # "the state-agent-looking child could be a KV
                             # store", wrote there, read it back to verify, and reported DONE —
                             # every step consistent, the value in the wrong agent. An internal
                             # agent that looks like a general-purpose one is a discoverability
@@ -412,7 +417,7 @@ async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
 
 
 async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
-    """The client's conversation, read from the mounted `chat` yaml_state (key-per-client)."""
+    """The client's conversation, read from the chat store (key-per-client)."""
     cid = await _ensure_chat_agent(self_id, kernel)
     if not cid:
         return []
@@ -433,27 +438,31 @@ async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
 async def _save_history(
     self_id: str, kernel, client_id: str, new_turns: list[dict]
 ) -> None:
-    """APPEND this turn's new messages to the `chat` yaml_state (key-per-client). The
+    """APPEND this turn's new messages to the chat store (key-per-client). The
     durable record is never trimmed; the projection only shapes what the model sees."""
     if not new_turns:
         return
     cid = await _ensure_chat_agent(self_id, kernel)
     if not cid:
         return
-    (
-        await kernel.send(
-            [
-                {
-                    "target": cid,
-                    "payload": {
-                        "type": "append",
-                        "key": _safe_client(client_id),
-                        "value": new_turns,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
+    # ONE append PER TURN — `append` adds its value as one element, so handing
+    # it the whole list nested the turns ([[user, assistant]]) and history read
+    # back empty of messages.
+    for turn in new_turns:
+        (
+            await kernel.send(
+                [
+                    {
+                        "target": cid,
+                        "payload": {
+                            "type": "append",
+                            "key": _safe_client(client_id),
+                            "value": turn,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
 
 
 async def _get_provider(self_id: str, kernel, cfg: Backend):
@@ -509,6 +518,22 @@ answer comes back as your next message. Name another agent's id to hand the answ
 them instead, or `null` to discard it. Text outside the tag is your message to whoever
 asked. Interpret instructions literally — act on what is asked, not on inferred
 intent. Keep prose brief: the work happens in calls, not in explanation.
+
+## Writing file contents — `send_binary`
+A stream sink like `write_stream` wants raw BYTES, but a `send` payload is JSON and
+JSON has no bytes type. So when a payload field IS a file's contents — source you are
+writing — use `send_binary`. It is `send`, one self-contained call, with ONE special
+rule: the `bytes` field is read RAW and must be the LAST field. Put the program there
+LITERALLY — do NOT escape anything, no `\\n`, no `\\"`; write real newlines and real
+quotes. Everything from `"bytes":"` to the final `"` before the closing braces is
+taken verbatim as the file's bytes:
+<tool_call>{"name":"send_binary","arguments":{"target_id":"<store id>","payload":{"type":"write_stream","path":"main.py","truncate":true,"bytes":"def main():
+    print("hi")   # real newlines, real quotes — nothing escaped
+"}}}</tool_call>
+`bytes` LAST, written raw — that is the whole trick, and it is why a large program
+never breaks the call. The metadata around it (`target_id`, `path`, `truncate`) is
+ordinary JSON. Everything else is `send` — `reply_to`, `id`, `timeout`, `retries` —
+but put those BEFORE `payload`: nothing may come after the program but closing braces.
 
 A `<tool_call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
 thinking. The envelope is parsed out of everything you emit and dispatched the
@@ -602,11 +627,11 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
     entire conversation reply 1 started, and if the chain ended first it was never
     delivered at all.
 
-    Measured 2026-08-24 (`live_build`, qwen3.8-27b): 26 of 36 calls never answered
+    Measured 2026-08-24 (`live_build`, the model): 26 of 36 calls never answered
     — `runner` 6 sent / 0 back (it was never first in its batch), `kernel` 10 / 1.
     The model re-sent what never came back and was read as stubborn three separate
-    times (opus 08-07 "acks lag a turn behind"; qwen 08-20 "the reply queue is
-    running ahead of me"; qwen 08-24). Each was diagnosed as a labelling problem
+    times (opus 08-07 "acks lag a turn behind"; the model 08-20 "the reply queue is
+    running ahead of me"; the model 08-24). Each was diagnosed as a labelling problem
     and answered with a better reply tag. The cause was here.
 
     Invisible to every unit test because a stub kernel's turn costs no time, and at
@@ -752,7 +777,7 @@ _REFLECT_NUDGE = (
 
 # THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched nothing.
 #
-# Measured 2026-08-25 (`live_subai` / `live_subai_graph`, qwen3.8-27b, twice each):
+# Measured 2026-08-25 (`live_subai` / `live_subai_graph`, the model, twice each):
 # mid-task, the model wrote its next action INSIDE its thinking — "Let me send
 # {type:'list_agents'} to kernel" — closed the thought, and ended the completion
 # without the envelope. A no-call turn ends the chain, so a single lapse killed
@@ -864,7 +889,7 @@ def dedupe_stale_reads(history: list[dict]) -> list[dict]:
 # really does return a reply; stripping the whole span deleted it from history, and
 # the next turn showed the model an effect with no cause.
 #
-# Measured 2026-08-24 (`live_compose`, qwen3.8-27b): turn 1 called `exec_bridge`
+# Measured 2026-08-24 (`live_compose`, the model): turn 1 called `exec_bridge`
 # from inside a thought and `file_bridge` after it. Both dispatched. History kept
 # only `file_bridge`. The exec_bridge reply arrived and the model wrote "I sent a
 # reflect to file_bridge_38de25, but the reply came back from exec_bridge_e05a8f" —
@@ -1034,6 +1059,18 @@ async def _route_reply(
                     )
                 )
             continue
+        # send_binary: encode ONE named payload field from a JSON string to real
+        # BYTES. A model tool call is JSON and JSON has no bytes type, so a stream
+        # sink (`write_stream`) that demands raw bytes is otherwise unreachable — it
+        # refuses a str. The model writes the contents as an ordinary JSON string in
+        # `bytes` (its own serializer does the escaping, which it does reliably); we
+        # utf-8-encode that one field here and the send is ordinary from the kernel's
+        # side. The whole call is a single JSON object — no second region.
+        if call.get("name") == "send_binary" and isinstance(payload, dict):
+            field = str(args.get("into") or "bytes")
+            val = payload.get(field)
+            if isinstance(val, str):
+                payload[field] = val.encode("utf-8")
         # The model's own `timeout` overrides the layer default; the kernel
         # validates it, so a bad value comes back as a readable refusal.
         item = {"target": target, "payload": payload, "timeout": send_timeout}
@@ -1482,7 +1519,7 @@ async def _run(
     # watches the wrong one drifts silently.
     await _emit_status(kernel, self_id, client_id, "done", reason="ok")
 
-    # APPEND this send's user + assistant turns to the durable `chat` yaml_state.
+    # APPEND this send's user + assistant turns to the durable chat store.
     # NOT `messages[1:]` — that's the projected/trimmed view; the store keeps the
     # FULL conversation so context management (compaction/recall) works next turn.
     if not stateless:
@@ -1565,7 +1602,7 @@ def _make_send(cfg: Backend):
         send_to = payload.get("send_to")
         if not isinstance(send_to, str) or not send_to.strip():
             send_to = None
-        # History is auto-mounted (a `chat` yaml_state, persisted through the loader) —
+        # History is auto-mounted (a durable_memory child, persisted via its file leg) —
         # no operator wiring needed; nothing to failfast on here.
         # Backends that require a provider up front (nvidia: api_key) failfast here.
         if cfg.require_provider:
@@ -1681,7 +1718,7 @@ def _make_send(cfg: Backend):
 
 def _make_history(cfg: Backend):
     async def _history(id, payload, kernel):
-        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's full conversation from the mounted chat yaml_state (the durable record)."""
+        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's full conversation from the chat store (the durable record)."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         return {
             "messages": await _load_history(id, kernel, client_id),
@@ -1948,8 +1985,6 @@ def build(
     # public Backend surface.
     cfg._error_mapper = error_mapper  # type: ignore[attr-defined]
 
-    from ai_core.author import author as _author_verb
-
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
@@ -1958,9 +1993,6 @@ def build(
         "status": _status,
         "context_status": _context_status,
         "recall": _recall,
-        # The SELF-CORRECT loop: the agent authors a durable tool and refuses
-        # its own `final` until the tool is OBSERVED answering (see author.py).
-        "author": _author_verb,
         "boot": _boot,
     }
     cfg._verbs = verbs  # type: ignore[attr-defined]  # reflect lists these

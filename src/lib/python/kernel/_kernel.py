@@ -412,7 +412,7 @@ class Kernel:
         Why: a VISIBLE counter invites an ordering inference that is false. The
         sequence increments on EVERY dispatch to that agent — boots, internal
         sends, another caller's traffic — so a caller sees gaps it did not cause.
-        Measured 2026-08-20 (qwen3.8-27b, live): given `[reply to
+        Measured 2026-08-20 (the model, live): given `[reply to
         file_bridge_830365:10]` after issuing what it thought was `:5`, the model
         spent a whole turn reconciling the gap — "Maybe the kernel renumbered it.
         Strange." — instead of doing the task. A human debugger reads it the same

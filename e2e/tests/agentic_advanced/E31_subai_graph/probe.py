@@ -8,15 +8,14 @@ No graph library exists anywhere in this codebase; the SHAPE is the variable.
 
 Probe 06 asked for one program on `exec_bridge`. Probe 05 asked for a specialist with
 CHILD workers wired to a scheduler. Neither asked for all of it at once, and neither put
-an AI agent inside the thing being built. Measured 2026-08-07: opus passed 06 (both arms)
-and passed 05, but 05 ran before `kernel_state._EXECUTORS` named `exec_bridge`, so it
-authored on `python_runtime`. So THIS combination has never run:
+an AI agent inside the thing being built. So THIS combination has never run:
 
   * the totalling logic as a state graph — nodes, edge map, self-written runner,
   * inside a SPECIALIST that owns child workers (probe 05's shape),
   * wired to the `clock` scheduler so it re-checks unattended (probe 05's clock),
   * consulting the `brain` AI agent by id (new here — inference as a WIRED UNIT),
-  * on `exec_bridge` with an interpreter allowlist (the current executor).
+  * on `exec_bridge`, the command runner (a program is a FILE plus a command,
+    gated by the leg's `allowed` regexes).
 
 That is the "compute, inference, memory and schedule are interchangeable units addressed
 by id" claim in CLAUDE.md, tested as one system instead of one clause at a time.

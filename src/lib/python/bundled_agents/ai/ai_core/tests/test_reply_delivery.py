@@ -2,10 +2,10 @@
 
 Two defects pinned here, both measured live:
 
-2026-08-24 (`live_build`, qwen3.8-27b): replies were delivered SEQUENTIALLY and
+2026-08-24 (`live_build`, the model): replies were delivered SEQUENTIALLY and
 each delivery blocked on a whole model turn — 26 of 36 calls never answered.
 
-2026-08-25 (`live_subai_langgraph`, qwen3.8-27b): one reply per turn — a turn
+2026-08-25 (`live_subai_langgraph`, the model): one reply per turn — a turn
 that made 7 calls spent the next 7 turns collecting its own answers (`1 of 7`
 … `7 of 7`), asked `list_agents` at t3, received the t1 reflect instead, and
 re-asked until the repeat tripwire killed the run with nothing built.

@@ -12,15 +12,15 @@ The fixture is the concept, laid out but not assembled:
   - `readings`  a file agent holding numbers minted at test time
   - `totals`    a durable memory agent
 
-What the model must work out: that a *mind* is just an agent whose code drives the
-AI agent and its children; that a python exec is a durable tool whose persisted `code`
-IS the program; and that a recurrence is a `schedule` pointing at what it built.
-None of that is stated. All of it is in the kernel's own docs.
+What the model must work out: that a specialist owns child agents it wires together;
+that a durable program is a FILE it writes plus a COMMAND a command-runner child runs
+(there is no `code` field); and that a recurrence is a `schedule` pointing at what it
+built. None of that is stated. All of it is in the kernel's own docs.
 
 SCORING — four HARD checks, and the last two are what make it more than probe 04:
 
-  1. STRUCTURE   a sub-agent exists with at least one script-agent CHILD carrying
-                 real code. Not "it said it built one".
+  1. STRUCTURE   a sub-agent exists with at least one command-runner CHILD that has
+                 actually RUN a program. Not "it said it built one".
   2. WIRED       a schedule exists whose target is something the model created —
                  the recurrence is aimed at its own work, not at a fixture.
   3. IT RUNS UNATTENDED
@@ -77,7 +77,7 @@ BACKEND, MODEL = BK.name, BK.model
 LLAMACPP_ENDPOINT = os.environ.get(
     "FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1"
 )
-CTX = int(os.environ.get("CTX", "32768"))
+CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # The BUILDER's window, separately. `CTX` is sized for the LOCAL AI agent, whose window is
 # fixed at `llama-server` start (`n_ctx_slot`), and claiming more than the server has is
@@ -129,10 +129,13 @@ TASK = (
     "it, make sure it really runs, and tell me what you made."
 )
 
-# The pre-wired executor leg — the operator's half of self-extension (see
-# `build_fixture`). FIXTURE, so it must be in MINE: it carries the advertised executor's
+# The pre-wired command-runner leg — the operator's half of self-extension (see
+# `build_fixture`). FIXTURE, so it must be in MINE: it carries the command-runner
 # handler_module, which is exactly what check 1 scans for.
 EXECUTOR_LEG = "runner"
+# The command runner's module — a FIXTURE FACT (the operator wires this leg), not a
+# naming-convention sniff. Check 1 identifies the model's own compute children by it.
+EXEC_MODULE = "exec_bridge.tools"
 
 MINE = {
     # BOTH root ids: python's root IS the persistence loader (`kernel_state`),
@@ -159,25 +162,7 @@ def box(title: str, body: str, mark: str = "|") -> None:
             print(f"  {mark} {raw[i : i + W]}")
 
 
-async def advertised_executors(root) -> set[str]:
-    """The executor module(s) this kernel ADVERTISES, read the way a MODEL reads them.
-
-    Only the DISTILLED reflect interpolates a real module name (the full one says
-    `'<an executor below>'`), and it is the same string the model is given — so the
-    harness and the model discover the executor by one path. `live_subai_selftest.py`
-    used to carry its own copy of this; it now calls this one, so there is a single
-    definition of "what counts as an executor".
-    """
-    se = ((await root.send([{"target": "kernel", "payload": {"type": "reflect"}}]))[0]["result"]).get("self_extension") or ""
-    found = set(re.findall(r"handler_module:'([a-z_]+\.[a-z_]+)'", se))
-    assert found, (
-        "the kernel's DEFAULT reflect names no executor — a model cannot discover "
-        f"self-extension, so this probe is unwinnable. self_extension={se[:200]!r}"
-    )
-    return found
-
-
-def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -> dict:
+def _ai_meta(agent_id: str, *, think: bool, store, root, backend: str | None = None) -> dict:
     """One record shape per backend. `brain` answers with thinking OFF — one completion
     per send, no loop; `ai` is the BUILDER.
 
@@ -220,6 +205,14 @@ def _ai_meta(agent_id: str, *, think: bool, store, backend: str | None = None) -
         # process these ids do not exist and the grant is inert.
         "callable_by": {
             "$self": "*", "$parent": "*", "$children": "*",
+            # THE OTHER HALF OF THE WIRE. `can_call` above grants the builder
+            # `brain`, but the gate is TWO-SIDED and these two are SIBLINGS, so
+            # there is no baseline edge: without this, `ai -> brain` is refused
+            # at ingress ("brain does not accept 'reflect' from ai") and the one
+            # composition the probe is about cannot happen at all. Opening only
+            # the egress half draws a wire that carries nothing — the same
+            # defect E20's fixture comment records.
+            "ai": "*", "brain": "*",
             "rest": "*", "web": "*",
         },
     }
@@ -313,7 +306,14 @@ async def build_fixture(root, *, interpreter: str | None = None):
             "parent_id": root.id,
             "handler_module": "file_bridge.tools",
             "id": "kernel_store",
-            "callable_by": {"ai": "*", "brain": "*"},
+            "callable_by": {"ai": "*", "brain": "*",
+                            # THE HARNESS reads these back to score. In
+                            # process it is the ungated operator; over a
+                            # wire it arrives as `rest` (and `web` for a
+                            # watch), so without this the SCORING calls
+                            # are refused and read as the model having
+                            # built nothing — a false NO on checks 2 & 3.
+                            "rest": "*", "web": "*"},
             "root": ".fantastic",
             "ingress_rule": "allow_all_ingress",
         }}]))[0]["result"]
@@ -326,7 +326,14 @@ async def build_fixture(root, *, interpreter: str | None = None):
             "parent_id": root.id,
             "handler_module": "file_bridge.tools",
             "id": "readings",
-            "callable_by": {"ai": "*", "brain": "*"},
+            "callable_by": {"ai": "*", "brain": "*",
+                            # THE HARNESS reads these back to score. In
+                            # process it is the ungated operator; over a
+                            # wire it arrives as `rest` (and `web` for a
+                            # watch), so without this the SCORING calls
+                            # are refused and read as the model having
+                            # built nothing — a false NO on checks 2 & 3.
+                            "rest": "*", "web": "*"},
             "root": "readings",
             "ingress_rule": "allow_all_ingress",
             "description": "Sensor readings — one integer per file.",
@@ -334,9 +341,17 @@ async def build_fixture(root, *, interpreter: str | None = None):
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "yaml_state.tools",
+            "handler_module": "durable_memory.tools",
             "id": "totals",
-            "callable_by": {"ai": "*", "brain": "*"},
+            "file_bridge_id": store["id"],
+            "callable_by": {"ai": "*", "brain": "*",
+                            # THE HARNESS reads these back to score. In
+                            # process it is the ungated operator; over a
+                            # wire it arrives as `rest` (and `web` for a
+                            # watch), so without this the SCORING calls
+                            # are refused and read as the model having
+                            # built nothing — a false NO on checks 2 & 3.
+                            "rest": "*", "web": "*"},
             "file_bridge_id": store["id"],
             "description": "Durable store for computed results.",
         }}]))[0]["result"]
@@ -345,59 +360,46 @@ async def build_fixture(root, *, interpreter: str | None = None):
             "parent_id": root.id,
             "handler_module": "scheduler.tools",
             "id": "clock",
-            "callable_by": {"ai": "*", "brain": "*"},
+            "callable_by": {"ai": "*", "brain": "*",
+                            # THE HARNESS reads these back to score. In
+                            # process it is the ungated operator; over a
+                            # wire it arrives as `rest` (and `web` for a
+                            # watch), so without this the SCORING calls
+                            # are refused and read as the model having
+                            # built nothing — a false NO on checks 2 & 3.
+                            "rest": "*", "web": "*"},
             "file_bridge_id": store["id"],
             "description": "Fires a payload at a target on a recurrence.",
         }}]))[0]["result"]
-    # The OPERATOR's half of self-extension: ONE open executor leg carrying an
-    # interpreter ALLOWLIST. The advertised executor has no default interpreter and
-    # refuses to guess a path, so without this leg nothing in the kernel can be
-    # authored and the probe is unwinnable. Which interpreter is not the model's
-    # decision (the bundle refuses per-call overrides for that reason) — the fixture
-    # picks `sys.executable`, a FACT about this harness process rather than a guess at
-    # something on disk. The model's job is to FIND it and author against it, which is
-    # what `advertised_interpreters` reads back.
-    executor = sorted(await advertised_executors(root))[0]
+    # The OPERATOR's half of self-extension: ONE open command-runner leg carrying a
+    # regex command ALLOWLIST. The runner has no default and refuses to guess, so
+    # without this leg nothing can run and the probe is unwinnable. Which interpreter
+    # may run is not the model's decision (the bundle refuses per-call overrides for
+    # that reason) — the fixture picks `sys.executable`, a FACT about this harness
+    # process rather than a guess at a path, and allowlists running it against a FILE.
+    # The model's job is to FIND that gate (reflect the leg) and author its own
+    # compute child against the same interpreter.
+    interp = interpreter or sys.executable
     leg = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": executor,
+            "handler_module": EXEC_MODULE,
             "id": EXECUTOR_LEG,
-            "callable_by": {"ai": "*", "brain": "*"},
+            "callable_by": {"ai": "*", "brain": "*",
+                            # THE HARNESS reads these back to score. In
+                            # process it is the ungated operator; over a
+                            # wire it arrives as `rest` (and `web` for a
+                            # watch), so without this the SCORING calls
+                            # are refused and read as the model having
+                            # built nothing — a false NO on checks 2 & 3.
+                            "rest": "*", "web": "*"},
             "ingress_rule": "allow_all_ingress",
-            "interpreters": [interpreter or sys.executable],
-            "shim": "python",
-            "description": "Process edge: the interpreter(s) this kernel may spawn.",
+            # the COMMAND runner's gate: run THIS interpreter against a file argument.
+            "allowed": [rf"{re.escape(interp)} \S+"],
+            "description": "Process edge: the command(s) this kernel may spawn.",
         }}]))[0]["result"]
-    assert not leg.get("error"), f"could not wire the executor leg: {leg}"
+    assert not leg.get("error"), f"could not wire the command runner: {leg}"
     return store
-
-
-async def advertised_interpreters(root) -> list[str]:
-    """The interpreter paths this kernel will spawn, read the way a MODEL reads them.
-
-    Two hops, both of them a model's: `list_agents` to find who carries the advertised
-    executor's handler_module (the DISTILLED tree does not carry it — only
-    id/sentence/description, and the leg's sentence is what points a reading model at
-    it), then that agent's own `reflect`, which is where the allowlist is advertised.
-    NOT `sys.executable` — hardcoding that here would prove the task is SOLVABLE while
-    stepping over whether the interpreter is FINDABLE, which is the half that made this
-    selftest pass while the probe it validates was unwinnable.
-    """
-    execs = await advertised_executors(root)
-    listing = ((await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]).get("agents") or []
-    out: list[str] = []
-    for rec in listing:
-        if rec.get("handler_module") not in execs:
-            continue
-        r = (await root.send([{"target": rec["id"], "payload": {"type": "reflect"}}]))[0]["result"]
-        out.extend(r.get("interpreters") or [])
-    assert out, (
-        "no executor agent in this kernel advertises an interpreter — the kernel "
-        "refuses to guess one, so a model cannot author a tool and this probe is "
-        "unwinnable. Wire an executor leg with `interpreters` first."
-    )
-    return out
 
 
 async def score(root, store_id: str, total: int, new_total: int, transcript: list[str]):
@@ -412,32 +414,34 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
         """Is this agent the HARNESS's, rather than something the model authored?
 
         `id in MINE` alone was not enough, measured 2026-08-07: the combined arm scored
-        `agents_made=2` for a model that created NOTHING. The two were `lgsrc` (an arm's
-        own fixture agent — arms now register theirs in MINE) and a `yaml_state` chat
-        store an AI backend mounts for itself on first use. Crediting the model with the
-        backend's own bookkeeping is the harness-counts-its-own-furniture bug, the same
-        class as the executor-by-name scar above.
+        `agents_made=2` for a model that created NOTHING. The two were an arm's own
+        fixture agent (arms now register theirs in MINE) and a chat store an AI backend
+        mounts for itself on first use. The chat store is a `durable_memory` agent whose
+        id is `<owner>_chat` (deterministic, id-based — there is no `mode` field any
+        more); crediting the model with the backend's own bookkeeping is the
+        harness-counts-its-own-furniture bug.
         """
         if node.get("id") in MINE:
             return True
+        rid = str(node.get("id") or "")
         r = records.get(node["id"], {})
-        return r.get("handler_module") == "yaml_state.tools" and r.get("mode") == "chat"
+        return r.get("handler_module") == "durable_memory.tools" and rid.endswith("_chat")
 
     made = [n for n in nodes if not _fixture(n)]
 
     # ── 1. STRUCTURE ──
-    # The executor is DISCOVERED, not matched by name. This was
-    # `"runtime" in handler_module`, which asserts a NAMING CONVENTION rather than the
-    # contract: rename the bundle and a working system scores NO here while checks 3 and
-    # 4 still go OK — the harness reporting that a thing which demonstrably works does
-    # not exist. Read it the way a model does, from the distilled reflect.
-    execs = await advertised_executors(root)
-    scripts = [
-        n
-        for n in made
-        if n.get("handler_module") in execs
-        and (records.get(n["id"], {}).get("code") or "").strip()
-    ]
+    # A model's compute child is a command runner (`exec_bridge.tools`) — the same
+    # module the fixture's own leg carries, a fixture fact, not a naming sniff.
+    execs = {EXEC_MODULE}
+    # A "script" is an executor agent that has actually RUN something — `code`
+    # is not a record field any more; the evidence is the leg's own job table.
+    scripts = []
+    for n in made:
+        if n.get("handler_module") not in execs:
+            continue
+        st = (await root.send([{"target": n["id"], "payload": {"type": "status"}}]))[0]["result"]
+        if (st or {}).get("jobs"):
+            scripts.append(n)
     # Parentage comes from the RECORDS: a distilled tree node does not carry
     # `parent_id`, so reading it off the node silently yields no parents at all.
     parents = {records.get(n["id"], {}).get("parent_id") for n in scripts}
@@ -541,9 +545,9 @@ async def run(
         await extra_agents(root)
 
     # The AI agent: one pass, no loop, no agency. Named `brain` so the model can find it.
-    (await root.send([{"target": root.id, "payload": _ai_meta("brain", think=False, store=store, backend=brain_backend)}]))[0]["result"]
+    (await root.send([{"target": root.id, "payload": _ai_meta("brain", think=False, store=store, root=root, backend=brain_backend)}]))[0]["result"]
     # The BUILDER — the turn that walks away.
-    ai = (await root.send([{"target": root.id, "payload": _ai_meta("ai", think=True, store=store)}]))[0]["result"]
+    ai = (await root.send([{"target": root.id, "payload": _ai_meta("ai", think=True, store=store, root=root)}]))[0]["result"]
     aid = ai["id"]
 
     transcript: list[str] = []
@@ -637,14 +641,46 @@ async def run(
                 runaway.append(why)
             box(f"-- turn {self.n} - ASSISTANT <-", text, ">")
 
-    if BACKEND == "anthropic":
-        import anthropic_backend.tools as bt
+    # THE TRANSCRIPT, from whichever side of the wire we are on. Wrapping the
+    # provider is only possible in process; a spawned kernel's transcript is
+    # read from the agent's own durable history instead.
+    if core is None:
+        from helpers.host.wire import WireTranscript
 
-        core._providers[aid] = Spy(bt.make_provider(aid, root))
+        spy_obj = WireTranscript(root.k, aid)
+
+        # SEE A DEAD CHAIN ON THE WIRE. This probe hand-rolls its reader instead
+        # of using `helpers.ai.connect`, so it never got the connector's event
+        # watcher — a failed pass announces itself as a `status` carrying
+        # `detail.error`, and with nobody subscribed a chain that died mid-flight
+        # is indistinguishable from a model that stopped. `subai_graph:rust` died
+        # after ONE pass with no reason recoverable anywhere.
+        from helpers.host.ws import WSWatcher
+
+        async def _wire_errspy() -> None:
+            watcher = WSWatcher(root.k.port, aid)
+            try:
+                await watcher.connect()
+                async for ev in watcher.events():
+                    det = ev.get("detail") or {}
+                    if ev.get("type") == "status" and det.get("error"):
+                        print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
+                        runaway.append(f"turn failed: {det['error']}")
+                    if ev.get("type") == "context" and ev.get("phase") == "too_small":
+                        print(f"\n  ** TOO_SMALL: {det} **\n", flush=True)
+            except Exception as e:
+                print(f"  ** event watch unavailable: {e} **", flush=True)
+            finally:
+                await watcher.close()
+
+        _errtask = asyncio.create_task(_wire_errspy())
     else:
-        import llamacpp_backend.tools as bt
-
-        core._providers[aid] = Spy(bt.make_provider(aid, root))
+        if BACKEND == "anthropic":
+            import anthropic_backend.tools as bt
+        else:
+            import llamacpp_backend.tools as bt
+        spy_obj = Spy(bt.make_provider(aid, root))
+        core._providers[aid] = spy_obj
 
     total = sum(READINGS.values())
     brain_backend = brain_backend or BACKEND
@@ -666,7 +702,7 @@ async def run(
         print(f"\n  ** FIRST SEND FAILED: {_first['error']} **\n", flush=True)
 
     idle, last = 0.0, 0
-    spy = core._providers[aid]
+    spy = spy_obj
     capped = ""
     # STOP ON NO PROGRESS, NOT ON TURN COUNT. A fixed turn budget cannot tell
     # "slower" from "worse": measured 2026-08-24 under a 6-way parallel run, the two

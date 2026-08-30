@@ -111,6 +111,28 @@ def _model_or_die(name: str) -> str:
     return m
 
 
+# RUNNER (meta) params — sampling/budget knobs merged verbatim into the request body,
+# distinct from CONNECTION (endpoint/key/model). They live in JSON beside this file,
+# NOT baked here: `sampling.default.json` (committed defaults) overlaid by
+# `sampling.json` (gitignored local override). The endpoint whitelists these and
+# silently drops anything unlisted. No model-specific values in code.
+def _runner_params() -> dict[str, Any]:
+    import json
+
+    here = os.path.dirname(__file__)
+    out: dict[str, Any] = {}
+    for fn in ("sampling.default.json", "sampling.json"):  # local overrides defaults
+        path = os.path.join(here, fn)
+        if not os.path.exists(path):
+            continue
+        try:
+            data = json.load(open(path))
+        except (ValueError, OSError):
+            continue
+        out.update({k: v for k, v in data.items() if not k.startswith("_")})
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def _anthropic() -> Backend:
     extra: dict[str, Any] = {}
     # WITHOUT this the record falls back to api.anthropic.com while carrying
@@ -128,6 +150,9 @@ def _anthropic() -> Backend:
         extra["tool_use"] = True
     if mt := int(os.environ.get("MAX_TOKENS", "0")):
         extra["max_tokens"] = mt
+    # Runner (sampling/budget) params from the JSON beside this file — see above.
+    if sampling := _runner_params():
+        extra["sampling"] = sampling
     return _Anthropic(
         name="anthropic",
         handler_module="anthropic_backend.tools",
