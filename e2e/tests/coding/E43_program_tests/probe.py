@@ -99,6 +99,7 @@ async def main():
             [INTERP, "-m", "pytest", "test_prog.py", "-q"],
             capture_output=True,
             text=True,
+            check=False,  # the returncode IS the measurement
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         checks = [

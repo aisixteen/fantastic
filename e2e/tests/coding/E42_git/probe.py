@@ -40,7 +40,7 @@ TASK = (
 
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=False
     ).stdout
 
 
