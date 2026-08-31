@@ -73,10 +73,10 @@ struct TextFileTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         _ = await seed(k, "m.py", "a = 1\nb = 2\nc = 3\n")
         let r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(1)])])]),
             block("b = 2", "b = 20"))
         #expect(r["patched"].asBool == true)
-        #expect(r["hunks"].asInt == 1)
+        #expect(r["edits"][0]["hunks"].asInt == 1)
         #expect(read(dir, "m.py") == "a = 1\nb = 20\nc = 3\n")
     }
 
@@ -88,8 +88,8 @@ struct TextFileTests {
             block("def f():\n    return 1", "def f():\n    return 99") + "\n"
             + block("return 2", "return 22")
         let r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]), p)
-        #expect(r["patched"].asBool == true && r["hunks"].asInt == 2)
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(2)])])]), p)
+        #expect(r["patched"].asBool == true && r["edits"][0]["hunks"].asInt == 2)
         #expect(read(dir, "m.py") == "def f():\n    return 99\n\ndef g():\n    return 22\n")
     }
 
@@ -98,25 +98,25 @@ struct TextFileTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         _ = await seed(k, "m.py", "v = 1\nv = 1\n")
         var r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(1)])])]),
             block("v = 1", "v = 2"))
         #expect(r["reason"].asString == "ambiguous")
         let p = block("v = 1\nv = 1", "w = 1") + "\n" + block("missing", "x")
-        r = await callBin(k, .object(["type": .string("patch"), "path": .string("m.py")]), p)
+        r = await callBin(k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(2)])])]), p)
         #expect(r["reason"].asString == "no_match")
         #expect(r["failed"].asArray?.first?["index"].asInt == 1)
         #expect(read(dir, "m.py") == "v = 1\nv = 1\n")
         r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(1)])])]),
             "<<<<<<< SEARCH\nv = 1\n=======\nv = 2\n")
         #expect(r["reason"].asString == "bad_arg")
         r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]), "no markers")
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(1)])])]), "no markers")
         #expect(r["reason"].asString == "bad_arg")
         r = await callBin(k, .object(["type": .string("patch")]), block("a", "b"))
         #expect(r["reason"].asString == "missing_arg")
         r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("nope.py")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("nope.py"), "hunks": .integer(1)])])]),
             block("a", "b"))
         #expect(r["reason"].asString == "not_found")
         #expect(read(dir, "m.py") == "v = 1\nv = 1\n")
@@ -128,7 +128,7 @@ struct TextFileTests {
         try? "a = 1\n".write(
             to: dir.appendingPathComponent("m.py"), atomically: true, encoding: .utf8)
         let r = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("m.py")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("m.py"), "hunks": .integer(1)])])]),
             block("a = 1", "a = 2"))
         #expect(r["reason"].asString == "unauthorized")
         #expect(read(dir, "m.py") == "a = 1\n")
@@ -200,15 +200,20 @@ struct TextFileTests {
         r = await callBin(
             k,
             .object([
-                "type": .string("patch"), "path": .string("v.txt"),
-                "if_match": .string(stale),
+                "type": .string("patch"),
+                "edits": .array([.object([
+                    "path": .string("v.txt"), "hunks": .integer(1),
+                    "if_match": .string(stale),
+                ])]),
             ]), block("two", "three"))
         #expect(r["reason"].asString == "version_mismatch")
         r = await callBin(
             k,
             .object([
-                "type": .string("patch"), "path": .string("v.txt"),
-                "dry_run": .bool(true),
+                "type": .string("patch"), "dry_run": .bool(true),
+                "edits": .array([.object([
+                    "path": .string("v.txt"), "hunks": .integer(1),
+                ])]),
             ]), block("two", "three"))
         #expect(r["dry_run"].asBool == true)
         #expect(read(dir, "v.txt") == "two\n")
@@ -269,7 +274,7 @@ struct TextFileTests {
             k, .object(["type": .string("checkpoint"), "path": .string("p.txt")]))
         let ck = c["ckpt_id"].asString ?? ""
         _ = await callBin(
-            k, .object(["type": .string("patch"), "path": .string("p.txt")]),
+            k, .object(["type": .string("patch"), "edits": .array([.object(["path": .string("p.txt"), "hunks": .integer(1)])])]),
             block("a = 1", "a = 2"))
         var ls = await call(
             k, .object(["type": .string("checkpoints"), "path": .string("p.txt")]))
@@ -342,4 +347,126 @@ struct TextFileTests {
             k, .object(["type": .string("write"), "path": .string("x")]))
         #expect(t["error"].asString?.contains("binary channel") == true)
     }
+
+    // MARK: - the TRANSACTION (multi-file edits in ONE patch)
+
+    @Test func multifilePatchAppliesBothAtomically() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "x = 1\n")
+        _ = await seed(k, "b.py", "y = 2\nz = 3\n")
+        let blob =
+            block("x = 1", "x = 10") + "\n" + block("y = 2", "y = 20") + "\n"
+            + block("z = 3", "z = 30")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(1)]),
+                    .object(["path": .string("b.py"), "hunks": .integer(2)]),
+                ]),
+            ]), blob)
+        #expect(r["patched"].asBool == true, "\(r)")
+        #expect(r["edits"][1]["hunks"].asInt == 2)
+        #expect(read(dir, "a.py") == "x = 10\n")
+        #expect(read(dir, "b.py") == "y = 20\nz = 30\n")
+        // committed transaction self-cleans its pre-images
+        let ck = dir.appendingPathComponent(".ckpt")
+        let files = (FileManager.default.enumerator(atPath: ck.path)?.allObjects ?? [])
+            .compactMap { $0 as? String }
+            .filter { !$0.hasSuffix("/") && !ck.appendingPathComponent($0).hasDirectoryPath }
+        #expect(files.isEmpty, "pre-image debris: \(files)")
+    }
+
+    @Test func multifileDoomedSecondEditWritesNothing() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "x = 1\n")
+        _ = await seed(k, "b.py", "y = 2\n")
+        let blob = block("x = 1", "x = 10") + "\n" + block("missing", "nope")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(1)]),
+                    .object(["path": .string("b.py"), "hunks": .integer(1)]),
+                ]),
+            ]), blob)
+        #expect(r["reason"].asString == "no_match", "\(r)")
+        #expect(r["failed"].asArray?.first?["path"].asString == "b.py")
+        #expect(read(dir, "a.py") == "x = 1\n")
+        #expect(read(dir, "b.py") == "y = 2\n")
+    }
+
+    @Test func hunkCountsMustSumToTheBlob() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "x = 1\n")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([.object(["path": .string("a.py"), "hunks": .integer(2)])]),
+            ]), block("x = 1", "x = 2"))
+        #expect(r["reason"].asString == "bad_arg", "\(r)")
+        #expect(r["error"].asString?.contains("sum") == true)
+        #expect(read(dir, "a.py") == "x = 1\n")
+    }
+
+    @Test func multifileCheckpointTrueKeepsPreimages() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "one\n")
+        _ = await seed(k, "b.py", "two\n")
+        let blob = block("one", "ONE") + "\n" + block("two", "TWO")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"), "checkpoint": .bool(true),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(1)]),
+                    .object(["path": .string("b.py"), "hunks": .integer(1)]),
+                ]),
+            ]), blob)
+        #expect(r["patched"].asBool == true, "\(r)")
+        let cks = r["ckpt_ids"].asArray ?? []
+        #expect(cks.count == 2)
+        for row in cks {
+            let rr = await call(
+                k,
+                .object([
+                    "type": .string("restore"), "path": row["path"],
+                    "ckpt_id": row["ckpt_id"],
+                ]))
+            #expect(rr["restored"].asBool == true, "\(rr)")
+        }
+        #expect(read(dir, "a.py") == "one\n")
+        #expect(read(dir, "b.py") == "two\n")
+    }
+
+    @Test func perEditIfMatchGuardsTheWholeTransaction() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.py", "one\n")
+        _ = await seed(k, "b.py", "two\n")
+        let blob = block("one", "ONE") + "\n" + block("two", "TWO")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(1)]),
+                    .object([
+                        "path": .string("b.py"), "hunks": .integer(1),
+                        "if_match": .string(String(repeating: "0", count: 16)),
+                    ]),
+                ]),
+            ]), blob)
+        #expect(r["reason"].asString == "version_mismatch", "\(r)")
+        #expect(r["path"].asString == "b.py")
+        #expect(read(dir, "a.py") == "one\n")
+    }
 }
+

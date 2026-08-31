@@ -1302,7 +1302,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
         .header("Content-Type", "application/octet-stream")
         .header(
             "X-Fantastic-Payload",
-            r#"{"type":"patch","path":"greeting.txt"}"#,
+            r#"{"type":"patch","edits":[{"path":"greeting.txt","hunks":1}]}"#,
         )
         .body(patch)
         .send()
@@ -1323,7 +1323,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     assert!(ct.starts_with("application/json"), "patch reply ct: {ct}");
     let pbody: Value = resp.json().await.expect("patch reply json");
     assert_eq!(pbody["patched"], true, "patch reply: {pbody}");
-    assert_eq!(pbody["hunks"], 1, "patch reply: {pbody}");
+    assert_eq!(pbody["edits"][0]["hunks"], 1, "patch reply: {pbody}");
 
     // ── read_stream: reply is an OCTET body = the raw (patched) file bytes ─
     let resp = client
