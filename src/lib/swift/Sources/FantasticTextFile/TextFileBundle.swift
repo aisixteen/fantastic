@@ -270,9 +270,13 @@ public struct TextFileBundle: AgentBundle {
             "target_id": targetId.map { JSON.string($0) } ?? .null,
             "patch_grammar": .string(
                 "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
-                    + "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match the current "
+                    + "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
                     + "document EXACTLY ONCE; the patch rides as RAW bytes (real newlines, "
-                    + "nothing escaped — use send_binary with `bytes` LAST)"),
+                    + "nothing escaped — use send_binary with `bytes` LAST). `patch` is a "
+                    + "TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file "
+                    + "rides the array; the blob holds every edit's hunks concatenated in "
+                    + "`edits` order, split by the per-edit `hunks` count; any failure "
+                    + "anywhere writes nothing"),
             "verbs": .object([
                 "reflect": .string("no args — identity, verb guide, and the wired default surface."),
                 "boot": .string("no args — no-op; this agent holds no state to hydrate."),
@@ -281,7 +285,7 @@ public struct TextFileBundle: AgentBundle {
                 "write": .string(
                     "args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."),
                 "patch": .string(
-                    "args: path:str (req), bytes:bytes (req — the utf-8 patch, raw), on:str?, if_match:str?, dry_run:bool?, checkpoint:bool? — SEARCH/REPLACE blocks, each matching EXACTLY ONCE; all-or-nothing; {path, patched:true, hunks, size, version, ckpt_id?}."),
+                    "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."),
                 "append": .string(
                     "args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}."),
                 "checkpoint": .string(
@@ -393,15 +397,28 @@ public struct TextFileBundle: AgentBundle {
         ])
     }
 
+    private struct PlannedEdit {
+        let path: String
+        let hunks: [(String, String)]
+        let ifMatch: String?
+        var newBytes: Data = Data()
+    }
+
     private func patchReply(_ kernel: Kernel, fb: String, payload: JSON, blob: Data) async
         -> JSON
     {
-        let path: String
-        switch pathOf(payload, "patch") {
-        case .failure(let e): return e
-        case .success(let p): path = p
+        // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
+        // rides the array (one shape, no single/multi drift; user decision
+        // 2026-09-01). ONE raw hunk blob, split by the per-edit counts; verify
+        // every hunk of every edit in memory, checkpoint all, apply all, then
+        // self-clean the pre-images (`checkpoint:true` keeps them). A mid-apply
+        // failure restores everything already written. Mirrors python (canonical).
+        guard let edits = payload["edits"].asArray, !edits.isEmpty else {
+            return Refusal.missing("patch", "edits (a list of {path, hunks, if_match?})")
         }
-        if blob.isEmpty { return Refusal.missing("patch", "bytes (the utf-8 patch)") }
+        if blob.isEmpty {
+            return Refusal.missing("patch", "bytes (the utf-8 patch — all hunks, in edits order)")
+        }
         guard let patch = String(data: blob, encoding: .utf8) else {
             return Refusal.bad("patch", "bytes", "valid utf-8 (the patch is text)")
         }
@@ -418,63 +435,154 @@ public struct TextFileBundle: AgentBundle {
                 "patch", "bytes",
                 "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block")
         }
-        let raw: Data
-        switch await readAll(kernel, fb: fb, path: path) {
-        case .failure(let e): return e
-        case .success(let d): raw = d
-        }
-        if let want = payload["if_match"].asString {
-            let have = version(raw)
-            if have != want { return versionMismatch(want: want, have: have) }
-        }
-        guard var working = String(data: raw, encoding: .utf8) else {
-            return Refusal.bad("patch", "path", "a utf-8 text file")
-        }
-        // Apply against the EVOLVING content; each SEARCH must be unique at its
-        // turn. Stop at the first failure and write NOTHING (all-or-nothing).
-        for (idx, hunk) in hunks.enumerated() {
-            let (search, replace) = hunk
-            let hits = countOccurrences(of: search, in: working)
-            if hits != 1 {
-                let reason = hits == 0 ? "no_match" : "ambiguous"
-                let detail =
-                    hits == 0 ? "search text not found" : "search text matches \(hits) places"
-                return .object([
-                    "error": .string("a hunk did not apply — nothing written"),
-                    "reason": .string(reason),
-                    "failed": .array([
-                        .object([
-                            "index": .integer(Int64(idx)), "reason": .string(detail),
-                        ])
-                    ]),
-                ])
+        // ── address the one hunk stream: split by per-edit counts ──
+        var plan: [PlannedEdit] = []
+        var cursor = 0
+        for (i, e) in edits.enumerated() {
+            guard let path = e["path"].asString, !path.isEmpty else {
+                return Refusal.bad("patch", "edits", "edit \(i): an object with a `path`")
             }
-            working = replaceFirst(search, with: replace, in: working)
+            guard let n = e["hunks"].asInt, n >= 1 else {
+                return Refusal.bad("patch", "edits", "edit \(i) (\"\(path)\"): `hunks` (int >= 1)")
+            }
+            let n2 = Int(n)
+            if cursor + n2 > hunks.count {
+                cursor += n2
+                break
+            }
+            plan.append(
+                PlannedEdit(
+                    path: path, hunks: Array(hunks[cursor..<cursor + n2]),
+                    ifMatch: e["if_match"].asString))
+            cursor += n2
         }
-        let new = Data(working.utf8)
+        if cursor != hunks.count || plan.count != edits.count {
+            return Refusal.bad(
+                "patch", "edits",
+                "hunk counts that sum to the blob's blocks — edits claim \(cursor), "
+                    + "the patch holds \(hunks.count)")
+        }
+        // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
+        for i in plan.indices {
+            let raw: Data
+            switch await readAll(kernel, fb: fb, path: plan[i].path) {
+            case .failure(let e): return e
+            case .success(let d): raw = d
+            }
+            if let want = plan[i].ifMatch {
+                let have = version(raw)
+                if have != want {
+                    var out = versionMismatch(want: want, have: have)
+                    out["path"] = .string(plan[i].path)
+                    return out
+                }
+            }
+            guard var working = String(data: raw, encoding: .utf8) else {
+                return Refusal.bad("patch", "edits", "\"\(plan[i].path)\": a utf-8 text file")
+            }
+            for (idx, hunk) in plan[i].hunks.enumerated() {
+                let (search, replace) = hunk
+                let hits = countOccurrences(of: search, in: working)
+                if hits != 1 {
+                    let reason = hits == 0 ? "no_match" : "ambiguous"
+                    let detail =
+                        hits == 0 ? "search text not found" : "search text matches \(hits) places"
+                    return .object([
+                        "error": .string("a hunk did not apply — nothing written"),
+                        "reason": .string(reason),
+                        "failed": .array([
+                            .object([
+                                "path": .string(plan[i].path),
+                                "index": .integer(Int64(idx)),
+                                "reason": .string(detail),
+                            ])
+                        ]),
+                    ])
+                }
+                working = replaceFirst(search, with: replace, in: working)
+            }
+            plan[i].newBytes = Data(working.utf8)
+        }
         if payload["dry_run"].asBool == true {
             return .object([
-                "path": .string(path), "dry_run": .bool(true),
-                "hunks": .integer(Int64(hunks.count)), "version": .string(version(raw)),
+                "dry_run": .bool(true),
+                "edits": .array(plan.map {
+                    .object(["path": .string($0.path), "hunks": .integer(Int64($0.hunks.count))])
+                }),
             ])
         }
-        var ckptId: String?
-        if payload["checkpoint"].asBool == true {
-            switch await takeCheckpoint(kernel, fb: fb, path: path) {
-            case .failure(let e): return e
-            case .success(let id): ckptId = id
+        // ── CHECKPOINT ALL, then APPLY ALL; a mid-apply failure restores ──
+        // everything already written. Pre-images are ALWAYS taken (they ARE
+        // the rollback); `checkpoint:true` only KEEPS them.
+        var ckpts: [(String, String)] = []
+        for e in plan {
+            switch await takeCheckpoint(kernel, fb: fb, path: e.path) {
+            case .failure(let err): return err
+            case .success(let id): ckpts.append((e.path, id))
             }
         }
-        if let err = await writeAtomic(kernel, fb: fb, path: path, data: new) { return err }
+        var written: [(String, String)] = []
+        for (e, ck) in zip(plan, ckpts) {
+            if let err = await writeAtomic(kernel, fb: fb, path: e.path, data: e.newBytes) {
+                for (path, id) in written {
+                    await restoreFrom(kernel, fb: fb, path: path, ckptId: id)
+                }
+                var out = err
+                out["restored"] = .array(written.map { .string($0.0) })
+                out["failed_path"] = .string(e.path)
+                return out
+            }
+            written.append((e.path, ck.1))
+        }
         var out: OrderedDictionary<String, JSON> = [
-            "path": .string(path),
             "patched": .bool(true),
-            "hunks": .integer(Int64(hunks.count)),
-            "size": .integer(Int64(new.count)),
-            "version": .string(version(new)),
+            "edits": .array(plan.map {
+                .object([
+                    "path": .string($0.path),
+                    "hunks": .integer(Int64($0.hunks.count)),
+                    "size": .integer(Int64($0.newBytes.count)),
+                    "version": .string(version($0.newBytes)),
+                ])
+            }),
         ]
-        if let ckptId { out["ckpt_id"] = .string(ckptId) }
+        if payload["checkpoint"].asBool == true {
+            out["ckpt_ids"] = .array(ckpts.map {
+                .object(["path": .string($0.0), "ckpt_id": .string($0.1)])
+            })
+        } else {
+            for (path, id) in ckpts {
+                await dropQuiet(kernel, fb: fb, path: path, ckptId: id)
+            }
+        }
         return .object(out)
+    }
+
+    /// Rollback arm of the patch transaction: put the pre-image back (or
+    /// delete a file that did not exist). Best-effort — it runs INSIDE a
+    /// failure path that is already being reported.
+    private func restoreFrom(_ kernel: Kernel, fb: String, path: String, ckptId: String) async {
+        let src = ckptPath(path, ckptId)
+        let (absent, _) = await kernel.sendWithBinary(
+            AgentId(fb),
+            .object([
+                "type": .string("read_stream"), "path": .string(src + ".absent"),
+                "offset": .integer(0), "length": .integer(1),
+            ]), Data())
+        if case .object = absent, absent["error"].asString == nil {
+            _ = await legCall(kernel, fb: fb, .object(["type": .string("delete"), "path": .string(path)]))
+            return
+        }
+        if case .success(let data) = await readAll(kernel, fb: fb, path: src) {
+            _ = await writeAtomic(kernel, fb: fb, path: path, data: data)
+        }
+    }
+
+    /// Self-cleaning arm: a COMMITTED transaction discards its pre-images.
+    private func dropQuiet(_ kernel: Kernel, fb: String, path: String, ckptId: String) async {
+        let src = ckptPath(path, ckptId)
+        _ = await legCall(kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src)]))
+        _ = await legCall(
+            kernel, fb: fb, .object(["type": .string("delete"), "path": .string(src + ".absent")]))
     }
 
     private func checkpointReply(_ kernel: Kernel, fb: String, payload: JSON) async -> JSON {

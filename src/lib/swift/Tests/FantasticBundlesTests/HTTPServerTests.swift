@@ -262,7 +262,7 @@ struct HTTPServerTests {
         patchReq.httpMethod = "POST"
         patchReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         patchReq.setValue(
-            "{\"type\":\"patch\",\"path\":\"note.txt\"}",
+            "{\"type\":\"patch\",\"edits\":[{\"path\":\"note.txt\",\"hunks\":1}]}",
             forHTTPHeaderField: "X-Fantastic-Payload")
         patchReq.setValue("bytes", forHTTPHeaderField: "X-Fantastic-Bytes-Field")
         patchReq.httpBody = patch.data(using: .utf8)

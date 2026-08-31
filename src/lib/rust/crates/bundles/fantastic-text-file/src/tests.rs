@@ -107,12 +107,12 @@ async fn patch_single_hunk_applies_and_writes() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         block("b = 2", "b = 20").as_bytes(),
     )
     .await;
     assert_eq!(r["patched"], true, "{r}");
-    assert_eq!(r["hunks"], 1);
+    assert_eq!(r["edits"][0]["hunks"], 1);
     assert_eq!(on_disk(&tmp, "m.py"), "a = 1\nb = 20\nc = 3\n");
 }
 
@@ -135,12 +135,12 @@ async fn patch_multi_hunk_evolving_and_multiline() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 2}]}),
         patch.as_bytes(),
     )
     .await;
     assert_eq!(r["patched"], true, "{r}");
-    assert_eq!(r["hunks"], 2);
+    assert_eq!(r["edits"][0]["hunks"], 2);
     assert_eq!(
         on_disk(&tmp, "m.py"),
         "def f():\n    return 99\n\ndef g():\n    return 22\n"
@@ -156,7 +156,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         block("v = 1", "v = 2").as_bytes(),
     )
     .await;
@@ -170,7 +170,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 2}]}),
         patch.as_bytes(),
     )
     .await;
@@ -181,7 +181,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         b"<<<<<<< SEARCH\nv = 1\n=======\nv = 2\n",
     )
     .await;
@@ -189,7 +189,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         b"no markers",
     )
     .await;
@@ -197,7 +197,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         &[0xff, 0xfe],
     )
     .await;
@@ -213,7 +213,7 @@ async fn patch_failures_are_loud_and_write_nothing() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "nope.py"}),
+        json!({"type": "patch", "edits": [{"path": "nope.py", "hunks": 1}]}),
         block("a", "b").as_bytes(),
     )
     .await;
@@ -231,7 +231,7 @@ async fn sealed_leg_denies_and_editor_passes_it_through() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "m.py"}),
+        json!({"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}),
         block("a = 1", "a = 2").as_bytes(),
     )
     .await;
@@ -342,7 +342,7 @@ async fn if_match_guards_write_and_patch() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "v.txt", "if_match": stale}),
+        json!({"type": "patch", "edits": [{"path": "v.txt", "hunks": 1, "if_match": stale}]}),
         block("two", "three").as_bytes(),
     )
     .await;
@@ -351,7 +351,7 @@ async fn if_match_guards_write_and_patch() {
     let r = call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "v.txt", "dry_run": true}),
+        json!({"type": "patch", "edits": [{"path": "v.txt", "hunks": 1}], "dry_run": true}),
         block("two", "three").as_bytes(),
     )
     .await;
@@ -420,7 +420,7 @@ async fn checkpoint_list_drop_restore_lifecycle() {
     call_bin(
         &k,
         &ed,
-        json!({"type": "patch", "path": "p.txt"}),
+        json!({"type": "patch", "edits": [{"path": "p.txt", "hunks": 1}]}),
         block("a = 1", "a = 2").as_bytes(),
     )
     .await;
@@ -530,4 +530,147 @@ async fn reflect_names_surface_and_grammar_and_byte_verbs_redirect_on_text() {
         r["error"].as_str().unwrap().contains("binary channel"),
         "{r}"
     );
+}
+
+// ─── the TRANSACTION (multi-file edits in ONE patch) ────────────
+
+#[tokio::test]
+async fn multifile_patch_applies_both_atomically() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "x = 1\n").await;
+    seed(&k, &ed, "b.py", "y = 2\nz = 3\n").await;
+    let blob = format!(
+        "{}\n{}\n{}",
+        block("x = 1", "x = 10"),
+        block("y = 2", "y = 20"),
+        block("z = 3", "z = 30")
+    );
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 2}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["patched"], true, "{r}");
+    assert_eq!(r["edits"][1]["hunks"], 2);
+    assert_eq!(on_disk(&tmp, "a.py"), "x = 10\n");
+    assert_eq!(on_disk(&tmp, "b.py"), "y = 20\nz = 30\n");
+    // committed transaction self-cleans its pre-images
+    let ck = tmp.path().join("sd").join(".ckpt");
+    let leftovers = std::fs::read_dir(&ck)
+        .map(|d| d.flatten().count())
+        .unwrap_or(0);
+    let files = walk_files(&ck);
+    assert!(
+        files.is_empty(),
+        "pre-image debris: {files:?} ({leftovers} entries)"
+    );
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_files(&p));
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn multifile_doomed_second_edit_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "x = 1\n").await;
+    seed(&k, &ed, "b.py", "y = 2\n").await;
+    let blob = format!("{}\n{}", block("x = 1", "x = 10"), block("missing", "nope"));
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 1}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["reason"], "no_match", "{r}");
+    assert_eq!(r["failed"][0]["path"], "b.py");
+    assert_eq!(on_disk(&tmp, "a.py"), "x = 1\n");
+    assert_eq!(on_disk(&tmp, "b.py"), "y = 2\n");
+}
+
+#[tokio::test]
+async fn hunk_counts_must_sum_to_the_blob() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "x = 1\n").await;
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [{"path": "a.py", "hunks": 2}]}),
+        block("x = 1", "x = 2").as_bytes(),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("sum"), "{r}");
+    assert_eq!(on_disk(&tmp, "a.py"), "x = 1\n");
+}
+
+#[tokio::test]
+async fn multifile_checkpoint_true_keeps_preimages() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "one\n").await;
+    seed(&k, &ed, "b.py", "two\n").await;
+    let blob = format!("{}\n{}", block("one", "ONE"), block("two", "TWO"));
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "checkpoint": true, "edits": [
+            {"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 1}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["patched"], true, "{r}");
+    let cks = r["ckpt_ids"].as_array().expect("ckpt_ids").clone();
+    assert_eq!(cks.len(), 2);
+    for row in &cks {
+        let rr = call(
+            &k,
+            &ed,
+            json!({"type": "restore", "path": row["path"], "ckpt_id": row["ckpt_id"]}),
+        )
+        .await;
+        assert_eq!(rr["restored"], true, "{rr}");
+    }
+    assert_eq!(on_disk(&tmp, "a.py"), "one\n");
+    assert_eq!(on_disk(&tmp, "b.py"), "two\n");
+}
+
+#[tokio::test]
+async fn per_edit_if_match_guards_the_whole_transaction() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.py", "one\n").await;
+    seed(&k, &ed, "b.py", "two\n").await;
+    let blob = format!("{}\n{}", block("one", "ONE"), block("two", "TWO"));
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [
+            {"path": "a.py", "hunks": 1},
+            {"path": "b.py", "hunks": 1, "if_match": "0000000000000000"}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["reason"], "version_mismatch", "{r}");
+    assert_eq!(r["path"], "b.py");
+    assert_eq!(on_disk(&tmp, "a.py"), "one\n");
 }

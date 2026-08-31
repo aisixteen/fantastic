@@ -332,14 +332,18 @@ async fn reflect_reply(agent: &Agent) -> Value {
         "target_id": target_id,
         "patch_grammar": "one or more blocks: `<<<<<<< SEARCH` / <old lines> / \
             `=======` / <new lines> / `>>>>>>> REPLACE`; each SEARCH must match \
-            the current document EXACTLY ONCE; the patch rides as RAW bytes \
-            (real newlines, nothing escaped — use send_binary with `bytes` LAST)",
+            its document EXACTLY ONCE; the patch rides as RAW bytes (real \
+            newlines, nothing escaped — use send_binary with `bytes` LAST). \
+            `patch` is a TRANSACTION over `edits:[{path, hunks, if_match?}]` — \
+            even one file rides the array; the blob holds every edit's hunks \
+            concatenated in `edits` order, split by the per-edit `hunks` count; \
+            any failure anywhere writes nothing",
         "verbs": {
             "reflect": "no args — identity, verb guide, and the wired default surface.",
             "boot": "no args — no-op; this agent holds no state to hydrate.",
             "read": "args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary.",
             "write": "args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}.",
-            "patch": "args: path:str (req), bytes:bytes (req — the utf-8 patch, raw), on:str?, if_match:str?, dry_run:bool?, checkpoint:bool? — SEARCH/REPLACE blocks, each matching EXACTLY ONCE; all-or-nothing; {path, patched:true, hunks, size, version, ckpt_id?}.",
+            "patch": "args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}.",
             "append": "args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}.",
             "checkpoint": "args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}.",
             "checkpoints": "args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}.",
@@ -451,12 +455,24 @@ async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u
 }
 
 async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
-    let path = match path_of(payload, "patch") {
-        Ok(p) => p,
-        Err(e) => return e,
+    // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
+    // rides the array (one shape, no single/multi drift; user decision
+    // 2026-09-01). ONE raw hunk blob, split by the per-edit counts; verify
+    // every hunk of every edit in memory, checkpoint all, apply all, then
+    // self-clean the pre-images (`checkpoint:true` keeps them). A mid-apply
+    // failure restores everything already written. Mirrors python (canonical).
+    let Some(edits) = payload
+        .get("edits")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+    else {
+        return missing("patch", "edits (a list of {path, hunks, if_match?})");
     };
     if blob.is_empty() {
-        return missing("patch", "bytes (the utf-8 patch)");
+        return missing(
+            "patch",
+            "bytes (the utf-8 patch — all hunks, in edits order)",
+        );
     }
     let patch = match std::str::from_utf8(blob) {
         Ok(s) => s,
@@ -473,63 +489,192 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
             "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
         );
     }
-    let raw = match read_all(kernel, fb, &path).await {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    if let Some(want) = payload.get("if_match").and_then(Value::as_str) {
-        let have = version_of(&raw);
-        if have != want {
-            return version_mismatch(want, &have);
-        }
+    // ── address the one hunk stream: split by per-edit counts ──
+    struct Edit {
+        path: String,
+        hunks: Vec<(String, String)>,
+        if_match: Option<String>,
+        new: Vec<u8>,
     }
-    let mut working = match String::from_utf8(raw.clone()) {
-        Ok(s) => s,
-        Err(_) => return bad("patch", "path", "a utf-8 text file"),
-    };
-    // Apply against the EVOLVING content; each SEARCH must be unique at its
-    // turn. Stop at the first failure and write NOTHING (all-or-nothing).
-    for (idx, (search, replace)) in hunks.iter().enumerate() {
-        let hits = count_occurrences(&working, search);
-        if hits != 1 {
-            let (reason, detail) = if hits == 0 {
-                ("no_match", "search text not found".to_string())
-            } else {
-                ("ambiguous", format!("search text matches {hits} places"))
-            };
-            return json!({
-                "error": "a hunk did not apply — nothing written",
-                "reason": reason,
-                "failed": [{"index": idx, "reason": detail}],
-            });
+    let mut plan: Vec<Edit> = Vec::new();
+    let mut cursor = 0usize;
+    for (i, e) in edits.iter().enumerate() {
+        let Some(path) = e
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+        else {
+            return bad(
+                "patch",
+                "edits",
+                &format!("edit {i}: an object with a `path`"),
+            );
+        };
+        let Some(n) = e.get("hunks").and_then(Value::as_u64).filter(|n| *n >= 1) else {
+            return bad(
+                "patch",
+                "edits",
+                &format!("edit {i} ({path:?}): `hunks` (int >= 1)"),
+            );
+        };
+        let n = n as usize;
+        if cursor + n > hunks.len() {
+            cursor += n;
+            break;
         }
-        working = working.replacen(search, replace, 1);
+        plan.push(Edit {
+            path: path.to_string(),
+            hunks: hunks[cursor..cursor + n].to_vec(),
+            if_match: e
+                .get("if_match")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            new: Vec::new(),
+        });
+        cursor += n;
     }
-    let new = working.into_bytes();
+    if cursor != hunks.len() || plan.len() != edits.len() {
+        return bad(
+            "patch",
+            "edits",
+            &format!(
+                "hunk counts that sum to the blob's blocks — edits claim {cursor}, \
+                 the patch holds {}",
+                hunks.len()
+            ),
+        );
+    }
+    // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
+    for e in plan.iter_mut() {
+        let raw = match read_all(kernel, fb, &e.path).await {
+            Ok(d) => d,
+            Err(err) => return err,
+        };
+        if let Some(want) = &e.if_match {
+            let have = version_of(&raw);
+            if have != *want {
+                let mut out = version_mismatch(want, &have);
+                out["path"] = json!(e.path);
+                return out;
+            }
+        }
+        let mut working = match String::from_utf8(raw) {
+            Ok(s) => s,
+            Err(_) => {
+                return bad(
+                    "patch",
+                    "edits",
+                    &format!("{:?}: a utf-8 text file", e.path),
+                )
+            }
+        };
+        for (idx, (search, replace)) in e.hunks.iter().enumerate() {
+            let hits = count_occurrences(&working, search);
+            if hits != 1 {
+                let (reason, detail) = if hits == 0 {
+                    ("no_match", "search text not found".to_string())
+                } else {
+                    ("ambiguous", format!("search text matches {hits} places"))
+                };
+                return json!({
+                    "error": "a hunk did not apply — nothing written",
+                    "reason": reason,
+                    "failed": [{"path": e.path, "index": idx, "reason": detail}],
+                });
+            }
+            working = working.replacen(search, replace, 1);
+        }
+        e.new = working.into_bytes();
+    }
     if payload.get("dry_run").and_then(Value::as_bool) == Some(true) {
-        return json!({"path": path, "dry_run": true, "hunks": hunks.len(), "version": version_of(&raw)});
+        return json!({
+            "dry_run": true,
+            "edits": plan.iter().map(|e| json!({"path": e.path, "hunks": e.hunks.len()})).collect::<Vec<_>>(),
+        });
     }
-    let mut ckpt_id: Option<String> = None;
-    if payload.get("checkpoint").and_then(Value::as_bool) == Some(true) {
-        match take_checkpoint(kernel, fb, &path).await {
-            Ok(id) => ckpt_id = Some(id),
-            Err(e) => return e,
+    // ── CHECKPOINT ALL, then APPLY ALL; a mid-apply failure restores ──
+    // everything already written. Pre-images are ALWAYS taken (they ARE the
+    // rollback); `checkpoint:true` only KEEPS them.
+    let mut ckpts: Vec<(String, String)> = Vec::new();
+    for e in &plan {
+        match take_checkpoint(kernel, fb, &e.path).await {
+            Ok(id) => ckpts.push((e.path.clone(), id)),
+            Err(err) => return err,
         }
     }
-    if let Some(err) = write_atomic(kernel, fb, &path, &new).await {
-        return err;
+    let mut written: Vec<(String, String)> = Vec::new();
+    for (e, (_, ckpt_id)) in plan.iter().zip(&ckpts) {
+        if let Some(err) = write_atomic(kernel, fb, &e.path, &e.new).await {
+            for (path, ck) in &written {
+                restore_from(kernel, fb, path, ck).await;
+            }
+            let mut out = if err.is_object() {
+                err
+            } else {
+                json!({"error": err.to_string()})
+            };
+            out["restored"] = json!(written.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+            out["failed_path"] = json!(e.path);
+            return out;
+        }
+        written.push((e.path.clone(), ckpt_id.clone()));
     }
     let mut out = json!({
-        "path": path,
         "patched": true,
-        "hunks": hunks.len(),
-        "size": new.len(),
-        "version": version_of(&new),
+        "edits": plan
+            .iter()
+            .map(|e| json!({
+                "path": e.path,
+                "hunks": e.hunks.len(),
+                "size": e.new.len(),
+                "version": version_of(&e.new),
+            }))
+            .collect::<Vec<_>>(),
     });
-    if let Some(id) = ckpt_id {
-        out["ckpt_id"] = json!(id);
+    if payload.get("checkpoint").and_then(Value::as_bool) == Some(true) {
+        out["ckpt_ids"] = json!(ckpts
+            .iter()
+            .map(|(p, c)| json!({"path": p, "ckpt_id": c}))
+            .collect::<Vec<_>>());
+    } else {
+        for (path, ck) in &ckpts {
+            drop_quiet(kernel, fb, path, ck).await;
+        }
     }
     out
+}
+
+/// Rollback arm of the patch transaction: put the pre-image back (or delete a
+/// file that did not exist). Best-effort — it runs INSIDE a failure path that
+/// is already being reported.
+async fn restore_from(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: &str) {
+    let src = ckpt_path(path, ckpt_id);
+    let (absent, _) = kernel
+        .send_with_binary(
+            &AgentId::from(fb),
+            json!({"type": "read_stream", "path": format!("{src}.absent"), "offset": 0, "length": 1}),
+            Vec::new(),
+        )
+        .await;
+    if absent.is_object() && absent.get("error").is_none() {
+        let _ = leg_call(kernel, fb, json!({"type": "delete", "path": path})).await;
+        return;
+    }
+    if let Ok(data) = read_all(kernel, fb, &src).await {
+        let _ = write_atomic(kernel, fb, path, &data).await;
+    }
+}
+
+/// Self-cleaning arm: a COMMITTED transaction discards its pre-images.
+async fn drop_quiet(kernel: &Arc<Kernel>, fb: &str, path: &str, ckpt_id: &str) {
+    let src = ckpt_path(path, ckpt_id);
+    let _ = leg_call(kernel, fb, json!({"type": "delete", "path": src.clone()})).await;
+    let _ = leg_call(
+        kernel,
+        fb,
+        json!({"type": "delete", "path": format!("{src}.absent")}),
+    )
+    .await;
 }
 
 async fn checkpoint_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
