@@ -68,25 +68,64 @@ def _deny(decision) -> JSONResponse:
     return JSONResponse(data, status_code=403)
 
 
+# ─── the binary leg ─────────────────────────────────────────────
+# JSON has no bytes type, so a verb whose payload (or reply) carries RAW bytes —
+# `patch_text_file`, `write_stream`, `read_stream` — rides an octet-stream body
+# instead: the bytes ARE the body, the rest of the envelope is JSON on
+# `X-Fantastic-Payload`, and the one bytes-valued FIELD is named by
+# `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in both directions, never
+# base64 — the HTTP mirror of the WS binary frame.
+_OCTET = "application/octet-stream"
+_PAYLOAD_HEADER = "x-fantastic-payload"
+_BYTES_FIELD_HEADER = "x-fantastic-bytes-field"
+
+
+def _first_bytes_field(d: dict) -> tuple[str | None, bytes | None]:
+    """The ONE field whose value is raw bytes — how a binary envelope carries its
+    blob. Returns `(name, blob)` or `(None, None)`."""
+    for k, v in d.items():
+        if isinstance(v, (bytes, bytearray)):
+            return k, bytes(v)
+    return None, None
+
+
 # ─── route endpoints ────────────────────────────────────────────
 
 
 def _make_post_endpoint(self_id: str, kernel):
     async def _rest_call(request: Request, target_id: str):
         body = await request.body()
-        try:
-            payload = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            # Don't echo the parser exception back — generic message
-            # only (CodeQL: information exposure through an exception).
-            return JSONResponse(
-                {"error": "web_rest: request body is not valid JSON"},
-                status_code=400,
-            )
-        if not isinstance(payload, dict):
-            return JSONResponse(
-                {"error": "web_rest: body must be a JSON object"}, status_code=400
-            )
+        if request.headers.get("content-type", "").startswith(_OCTET):
+            # Binary leg: the raw body IS one field's bytes; the rest of the
+            # envelope rides `X-Fantastic-Payload`, the field named by
+            # `X-Fantastic-Bytes-Field` (default `bytes`).
+            try:
+                payload = json.loads(request.headers.get(_PAYLOAD_HEADER) or "{}")
+            except json.JSONDecodeError:
+                return JSONResponse(
+                    {"error": "web_rest: X-Fantastic-Payload is not valid JSON"},
+                    status_code=400,
+                )
+            if not isinstance(payload, dict):
+                return JSONResponse(
+                    {"error": "web_rest: X-Fantastic-Payload must be a JSON object"},
+                    status_code=400,
+                )
+            payload[request.headers.get(_BYTES_FIELD_HEADER) or "bytes"] = body
+        else:
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                # Don't echo the parser exception back — generic message
+                # only (CodeQL: information exposure through an exception).
+                return JSONResponse(
+                    {"error": "web_rest: request body is not valid JSON"},
+                    status_code=400,
+                )
+            if not isinstance(payload, dict):
+                return JSONResponse(
+                    {"error": "web_rest: body must be a JSON object"}, status_code=400
+                )
         decision = _gate(self_id, kernel, target_id, payload, request)
         if not decision.allowed:
             return _deny(decision)
@@ -108,6 +147,20 @@ def _make_post_endpoint(self_id: str, kernel):
             reply = (await kernel.send([item]))[0]["result"]
         if reply is None:
             return Response(status_code=204)
+        # A reply that carries raw bytes (e.g. `read_stream`) goes back the same
+        # way it came in — octet body + JSON header — never base64.
+        if isinstance(reply, dict):
+            field, blob = _first_bytes_field(reply)
+            if field is not None:
+                rest = {k: v for k, v in reply.items() if k != field}
+                return Response(
+                    content=blob,
+                    media_type=_OCTET,
+                    headers={
+                        _PAYLOAD_HEADER: json.dumps(rest),
+                        _BYTES_FIELD_HEADER: field,
+                    },
+                )
         return JSONResponse(reply)
 
     return _rest_call

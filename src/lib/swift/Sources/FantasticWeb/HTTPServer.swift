@@ -18,6 +18,7 @@
 //   GET  /<agent_id>/ws             → WebSocket upgrade → the shared proxy
 //                                     (web_ws), see WebSocket.swift
 
+import FantasticIoBridge
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -265,6 +266,26 @@ public final class WebServer: @unchecked Sendable {
         spec: RouteSpec, params: [String: String], query: [String: String],
         request: HTTPRequest
     ) async -> HTTPResponse {
+        // Header lookup is case-insensitive (NIO preserves the on-wire case).
+        var lowerHeaders: [String: String] = [:]
+        for (k, v) in request.headers { lowerHeaders[k.lowercased()] = v }
+
+        // ── BINARY leg (parity with py web_rest) ──
+        // A verb whose payload OR reply carries RAW bytes — patch_text_file /
+        // write_stream / read_stream — rides an octet-stream body instead of
+        // JSON: the raw body IS the blob, the rest of the envelope is JSON on
+        // `X-Fantastic-Payload`, and the one bytes-valued field is named by
+        // `X-Fantastic-Bytes-Field` (default `bytes`). Never base64; symmetric
+        // in both directions — the HTTP mirror of the WS binary frame. JSON can't
+        // hold bytes, so the blob rides the kernel's binary channel
+        // (`sendWithBinary`), exactly as the WS binary frame does.
+        if request.method == "POST",
+            (lowerHeaders["content-type"] ?? "").hasPrefix("application/octet-stream")
+        {
+            return await dispatchOctetRoute(
+                spec: spec, params: params, request: request, headers: lowerHeaders)
+        }
+
         let bodyStr = request.body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         var paramsObj: OrderedDictionary<String, JSON> = [:]
         for (k, v) in params { paramsObj[k] = .string(v) }
@@ -291,6 +312,78 @@ public final class WebServer: @unchecked Sendable {
         return HTTPResponse(
             status: status, contentType: contentType,
             body: bodyOut.data(using: .utf8) ?? Data())
+    }
+
+    /// The BINARY leg of an `.http` (web_rest) route. The raw request body is a
+    /// verb's one bytes-valued field; the rest of the envelope rides
+    /// `X-Fantastic-Payload`. Gate + self-id tagging + exec-id mirror the JSON
+    /// path — the difference is only the channel (`sendWithBinary`, since JSON
+    /// can't carry the bytes). A reply that itself carries bytes (read_stream)
+    /// goes back the SAME way: octet body + JSON header, never base64.
+    private static let octetType = "application/octet-stream"
+    private static let payloadHeader = "x-fantastic-payload"
+
+    private func dispatchOctetRoute(
+        spec: RouteSpec, params: [String: String],
+        request: HTTPRequest, headers: [String: String]
+    ) async -> HTTPResponse {
+        guard let target = params["target"] else {
+            return jsonHTTP(400, .object(["error": .string("web_rest: missing target")]))
+        }
+        // The envelope is JSON on `X-Fantastic-Payload`; the raw body is the blob.
+        let payloadRaw = headers[Self.payloadHeader] ?? "{}"
+        guard let payload = try? JSON.parse(payloadRaw), case .object = payload else {
+            return jsonHTTP(
+                400,
+                .object(["error": .string("web_rest: X-Fantastic-Payload must be a JSON object")]))
+        }
+        let blob = request.body ?? Data()
+
+        // GATE — same io_bridge inbound gate as the JSON path; credential on
+        // X-Fantastic-Auth. The web_rest leg is the route's owner.
+        let token = headers["x-fantastic-auth"]
+        if let denied = gateWebLeg(
+            kernel: kernel, legId: spec.ownerId, target: target,
+            verb: payload["type"].asString ?? "", token: token)
+        {
+            return jsonHTTP(403, denied)
+        }
+
+        // NAMING an execution — parity with the JSON path. Dispatch metadata on
+        // its own header, not in the verb payload; carried on the binary
+        // envelope as `id`.
+        var header = payload
+        if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
+            header["id"] = .string(execId)
+        }
+
+        // Tag the dispatch with THIS surface's id (self-id), exactly as the JSON
+        // path does by routing through the web_rest agent — so the two-sided
+        // kernel gate runs with the leg as sender and telemetry rays originate
+        // from this sprite.
+        let (reply, outBody): (JSON, Data) = await KernelTaskLocals.$currentSender.withValue(
+            spec.ownerId
+        ) {
+            await kernel.sendWithBinary(AgentId(target), header, blob)
+        }
+
+        // A reply that carries raw bytes (read_stream chunk) goes back octet +
+        // JSON header. Otherwise a plain JSON reply, like the JSON path.
+        if !outBody.isEmpty {
+            return HTTPResponse(
+                status: 200, contentType: Self.octetType, body: outBody,
+                extraHeaders: [
+                    "X-Fantastic-Payload": reply.serialize(),
+                    "X-Fantastic-Bytes-Field": "bytes",
+                ])
+        }
+        return jsonHTTP(200, reply)
+    }
+
+    private func jsonHTTP(_ status: Int, _ body: JSON) -> HTTPResponse {
+        HTTPResponse(
+            status: status, contentType: "application/json",
+            body: body.serialize().data(using: .utf8) ?? Data())
     }
 
     private func serveIndex() async -> HTTPResponse {

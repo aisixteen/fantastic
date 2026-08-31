@@ -1,0 +1,9 @@
+# WHAT to measure. No model, no endpoint, no key — a deterministic capability
+# probe over the real kernel. Free, and (once ported) cross-runtime.
+id: file_edit
+group: coding
+title: patch_text_file applies a search/replace edit and fails loud
+runner: probe.py
+# python first; rust/swift added once patch_text_file is ported to them.
+runtimes: [python, rust, swift]
+costs: free

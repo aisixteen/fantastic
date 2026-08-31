@@ -15,6 +15,7 @@ Verbs:
   list   path?       -> {files: [{name, path, type, size?}, ...]}
   read_stream  path offset? length?        -> {bytes, next_offset, eof, size} (SOURCE)
   write_stream path bytes offset? truncate? -> {written, offset, size}        (SINK)
+  patch_text_file path bytes(=patch) -> {patched, hunks, size}  (SEARCH/REPLACE edit)
   pump   source? source_path sink? sink_path? -> {bytes, chunks}  (server-side copy)
   delete path        -> {path, deleted: true}            (refused if readonly)
   rename old_path new_path -> {old_path, new_path}        (refused if readonly)
@@ -264,6 +265,113 @@ async def _write_stream(id, payload, kernel):
     return {"path": path, "written": len(data), "offset": off, "size": size}
 
 
+# ─── patch_text_file ────────────────────────────────────────────
+# A STRUCTURED whole-file edit that reuses the file stream: read the current text,
+# apply SEARCH/REPLACE hunks, write it back atomically (fs does temp+rename). The
+# patch is TEXT (utf-8) but rides as raw BYTES on the binary channel (`send_binary`)
+# so a hunk full of quotes/backslashes/newlines is never JSON-escaped. Each hunk's
+# SEARCH must match the CURRENT content EXACTLY ONCE — 0 matches or an ambiguous >1
+# FAILS LOUD (no fuzzy apply). All-or-nothing: on any failed hunk, nothing is written.
+_H_START, _H_DIV, _H_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
+
+
+def _parse_hunks(text: str) -> list[tuple[str, str]]:
+    """Parse SEARCH/REPLACE blocks into (search, replace) pairs. The text inside a
+    block is taken VERBATIM (the marker lines excluded). Raises ValueError on a block
+    that opens but does not close."""
+    lines = text.split("\n")
+    hunks: list[tuple[str, str]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i] != _H_START:
+            i += 1
+            continue
+        j = i + 1
+        search: list[str] = []
+        while j < n and lines[j] != _H_DIV:
+            search.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a SEARCH block has no `=======` divider")
+        j += 1
+        replace: list[str] = []
+        while j < n and lines[j] != _H_END:
+            replace.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a block has no closing `>>>>>>> REPLACE`")
+        hunks.append(("\n".join(search), "\n".join(replace)))
+        i = j + 1
+    return hunks
+
+
+async def _patch_text_file(id, payload, kernel):
+    """args: path:str (req), bytes:bytes (req — the patch, utf-8, on the binary
+    channel). Applies SEARCH/REPLACE hunks to an EXISTING text file and writes it
+    back ATOMICALLY. One or more blocks:
+    `<<<<<<< SEARCH` / <old> / `=======` / <new> / `>>>>>>> REPLACE`. Each <old> must
+    occur EXACTLY ONCE in the current file — not-found or ambiguous FAILS LOUD and
+    writes nothing (no fuzzy match, no partial apply). Returns {path, patched:true,
+    hunks:N, size} or {error, reason, failed:[{index, reason}]}. Refused if readonly."""
+    rec = kernel.get(id) or {}
+    if err := _readonly_or_none(rec):
+        return err
+    root = _root_str(rec)
+    path = payload.get("path", "")
+    if not path:
+        return missing("patch_text_file", "path")
+    data = payload.get("bytes", b"")
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return missing("patch_text_file", "bytes (the utf-8 patch)")
+    try:
+        patch = bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return bad("patch_text_file", "bytes", "valid utf-8 (the patch is text)")
+    if not fs.is_file(root, path):
+        return refusal(NOT_FOUND, f"no text file at {path!r}")
+    try:
+        hunks = _parse_hunks(patch)
+    except ValueError as e:
+        return bad("patch_text_file", "bytes", f"a well-formed patch — {e}")
+    if not hunks:
+        return bad(
+            "patch_text_file",
+            "bytes",
+            "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
+        )
+    try:
+        working = fs.read_text(root, path)
+    except (ValueError, OSError) as e:
+        return refusal(TRANSPORT_ERROR, str(e))
+    # Apply against the EVOLVING content; each SEARCH must be unique at its turn.
+    # Stop at the first failure and write NOTHING (all-or-nothing).
+    for idx, (search, replace) in enumerate(hunks):
+        hits = working.count(search)
+        if hits != 1:
+            reason = "no_match" if hits == 0 else "ambiguous"
+            detail = (
+                "search text not found"
+                if hits == 0
+                else f"search text matches {hits} places"
+            )
+            return {
+                "error": "a hunk did not apply — nothing written",
+                "reason": reason,
+                "failed": [{"index": idx, "reason": detail}],
+            }
+        working = working.replace(search, replace, 1)
+    try:
+        fs.write_text(root, path, working)  # atomic: temp + rename
+    except (ValueError, OSError) as e:
+        return refusal(TRANSPORT_ERROR, str(e))
+    return {
+        "path": path,
+        "patched": True,
+        "hunks": len(hunks),
+        "size": len(working.encode("utf-8")),
+    }
+
+
 async def _pump(id, payload, kernel):
     """The PUMP — a server-side stream copy SOURCE→SINK, chunk by chunk, in ONE
     call (vs a consumer driving each read/write over the wire). Storage-agnostic:
@@ -335,6 +443,7 @@ VERBS = {
     "list": _list,
     "read_stream": _read_stream,
     "write_stream": _write_stream,
+    "patch_text_file": _patch_text_file,
     "pump": _pump,
     "delete": _delete,
     "rename": _rename,

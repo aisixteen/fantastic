@@ -1176,3 +1176,183 @@ fn ingest_chunk_single_chunk_completes_immediately() {
         .expect("a 1-chunk upload assembles on the first frame");
     assert_eq!(blob, b"solo");
 }
+
+/// The BINARY leg of the REST surface (octet-stream body) — mirror of the
+/// Python `web_rest` binary leg. An octet POST of a `patch_text_file` carries
+/// the patch in the raw body and the envelope on `X-Fantastic-Payload`; the
+/// reply is JSON `{patched:true}`. A `read_stream` returns an OCTET reply whose
+/// body is the raw file bytes and whose `X-Fantastic-Payload` header carries the
+/// rest of the envelope. Never base64.
+#[tokio::test]
+async fn web_rest_octet_leg_patch_and_read_stream() {
+    // Kernel with web + web_rest + file_bridge registered.
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, WebBundle);
+    kernel
+        .bundles
+        .register("web_rest.tools", fantastic_web_rest::WebRestBundle);
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    // The file_bridge clamps its root under the kernel's running dir, which the
+    // bundle derives from the root agent's `.fantastic` parent = `tmp`. Seed a
+    // text file at `tmp/served/greeting.txt`.
+    let served = tmp.path().join("served");
+    std::fs::create_dir_all(&served).unwrap();
+    std::fs::write(served.join("greeting.txt"), "hello world\n").unwrap();
+
+    let port = free_port();
+    let web_id = "web_octet";
+    let rest_id = "wr_octet";
+    let fb_id = "fb_octet";
+
+    // web host.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": HANDLER_MODULE, "id": web_id, "port": port,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // file_bridge — OPEN (its own io-bridge gate) + accept the REST surface as a
+    // caller (two-sided call gate: ingress side).
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "file_bridge.tools", "id": fb_id,
+                "root": "served",
+                "ingress_rule": "allow_all_ingress",
+                "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*" },
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // web_rest child — may reach the file_bridge (call gate: egress side).
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({
+                "type": "create_agent", "parent_id": web_id,
+                "handler_module": "web_rest.tools", "id": rest_id,
+                "can_call": { fb_id: "*" },
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let boot_reply = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
+    wait_until_port_accepts(port).await;
+
+    let url = format!("http://127.0.0.1:{port}/{rest_id}/{fb_id}");
+    let client = reqwest::Client::new();
+
+    // ── patch_text_file: patch rides the raw octet body ──────────────────
+    let patch = "<<<<<<< SEARCH\nhello world\n=======\ngoodbye world\n>>>>>>> REPLACE\n";
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/octet-stream")
+        .header(
+            "X-Fantastic-Payload",
+            r#"{"type":"patch_text_file","path":"greeting.txt"}"#,
+        )
+        .body(patch)
+        .send()
+        .await
+        .expect("octet patch post");
+    assert!(
+        resp.status().is_success(),
+        "patch status: {}",
+        resp.status()
+    );
+    // A verb with no bytes in its reply comes back as JSON.
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ct.starts_with("application/json"), "patch reply ct: {ct}");
+    let pbody: Value = resp.json().await.expect("patch reply json");
+    assert_eq!(pbody["patched"], true, "patch reply: {pbody}");
+    assert_eq!(pbody["hunks"], 1, "patch reply: {pbody}");
+
+    // ── read_stream: reply is an OCTET body = the raw (patched) file bytes ─
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/octet-stream")
+        .header(
+            "X-Fantastic-Payload",
+            r#"{"type":"read_stream","path":"greeting.txt"}"#,
+        )
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .expect("octet read_stream post");
+    assert!(resp.status().is_success(), "read status: {}", resp.status());
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.starts_with("application/octet-stream"),
+        "read reply ct: {ct}"
+    );
+    // Envelope rides the header; the ONE bytes field is named by the header.
+    let env_raw = resp
+        .headers()
+        .get("x-fantastic-payload")
+        .and_then(|v| v.to_str().ok())
+        .expect("X-Fantastic-Payload on octet reply")
+        .to_string();
+    let field = resp
+        .headers()
+        .get("x-fantastic-bytes-field")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(field, "bytes", "bytes-field header");
+    let env: Value = serde_json::from_str(&env_raw).expect("payload header is JSON");
+    assert_eq!(env["path"], "greeting.txt", "reply envelope: {env}");
+    // The body is the raw file bytes — reflects the applied patch, never base64.
+    let raw = resp.bytes().await.expect("octet reply body");
+    assert_eq!(&raw[..], b"goodbye world\n", "read_stream body");
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
