@@ -103,6 +103,14 @@ public final class AIBackend: @unchecked Sendable {
     var projectionCache: [String: JSON] = [:]
     var compactionMark: [String: (Int, String)] = [:]
 
+    /// The AI's chat-store id (`<self>_chat`, a `durable_memory` child), keyed by
+    /// agent id — python's module-global `_chat_agent`. The conversation lives
+    /// THERE and persists through THAT agent's own `file_bridge_id`; this backend
+    /// writes no disk and no longer routes chat through the loader's blob channel
+    /// (which made every turn vanish when the loader had no provider wired).
+    private let chatAgentLock = NSLock()
+    private var chatAgentCache: [String: String] = [:]
+
     init(config: AIBackendConfig) {
         self.config = config
     }
@@ -283,7 +291,7 @@ enum AIPassOutcome {
 
         // Enqueue this submission. Only ONE generation runs at a time per
         // agent (FIFO) — concurrent callers queue in arrival order, which
-        // also keeps the file_bridge-persisted history race-free.
+        // also keeps the chat-store-persisted history race-free.
         let sendId = mintSendId()
         let st = runState(agent.id.value)
         st.enqueue(
@@ -397,8 +405,7 @@ enum AIPassOutcome {
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
-                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
-                    incoming: text)
+                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt)
             }
         }
         return reply
@@ -443,7 +450,6 @@ enum AIPassOutcome {
         // The user row carries `id` only for stateless backends (FM bubble
         // identity); ollama/NIM don't. Stateless keeps history UI-only.
         let prior = await loadHistory(agent: agent, client: clientId, kernel: kernel)
-        let persistBase = prior + [userTurn(id: userMessageId, text: userText)]
         let modelHistory = config.stateless ? [] : prior
 
         // Rebuild the system block every turn from the live substrate (a lean
@@ -461,9 +467,9 @@ enum AIPassOutcome {
 
         // Context-Protocol seam: shape what the MODEL sees this turn to fit the
         // window (prepending the canonical [context-notice]), ONCE at entry.
-        // `messages` is the model view; persistence uses `persistBase` (the full
-        // conversation), so the durable store is never trimmed and the notice is
-        // never persisted. Skipped for stateless backends (FM owns its context;
+        // `messages` is the model view; persistence APPENDS this turn to the chat
+        // store (the full conversation), so the durable store is never trimmed and
+        // the notice is never persisted. Skipped for stateless backends (FM owns its context;
         // modelHistory is empty).
         if !config.stateless {
             switch await projectContext(
@@ -559,8 +565,10 @@ enum AIPassOutcome {
         // nothing.
         if Task.isCancelled { return .cancelled }
 
-        // Persist the full chat: base (prior + user turn) + the assistant turn.
-        // THE ONLY WRITE, and the only one python/rust make either. The error /
+        // APPEND this send's user + assistant turns to the durable chat store.
+        // NOT the projected view, and NOT the whole conversation re-written: the
+        // store owns the full transcript and each turn is one `append`. THE ONLY
+        // WRITE, and the only one python/rust make either. The error /
         // FM-interrupt / timeout / cancel paths all return before this point,
         // so an interrupted turn persists nothing at all — neither half of an
         // exchange that never completed.
@@ -571,9 +579,11 @@ enum AIPassOutcome {
         // compounds turn over turn. The RAW text (markers in) is what a reader
         // parses for tool calls — a call the model wrote mid-thought still counts —
         // and it is what the `token`/`done` events already carried.
-        let finalRows =
-            persistBase + [assistantTurn(id: messageId, content: withoutThinking(accumulated))]
-        await saveHistory(agent: agent, client: clientId, kernel: kernel, rows: finalRows)
+        let newTurns = [
+            userTurn(id: userMessageId, text: userText),
+            assistantTurn(id: messageId, content: withoutThinking(accumulated)),
+        ]
+        await saveHistory(agent: agent, client: clientId, kernel: kernel, newTurns: newTurns)
 
         await emitStatus(
             agentId: agentId, clientId: clientId, phase: "done", st: st,
@@ -791,17 +801,27 @@ enum AIPassOutcome {
         return .object(row)
     }
 
-    // MARK: - history persistence (routed through file_bridge_id)
+    // MARK: - the chat store (`<self>_chat`, a durable_memory child)
 
-    /// The bound file_bridge agent id, if the operator (ollama / NIM) or
-    /// the backend's own boot (FM) wired one. No id ⇒ no persistence
-    /// (history stays empty across turns) — the canonical "no provider ⇒
-    /// nothing persisted", NOT a fallback.
-    private func fileBridgeId(_ agent: Agent) -> String? {
-        agent.metaValue(forKey: "file_bridge_id")?.asString
+    /// The deterministic id of an AI agent's chat store — a `durable_memory`
+    /// child holding one key per client_id. Public because the FM backend, which
+    /// self-mounts its OWN durable_memory agents, must tell them apart from this
+    /// one (it is not the model's memory; it is the transcript).
+    public static func chatStoreId(for agentId: String) -> String { "\(agentId)_chat" }
+
+    private func cachedChatAgent(_ id: String) -> String? {
+        chatAgentLock.lock()
+        defer { chatAgentLock.unlock() }
+        return chatAgentCache[id]
     }
 
-    /// Trim + sanitise a client id so it's safe as a filename suffix.
+    private func setCachedChatAgent(_ id: String, _ chatId: String?) {
+        chatAgentLock.lock()
+        defer { chatAgentLock.unlock() }
+        chatAgentCache[id] = chatId
+    }
+
+    /// Trim + sanitise a client id so it is safe as a store KEY.
     /// Mirrors Rust `safe_client` / Python `_safe_client`.
     func safeClient(_ clientId: String) -> String {
         let trimmed = clientId.trimmingCharacters(in: .whitespaces)
@@ -813,60 +833,105 @@ enum AIPassOutcome {
         return out.isEmpty ? "cli" : out
     }
 
-    /// Per-client chat thread, STORE-RELATIVE (`agents/<id>/…`) so wiring
-    /// `file_bridge_id` to the `.fantastic` store lands the sidecar next
-    /// to the agent's own record. Matches Rust/Python `chat_path`.
-    /// The per-client chat sidecar's FILENAME. A name, not a path — the LOADER
-    /// owns where sidecars land, so this bundle no longer computes
-    /// `agents/<id>/…` and no longer names a provider of its own.
-    private func chatBlob(_ client: String) -> String {
-        "chat_\(safeClient(client)).json"
+    /// The AI's chat store — a `durable_memory` child, its durable conversation
+    /// log, which persists through ITS OWN `file_bridge_id` (the AI writes NO disk
+    /// itself). Found by id or created (idempotent + cached). `nil` only if
+    /// creation fails. Mirrors python `_ensure_chat_agent`.
+    func ensureChatAgent(agent: Agent, kernel: Kernel) async -> String? {
+        let selfId = agent.id.value
+        if let cached = cachedChatAgent(selfId), kernel.agent(AgentId(cached)) != nil {
+            return cached
+        }
+        setCachedChatAgent(selfId, nil)
+        // BOUND BY ID, not discovered by flag: the store's id is deterministic, so
+        // finding it back is a lookup, not a scan of the tree for a magic meta.
+        let want = AIBackend.chatStoreId(for: selfId)
+        if kernel.agent(AgentId(want)) != nil {
+            setCachedChatAgent(selfId, want)
+            return want
+        }
+        // BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the blob
+        // channel this replaced. The store is the AI's own conversation state,
+        // not an operator composition decision, and `create_agent` is
+        // kernel-owned: without operator authority every AI agent would need a
+        // `create_agent` grant on the root just to keep its history.
+        let payload: JSON = .object([
+            "type": .string("create_agent"),
+            // The store is MINE — a child of this AI agent, reached through the
+            // `$children` baseline with no grant. Placement is STATED, since
+            // `create_agent` is answered by the root.
+            "parent_id": .string(selfId),
+            "id": .string(want),
+            "handler_module": .string("durable_memory.tools"),
+            // The store persists through the SAME file leg as its owner —
+            // durable_memory has no fs of its own. Absent leg ⇒ the field is
+            // null, its writes failfast, and history stays empty. No fallback.
+            "file_bridge_id": agent.metaValue(forKey: "file_bridge_id") ?? .null,
+            // SAY WHAT IT IS. A type-derived id advertises "key/value store"
+            // loudly, and a model asked to use "this kernel's key/value store"
+            // will pick it and write the wrong agent. An internal agent that
+            // looks general-purpose is a discoverability defect.
+            "description": .string(
+                "Internal conversation store for the AI agent `\(selfId)` — one key per "
+                    + "client_id, holding that client's message history. NOT general-purpose "
+                    + "memory: do not read or write it to store facts, results or notes. It is "
+                    + "written by the agent's own turn loop."),
+        ])
+        let r = await kernel.asBookkeeping {
+            await kernel.send([Item(AgentId("kernel"), payload)])[0].result
+        }
+        guard let cid = r["id"].asString else { return nil }
+        setCachedChatAgent(selfId, cid)
+        return cid
     }
 
-    /// Load a client's persisted chat THROUGH the kernel. Empty on no store /
-    /// missing file / unparseable.
+    /// The client's conversation, read from the chat store (key-per-client).
+    /// Empty when there is no store, no key, or the key holds something else.
+    /// Mirrors python `_load_history`.
     func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
-        // THROUGH THE LOADER. Operator authority: reading our OWN sidecar is
-        // bookkeeping processed from above, not this agent reaching out.
-        let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+        guard let cid = await ensureChatAgent(agent: agent, kernel: kernel) else { return [] }
+        let r = await kernel.asBookkeeping {
             await kernel.send([
                 Item(
-                    AgentId("kernel"),
+                    AgentId(cid),
                     .object([
-                        "type": .string("load_blob"),
-                        "agent_id": .string(agent.id.value),
-                        "name": .string(chatBlob(client)),
+                        "type": .string("read"),
+                        "key": .string(self.safeClient(client)),
                     ]))
             ])[0].result
         }
-        guard let content = r["content"].asString,
-            let parsed = try? JSON.parse(content),
-            let arr = parsed.asArray
-        else { return [] }
-        return arr
+        return r["value"].asArray ?? []
     }
 
-    /// Persist a client's full chat THROUGH the kernel. No store ⇒ nothing
-    /// lands; that is the auto-flush law, not a fallback.
-    private func saveHistory(agent: Agent, client: String, kernel: Kernel, rows: [JSON]) async {
+    /// APPEND this turn's new messages to the chat store (key-per-client). The
+    /// durable record is never trimmed; the projection only shapes what the model
+    /// sees. Mirrors python `_save_history`.
+    private func saveHistory(
+        agent: Agent, client: String, kernel: Kernel, newTurns: [JSON]
+    ) async {
+        if newTurns.isEmpty { return }
+        guard let cid = await ensureChatAgent(agent: agent, kernel: kernel) else { return }
+        // ONE append PER TURN — `append` adds its value as ONE element, so handing
+        // it the whole list nests the turns ([[user, assistant]]) and history reads
+        // back empty of messages.
+        //
         // KERNEL BOOKKEEPING, not the caller's send: it clears the caller's
         // identity AND the caller's kill flag. Clearing only the sender left the
         // write inside the turn's killed subtree, where dispatch is inert — so
-        // cancelling mid-stream destroyed the user row that was already
-        // committed. A cancel must never corrupt what was already durable. The
-        // partial-assistant row is a different question, and it is guarded
-        // separately by `Task.isCancelled` before the second save.
-        _ = await kernel.asBookkeeping {
-            await kernel.send([
-                Item(
-                    AgentId("kernel"),
-                    .object([
-                        "type": .string("persist_blob"),
-                        "agent_id": .string(agent.id.value),
-                        "name": .string(chatBlob(client)),
-                        "content": .string(JSON.array(rows).serialize()),
-                    ]))
-            ])[0].result
+        // cancelling mid-stream destroyed a turn that was already committed. A
+        // cancel must never corrupt what was already durable.
+        for turn in newTurns {
+            _ = await kernel.asBookkeeping {
+                await kernel.send([
+                    Item(
+                        AgentId(cid),
+                        .object([
+                            "type": .string("append"),
+                            "key": .string(self.safeClient(client)),
+                            "value": turn,
+                        ]))
+                ])[0].result
+            }
         }
     }
 

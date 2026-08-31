@@ -25,6 +25,7 @@ sys.path.insert(0, str(E2E))
 
 from helpers import verdict  # noqa: E402
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime  # noqa: E402
+from helpers.proxy import DEFAULT_QUESTION_ANSWER, find_question  # noqa: E402
 
 REPO = E2E.parent
 
@@ -224,8 +225,22 @@ def main(scenario_id: str) -> int:
         # falsifiable — never the model's prose.
         deadline = time.monotonic() + float(
             os.environ.get("IDLE", limits.get("idle_seconds", 100)))
-        ok, seen = False, {}
+        ok, seen, answered = False, {}, set()
         while time.monotonic() < deadline:
+            # The model asked the human — answer so the chain RESUMES (once per
+            # question). Options ignored: the answer is the model's call to make.
+            h = k.send("ai", {"type": "history", "client_id": "probe"})
+            for m in reversed((h.get("messages") or []) if isinstance(h, dict) else []):
+                if m.get("role") == "assistant":
+                    q = find_question(str(m.get("content") or ""))
+                    if q:
+                        rid = str(q.get("request_id") or q.get("question") or "q")
+                        if rid not in answered:
+                            answered.add(rid)
+                            k.send("ai", {"type": "send",
+                                          "text": DEFAULT_QUESTION_ANSWER,
+                                          "client_id": "probe"})
+                    break
             ok = True
             for check in sc.get("expect") or []:
                 if "human_double_click" in check:

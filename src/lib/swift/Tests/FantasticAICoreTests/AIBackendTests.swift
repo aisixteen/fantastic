@@ -6,6 +6,7 @@
 // DISPATCH path each pass ends in lives in `RoutingTests.swift`;
 // provider-specific wire tests stay with each backend target.
 
+import FantasticDurableMemory
 import FantasticJSON
 import FantasticKernel
 import Foundation
@@ -138,10 +139,8 @@ struct AIBackendTests {
                 "client_id": .string("c"),
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the dispatched call's reply never came back")
-        // Wait for ALL SIX rows the assertion below reads. Waiting for 4 raced
-        // the nudge turn: alone it had landed by the time we looked, under full
-        // suite load it had not, and the count read 5.
-        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 6)
+        // Wait for ALL FOUR rows the assertion below reads.
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 4)
 
         // Pass 2's system message is the CALLER's, still — not the substrate's
         // default block (whose `SEND_TO_HOWTO` heading would be in there).
@@ -150,10 +149,10 @@ struct AIBackendTests {
         #expect(!turn2.contains("Reaching other agents"))
         #expect(turn2.contains(" · core "))
 
-        // Six rows: the envelope turn, the reply turn it caused, and the nudge
-        // turn that reply's no-call answer earned (user+assistant each).
+        // Four rows: the envelope turn and the reply turn it caused
+        // (user+assistant each). The reply's no-call answer ends the chain.
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
-        #expect(msgs.count == 6)
+        #expect(msgs.count == 4)
         #expect(msgs[1]["content"].asString == envelope)  // persisted verbatim
         #expect(msgs[1]["tool_calls"].asArray == nil)  // and never as a native block
         #expect(msgs[2]["content"].asString?.contains(" · core ") == true)
@@ -355,9 +354,9 @@ struct AIBackendTests {
         #expect(h2["client_id"].asString == "c2")
     }
 
-    @Test func historyPersistsAcrossTurnsThroughFileBridge() async throws {
+    @Test func historyPersistsAcrossTurnsThroughTheChatStore() async throws {
         // Two sends on one client: turn 2's persisted history must carry
-        // turn 1 (the load→save round-trip through file_bridge_id).
+        // turn 1 (the load→append round-trip through the `<agent>_chat` store).
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider(tokens: ["x"])) })
         _ = await kernel.send([Item(id, .object([
@@ -379,15 +378,25 @@ struct AIBackendTests {
         #expect(msgs[1]["role"].asString == "assistant")
         #expect(msgs[2]["content"].asString == "two")
         #expect(msgs[3]["role"].asString == "assistant")
+
+        // THE STORE IS THE RECORD. `history` is a read of the `<agent>_chat`
+        // durable_memory child, one key per client — not a file the backend
+        // wrote. Read the store directly: same four turns, in order, appended
+        // one per turn (a whole-list write nests them and reads back empty).
+        let stored = await chatStoreRows(kernel: kernel, id: id, client: "c")
+        #expect(stored.map { $0["content"].asString } == ["one", "x", "two", "x"])
     }
 
     @Test func historyStaysEmptyWithoutFileBridge() async throws {
         // No file_bridge_id wired ⇒ no persistence (RAM-empty), NOT a
-        // silent fallback. The send still streams; history just doesn't
-        // accumulate.
+        // silent fallback. The chat store is still MOUNTED (it is the AI's own
+        // conversation state, not an operator decision) — it just has no leg to
+        // write through, so its `append` refuses and nothing accumulates. The
+        // send still streams.
         let registry = BundleRegistry()
         registry.register(
             "mock_backend.tools", MockBundle(config: baseConfig { .provider(MockProvider()) }))
+        registry.register("durable_memory.tools", DurableMemoryBundle())
         let kernel = Kernel(storage: .inMemory, bundles: registry)
         let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
         kernel.register(root)
@@ -403,6 +412,60 @@ struct AIBackendTests {
         try? await Task.sleep(nanoseconds: 60_000_000)
         let h = await kernel.send([Item(id, .object(["type": .string("history")]))])[0].result
         #expect((h["messages"].asArray ?? []).isEmpty)
+        // The store exists, as a child of the AI, carrying no leg of its own.
+        let chat = kernel.agent(AgentId("naked_chat"))
+        #expect(chat != nil)
+        #expect(chat?.handlerModule == "durable_memory.tools")
+        #expect(chat?.parentId?.value == "naked")
+        #expect(chat?.metaValue(forKey: "file_bridge_id")?.asString == nil)
+        // The refusal is the store's, and it names the missing wiring.
+        let appended = await kernel.send([Item(AgentId("naked_chat"), .object([
+                "type": .string("append"), "key": .string("cli"), "value": .string("x"),
+            ]))])[0].result
+        #expect(appended["error"].asString?.contains("no file_bridge_id wired") == true)
+    }
+
+    @Test func theChatStoreIsAMountedDurableMemoryChild() async throws {
+        // WHERE the conversation lives, asserted as structure: a `<self>_chat`
+        // durable_memory child, wired to the SAME file leg as its owner, keyed
+        // per client — not a sidecar the backend writes through the loader.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["ok"])) })
+        _ = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string("hi"),
+                "client_id": .string("c"),
+            ]))])[0].result
+        try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
+
+        let chat = kernel.agent(AgentId("\(id.value)_chat"))
+        #expect(chat != nil)
+        #expect(chat?.handlerModule == "durable_memory.tools")
+        #expect(chat?.parentId?.value == id.value)
+        // Copied from the owner's record — durable_memory has no fs of its own.
+        #expect(
+            chat?.metaValue(forKey: "file_bridge_id")?.asString
+                == kernel.agent(id)?.metaValue(forKey: "file_bridge_id")?.asString)
+        // It SAYS WHAT IT IS, so a model hunting for a key/value store does not
+        // mistake the transcript for general-purpose memory.
+        #expect(chat?.descriptionMeta?.contains("NOT general-purpose") == true)
+        // One key per client, holding that client's turns.
+        let keys = await kernel.send([Item(AgentId("\(id.value)_chat"), .object(["type": .string("keys")]))])[0].result
+        #expect((keys["keys"].asArray ?? []).compactMap { $0.asString } == ["c"])
+        #expect(await chatStoreRows(kernel: kernel, id: id, client: "c").count == 2)
+    }
+
+    @Test func theChatStoreIsReusedNotRecreated() async throws {
+        // Idempotent by id: a second turn (and a `history` read) find the same
+        // store rather than minting another. Two stores would split the thread.
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider(tokens: ["ok"])) })
+        _ = await kernel.send([Item(id, .object(["type": .string("send"), "text": .string("a")]))])[0].result
+        try await waitForHistory(kernel: kernel, id: id, client: "cli", count: 2)
+        _ = await kernel.send([Item(id, .object(["type": .string("history")]))])[0].result
+        let stores = kernel.agent(id)?.childIds().filter {
+            kernel.agent($0)?.handlerModule == "durable_memory.tools"
+        }
+        #expect(stores?.map { $0.value } == ["\(id.value)_chat"])
     }
 
     @Test func statusIdleShapeWhenNothingInFlight() async throws {

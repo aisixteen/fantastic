@@ -47,6 +47,11 @@ async fn mk_kernel_with(
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    // Chat history is a `<self>_chat` durable_memory child of the backend.
+    kernel.bundles.register(
+        "durable_memory.tools",
+        fantastic_durable_memory::DurableMemoryBundle,
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),

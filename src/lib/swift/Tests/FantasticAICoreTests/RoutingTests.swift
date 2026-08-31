@@ -92,16 +92,11 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("what is here?"),
                 "client_id": .string("c"),
             ]))])[0].result
-        // One call = one follow-up turn. That turn emits NO call, and because
-        // its incoming was a delivered reply it earns exactly ONE nudge — the
-        // cap is structural (the nudge is not itself a reply, so the turn
-        // answering it is never nudged again).
-        #expect(await script.waitForCalls(3), "the call's reply never came back")
+        // One call = one follow-up turn. That turn emits NO call, which ENDS the
+        // chain — stopping IS the done signal; nothing nudges it to continue.
+        #expect(await script.waitForCalls(2), "the call's reply never came back")
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(script.calls == 3, "reply turn + one nudge, then it stopped")
-        #expect(
-            script.requestText(2).contains("no call was dispatched"),
-            "the chain-ending turn was not nudged")
+        #expect(script.calls == 2, "the no-call follow-up ended the chain")
         let turn2 = script.requestText(1)
         #expect(turn2.contains(" · core "), "untagged reply: \(turn2.suffix(400))")
         #expect(turn2.contains("agents"), "the real list_agents result must be in the turn")
@@ -126,18 +121,17 @@ struct RoutingTests {
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
-        // Three scripted passes, then the last one emits no call and earns its
-        // ONE nudge — four passes in total.
-        #expect(await script.waitForCalls(4), "chain stalled at \(script.calls) passes")
+        // Three scripted passes; the last emits no call and ENDS the chain — no
+        // nudge, three passes in total.
+        #expect(await script.waitForCalls(3), "chain stalled at \(script.calls) passes")
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(script.calls == 4, "expected 4 passes, got \(script.calls)")
+        #expect(script.calls == 3, "expected 3 passes, got \(script.calls)")
         let turn3 = script.requestText(2)
         #expect(turn3.contains("PASS-ONE-SPEAKING"), "pass 3 read a stale history")
         #expect(turn3.contains("PASS-TWO-SPEAKING"))
-        // 3 passes = 3 user turns + 3 assistant turns.
+        // 3 passes = 3 user turns + 3 assistant turns, two rows each.
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 6)
-        // Four turns now (three scripted + the nudge), two rows each.
-        #expect((await historyRows(kernel: kernel, id: id, client: "c")).count == 8)
+        #expect((await historyRows(kernel: kernel, id: id, client: "c")).count == 6)
     }
 
     @Test func replyToOmittedDefaultsToSelf() async throws {

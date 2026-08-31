@@ -660,11 +660,25 @@ struct AgenticCorpusTests {
             let before = Set(
                 (try? FileManager.default.contentsOfDirectory(atPath: cwd.path)) ?? [])
             let workdir = cwd
+            // Reap ONLY what a scenario plausibly wrote: `.fantastic`, its own
+            // `.agentic_*` fixtures, and the roots its config declares. Sibling
+            // suites share this process cwd and create fixtures of their own IN
+            // PARALLEL — a blanket "delete every new entry" reaped a concurrent
+            // HTTP test's live fixture mid-test (measured:
+            // webRestBinaryLegPatchAndReadStream, "file note.txt not found"
+            // after a successful patch).
+            let owned = ownedRoots(of: sc.config)
             defer {
                 let after = Set(
                     (try? FileManager.default.contentsOfDirectory(atPath: cwd.path)) ?? [])
                 for stray in after.subtracting(before) {
-                    try? FileManager.default.removeItem(at: cwd.appendingPathComponent(stray))
+                    let mine =
+                        stray == ".fantastic" || stray.hasPrefix(".agentic_")
+                        || owned.contains(stray)
+                    if mine {
+                        try? FileManager.default.removeItem(
+                            at: cwd.appendingPathComponent(stray))
+                    }
                 }
             }
 
@@ -698,4 +712,25 @@ struct AgenticCorpusTests {
             + pinned.sorted { $0.key < $1.key }.map { "\($0.key)x\($0.value)" }.joined(separator: ", "))
         #expect(ran > 0, "no scenario hydrated")
     }
+}
+
+/// Every `root:`-declared first path component anywhere in a scenario config —
+/// the top-level dirs its kernels may create in the SHARED process cwd. The
+/// per-scenario cleanup reaps only these (+ `.fantastic` / `.agentic_*`), so a
+/// sibling suite's parallel fixture is never collateral.
+private func ownedRoots(of config: JSON) -> Set<String> {
+    var out: Set<String> = []
+    func walk(_ v: JSON) {
+        if let o = v.asObject {
+            if let r = o["root"]?.asString, !r.isEmpty, r != "." {
+                let first = r.split(separator: "/").first.map(String.init) ?? r
+                if !first.isEmpty, first != "." { out.insert(first) }
+            }
+            for (_, x) in o { walk(x) }
+        } else if let a = v.asArray {
+            for x in a { walk(x) }
+        }
+    }
+    walk(config)
+    return out
 }

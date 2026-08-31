@@ -17,6 +17,9 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }
+# Chat history lives in a `<self>_chat` durable_memory child — register the REAL
+# store bundle so the round-trip test exercises the wiring, not a stub.
+fantastic-durable-memory = { path = "../fantastic-durable-memory" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = "0.6"

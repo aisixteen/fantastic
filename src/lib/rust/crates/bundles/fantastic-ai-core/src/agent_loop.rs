@@ -157,6 +157,6 @@ pub async fn run_generation(
         // 2026-08-02).
         json!({"role": "assistant", "content": without_thinking(&last_text)}),
     ];
-    let _ = append_history(self_id, kernel, client_id, &new_turns).await;
+    append_history(self_id, kernel, client_id, &new_turns).await;
     Ok(last_text)
 }

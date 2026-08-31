@@ -310,6 +310,7 @@ name = "fantastic-ai-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -328,6 +329,7 @@ dependencies = [
  "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-cli-bundle",
+ "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -451,6 +453,7 @@ dependencies = [
  "fantastic-kernel",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -501,6 +504,7 @@ dependencies = [
  "async-trait",
  "fantastic-ai-core",
  "fantastic-bundle",
+ "fantastic-durable-memory",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
@@ -517,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-ai-core",
+ "fantastic-durable-memory",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
@@ -610,6 +615,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "fantastic-file",
  "fantastic-io-bridge",
  "fantastic-kernel",
  "fantastic-web-rest",

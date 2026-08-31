@@ -60,16 +60,8 @@ pub async fn on_cancel(
     emit_status(kernel, &state, agent_id, &client_id, route, "done", detail).await;
 }
 
-/// `history` verb. `name` is the backend's error-message prefix.
-pub async fn history(
-    agent_id: &AgentId,
-    payload: &Value,
-    kernel: &Arc<Kernel>,
-    name: &str,
-) -> Value {
-    if crate::helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": format!("{name}: file_bridge_id required")});
-    }
+/// `history` verb.
+pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let client_id = safe_client(
         payload
             .get("client_id")
@@ -464,9 +456,6 @@ pub async fn send(
         let route_kernel = Arc::clone(kernel);
         let route_self = agent_id.clone();
         let route_client = client_id.clone();
-        // The turn's INCOMING text, so routing can tell a CHAIN turn (answering a
-        // delivered reply) from a chat turn — only the former is ever nudged.
-        let route_incoming = text.clone();
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
                 route_self,
@@ -475,7 +464,6 @@ pub async fn send(
                 route_client,
                 send_to,
                 system_prompt_for_route,
-                route_incoming,
             )
             .await;
         });

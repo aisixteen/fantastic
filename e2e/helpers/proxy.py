@@ -50,6 +50,40 @@ def distinct_calls(transcript: list[str]) -> int:
     return len(seen)
 
 
+#: what a harness answers when the model asks the human — options ignored, always
+#: the same, so a run is never blocked on a decision that is the model's to make.
+DEFAULT_QUESTION_ANSWER = "do your best judgement"
+
+
+def find_question(text: str) -> dict | None:
+    """The `{"type":"question", ...}` the model put on its own line, or None.
+
+    The ask is prompt-taught — STRICT JSON on a line, then no call — so it lives in
+    the raw output, not a wired event. A harness detects it HERE and answers to
+    resume the chain (see `DEFAULT_QUESTION_ANSWER`)."""
+    import json
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not (line.startswith("{") and '"question"' in line):
+            continue
+        try:
+            q = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(q, dict) and q.get("type") == "question":
+            # A TEMPLATE ECHO is not an ask: models sometimes restate the taught
+            # shape verbatim, placeholders intact ("<what you are asking>",
+            # request_id "<yours>"). A real question filled those in.
+            def _placeholder(v) -> bool:
+                return isinstance(v, str) and v.startswith("<") and v.endswith(">")
+
+            if _placeholder(q.get("question")) or _placeholder(q.get("request_id")):
+                continue
+            return q
+    return None
+
+
 @dataclass
 class Limits:
     """Every bound in one place, all overridable from the environment."""

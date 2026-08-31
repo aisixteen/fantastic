@@ -227,10 +227,16 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
     }
 
     /// Agent ids of this backend's mounted durable_memory agents.
+    ///
+    /// EXCLUDES the shared core's chat store (`<self>_chat`), which is a
+    /// durable_memory child too but holds the TRANSCRIPT, not the model's
+    /// memory: injecting its keys would put the conversation into the system
+    /// prompt, and counting it as a mounted mode would skew `mountMemoryAgents`.
     func memoryAgents(agentId: AgentId, kernel: Kernel) -> [AgentId] {
         guard let agent = kernel.agent(agentId) else { return [] }
+        let chatId = AIBackend.chatStoreId(for: agentId.value)
         return agent.childIds().filter {
-            kernel.agent($0)?.handlerModule == "durable_memory.tools"
+            $0.value != chatId && kernel.agent($0)?.handlerModule == "durable_memory.tools"
         }
     }
 
@@ -247,9 +253,12 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         var blocks: [String] = []
         let base = agent.metaValue(forKey: "instructions")?.asString ?? ""
         if !base.isEmpty { blocks.append(base) }
+        // Same exclusion as `memoryAgents`: the chat store is the transcript, not
+        // memory — its keys never go into the instructions.
+        let chatId = AIBackend.chatStoreId(for: agent.id.value)
         let memAgentIds =
             agent.childIds().filter {
-                kernel.agent($0)?.handlerModule == "durable_memory.tools"
+                $0.value != chatId && kernel.agent($0)?.handlerModule == "durable_memory.tools"
             }
         for memAgentId in memAgentIds {
             // durable_memory is modeless and has no whole-store verb (full parity

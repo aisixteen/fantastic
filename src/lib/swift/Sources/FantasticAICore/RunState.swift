@@ -5,7 +5,7 @@
 //
 // Only ONE generation runs at a time per agent: concurrent callers (cli,
 // browser tabs) queue in arrival order. Serialization also keeps the
-// file_bridge-persisted chat history race-free (two sends on one client
+// chat-store-persisted history race-free (two sends on one client
 // can't interleave load→save).
 
 import FantasticJSON

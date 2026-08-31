@@ -150,24 +150,6 @@ fn you_sent(args: &Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
-/// Honour where this pass's output goes. Runs DETACHED, after the FIFO guard is
-/// dropped — see the module header.
-///
-/// Takes owned values because it is spawned as its own kernel task and must be
-/// `'static`.
-/// The runtime reminder a CHAIN turn gets when it emitted no call.
-///
-/// Model-facing PROMPT text, byte-identical across runtimes: a model reads it
-/// and retries from it. Says both halves — act if unfinished, and stopping is
-/// normal — because an earlier version that only pushed toward acting produced
-/// paralysis (a 47k-char turn re-reading the rule, then four consecutive
-/// no-call turns after the task was already done).
-pub const NO_CALL_NUDGE: &str = "[no call was dispatched] Your turn emitted no \
-<tool_call> envelope, so NOTHING ran — a call decided in thinking does not \
-execute unless the envelope is written out. If the task is unfinished, emit that \
-call now. If it is finished, say so — a turn without a call ends the chain \
-normally.";
-
 /// Honour where this pass's output goes.
 ///
 /// Runs DETACHED, after the FIFO guard is dropped — see the module header. Takes
@@ -184,7 +166,6 @@ pub async fn route_reply(
     client_id: String,
     send_to: Option<String>,
     system_prompt: Option<String>,
-    incoming: String,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
@@ -376,30 +357,7 @@ pub async fn route_reply(
 
     if let Some(to) = send_to.as_deref() {
         deliver(&kernel, to, &text, &client_id, sp).await;
-        return;
     }
-
-    // THE NO-CALL NUDGE. A CHAIN turn (its incoming text was a delivered reply)
-    // that emits no call and no units gets ONE runtime reminder.
-    //
-    // Measured 2026-08-25 (`live_subai`/`live_subai_graph`, the model, twice
-    // each): the model wrote its next action INSIDE thinking — "Let me send
-    // {type:'list_agents'} to kernel" — and ended the completion without the
-    // envelope. A no-call turn ends the chain, so one lapse killed runs whose
-    // gate, premise and delivery were clean.
-    //
-    // The cap is STRUCTURAL, not a counter: the nudge IS the next incoming text,
-    // and a turn answering a nudge is not a reply turn, so it is never nudged
-    // again. A chat turn (incoming is not a reply tag) is never nudged at all —
-    // stopping is normal there.
-    if is_reply_turn(&incoming) {
-        deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
-    }
-}
-
-/// Was this turn's incoming text a DELIVERED REPLY (i.e. are we mid-chain)?
-fn is_reply_turn(incoming: &str) -> bool {
-    incoming.trim_start().starts_with("[reply to ")
 }
 
 /// ONE delivered message per destination: blocks joined by a blank line, each

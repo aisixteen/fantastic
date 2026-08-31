@@ -192,9 +192,6 @@ fn meta_u64(agent_id: &AgentId, kernel: &Arc<Kernel>, key: &str) -> Option<u64> 
 }
 
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": "llamacpp_backend: file_bridge_id required"});
-    }
     let client_id = helpers::safe_client(
         payload
             .get("client_id")
@@ -273,7 +270,7 @@ impl Bundle for LlamaCppBundle {
             "reflect" => reflect_reply(agent_id, kernel).await,
             "boot" | "shutdown" => Value::Null,
             "send" => send_reply(agent_id, payload, kernel).await,
-            "history" => verbs::history(agent_id, payload, kernel, "llamacpp_backend").await,
+            "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),

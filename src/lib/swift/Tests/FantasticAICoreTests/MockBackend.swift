@@ -7,6 +7,7 @@
 // dispatch path) — and because the SCRIPT half of it is a prerequisite for
 // routing tests rather than a nicety: see `ProviderScript`.
 
+import FantasticDurableMemory
 import FantasticJSON
 import FantasticKernel
 import OrderedCollections
@@ -165,22 +166,26 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
 
 /// In-memory file_bridge stand-in: dict-backed STREAM verbs (`write_stream` /
 /// `read_stream` on the binary channel — the string read/write verbs are gone),
-/// so the AI backend's real `file_bridge_id` persistence path (persist_blob /
-/// load_blob → write_stream/read_stream) is exercised without touching disk.
+/// so the real chat-store persistence path (the `<self>_chat` durable_memory
+/// child → its own `file_bridge_id` → write_stream/read_stream) is exercised
+/// without touching disk.
 final class MockFileBridge: AgentBundle, @unchecked Sendable {
     let name = "mock_file_bridge"
     private let lock = NSLock()
     private var files: [String: String] = [:]
 
-    private func get(_ path: String) -> String? {
+    /// ONE bundle instance backs EVERY file_bridge agent in the kernel, so the
+    /// dict is keyed by `<bridge agent>/<path>` — each leg has its own root in
+    /// reality, and two legs must not share a `state.yaml`.
+    private func get(_ agentId: AgentId, _ path: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        return files[path]
+        return files["\(agentId.value)/\(path)"]
     }
-    private func put(_ path: String, _ content: String) {
+    private func put(_ agentId: AgentId, _ path: String, _ content: String) {
         lock.lock()
         defer { lock.unlock() }
-        files[path] = content
+        files["\(agentId.value)/\(path)"] = content
     }
 
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -201,12 +206,12 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
-            put(path, String(data: blob, encoding: .utf8) ?? "")
+            put(agentId, path, String(data: blob, encoding: .utf8) ?? "")
             return (
                 .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data()
             )
         case "read_stream":
-            guard let c = get(path) else {
+            guard let c = get(agentId, path) else {
                 return (.object(["error": .string("not found")]), Data())
             }
             let data = Data(c.utf8)
@@ -404,6 +409,11 @@ func bootMockKernel(
     let registry = BundleRegistry()
     registry.register("mock_backend.tools", MockBundle(config: config))
     registry.register("file_bridge.tools", MockFileBridge())
+    // The chat store's handler: the shared core mounts `<backend>_chat` as a
+    // durable_memory child and the conversation lives there. Without it
+    // registered the store agent exists but answers nothing, and `history` is
+    // empty for a reason that has nothing to do with the test.
+    registry.register("durable_memory.tools", DurableMemoryBundle())
     let recorder = PayloadRecorder()
     registry.register("mock_recorder.tools", recorder)
     registry.register("mock_raiser.tools", RaisingBundle())
@@ -425,8 +435,10 @@ func bootMockKernel(
     var accept: OrderedCollections.OrderedDictionary<String, JSON> = [:]
     for id in backendIds { accept[id] = .string("*") }
     let acceptJSON = JSON.object(accept)
-    // A discoverable file_bridge store, so chat history persists THROUGH the
-    // loader (the consumer names only itself and a filename).
+    // The loader's own discoverable store (`findStore` matches a file_bridge
+    // whose `root` resolves to the root agent's dir). Chat no longer rides this
+    // leg — each backend gets its own below — but the kernel's record
+    // persistence still wants a provider to exist.
     _ = await kernel.send([Item(AgentId("core"), .object([
             "type": .string("create_agent"),
             "parent_id": .string("core"),
@@ -459,24 +471,40 @@ func bootMockKernel(
             "id": .string("slowpoke"),
             "callable_by": acceptJSON,
         ]))])[0].result
-    // Deny-all: a backend persists to its `store`, streams to `cli`, and routes
-    // replies to its peers (probe/raiser/slowpoke + the other backends). Grant
-    // exactly those lateral edges — wiring pairs with granting.
+    // Deny-all: a backend streams to `cli`, routes replies to its peers
+    // (probe/raiser/slowpoke + the other backends), and its `file_bridge_id` leg
+    // is granted per backend below. Grant exactly those lateral edges — wiring
+    // pairs with granting.
     var grant: OrderedCollections.OrderedDictionary<String, JSON> = [
-        "store": .string("*"), "cli": .string("*"),
+        "cli": .string("*"),
         "probe": .string("*"), "raiser": .string("*"), "slowpoke": .string("*"),
     ]
     for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
     for id in backendIds {
+        // ONE FILE LEG PER BACKEND. The chat store copies its owner's
+        // `file_bridge_id`, and durable_memory writes `state.yaml` at the leg's
+        // ROOT — so two backends sharing one leg would share one document and
+        // interleave their transcripts under the same client key.
+        let legId = "store_\(id)"
+        _ = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("create_agent"),
+                "parent_id": .string("core"),
+                "handler_module": .string("file_bridge.tools"),
+                "root": .string(storeRoot.appendingPathComponent(id).path),
+                "id": .string(legId),
+                "callable_by": acceptJSON,
+            ]))])[0].result
+        var backendGrant = grant
+        backendGrant[legId] = .string("*")
         let r = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string("core"),
                 "handler_module": .string("mock_backend.tools"),
                 "id": .string(id),
-                "file_bridge_id": .string("store"),
+                "file_bridge_id": .string(legId),
                 "context_window": .integer(contextWindow),
-                "can_call": .object(grant),
+                "can_call": .object(backendGrant),
                 // Peer backends call each other — accept them (ingress).
                 "callable_by": acceptJSON,
             ]))])[0].result
@@ -527,6 +555,19 @@ func waitForHistory(
         if (h["messages"].asArray ?? []).count >= count { return }
         try await Task.sleep(nanoseconds: 5_000_000)
     }
+}
+
+/// The turns as the CHAT STORE itself holds them: `<agent>_chat` is a
+/// durable_memory agent with one key per client. Reading it directly is what
+/// proves the transcript is durable in the store rather than only in the
+/// backend's reply.
+func chatStoreRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
+    let r = await kernel.send([
+        Item(
+            AgentId("\(id.value)_chat"),
+            .object(["type": .string("read"), "key": .string(client)]))
+    ])[0].result
+    return r["value"].asArray ?? []
 }
 
 /// This client's persisted turns.

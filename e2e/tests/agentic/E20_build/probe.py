@@ -202,8 +202,10 @@ async def wire_executor_leg(
             "id": agent_id,
             "cwd": os.getcwd(),
             "ingress_rule": "allow_all_ingress",
-            # Two-sided deny-all: the AI reflects + starts on this leg.
-            "callable_by": {"ai": "*"},
+            # Two-sided deny-all: the AI reflects + starts on this leg. The wire
+            # surfaces too — the harness DISCOVERS the leg the same way the model
+            # does (reflect), and over REST that reflect arrives as `rest`.
+            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             # THE GATE: run THIS interpreter against a file argument. A model reflects
             # the leg, reads the exact interpreter path here, and runs `<interp> <file>`.
             "allowed": [rf"{re.escape(interp)} \S+"],
@@ -331,7 +333,9 @@ async def run(
             "ingress_rule": "allow_all_ingress",
             # Two-sided deny-all: the AI (and its authored tools, which it opens via
             # its own update_agent grant) reach this store — accept the AI directly.
-            "callable_by": {"ai": "*"},
+            # The wire surfaces too: over REST/WS the harness's own reads arrive AS
+            # `rest`/`web`, and ingress is two-sided (inert in-process — no such ids).
+            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
         }}]))[0]["result"]
     # The readings live behind an OPEN file agent — this probe is about building a
     # program, not about guessing an auth posture (that is `live_plan.py`'s job).
@@ -347,7 +351,9 @@ async def run(
             "root": "readings",
             "ingress_rule": "allow_all_ingress",
             "description": "Sensor readings — one integer per file.",
-            "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
+            # Two-sided deny-all: accept the AI + the wire surfaces (harness reads
+            # arrive as `rest`/`web` on a spawned kernel; inert in-process).
+            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
         }}]))[0]["result"]
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
@@ -358,7 +364,7 @@ async def run(
             "description": "Durable store for computed results.",
             # Two-sided deny-all: accept the AI directly, AND the command runner — the
             # program's `set` lands from the runner leg (its owner) over the control wire.
-            "callable_by": {"ai": "*", EXECUTOR_LEG: "*"},
+            "callable_by": {"ai": "*", EXECUTOR_LEG: "*", "rest": "*", "web": "*"},
         }}]))[0]["result"]
     # The executor leg, open, with an interpreter allowlist. Without it there is no
     # allowlisted interpreter anywhere in the kernel and NOTHING can be authored — the
