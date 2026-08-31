@@ -20,3 +20,4 @@ The byte surface is the `file_bridge` streams; the EDIT organ is the `text_file`
 | `cancel` | kernel `ps`+`cancel` over an `exec_bridge` job (C1) | find the in-flight job in the task table, kill it — the OS process must actually die |
 | `grant` | the two-sided call gate + the ask protocol (C5) | denied on ingress, ask the human, operator opens the edge, retry to done |
 | `multipatch` | the `patch` TRANSACTION (C2) | ONE call, `edits` across two files — coordinated rename, atomic, no half-applied state |
+| `grep_glob` | `exec_bridge` + `grep`/`find` (C3) | the marker hides among cross-type decoys — only a glob-filtered, line-numbered hit scores |
