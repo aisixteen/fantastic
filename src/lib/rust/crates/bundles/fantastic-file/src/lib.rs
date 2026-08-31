@@ -11,23 +11,25 @@
 //! | `reflect`| _none_                     | `{id, sentence, root, readonly, hidden_count, verbs}` |
 //! | `boot`   | _none_                     | `null`                                |
 //! | `list`   | `path?`                    | `{path, files: [{name, path, type, size?}]}` |
-//! | `read`   | `path`                     | `{path, content}` (text) or `{path, image_base64, mime}` (image) |
-//! | `write`  | `path`, `content`          | `{path, written: true}`               |
+//! | `read_stream` | `path`, `offset?`, `length?` | binary channel — reply body = one raw chunk |
+//! | `write_stream`| `path`, `offset?`, `truncate?` | binary channel — request body = one raw chunk |
+//! | `pump`   | `source?`, `source_path`, `sink?`, `sink_path?` | server-side SOURCE→SINK copy |
 //! | `delete` | `path`                     | `{path, deleted: true}`               |
 //! | `rename` | `old_path`, `new_path`     | `{old_path, new_path}`                |
 //! | `mkdir`  | `path`                     | `{path, created: true}`               |
 //!
-//! `readonly: true` on the agent record refuses every mutating verb
+//! There is NO string `read`/`write`: bytes move only over the stream verbs
+//! (`read_stream`/`write_stream`), raw on the binary channel, never base64 — the
+//! py-canonical shape. `readonly: true` on the record refuses every mutating verb
 //! with the one refusal shape, `reason: "unauthorized"` (#27).
 
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use base64::Engine;
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,8 +42,6 @@ pub const README: &str = include_str!("readme.md");
 /// Default hidden-file names hidden from `list`. Matches the Python
 /// bundle so cross-runtime workdirs stay symmetric.
 pub const DEFAULT_HIDDEN: &[&str] = &[".git", ".env", ".fantastic", "node_modules", "__pycache__"];
-
-const IMAGE_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
 
 /// The filesystem bundle.
 pub struct FileBundle;
@@ -169,9 +169,6 @@ impl Bundle for FileBundle {
                 };
                 match verb {
                     "list" => list_reply(&root, payload, &hidden),
-                    "read" => read_reply(&root, payload, &meta),
-                    "write" if readonly => readonly_refusal(),
-                    "write" => write_reply(&root, payload),
                     "delete" if readonly => readonly_refusal(),
                     "delete" => delete_reply(&root, payload),
                     "rename" if readonly => readonly_refusal(),
@@ -625,8 +622,6 @@ fn reflect_reply(agent_id: &AgentId, root: &Path, readonly: bool, hidden: &[Stri
             "reflect": "Identity + filesystem root + readonly flag. No args.",
             "boot": "No-op. Returns None.",
             "list": "args: path:str (default '').",
-            "read": "args: path:str (req).",
-            "write": "args: path:str (req), content:str (req).",
             "delete": "args: path:str (req).",
             "rename": "args: old_path:str (req), new_path:str (req).",
             "mkdir": "args: path:str (req).",
@@ -686,219 +681,6 @@ fn list_reply(root: &Path, payload: &Value, hidden: &[String]) -> Value {
         "path": path_str,
         "files": files,
     })
-}
-
-/// Default text-read window (chars). Py parity: `DEFAULT_MAX_READ_CHARS`.
-const DEFAULT_MAX_READ_CHARS: usize = 16384;
-
-/// The leg's text-read window — per-record like `hidden`; the default protects a
-/// conversation from one call. Measured 2026-08-07 on py: an unbounded 86 KB read
-/// drove an LLM's context to 21k tokens and the next turn was cancelled
-/// mid-prefill.
-fn max_read_chars(meta: &Map<String, Value>) -> usize {
-    match meta.get("max_read_chars").and_then(Value::as_i64) {
-        Some(n) if n > 0 => n as usize,
-        _ => DEFAULT_MAX_READ_CHARS,
-    }
-}
-
-/// `(slice, reply-extras)` — `offset`/`limit` page a large file explicitly.
-/// Py parity: `_window_text` (field-for-field, hint included).
-fn window_text(
-    meta: &Map<String, Value>,
-    payload: &Value,
-    text: &str,
-) -> (String, Map<String, Value>) {
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
-    let offset = payload
-        .get("offset")
-        .and_then(Value::as_i64)
-        .map(|n| n.max(0) as usize)
-        .unwrap_or(0);
-    let cap = max_read_chars(meta);
-    let limit = payload
-        .get("limit")
-        .and_then(Value::as_i64)
-        .map(|n| (n.max(1) as usize).min(cap))
-        .unwrap_or(cap);
-    let end = (offset + limit).min(total);
-    let chunk: String = chars[offset.min(total)..end].iter().collect();
-    let mut extras = Map::new();
-    if offset == 0 && end >= total {
-        return (chunk, extras);
-    }
-    extras.insert("total_chars".into(), json!(total));
-    extras.insert("offset".into(), json!(offset));
-    extras.insert("returned_chars".into(), json!(chunk.chars().count()));
-    extras.insert("truncated".into(), json!(end < total));
-    if end < total {
-        extras.insert("next_offset".into(), json!(end));
-        extras.insert(
-            "hint".into(),
-            json!(format!(
-                "{} of {total} chars unread — continue with {{type:'read', path:…, \
-                 offset:{end}}} (max {cap} per call, raise the leg's \
-                 `max_read_chars` to widen it)",
-                total - end
-            )),
-        );
-    }
-    (chunk, extras)
-}
-
-fn read_reply(root: &Path, payload: &Value, meta: &Map<String, Value>) -> Value {
-    let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
-        return json!({"error": "read requires path"});
-    };
-    let target = match resolve_safe(root, path_str) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
-    };
-    if !target.exists() {
-        return json!({"error": format!("path {path_str:?} not found")});
-    }
-    let ext_lower = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{}", e.to_lowercase()))
-        .unwrap_or_default();
-    // Three return shapes (Python parity, file/tools.py:122):
-    //   1. image extension      → {path, image_base64, mime}
-    //   2. UTF-8-readable file  → {path, content}
-    //   3. any other binary     → {path, image_base64, mime}
-    //
-    // The third branch handles videos (.mp4), PDFs, fonts, archives —
-    // anything that isn't text. Reusing `image_base64` as the carry
-    // field keeps the wire compatible with the existing web proxy
-    // (which already base64-decodes that field and serves with the
-    // reply's `mime`). Mime comes from the extension lookup; falls
-    // back to `application/octet-stream` for the unrecognised tail.
-    if IMAGE_EXT.contains(&ext_lower.as_str()) {
-        return read_binary(&target, path_str, &ext_lower);
-    }
-    match std::fs::read_to_string(&target) {
-        Ok(content) => {
-            let (chunk, extras) = window_text(meta, payload, &content);
-            let mut reply = Map::new();
-            reply.insert("path".into(), json!(path_str));
-            reply.insert("content".into(), json!(chunk));
-            reply.extend(extras);
-            Value::Object(reply)
-        }
-        // ENOENT / EACCES / etc. genuinely failed — propagate.
-        Err(e) if e.kind() != std::io::ErrorKind::InvalidData => {
-            json!({"error": format!("read {}: {e}", target.display())})
-        }
-        // InvalidData = non-UTF-8 file. Fall through to binary path.
-        Err(_) => read_binary(&target, path_str, &ext_lower),
-    }
-}
-
-/// Read `target` as raw bytes + return base64 + mime. Used for any
-/// non-UTF-8 file (videos, PDFs, fonts, archives) and explicitly for
-/// known image extensions. Mime guess comes from the extension; falls
-/// back to `application/octet-stream` for unknown extensions.
-fn read_binary(target: &Path, path_str: &str, ext_lower: &str) -> Value {
-    match std::fs::read(target) {
-        Ok(bytes) => {
-            let mime = mime_for_ext(ext_lower);
-            json!({
-                "path": path_str,
-                "image_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                "mime": mime,
-            })
-        }
-        Err(e) => json!({"error": format!("read {}: {e}", target.display())}),
-    }
-}
-
-/// Mime lookup for the (small) set of extensions consumers actually
-/// see. Goal: enough coverage that the web proxy serves the correct
-/// `Content-Type` for `<img>` / `<video>` / `<audio>` / `<embed>`
-/// elements without the browser sniffing.
-fn mime_for_ext(ext_lower: &str) -> &'static str {
-    match ext_lower {
-        ".png" => "image/png",
-        ".jpg" | ".jpeg" => "image/jpeg",
-        ".gif" => "image/gif",
-        ".webp" => "image/webp",
-        ".svg" => "image/svg+xml",
-        ".mp4" => "video/mp4",
-        ".webm" => "video/webm",
-        ".mov" => "video/quicktime",
-        ".m4v" => "video/x-m4v",
-        ".mp3" => "audio/mpeg",
-        ".wav" => "audio/wav",
-        ".ogg" => "audio/ogg",
-        ".m4a" => "audio/mp4",
-        ".pdf" => "application/pdf",
-        ".woff" => "font/woff",
-        ".woff2" => "font/woff2",
-        ".ttf" => "font/ttf",
-        ".otf" => "font/otf",
-        ".zip" => "application/zip",
-        _ => "application/octet-stream",
-    }
-}
-
-/// A `code` / `content` value as text, accepting a LIST OF LINES.
-///
-/// A program written as one JSON string is the most fragile thing a model
-/// emits: every newline is an escape and every inner quote another, so one
-/// missed `\"` swallows the rest of the object and the call is lost entirely.
-/// Measured on gemma-4-12B, and again on the `subai_graph` probe, which burned
-/// three consecutive turns on it.
-///
-/// A list removes the failure rather than softening it: newlines become the
-/// array structure instead of escapes, and each element is short enough that a
-/// lost quote costs ONE line rather than the whole document.
-///
-/// A LIST is the only newly accepted shape — anything else returns `None` so
-/// the existing refusals still fire. A bare `42` is a mistake, not a one-line
-/// program, and quietly stringifying it would spawn an interpreter on nonsense.
-fn lines_or_str(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Array(items)) => Some(
-            items
-                .iter()
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    Value::Null => String::new(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        _ => None,
-    }
-}
-
-fn write_reply(root: &Path, payload: &Value) -> Value {
-    let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
-        return json!({"error": "write requires path"});
-    };
-    // A LIST of lines is accepted and joined with newlines — see the note on
-    // `lines_or_str` in exec_bridge: a multi-line body as ONE JSON string is
-    // where a model loses a closing quote and the whole call with it.
-    let Some(content) = lines_or_str(payload.get("content")) else {
-        return json!({"error": "write requires content (str, or a list of lines)"});
-    };
-    let content = content.as_str();
-    let target = match resolve_safe(root, path_str) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
-    };
-    if let Some(parent) = target.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return json!({"error": format!("mkdir parent: {e}")});
-        }
-    }
-    match std::fs::write(&target, content) {
-        Ok(_) => json!({"path": path_str, "written": true}),
-        Err(e) => json!({"error": format!("write {}: {e}", target.display())}),
-    }
 }
 
 fn delete_reply(root: &Path, payload: &Value) -> Value {

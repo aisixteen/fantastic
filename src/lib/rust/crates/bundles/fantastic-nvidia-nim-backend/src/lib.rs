@@ -142,7 +142,6 @@ fn no_key_error() -> String {
     format!("nvidia_nim_backend: no api key — set {KEY_VAR}")
 }
 
-
 // ── NIM provider (Bearer + SSE + 429 retry) ─────────────────────────
 
 /// Built per `send`; captures the kernel + client id + route so it can
@@ -360,8 +359,6 @@ impl Bundle for NvidiaNimBundle {
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "nvidia_nim_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
-            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
-            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("nvidia_nim_backend: unknown type {other:?}")}),

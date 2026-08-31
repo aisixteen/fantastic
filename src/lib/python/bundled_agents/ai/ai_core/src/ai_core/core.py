@@ -721,7 +721,7 @@ THINK_CLOSE = "</think>"
 # it strictly redundant, which requires the verb to return WHOLE state rather than an
 # answer to a question:
 #
-#   reflect · list_agents · ps · keys · state_yaml   → whole-state. The newest reply IS
+#   reflect · list_agents · ps · keys              → whole-state. The newest reply IS
 #       the truth; older copies describe a state that no longer exists and can only
 #       mislead. Safe to drop.
 #   read · list · status · get                       → PARAMETERISED. Two `read`s on the
@@ -732,7 +732,7 @@ THINK_CLOSE = "</think>"
 # facts (verbs, ids, tree) and has no reason to re-reflect — re-fetching what it lost is
 # exactly the loop we are trying to avoid. Applied to the PROMPT view only; durable
 # history keeps every turn, so the trace stays complete.
-_WHOLE_STATE_READS = frozenset({"reflect", "list_agents", "ps", "keys", "state_yaml"})
+_WHOLE_STATE_READS = frozenset({"reflect", "list_agents", "ps", "keys"})
 # `[^\]]*` absorbs the optional ` · N of M in batch <token>` suffix.
 _REPLY_TAG = re.compile(r"^\[reply to \S+ · (\S+) (\S+)[^\]]*\]")
 # A delivered turn carries ONE OR MORE reply blocks — a batch arrives whole, one

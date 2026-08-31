@@ -1,28 +1,27 @@
 #if os(macOS)
     import Foundation
 
-    /// Spawning a durable python child with a control socket it can talk back on.
+    /// Spawning a COMMAND with a control socket it can talk back on.
     ///
-    /// The caller applies the OPTIONAL shim (the connector) before handing `code`
-    /// here — the wire is the contract; this is the PARENT half's launcher.
+    /// A spawned program MAY speak the kernel over the inherited control fd; one that
+    /// never reads it runs exactly like any OS process. This is the PARENT half of that
+    /// wire: it makes the socket pair, hands one end to the child, and returns the other
+    /// for the relay. Mirror of python `proc.spawn_argv`: spawn argv AS GIVEN — the gate
+    /// is the caller's regex allowlist on the shell-joined line, and this adds nothing.
     ///
     /// ## Foundation's `Process` cannot pass an arbitrary fd — measured
     ///
     /// It spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`, so every descriptor not named in its
     /// `file_actions` is closed regardless of its actual `FD_CLOEXEC` bit — and it only
-    /// ever names 0/1/2. Measured 2026-08-05: with stdout+stderr piped the child reports
-    /// `HAVE ['0','1','2','3']` no matter what number we hand it, and dies
-    /// `OSError: [Errno 9] Bad file descriptor`. (A one-pipe probe appears to work and is
-    /// a false green — do not re-derive this from a simpler test.)
+    /// ever names 0/1/2. So the socket goes in as **stdin**, which IS in `file_actions`,
+    /// and a tiny `sh` shim moves it to fd 3 and re-execs the command:
     ///
-    /// So the socket goes in as **stdin**, which IS in `file_actions`, and a tiny `sh`
-    /// shim moves it to fd 3 and re-execs python:
+    ///     sh -c 'exec 3<&0 0</dev/null; exec "$@"' fx <command> <args...>
     ///
-    ///     sh -c 'exec 3<&0 0</dev/null; exec "$0" -u -c "$1"' <interp> <code>
-    ///
-    /// Both `exec`s replace the process image, so the **pid is preserved** — signals,
+    /// `exec "$@"` replaces the process image, so the **pid is preserved** — signals,
     /// `kill(pid,0)` and the orphan gate all keep working — and Foundation still does the
-    /// `waitpid`. The program is passed as `$1`, so no shell quoting ever touches it.
+    /// `waitpid`. The command + argv are passed as `"$@"`, so no shell quoting ever
+    /// touches them.
     enum Spawn {
 
         struct Spawned {
@@ -33,12 +32,19 @@
             let stderr: Pipe
         }
 
-        /// Launch `interp -u -c <connector + code>` with a control socket on an
+        /// Launch `argv` (argv[0] = command, rest = args) with a control socket on an
         /// inherited fd. `selfId` is the OWNER agent id (the tool's public id, not an
         /// ephemeral job id), so a tool can address itself by the id others use.
+        /// `envExtra` is the per-call `env` block. There is NO `FANTASTIC_ARGS`: a
+        /// general-purpose command runner passes arguments as argv, not a smuggled env.
         static func job(
-            interp: String, code: String, selfId: String, argsJSON: String, cwd: String?
+            argv: [String], selfId: String, envExtra: [String: String], cwd: String?
         ) throws -> Spawned {
+            guard !argv.isEmpty else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(EINVAL),
+                    userInfo: [NSLocalizedDescriptionKey: "empty argv"])
+            }
             var fds: [Int32] = [0, 0]
             guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
                 throw NSError(
@@ -48,17 +54,15 @@
             let parentFd = fds[0], childFd = fds[1]
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = [
-                "-c", "exec 3<&0 0</dev/null; exec \"$0\" -u -c \"$1\"",
-                interp, code,
-            ]
+            // $0=fx (a label), $@ = argv; `exec "$@"` runs command with its args.
+            p.arguments = ["-c", "exec 3<&0 0</dev/null; exec \"$@\"", "fx"] + argv
             // stdin IS in Process's file_actions, so this one survives. The shim moves it
             // to 3 and re-execs.
             p.standardInput = FileHandle(fileDescriptor: childFd, closeOnDealloc: false)
             var env = ProcessInfo.processInfo.environment
+            for (k, v) in envExtra { env[k] = v }
             env["FANTASTIC_CTRL_FD"] = "3"  // where the shim puts it
             env["FANTASTIC_SELF_ID"] = selfId
-            env["FANTASTIC_ARGS"] = argsJSON
             p.environment = env
             if let cwd, !cwd.isEmpty { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
             let out = Pipe(), err = Pipe()

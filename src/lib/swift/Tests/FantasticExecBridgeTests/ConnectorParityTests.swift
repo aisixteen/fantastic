@@ -72,17 +72,18 @@ struct SpawnTests {
         let code = """
             import os, stat
             fd = int(os.environ["FANTASTIC_CTRL_FD"])
-            print("sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ["FANTASTIC_SELF_ID"], "args", os.environ["FANTASTIC_ARGS"])
+            print("sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ["FANTASTIC_SELF_ID"], "env", os.environ.get("MYVAR"))
             """
         let s = try Spawn.job(
-            interp: py, code: code, selfId: "owner_agent", argsJSON: #"{"n":41}"#, cwd: nil)
+            argv: [py, "-u", "-c", code], selfId: "owner_agent",
+            envExtra: ["MYVAR": "hello"], cwd: nil)
         let data = s.stdout.fileHandleForReading.readDataToEndOfFile()
         s.process.waitUntilExit()
         close(s.ctrlFd)
         let text = String(data: data, encoding: .utf8) ?? ""
         #expect(text.contains("sock True"))
         #expect(text.contains("self owner_agent"))
-        #expect(text.contains(#"args {"n":41}"#))
+        #expect(text.contains("env hello"))
     }
 
     /// The lifeline: drop the parent's socket and the child reaps ITSELF, even parked
@@ -94,9 +95,11 @@ struct SpawnTests {
         // `_o._exit(0)`s) — the shim is opt-in now, so this program takes it the
         // way a parked durable tool would.
         let s = try Spawn.job(
-            interp: py,
-            code: CONNECTOR_SRC + "\nimport threading\nthreading.Event().wait()\n",
-            selfId: "owner_agent", argsJSON: "{}", cwd: nil)
+            argv: [
+                py, "-u", "-c",
+                CONNECTOR_SRC + "\nimport threading\nthreading.Event().wait()\n",
+            ],
+            selfId: "owner_agent", envExtra: [:], cwd: nil)
         Thread.sleep(forTimeInterval: 0.5)
         #expect(s.process.isRunning, "child exited early")
 

@@ -1,39 +1,87 @@
-> Author your own durable tools as script agents whose persisted `code` is a SCRIPT the kernel runs top to bottom.
+> A durable program is a FILE you write plus a command that runs it. Compose the agents you have, stream a program's bytes to a file, run it through the command executor. There is no `code` field.
 
-# Self-extension — author your own tools
+# Self-extension
 
-This kernel is self-extending: any capability you lack, you AUTHOR as a durable
-*script agent* whose persisted `code` is a SCRIPT — the kernel runs it top to
-bottom, it is not a set of verb handlers.
+**A durable program is a FILE plus a command — not a `code`-carrying agent.**
 
-- **Add** — `send('kernel', {type:'create_agent', handler_module:'<an executor below>', id:'<name>', code:'<your program as one JSON string>'})`. The loader lays that `code` down as **`main.py` in the agent's own dir**, beside `agent.json` — so a tool is a real file you can read, diff and edit, and a traceback names it at the right line.
-- **Run it on demand** — `send('<id>', {type:'start', args:{…}})` runs the persisted `code` once and returns at once; the program's own output is not that reply, so send your result where it belongs from inside the program. A one-shot tool needs no `on_message` and does not stay running.
-- **Use (long-lived)** — send the agent a turn by its id. It replies `{queued:true}`; its real output rides `emit`ted events (e.g. `say` / `done`) tagged with the caller's `client_id` — `watch` its id to receive them.
-- **Remove** — `send('kernel', {type:'delete_agent', id:'<name>'})`.
-- **Author the `code` as a SCRIPT** — Your `code` is a SCRIPT, not a set of verb handlers. It is run top to bottom, once per `start` (and again on `boot`). Defining a function does not register a verb — `def run(payload): ...` and nothing else defines `run`, exits, and does no work at all. Put the work at module level. If the tool must survive its first pass to receive later sends, keep it running; only a LIVE job acks `{queued:true}`.
-- **The connector** — your program gets a `kernel` object in scope (its ONLY capability): `kernel.send(target_id, payload)` → the target's reply; `kernel.emit(payload)` → emit an event on YOUR OWN agent — this is how you speak (there is NO `kernel.say`; you `emit` a `{type:'say', …}`); receive later inbound turns by registering `kernel.on_message(callback)` and keeping the program running; `kernel.self_id` is your id; `kernel.args` is THIS CALL's arguments — whatever the caller put in `start`'s `args` field (`{}` if none). Take your inputs from `args` rather than baking them into `code`, and take the ADDRESSEE from there too — then one tool serves many callers, and the caller decides where the result goes (`kernel.send(kernel.args.reply_to, …)`) instead of the tool deciding for them. (The root reflect's `self_extension` names which executor + receive-shape THIS runtime has.) To answer an inbound `{type:'send', text, client_id}`: do the work, then `kernel.emit({type:'say', text:<answer>, client_id})` then `kernel.emit({type:'done', client_id})`. Handle ONLY `{type:'send'}` turns — ALL inbound traffic (including your own emitted events and `reflect`/`boot`) reaches `on_message`, so ignore anything whose type isn't `send`. Keep each string literal on ONE line — the `code` is one JSON string.
-- **Compose** — a running script can itself `create_agent` more agents, so tools build on tools.
-- **Grant its reach — two-sided deny-all** — every agent is DENY-ALL by default on BOTH sides: who it may CALL (`can_call`, egress) and who may CALL IT (`callable_by`, ingress). An edge exists only when BOTH ends grant it. The only free edges are structural — an agent may reach and be reached by itself, its parent (its creator), and its own children. NOTHING is exempt from the gate, `reflect` included: a `send` to a `file_bridge` or `yaml_state` you didn't create comes back `{reason:'unauthorized'}` (the `side` field says which end refused — `egress` = your reach, `ingress` = their acceptance). Two ways to give a tool what it needs:
-  - **The clean path — author a cohort of your OWN children.** Create the tool AND the data agents it talks to as YOUR children (or have the tool `create_agent` them as ITS children). Agents in one subtree reach each other through the `$parent`/`$children` baseline with ZERO explicit grants — a tool and the `readings`/`totals` it owns just work.
-  - **Reaching an EXISTING foreign peer** takes a grant on each end. Grant your tool's egress IN ITS `create_agent`, on `can_call:{'<target_id>':['<verb>', …]}` (or `'*'` for every verb) — but you may only confer a SUBSET of what YOU yourself hold (over-conferring is refused). The peer must also ACCEPT your tool on its `callable_by`; if the peer is yours, set it (`update_agent` the peer, adding `callable_by:{'<tool_id>':['<verb>']}`); if it belongs to someone else, its owner (or the operator) opens it — from above.
-  - **Authority descends, never self-raised.** You grant your child; you CANNOT edit your own `can_call`/`callable_by` (an `update_agent` on yourself touching either field is refused). New authority always comes from your creator or the operator.
-  You never have to guess: a denied send's `hint` names the fix, and `side` tells you which end to open — discovery-through-denial, the same way a sealed io leg's denial teaches `ingress_rule`.
+The old way — a program pasted into a `code` field as a JSON string — is GONE:
+a whole program escaped into an envelope is exactly how a call gets lost to one
+stray quote. There is no `code` field, no `interpreters`, no `shim`;
+`create_agent` with `code` is refused, and the refusal says so.
 
-Reach everything by id: the kernel connector (send / emit / on_message + your
-self_id) is how a tool is MEANT to touch the world.
+The way that WORKS now, and it makes something that genuinely persists and
+re-runs:
 
-What that isolates you from depends on the interpreter you were given. The allowlist
-buys exactly ONE property, stated narrowly on purpose: the OPERATOR chose which runtime
-and which environment your program runs in, and your program cannot choose a different
-one. It buys nothing else — a CPython on the list still has `open()`, `socket` and
-`subprocess`, so a leg allowlisting one is a conscious decision to allow local code
-execution with that interpreter's full reach. A real sandbox needs an OS mechanism (a
-separate uid, a container, `sandbox-exec`) and is DEFERRED, not solved. Prefer the
-connector regardless — data reached by id is inspectable, gated, and portable across
-kernels; data reached by `open()` is none of those.
+1. **Write the program to a file** on the file leg, its bytes carried over a
+   stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`,
+   or `send_binary` (same call, but write the program RAW in the LAST `bytes`
+   field — nothing escaped; see the `send` docs).
+2. **Run it** with the command executor: `start {command:'python',
+   args:['<your file>'], …}`. The file is durable on disk, so the SAME command
+   run again later re-executes the SAME program against whatever the inputs hold
+   THEN — which is what "build a thing that re-runs" means.
 
-**To THINK, reach an AI agent by id** — read the `minds` doc (`reflect
-{type:'reflect', readme:'minds'}`). The short of it: an AI agent does ONE pass and has no
-loop, no tools and no agency — so if you want an agent that plans, iterates, uses other
-agents as tools, or asks the human, **you author that control flow yourself**, around an
-AI-agent call. There is no built-in agent loop in this kernel.
+The program reaches the other agents itself, over its control wire, exactly as
+any agent does. Assemble these pieces and you have built something durable
+without any `code` field at all.
+
+## What you CAN do now
+
+- **Compose the agents you were given.** `send('kernel', {type:'list_agents'})`
+  for the tree, `reflect` each for its verbs, then `send`. Most tasks are solved
+  entirely by wiring existing agents together.
+
+- **Run a command.** The executor is a **general-purpose COMMAND runner** — not a
+  code runner. Reflect it to read its `allowed` regexes (the full command line
+  must match one), then
+  `send('<executor>', {type:'start', command:'<path>', args:['<arg>', …]})`.
+  It returns `{job_id, status:'running'}` at once and streams `progress` events
+  per output line; poll `{type:'status', job_id}` for the result. `stop`,
+  `clear` as advertised.
+
+- **Write and read files — over STREAMS, never a JSON string.** Putting file
+  contents in a payload string is the same escaping trap as `code`. Use the file
+  leg's stream verbs:
+  - write: `send('<file>', {type:'write_stream', path:'x', bytes:<raw>, truncate:true})`
+  - read:  `send('<file>', {type:'read_stream', path:'x', offset:0})` → `{bytes, next_offset, eof}`, one chunk at a time.
+  The string `read`/`write` verbs are gone.
+
+- **A worker that COMPUTES is an `exec_bridge.tools` agent — NOT a new module.**
+  You do not, and cannot, author a new `handler_module` to make something compute:
+  there is no way to add a module to the installed catalog, and you never need one.
+  A compute worker IS a command-runner agent that owns a program:
+  `create_agent handler_module='exec_bridge.tools' … allowed=['<interp> \\S+']`,
+  then `write_stream` it a program FILE and `start`/schedule that command. The
+  PROGRAM does the work; the agent is just the runner that owns and re-runs it. So
+  "a specialist with child workers that compute" = a parent agent whose children are
+  `exec_bridge.tools` runners, each with its own program file — no bundle authored.
+
+- **Create and delete plain agents.** `create_agent` (a `handler_module` + grants)
+  and `delete_agent` work as before; only the program-carrying `code` path is
+  withdrawn.
+
+## Grant its reach — two-sided deny-all
+
+Every agent is DENY-ALL on BOTH sides: who it may CALL (`can_call`, egress) and
+who may CALL IT (`callable_by`, ingress). An edge exists only when BOTH ends
+grant it. The free edges are structural — an agent reaches and is reached by
+itself, its parent (its creator), and its own children; everything else needs an
+explicit grant on each end. `reflect` included: a `send` to a leg you did not
+create comes back `{reason:'unauthorized'}`, and the reply's `side` says which
+end refused (`egress` = your reach, `ingress` = their acceptance) and `hint`
+names the fix.
+
+The one thing you CANNOT do is raise your OWN authority: editing your own
+`can_call`/`callable_by` is refused. But you are NOT limited to your children —
+if you hold `update_agent` (for example on the root/`kernel_state`, a common
+grant), you can **open ANY agent's `callable_by`** to accept a caller, including a
+SIBLING that is not your child (`totals`, `readings`, `clock`). Opening ingress
+grants no reach, so it is freely conferrable this way. So to let a worker you made
+call `totals`: give the worker `can_call:{totals:[…]}` at `create_agent`, AND
+`update_agent id='totals'` to add the worker to `totals.callable_by` (send the
+WHOLE map — update replaces, not merges). Both ends granted, the edge exists. New
+reach for YOURSELF still comes only from your creator or the operator.
+
+Reach everything by id. A denied send's `hint` and `side` are
+discovery-through-denial — the same way a sealed io leg's denial teaches
+`ingress_rule`.

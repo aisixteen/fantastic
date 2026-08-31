@@ -26,3 +26,4 @@ src/lib/swift/fantastic-sched-*/
 src/lib/swift/fantastic-schedfire-*/
 src/lib/swift/fantastic-wsbrstream-*/
 e2e/backends/sampling.json
+e2e/backends/connection.local.env

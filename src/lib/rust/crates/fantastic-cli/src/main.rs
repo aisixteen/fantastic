@@ -50,7 +50,10 @@ fn register_default_bundles() -> BundleRegistry {
         reg.register(probes::PLANT_MODULE, probes::PlantProbe::default());
         reg.register(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
     }
-    reg.register("yaml_state.tools", fantastic_yaml_state::YamlStateBundle);
+    reg.register(
+        "durable_memory.tools",
+        fantastic_durable_memory::DurableMemoryBundle,
+    );
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);

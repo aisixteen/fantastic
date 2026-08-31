@@ -163,7 +163,10 @@ fn read_api_key() -> Option<String> {
 
 /// The refusal for an unwired connector — names the variables to set.
 fn no_key_error() -> String {
-    format!("anthropic_backend: no api key — set {}", KEY_VARS.join(" or "))
+    format!(
+        "anthropic_backend: no api key — set {}",
+        KEY_VARS.join(" or ")
+    )
 }
 
 // ── plain messages → Anthropic translation ──────────────────────────
@@ -557,8 +560,6 @@ impl Bundle for AnthropicBundle {
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "anthropic_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
-            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
-            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("anthropic_backend: unknown type {other:?}")}),

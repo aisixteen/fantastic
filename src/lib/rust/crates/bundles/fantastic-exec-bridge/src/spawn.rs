@@ -1,8 +1,11 @@
-//! Spawning a durable python child, with a control socket it can talk back on.
+//! Spawning a COMMAND, with a control socket it can talk back on.
 //!
-//! The child half of the wire is [`crate::CONNECTOR_SRC`] — python source, vendored
-//! verbatim, prepended to the program. This module is the PARENT half: it makes the
-//! socket pair, hands one end to the child, and returns the other for the relay.
+//! A spawned program MAY speak the kernel over the inherited control fd; one that
+//! never reads it runs exactly like any OS process. This module is the PARENT half of
+//! that wire: it makes the socket pair, hands one end to the child, and returns the
+//! other for the relay. Mirror of python `proc.spawn_argv`: spawn argv AS GIVEN — the
+//! gate is the caller's regex allowlist on the shell-joined line, and this function
+//! adds nothing to it.
 //!
 //! ## Why `std::os::unix::net::UnixStream::pair` and not `nix::socketpair`
 //!
@@ -21,29 +24,32 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::process::Stdio;
 
+use serde_json::{Map, Value};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
-/// A spawned durable job: the OS child, plus the parent end of its control socket.
+/// A spawned job: the OS child, plus the parent end of its control socket.
 pub struct Spawned {
-    /// The running python process.
+    /// The running process.
     pub child: Child,
     /// Parent end of the control socket — hand this to the relay.
     pub ctrl: UnixStream,
 }
 
-/// Spawn `argv` (already allowlist-resolved and shim-applied by the caller —
-/// [`crate::resolve_interpreter`] + [`crate::apply_shim`] + [`crate::build_argv`]
-/// are the ONLY path here, which is what makes the allowlist unbypassable) with a
-/// control socket on an inherited fd.
+/// Spawn `argv` AS GIVEN (already gated by the caller's regex allowlist on the
+/// shell-joined line — [`crate::command_permitted`] is the ONLY path here, which is
+/// what makes the allowlist unbypassable) with a control socket on an inherited fd.
 ///
-/// `args_json` reaches the program as `kernel.args`; `self_id` is the OWNER agent id
-/// (the tool's public id, not an ephemeral job id) so a tool can address itself by the
-/// id others use.
+/// Mirror of python `proc.spawn_argv`: the child inherits `os.environ` plus
+/// `env_extra` (the per-call `env` block), and this function additionally sets
+/// `FANTASTIC_CTRL_FD` (the control-wire fd) and `FANTASTIC_SELF_ID` (the OWNER agent
+/// id — the tool's public id, not an ephemeral job id, so a tool can address itself by
+/// the id others use). There is no `FANTASTIC_ARGS`: a general-purpose command runner
+/// passes arguments as argv, not as a smuggled env blob.
 pub fn spawn_job(
     argv: &[String],
     self_id: &str,
-    args_json: &str,
+    env_extra: &Map<String, Value>,
     cwd: Option<&str>,
 ) -> std::io::Result<Spawned> {
     let Some((exe, rest)) = argv.split_first() else {
@@ -59,10 +65,14 @@ pub fn spawn_job(
     cmd.args(rest)
         .env("FANTASTIC_CTRL_FD", child_raw.to_string())
         .env("FANTASTIC_SELF_ID", self_id)
-        .env("FANTASTIC_ARGS", args_json)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
+    // The per-call `env` block — each value stringified, exactly like python's
+    // `{str(k): str(v) for k, v in env_extra_user.items()}`.
+    for (k, v) in env_extra {
+        cmd.env(k, value_to_env(v));
+    }
     if let Some(c) = cwd.filter(|c| !c.is_empty()) {
         cmd.current_dir(c);
     }
@@ -94,6 +104,16 @@ pub fn spawn_job(
     parent.set_nonblocking(true)?;
     let ctrl = UnixStream::from_std(parent)?;
     Ok(Spawned { child, ctrl })
+}
+
+/// Stringify an env value the way python's `str(v)` would for the common scalar
+/// cases (string as-is, others via their JSON text). Objects/arrays are unusual in
+/// an env block but must not panic.
+fn value_to_env(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// The fd number the child was told to use. Exposed for tests.

@@ -21,25 +21,56 @@ private final class Files: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         f[p] = c
     }
+    func remove(_ p: String) {
+        lock.lock(); defer { lock.unlock() }
+        f[p] = nil
+    }
     var paths: [String] {
         lock.lock(); defer { lock.unlock() }
         return Array(f.keys)
     }
 }
 
+/// A mock file_bridge that speaks the STREAM verbs on the BINARY channel — the
+/// string `read`/`write` verbs are gone, so the kernel's blob + record I/O rides
+/// `write_stream`/`read_stream` with raw bytes.
 private struct Store: AgentBundle {
     let name = "file_bridge"
     let files: Files
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
         let path = payload["path"].asString ?? ""
         switch payload["type"].asString ?? "" {
-        case "read":
-            return files.get(path).map { JSON.object(["content": .string($0)]) }
-                ?? .object(["error": .string("not found")])
-        case "write":
-            files.put(path, payload["content"].asString ?? "")
-            return .object(["written": .bool(true)])
-        default: return .object(["error": .string("unknown verb")])
+        case "delete":
+            files.remove(path)
+            return .object(["deleted": .bool(true)])
+        default:
+            // Any non-stream verb (e.g. the ledger test's probe) just settles.
+            return .object(["ok": .bool(true)])
+        }
+    }
+    func handleBinary(
+        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+    ) async throws -> (JSON?, Data) {
+        let path = header["path"].asString ?? ""
+        switch header["type"].asString ?? "" {
+        case "write_stream":
+            files.put(path, String(data: blob, encoding: .utf8) ?? "")
+            return (
+                .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data()
+            )
+        case "read_stream":
+            guard let c = files.get(path) else {
+                return (.object(["error": .string("not found")]), Data())
+            }
+            let data = Data(c.utf8)
+            return (
+                .object([
+                    "eof": .bool(true), "size": .integer(Int64(data.count)),
+                    "next_offset": .integer(Int64(data.count)),
+                ]), data
+            )
+        default:
+            return (.object(["error": .string("unknown verb")]), Data())
         }
     }
 }

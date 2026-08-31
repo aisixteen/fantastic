@@ -120,22 +120,25 @@ struct ReflectUniformTests {
         }
     }
 
-    /// The authoring doc must teach the SAME execution model as the distilled
-    /// `self_extension`, and BOTH receive shapes — js/lua await `on_message()` in a
-    /// registers a CALLBACK — the ONE receive shape now that exec_bridge is the
-    /// one executor (the in-proc loop engines are deleted).
-    @Test func selfExtensionDocStatesScriptModelAndTheReceiveShape() throws {
+    /// The authoring doc must teach the FILE+COMMAND execution model — a durable
+    /// program is a FILE you write (stream verbs / send_binary) plus a command you
+    /// run on the general-purpose exec_bridge COMMAND runner. No `code` field.
+    @Test func selfExtensionDocStatesTheFileCommandModel() throws {
         let body = try #require(RootDocs.all.first { $0.key == "self-extension" }?.body)
-        #expect(body.contains("SCRIPT"), "\(body)")
-        #expect(body.contains("top to bottom"), "\(body)")
-        #expect(body.contains("module level"), "\(body)")
-        #expect(body.contains("kernel.on_message(callback)"), "\(body)")
+        #expect(body.contains("write_stream"), "\(body)")
+        #expect(body.contains("send_binary"), "\(body)")
+        #expect(body.lowercased().contains("command runner"), "\(body)")
+        #expect(body.contains("`code` field"), "\(body)")
+        // The superseded script model must be gone, not merely supplemented.
         #expect(!body.contains("IS the tool"), "\(body)")
     }
 
     @Test func rootReflectCarriesReadmesFrame() async {
         let kernel = makeKernel()
-        let r = await kernel.send([Item("core", ["type": "reflect"])])[0].result
+        // `detail:'full'` carries the doc-tree FRAME (readmes + docs); the distilled
+        // DEFAULT omits it — the always-injected AI/FM prompt stays in budget.
+        // Mirrors python `test_readme_doctree.py` (full carries, default omits).
+        let r = await kernel.send([Item("core", ["type": "reflect", "detail": "full"])])[0].result
         let readmes = r["readmes"].asArray
         #expect(readmes != nil && !(readmes!.isEmpty))
         #expect(readmes?.contains { $0["key"].asString == "self-extension" } == true)
@@ -145,6 +148,11 @@ struct ReflectUniformTests {
             #expect(e["body"] == nil || e["body"].isNull)  // index carries no bodies
         }
         #expect(r["docs"].asString?.contains("keyed doc tree") == true)
+
+        // The distilled default drops the inlined frame (readmes + docs).
+        let d = await kernel.send([Item("core", ["type": "reflect"])])[0].result
+        #expect(d["readmes"] == nil || d["readmes"].isNull)
+        #expect(d["docs"] == nil || d["docs"].isNull)
     }
 
     @Test func readmeIndexKeyedViewAndErrors() async {
@@ -179,67 +187,23 @@ struct ReflectUniformTests {
 
     // ─── self_extension: the authoring contract ────────────────
     //
-    // Measured twice on gemma-4-12B (2026-08-06): with the old "the `code` IS the
-    // tool" the model read "the code DEFINES the tool", authored
-    // `def run(payload): ...` and sent {type:'run'} expecting a call. Two agents
-    // shipped inert, nothing was written, {queued:true} never appeared because no
-    // job stayed alive. Both facts below cost a whole run when wrong, and neither
-    // was pinned by any swift test.
+    // A durable program is a FILE plus a COMMAND — there is no `code` field
+    // (a program embedded as a JSON string is exactly how a call gets lost to
+    // escaping). Write it with the file leg's STREAM verbs or `send_binary`, run
+    // it on the general-purpose exec_bridge COMMAND runner.
 
-    @Test func selfExtensionStatesTheExecutionModel() async throws {
+    @Test func selfExtensionStatesTheFileCommandModel() async throws {
         let kernel = makeKernel()
         let s = try #require(
             await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
-        #expect(s.contains("SCRIPT"), "\(s)")
-        #expect(s.contains("top to bottom"), "\(s)")
-        // The specific misread that burned two runs: a bare `def` is inert.
-        #expect(s.contains("`def`"), "\(s)")
-        #expect(s.contains("module level"), "\(s)")
-        #expect(s.contains("kernel.on_message(cb)"), "\(s)")
-        // The superseded phrasing must be gone, not merely supplemented.
+        #expect(s.contains("A DURABLE PROGRAM is a FILE"), "\(s)")
+        #expect(s.contains("no `code` field") || s.contains("There is no `code` field"), "\(s)")
+        #expect(s.contains("write_stream"), "\(s)")
+        #expect(s.contains("send_binary"), "\(s)")
+        #expect(s.contains("COMMAND runner"), "\(s)")
+        #expect(s.contains("exec_bridge.tools"), "\(s)")
+        // The superseded script phrasing must be gone.
         #expect(!s.contains("IS the tool"), "\(s)")
-        // Only a LIVE script acks — the model waited for {queued:true} from a
-        // script that had already exited.
-        #expect(s.contains("a LIVE script acks {queued:true}"), "\(s)")
-    }
-
-    /// The advertised executor list must be DERIVED, never hard-coded: a
-    /// hard-coded list drifted from what a build actually registered, so a
-    /// conditionally-compiled executor went unnamed while the string named a
-    /// module that is not registered at all. Both directions are asserted here
-    /// against `availableBundles()`.
-    @Test func selfExtensionNamesOnlyRegisteredExecutors() async throws {
-        for (module, shape) in Kernel.scriptExecutors {
-            let registry = BundleRegistry()
-            registry.register("echo.tools", EchoBundle())
-            registry.register(module, EchoBundle())
-            let kernel = Kernel(storage: .inMemory, bundles: registry)
-            let root = Agent(id: "core", handlerModule: nil, parentId: nil)
-            kernel.register(root)
-            kernel.setRoot(root)
-
-            let s = try #require(
-                await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
-            #expect(s.contains(module), "registered \(module) but self_extension omits it: \(s)")
-            #expect(s.contains(shape), "\(module) named without its receive shape: \(s)")
-            // A registered echo bundle is no script executor.
-            #expect(!s.contains("echo.tools"), "\(s)")
-            for other in Kernel.scriptExecutors.map(\.handlerModule) where other != module {
-                #expect(!s.contains(other), "phantom executor \(other) named: \(s)")
-            }
-        }
-    }
-
-    @Test func selfExtensionSaysSoWhenNoExecutorIsRegistered() async throws {
-        // makeKernel registers echo only — no handler_module here runs authored
-        // `code`, and a caller must learn that from the same round-trip rather
-        // than being pointed at a module that cannot be created.
-        let kernel = makeKernel()
-        let s = try #require(
-            await kernel.send([Item("core", ["type": "reflect"])])[0].result["self_extension"].asString)
-        #expect(s.contains("NO script executor"), "\(s)")
-        for module in Kernel.scriptExecutors.map(\.handlerModule) {
-            #expect(!s.contains(module), "unregistered \(module) named: \(s)")
-        }
+        #expect(!s.contains("code:'<your program"), "\(s)")
     }
 }

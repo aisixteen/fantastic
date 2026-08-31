@@ -275,7 +275,6 @@ impl Bundle for LlamaCppBundle {
             "send" => send_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel, "llamacpp_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
-            "author" => fantastic_ai_core::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("llamacpp_backend: unknown type {other:?}")}),

@@ -18,8 +18,8 @@
 // to the model (the shared core runs in `stateless` mode for FM).
 //
 // The model's DURABLE memory is the always-inject path: at `boot` the
-// bundle self-mounts `mem` + `data` yaml_state memory agents, and
-// `makeProvider` splices each agent's current `state_yaml` into the
+// bundle self-mounts `mem` + `data` durable_memory agents, and
+// `makeProvider` splices each agent's current keys into the
 // session instructions on EVERY send. Recall is structural, not
 // prompted.
 //
@@ -83,7 +83,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 },
                 // Always-inject durable memory: the shared core appends
                 // this AFTER the substrate prompt (primer + menu + send
-                // how-to). Each mounted yaml_state agent's `state_yaml` +
+                // how-to). Each mounted durable_memory agent's keys +
                 // any custom `instructions` meta land in the FM session's
                 // instructions every turn — recall is structural.
                 systemPromptExtra: { agent, kernel in
@@ -121,7 +121,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         ollama_backend; runs stateless against the native on-device model.
         Tool-calling is RAW: no Apple @Generable Tool — the model generates text and \
         FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
-        Durable memory: on boot, mem+data yaml_state agents are auto-mounted and their \
+        Durable memory: on boot, mem+data durable_memory agents are auto-mounted and their \
         contents spliced into the model instructions on every send (always-on; no explicit recall needed).
         """
     }
@@ -149,7 +149,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
 
     // MARK: - Durable memory (self-mount + always-inject)
 
-    /// Idempotently mount `mem` + `data` yaml_state memory agents under
+    /// Idempotently mount `mem` + `data` durable_memory agents under
     /// this backend at boot, so the model's durable memory exists — and
     /// is auto-injected — before turn one. No-op if an agent of each mode
     /// already exists (children rehydrate from disk on reboot).
@@ -158,7 +158,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
             memoryAgents(agentId: agentId, kernel: kernel).compactMap {
                 kernel.agent($0)?.metaValue(forKey: "mode")?.asString
             })
-        // yaml_state persists THROUGH a file_bridge provider (no own disk
+        // durable_memory persists THROUGH a file_bridge provider (no own disk
         // surface). Discover the `.fantastic` store + wire `file_bridge_id` so
         // the mounted memory persists. No store wired ⇒ field omitted (the
         // memory is RAM-only and `set` failfasts — no silent fallback).
@@ -183,7 +183,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 // ITS OWN subtree: placement is stated by `parent_id`, and the
                 // kernel-owned verb goes to the root.
                 "parent_id": .string(agentId.value),
-                "handler_module": .string("yaml_state.tools"),
+                "handler_module": .string("durable_memory.tools"),
                 "mode": .string(mode),
             ])
             if let storeId {
@@ -226,16 +226,16 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         }
     }
 
-    /// Agent ids of this backend's mounted yaml_state memory agents.
+    /// Agent ids of this backend's mounted durable_memory agents.
     func memoryAgents(agentId: AgentId, kernel: Kernel) -> [AgentId] {
         guard let agent = kernel.agent(agentId) else { return [] }
         return agent.childIds().filter {
-            kernel.agent($0)?.handlerModule == "yaml_state.tools"
+            kernel.agent($0)?.handlerModule == "durable_memory.tools"
         }
     }
 
-    /// The system-prompt body + each mounted yaml_state memory agent's
-    /// current `state_yaml` spliced in. Because the FM session is rebuilt
+    /// The system-prompt body + each mounted durable_memory agent's
+    /// current keys spliced in. Because the FM session is rebuilt
     /// per send, this single hook covers boot + every turn + post-
     /// compaction for free — the model's durable memory is ALWAYS
     /// present, never recalled (the "always inject" principle).
@@ -249,13 +249,22 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         if !base.isEmpty { blocks.append(base) }
         let memAgentIds =
             agent.childIds().filter {
-                kernel.agent($0)?.handlerModule == "yaml_state.tools"
+                kernel.agent($0)?.handlerModule == "durable_memory.tools"
             }
         for memAgentId in memAgentIds {
-            let reply = await kernel.send([Item(memAgentId, .object(["type": .string("state_yaml")]))])[0].result
-            guard let yaml = reply["yaml"].asString, !yaml.isEmpty else { continue }
-            let mode = kernel.agent(memAgentId)?.metaValue(forKey: "mode")?.asString ?? "data"
-            blocks.append("## Your \(mode) memory (\(memAgentId.value)):\n\(yaml)")
+            // durable_memory is modeless and has no whole-store verb (full parity
+            // with python), so reconstruct the block from `keys` + `read`.
+            let keysReply = await kernel.send([Item(memAgentId, .object(["type": .string("keys")]))])[0].result
+            let keys = (keysReply["keys"].asArray ?? []).compactMap { $0.asString }
+            var lines: [String] = []
+            for key in keys {
+                let r = await kernel.send([Item(memAgentId, .object(["type": .string("read"), "key": .string(key)]))])[0].result
+                if r["value"].isNull { continue }
+                lines.append("\(key): \(r["value"].serialize())")
+            }
+            guard !lines.isEmpty else { continue }
+            let label = kernel.agent(memAgentId)?.metaValue(forKey: "mode")?.asString ?? "durable"
+            blocks.append("## Your \(label) memory (\(memAgentId.value)):\n" + lines.joined(separator: "\n"))
         }
         return blocks.joined(separator: "\n\n")
     }

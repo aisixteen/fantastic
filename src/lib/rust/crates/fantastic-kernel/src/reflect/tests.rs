@@ -218,48 +218,20 @@ async fn readme_flag_tiers() {
 
 // ─── keyed / tiered doc tree ───────────────────────────────────
 
-// ─── self_extension: the execution model + the DERIVED executor list ───
+// ─── self_extension: the FILE + COMMAND model (no `code` field) ───
 //
-// Two facts the root pointer owns, both of them paid for by a failed run:
-//
-// 1. The EXECUTION MODEL. Measured twice on gemma-4-12B (2026-08-06): "the
-//    `code` IS the tool" reads as "the code DEFINES the tool", so the model
-//    authored `def run(payload): ...` and sent {type:'run'} expecting a call.
-//    Two agents shipped inert (one was valid Python), nothing was written, and
-//    {queued:true} never appeared because no job stayed alive.
-// 2. The EXECUTOR'S NAME. Measured on python (2026-08-05): opus-5 invented
-//    `handler_module:'local_runner.script'` because the real module was never
-//    named, and built nothing. An affordance you cannot NAME is not
-//    discoverable — and a module named but not registered is worse than silence.
+// The old `code`-carrying script model is gone. A durable program is a FILE you
+// write (over a stream, or `send_binary`) plus a command that runs it. The
+// pointer must teach that SHAPE — a model that lacks it writes something that
+// cannot work, and the weak models are the ones that never follow the pointer to
+// go read the full doc. The executor-advertisement machinery (which executor runs
+// authored `code`) is deleted with the `code` field it existed to advertise.
 
-/// A do-nothing bundle, registered only so `available_bundles` reports its
-/// `handler_module`. The executor advertisement is derived from the REGISTRY, so
-/// a test of that derivation must install real registry entries.
-struct StubBundle(&'static str);
-
-#[async_trait::async_trait]
-impl crate::bundle::Bundle for StubBundle {
-    fn name(&self) -> &str {
-        self.0
-    }
-    async fn handle(
-        &self,
-        _id: &AgentId,
-        _payload: &Value,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<crate::bundle::Reply, crate::bundle::BundleError> {
-        Ok(None)
-    }
-}
-
-/// A kernel with `handler_module`s registered, its root set, and one reflect
-/// taken — returns the root reflect's `self_extension`.
-async fn self_extension_with(modules: &[&'static str]) -> String {
-    let mut kernel = Kernel::new();
-    for m in modules {
-        kernel.bundles.register(m, StubBundle(m));
-    }
-    let kernel = Arc::new(kernel);
+/// A kernel with its root set, one reflect taken — returns the root reflect's
+/// `self_extension`. Registration no longer changes the string (it is derived
+/// from nothing but the model itself), so no bundles are needed.
+async fn root_self_extension() -> String {
+    let kernel = Arc::new(Kernel::new());
     let root = mk_agent("core", None);
     let _rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
@@ -270,134 +242,72 @@ async fn self_extension_with(modules: &[&'static str]) -> String {
         .to_string()
 }
 
-/// Every `<word>.tools` token in `s` — the shape a `handler_module` wears.
-fn handler_module_tokens(s: &str) -> Vec<String> {
-    s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
-        .map(|t| t.trim_end_matches('.'))
-        .filter(|t| t.ends_with(".tools"))
-        .map(str::to_string)
-        .collect()
-}
-
-/// Mirrors python's `test_distilled_default_keeps_self_extension_ACTIONABLE`
-/// in spirit: the pointer must teach the EXECUTION MODEL, not only that
-/// self-extension exists. `def run(): ...` is what a model writes when told the
-/// code "is the tool".
+/// Mirrors python's `test_full_reflect_names_no_dead_authoring_recipe` +
+/// `test_distilled_default_keeps_self_extension_ACTIONABLE`: the pointer states
+/// the FILE+command model and must not resurrect the withdrawn `code` recipe.
 #[tokio::test]
-async fn self_extension_states_the_script_execution_model() {
-    let se = self_extension_with(&["exec_bridge.tools"]).await;
+async fn self_extension_states_the_file_and_command_model() {
+    let se = root_self_extension().await;
     let low = se.to_lowercase();
+    // The live model: a durable program is a FILE plus a command, no `code` field.
     assert!(
-        low.contains("script"),
-        "must say the code is a SCRIPT: {se}"
-    );
-    assert!(low.contains("top to bottom"), "must say HOW it runs: {se}");
-    assert!(
-        se.contains("`def`"),
-        "must warn that a bare `def` does nothing: {se}"
+        se.contains("no `code` field") || se.contains("There is no `code`"),
+        "must say the code field is gone: {se}"
     );
     assert!(
-        se.contains("module level"),
-        "must say where the work goes: {se}"
+        se.contains("write_stream"),
+        "must name the stream write path: {se}"
     );
     assert!(
-        se.contains("create_agent"),
-        "must show how to author, not just that you may: {se}"
+        se.contains("send_binary"),
+        "must name the raw byte path: {se}"
     );
-}
-
-/// The advertised executor set IS the registry, intersected with [`EXECUTORS`].
-/// Hand-writing the list is what once let a registered executor go unmentioned while
-/// it was registered — so this asserts the mapping in both directions.
-#[tokio::test]
-async fn self_extension_names_only_registered_executors() {
-    let mut kernel = Kernel::new();
-    for m in [
-        "exec_bridge.tools",
-        // A NON-executor bundle: registered, and must never be advertised as a
-        // place authored `code` can run.
-        "yaml_state.tools",
-    ] {
-        kernel.bundles.register(m, StubBundle(m));
-    }
-    let kernel = Arc::new(kernel);
-    let root = mk_agent("core", None);
-    let _rx = kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    let v = bare_reflect(&kernel, &root, &json!({"type": "reflect"}));
-    let se = v["self_extension"].as_str().unwrap();
-
-    // Derived expectation — the same introspection the pointer renders from.
-    let installed: Vec<String> = available_bundles(&kernel)
-        .iter()
-        .filter_map(|b| b.get("handler_module").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect();
-
-    // ① every module NAMED in the string is actually registered.
-    for named in handler_module_tokens(se) {
-        assert!(
-            installed.contains(&named),
-            "self_extension names {named:?}, which this build does not register: {se}"
-        );
-    }
-    // ② every registered executor IS named — `exec_bridge.tools`, the ONE
-    //    executor this kernel ships (the per-language runtimes are wiped).
-    for (module, _) in EXECUTORS {
-        assert!(
-            se.contains(module),
-            "{module} is registered but self_extension never names it: {se}"
-        );
-    }
+    assert!(
+        low.contains("command"),
+        "must point at the command runner: {se}"
+    );
     assert!(
         se.contains("exec_bridge.tools"),
-        "the registered executor must be named: {se}"
-    );
-    // ③ a non-executor bundle is not an executor.
-    assert!(
-        !se.contains("yaml_state.tools"),
-        "yaml_state is not a script executor: {se}"
-    );
-    // ④ the named executor carries its RECEIVE SHAPE — a python program
-    //    registers a callback. Mis-stating it costs a run.
-    assert!(se.contains("kernel.on_message(cb)"));
-}
-
-/// Empty intersection → say the build ships none. Naming an absent module is
-/// the exact failure the derivation exists to prevent.
-#[tokio::test]
-async fn self_extension_names_no_executor_when_none_is_registered() {
-    let se = self_extension_with(&[]).await;
-    assert!(
-        handler_module_tokens(&se).is_empty(),
-        "a build with no executor must name no module: {se}"
-    );
-    assert!(
-        se.contains("NO script executor"),
-        "must say the build ships none: {se}"
-    );
-    // The example keeps the PLACEHOLDER rather than inventing a module.
-    assert!(
-        se.contains("handler_module:'<an executor below>'"),
-        "with none registered the example must not name a module: {se}"
+        "a compute worker is an exec_bridge runner: {se}"
     );
 }
 
-/// A registered executor that is NOT in the table changes nothing, and a
-/// table entry that is not registered is never advertised.
+/// The withdrawn `code`/interpreter/shim recipe must never appear — a model
+/// following a dead recipe burns turns on a `create_agent` now refused.
 #[tokio::test]
-async fn self_extension_advertises_the_intersection_only() {
-    // A registered bundle NOT in the table (yaml_state) adds nothing, and the
-    // table's one entry only shows when its module is actually registered.
-    let se = self_extension_with(&["exec_bridge.tools"]).await;
-    // WHICH modules appear, not how many times: the registered executor is now
-    // named twice on purpose — interpolated into the `create_agent` example so
-    // it is copy-pasteable, and again in the tail with its receive shape.
-    let mut seen = handler_module_tokens(&se);
-    seen.sort();
-    seen.dedup();
-    assert_eq!(seen, vec!["exec_bridge.tools"]);
-    assert!(!se.contains("yaml_state.tools"));
+async fn self_extension_teaches_no_dead_code_recipe() {
+    let se = root_self_extension().await;
+    for dead in [
+        "code:'",
+        "code=",
+        "interpreters:",
+        "shim:",
+        "handler_module:'",
+    ] {
+        assert!(
+            !se.contains(dead),
+            "self_extension still teaches the withdrawn recipe {dead:?}: {se}"
+        );
+    }
+}
+
+/// The executor-advertisement tail is DELETED with the machinery that produced
+/// it: there is no "which executor runs authored `code`" clause any more.
+#[tokio::test]
+async fn self_extension_has_no_executor_advertisement_tail() {
+    let se = root_self_extension().await;
+    assert!(
+        !se.contains("Executors here"),
+        "the derived executor tail must be gone: {se}"
+    );
+    assert!(
+        !se.contains("NO script executor"),
+        "the no-executor branch must be gone: {se}"
+    );
+    assert!(
+        !se.contains("<an executor below>"),
+        "the executor placeholder must be gone: {se}"
+    );
 }
 
 #[test]

@@ -20,5 +20,5 @@ tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 # The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus
 # at `contract/agentic/` declares, so it needs the bundles those manifests name.
-fantastic-yaml-state = { path = "../fantastic-yaml-state" }
+fantastic-durable-memory = { path = "../fantastic-durable-memory" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }

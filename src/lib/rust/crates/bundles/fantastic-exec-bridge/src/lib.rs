@@ -3,40 +3,46 @@
 //!
 //! Crossing kernel↔subprocess is gated like any io_bridge leg: **SEALED BY
 //! DEFAULT** (absent `ingress_rule` ⇒ every verb except `reflect` denies
-//! `{reason:"unauthorized"}`), and bound by the **interpreter ALLOWLIST**:
-//! `interpreters` on the record is the only set that can be spawned. No per-call
-//! override, no default, no PATH fallback — an unlisted `interpreter` is refused
-//! at WRITE time (`validate_meta`) and again at `start`, naming the legal set.
+//! `{reason:"unauthorized"}`), and bound by a **regex command ALLOWLIST**:
+//! `allowed` on the record is a list of regexes, and `start {command, args}`
+//! refuses unless the shell-joined line fullmatches one. No per-call override,
+//! no default, no PATH fallback — an empty `allowed` runs nothing. The withdrawn
+//! `code`/`shim`/`interpreter`/`interpreters`/`argv_template` fields are refused
+//! at WRITE time (`validate_meta`) and at `start`.
+//!
+//! It is a GENERAL-PURPOSE COMMAND runner, **not** a code runner. A program is a
+//! FILE some process (or a `write_stream`) put on disk; running it is `command` +
+//! `args`, exactly like anything else — so the job table / output pump / connector
+//! relay / fd passing / task-table rows / mail contract are all language-blind.
 //!
 //! The bridge publishes a WIRE — the inherited `FANTASTIC_CTRL_FD`, framed
-//! `[4-byte BE length | JSON]` — and nothing else. `shim:'python'` prepends the
-//! wire client ([`CONNECTOR_SRC`]); `shim` stays OPTIONAL because the wire is
-//! the contract, so adding a language is adding a blob to [`SHIMS`], not a code
-//! path. `start` spawns in the BACKGROUND and returns `{job_id,
-//! status:"running"}` at once, streaming `progress` / `job_done`; `boot`
-//! re-runs the persisted `code` after a reboot and PROPAGATES its error instead
-//! of booting silently broken. Any verb this bundle does not own is MAIL for
-//! the running program (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`,
-//! `on_cancel` SIGKILLs the real process).
+//! `[4-byte BE length | JSON]` — and nothing else. A program that wants a
+//! `kernel` global includes the reference wire client ([`CONNECTOR_SRC`]) in its
+//! own source; the bridge prepends nothing. `start` spawns in the BACKGROUND and
+//! returns `{job_id, status:"running"}` at once, streaming `progress` / `job_done`;
+//! `boot` is a no-op (nothing auto-restarts — a command is started by a caller,
+//! not the record). Any verb this bundle does not own is MAIL for the running
+//! program (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel`
+//! SIGKILLs the real process).
 //!
-//! **NOT a sandbox.** An allowlisted interpreter is a NAMED interpreter, with
-//! all of that interpreter's reach — a CPython on the list still has `open()`,
-//! `socket`, `subprocess`. The allowlist buys exactly one property: the
-//! OPERATOR chose which runtime and which environment a program runs in, and
-//! the program cannot choose a different one. Anything stronger needs an OS
-//! mechanism (`sandbox-exec`, a separate uid, a container) and is DEFERRED.
+//! **NOT a sandbox.** An allowlisted command is a NAMED command, with all of that
+//! command's reach — a python it permits still has `open()`, `socket`,
+//! `subprocess`. The allowlist buys exactly one property: the OPERATOR chose WHICH
+//! commands may run, and a program cannot pick a different one. Anything stronger
+//! needs an OS mechanism (`sandbox-exec`, a separate uid, a container) and is
+//! DEFERRED.
 //!
 //! ## Verbs
 //!
 //! | verb       | args                                                            | reply                                          |
 //! |------------|-----------------------------------------------------------------|------------------------------------------------|
-//! | `reflect`  | _none_ (UNGATED — discovery works on a sealed leg)              | identity + allowlist + shims + posture         |
-//! | `start`    | `code:str?` (else the record's), `args:any?`, `cwd?`, `interpreter:str?` (one of the allowlist), `shim:str?` | `{job_id, status:"running"}` at once |
+//! | `reflect`  | _none_ (UNGATED — discovery works on a sealed leg)              | identity + allowlist + posture                 |
+//! | `start`    | `command:str` (req), `args:list[str]?`, `env:dict?`, `cwd?`     | `{job_id, status:"running"}` at once           |
 //! | `status`   | `job_id:str?`                                                   | one job with its output, or all of this agent's |
 //! | `clear`    | `job_id:str?`                                                   | drops finished rows of this agent              |
 //! | `interrupt`| `job_id:str?`                                                   | `{interrupted: int}` (SIGINT to in-flight)     |
 //! | `stop`     | `job_id:str?`                                                   | `{killed: int}` (SIGKILL to in-flight)         |
-//! | `boot`     | _none_                                                          | re-starts the persisted `code`; ERRORS propagate |
+//! | `boot`     | _none_                                                          | no-op → `null`                                 |
 //!
 //! Anything else is MAIL for the running program: `{queued:true}` when a job is
 //! live, a loud error naming the verb when none is.
@@ -48,18 +54,17 @@ use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The child-side connector, VENDORED VERBATIM from python's
 /// `exec_bridge/_connector.py`.
 ///
 /// It is pure-stdlib Python (`os, json, socket, struct, threading, queue, sys`) with
-/// zero dependency on the python kernel. Each runtime's exec bridge prepends this
-/// identical text (`shim:'python'`) and implements only the PARENT half of the control
-/// socket. That makes the wire identical by construction rather than by discipline:
-/// `[4-byte BE length | JSON body]`, with `FANTASTIC_CTRL_FD` / `FANTASTIC_SELF_ID` /
-/// `FANTASTIC_ARGS` in the child env.
+/// zero dependency on the python kernel. A program that wants a `kernel` global
+/// INCLUDES this text in its own source (it is a library the program bundles, not
+/// something the bridge prepends). That makes the wire identical by construction rather
+/// than by discipline: `[4-byte BE length | JSON body]`, with `FANTASTIC_CTRL_FD` /
+/// `FANTASTIC_SELF_ID` in the child env.
 ///
 /// It is VENDORED rather than `include_str!`d across the tree because the container's
 /// rust stage copies only `src/lib/rust/` — a cross-tree include is a hard build break
@@ -73,117 +78,86 @@ pub const HANDLER_MODULE: &str = "exec_bridge.tools";
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
-/// name → source prepended to the program. One entry per LANGUAGE, not per
-/// interpreter: every CPython on an allowlist shares this client. Adding a
-/// language is adding a blob here, not a code path.
-pub const SHIMS: &[(&str, &str)] = &[("python", CONNECTOR_SRC)];
+// ── the command gate: a REGEX allowlist (py `_allowed_patterns` / `_command_permitted`) ──
 
-/// The shim names this bridge can serve — what `reflect` advertises.
-pub fn shim_names() -> Vec<&'static str> {
-    SHIMS.iter().map(|(n, _)| *n).collect()
-}
-
-/// `program`, with the named shim prepended. `None` ⇒ untouched (raw wire).
-/// An unknown name is a REFUSAL naming the legal set, not a silent pass-through:
-/// a program that asked for `kernel` and did not get it fails later, somewhere
-/// else, with a `NameError` that names nothing useful.
-pub fn apply_shim(shim: Option<&str>, program: &str) -> Result<String, String> {
-    match shim {
-        None | Some("") => Ok(program.to_string()),
-        Some(name) => match SHIMS.iter().find(|(n, _)| *n == name) {
-            Some((_, blob)) => Ok(format!("{blob}\n{program}")),
-            None => Err(format!(
-                "exec_bridge: shim {name:?} is unknown — this bridge serves {:?}",
-                shim_names()
-            )),
-        },
+/// This leg's `allowed` — regexes a command line must fullmatch to run. A bare
+/// string is treated as a one-element list. Empty ⇒ the leg runs nothing (a legal
+/// state: wired but given nothing to run, refusing loudly).
+pub fn allowed_patterns(meta: &Map<String, Value>) -> Vec<String> {
+    match meta.get("allowed") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().map(value_to_pattern).collect(),
+        _ => vec![],
     }
 }
 
-// ── the interpreter ALLOWLIST (py `proc.allowed` / `proc.resolve`) ──
-
-/// This leg's allowlisted interpreters, `~` expanded. Empty ⇒ the leg spawns
-/// nothing (a legal state: wired but given nothing to run, refusing loudly).
-pub fn allowed(meta: &Map<String, Value>) -> Vec<String> {
-    let raw = match meta.get("interpreters") {
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        _ => vec![],
-    };
-    raw.iter()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| expanduser(s).to_string_lossy().to_string())
-        .collect()
+/// Mirror python's `str(x)` over each `allowed` element: a string as-is, anything
+/// else via its text form.
+fn value_to_pattern(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
-/// The interpreter to spawn, or refuse NAMING the legal set — the mechanism
-/// measured (2026-08-06) to let a small model recover: a refusal that does not
-/// say what WOULD work only teaches that something is wrong. Requesting nothing
-/// is legal when the leg lists exactly one interpreter; with several, silence
-/// is ambiguous and refused rather than guessed.
-pub fn resolve_interpreter(
-    meta: &Map<String, Value>,
-    requested: Option<&str>,
-) -> Result<String, String> {
-    let ok = allowed(meta);
-    if ok.is_empty() {
-        return Err(
-            "no interpreters are allowlisted on this leg — an operator must set \
-             `interpreters=[<abs path to an interpreter>]` before a program can run"
+/// `None` when `line` fullmatches an allowed pattern; else the refusal text.
+///
+/// The FULL command line (command + args, shell-joined) is matched, ANCHORED — the
+/// rust equivalent of python's `re.fullmatch(pat, line, re.DOTALL)` is
+/// `\A(?s:PAT)\z`: `\A`/`\z` pin both ends so `echo.*` cannot smuggle
+/// `echo; rm -rf /` past a prefix, and `(?s)` makes `.` span newlines (an argv
+/// element may legitimately contain them). An empty allowlist runs nothing.
+pub fn command_permitted(meta: &Map<String, Value>, line: &str) -> Option<String> {
+    let pats = allowed_patterns(meta);
+    if pats.is_empty() {
+        return Some(
+            "exec_bridge: no commands are allowed on this leg — an operator must \
+             set `allowed=[<regex>, ...]` naming what may run"
                 .to_string(),
         );
     }
-    match requested.map(str::trim).filter(|s| !s.is_empty()) {
-        None => {
-            if ok.len() == 1 {
-                Ok(ok[0].clone())
-            } else {
-                Err(format!(
-                    "this leg allows {} interpreters, so name one: interpreter=<one of {ok:?}>",
-                    ok.len()
-                ))
-            }
-        }
-        Some(req) => {
-            let want = expanduser(req).to_string_lossy().to_string();
-            if ok.contains(&want) {
-                Ok(want)
-            } else {
-                Err(format!("interpreter {req:?} is not allowlisted — {ok:?}"))
+    for pat in &pats {
+        // A broken pattern permits nothing; validate_meta refuses new ones.
+        if let Ok(re) = regex::Regex::new(&format!(r"\A(?s:{pat})\z")) {
+            if re.is_match(line) {
+                return None;
             }
         }
     }
+    Some(format!(
+        "exec_bridge: command not allowed: {line:?} — this leg permits: {pats:?}"
+    ))
 }
 
-/// The full argv: `argv_template` on the record with `<interp>`/`<program>`
-/// substituted. A template rather than hardcoded flags because `-u -c` is
-/// CPython-specific (node wants `-e`); the bridge does not know which language
-/// it is spawning and must not pretend to. Default is the CPython shape — the
-/// only family this bundle ships a shim for.
-pub fn build_argv(meta: &Map<String, Value>, interp: &str, program: &str) -> Vec<String> {
-    let default = vec![
-        json!("<interp>"),
-        json!("-u"),
-        json!("-c"),
-        json!("<program>"),
-    ];
-    let tmpl: Vec<Value> = match meta.get("argv_template") {
-        Some(Value::Array(a)) => a.clone(),
-        Some(Value::String(s)) => vec![json!(s)],
-        _ => default,
-    };
-    tmpl.iter()
-        .map(|a| match a.as_str() {
-            Some("<interp>") => interp.to_string(),
-            Some("<program>") => program.to_string(),
-            Some(other) => other.to_string(),
-            None => a.to_string(),
-        })
-        .collect()
+/// Shell-join argv the way python's `shlex.join` does — POSIX quoting, so the joined
+/// line the allowlist matches is the same one a shell would see. A token with only
+/// shell-safe characters is passed through; anything else is single-quoted with inner
+/// `'` escaped as `'"'"'`; an empty token becomes `''`.
+pub fn shlex_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|s| shlex_quote(s))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One token, quoted per python's `shlex.quote`. Safe set is `[\w@%+=:,./-]`
+/// (ASCII word chars plus `@%+=:,./-`); anything else forces single-quoting.
+fn shlex_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+            )
+    });
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\"'\"'"))
+    }
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────
@@ -202,14 +176,12 @@ impl Bundle for ExecBridgeBundle {
     }
 
     /// Refuse a write this bundle cannot honour, at the WRITE, next to the typo
-    /// (py-canonical `validate_meta`). Validates the MERGED state — `record`
-    /// (empty at create) with `meta` applied — because a cross-field rule
-    /// (`interpreter` against `interpreters`) is unenforceable from the patch
-    /// alone.
+    /// (py-canonical `validate_meta`). Rejects the withdrawn code-runner fields and
+    /// validates that `allowed` is a non-empty list of compilable regexes.
     fn validate_meta(
         &self,
         meta: &Map<String, Value>,
-        record: &Map<String, Value>,
+        _record: &Map<String, Value>,
     ) -> Option<String> {
         if let Some(spec) = meta.get("ingress_rule") {
             let resolved = fantastic_io_bridge::authorizer::ingress::resolve(Some(spec));
@@ -224,36 +196,38 @@ impl Bundle for ExecBridgeBundle {
                 ));
             }
         }
-        if let Some(shim) = meta.get("shim").and_then(Value::as_str) {
-            if !shim.is_empty() && !SHIMS.iter().any(|(n, _)| *n == shim) {
+        // The withdrawn code-runner fields are refused at WRITE time. This is a
+        // GENERAL-PURPOSE command runner; gate it with `allowed`.
+        for gone in [
+            "code",
+            "shim",
+            "interpreter",
+            "interpreters",
+            "argv_template",
+        ] {
+            if meta.get(gone).is_some_and(|v| !v.is_null()) {
                 return Some(format!(
-                    "shim={shim:?} is unknown — this bridge serves {:?}",
-                    shim_names()
+                    "exec_bridge: `{gone}` is not a field — this is a general-purpose \
+                     COMMAND runner; gate it with `allowed=[<regex>, ...]`"
                 ));
             }
         }
-        if let Some(raw) = meta.get("interpreters") {
-            let ok = matches!(raw, Value::String(s) if !s.trim().is_empty())
-                || matches!(raw, Value::Array(a) if a
-                    .iter()
-                    .all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty())));
-            if !ok {
+        // `allowed` must be a non-empty list of compilable regexes.
+        if let Some(raw) = meta.get("allowed").filter(|v| !v.is_null()) {
+            let pats: Vec<String> = match raw {
+                Value::String(s) => vec![s.clone()],
+                Value::Array(a) => a.iter().map(value_to_pattern).collect(),
+                _ => Vec::new(),
+            };
+            if pats.is_empty() {
                 return Some(
-                    "interpreters must be a list of interpreter paths, e.g. \
-                     interpreters=['~/.venvs/x/bin/python']"
+                    "allowed must be a non-empty list of regexes, e.g. allowed=['ls( .*)?']"
                         .to_string(),
                 );
             }
-        }
-        // `interpreter` against the allowlist the record WILL have.
-        let mut merged = record.clone();
-        for (k, v) in meta {
-            merged.insert(k.clone(), v.clone());
-        }
-        if let Some(req) = merged.get("interpreter").and_then(Value::as_str) {
-            if !req.is_empty() {
-                if let Err(e) = resolve_interpreter(&merged, Some(req)) {
-                    return Some(e);
+            for pat in &pats {
+                if let Err(e) = regex::Regex::new(pat) {
+                    return Some(format!("allowed contains a broken regex {pat:?}: {e}"));
                 }
             }
         }
@@ -413,17 +387,6 @@ fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Expand a leading `~` to `$HOME`. Pure on platforms without HOME.
-fn expanduser(s: &str) -> PathBuf {
-    if let Some(rest) = s.strip_prefix("~") {
-        if let Ok(home) = std::env::var("HOME") {
-            let trimmed = rest.strip_prefix('/').unwrap_or(rest);
-            return PathBuf::from(home).join(trimmed);
-        }
-    }
-    PathBuf::from(s)
-}
-
 // ── verb implementations ────────────────────────────────────────────
 
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
@@ -448,31 +411,30 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
     json!({
         "id": agent_id.as_str(),
         // Py-canonical sentence — the ALLOWLIST is advertised so an authoring
-        // model never has to GUESS an interpreter path (a guess has no legal
-        // answer, same defect class as an unnamed executor module).
-        "sentence": "Process edge of the io family — sealed by default, allowlisted interpreters only. Spawns a program in the background; it gets a kernel wire over a private control fd.",
+        // model can see what it may run without guessing.
+        "sentence": "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd.",
         "cwd": cwd_val,
-        "interpreters": allowed(&meta),
-        "shims": shim_names(),
+        // THE GATE, advertised: a caller must see what it may run.
+        "allowed": allowed_patterns(&meta),
         "running": running,
         "verbs": {
-            "reflect": "Identity + allowlist + shims + running job count + auth posture. No args.",
-            "start": "args: code:str? (falls back to the record's `code`), args:any? (THIS CALL's arguments — reaches the program as `kernel.args`), cwd:str?, interpreter:str? (one of the allowlist; optional when it lists exactly one), shim:str? (one of `shims`; absent ⇒ the program speaks the raw wire). Spawns in the BACKGROUND; returns {job_id, status:'running'} at once and streams progress/job_done.",
+            "reflect": "Identity + running job count + auth posture. No args.",
+            "start": "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes or the start is refused naming the patterns. Spawns in the BACKGROUND; returns {job_id, status:'running'} at once and streams progress/job_done.",
             "status": "args: job_id:str?. One job (with full output) or all of this agent's jobs.",
             "clear": "args: job_id:str?. Drop finished rows of this agent.",
             "interrupt": "args: job_id:str?. SIGINT in-flight subprocesses. Returns {interrupted:int}.",
             "stop": "args: job_id:str?. SIGKILL in-flight subprocesses. Returns {killed:int}.",
-            "boot": "No args. Re-runs the record's persisted `code` (unless a job is live). Its ERROR propagates — a record naming a non-allowlisted interpreter must not boot silently broken.",
+            "boot": "No-op. Nothing auto-restarts: a command is started by a caller, not the record.",
         },
         "emits": {
             "job_started": "{type:'job_started', job_id}",
             "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
             "job_done": "{type:'job_done', job_id, exit_code, ok, stdout, stderr}",
         },
-        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD: [4-byte BE length | JSON]. Name `shim:'<one of shims>'` on `start` and a client is prepended for you (python: a `kernel` global with send/emit/reflect/watch/on_message + self_id + args). Name none and speak it yourself — reflect readme=true for the frame vocabulary.",
+        "wire": "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | JSON], both directions. To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is not one-way. It is not inline, though: read frames in a loop and skip any whose rid isn't yours (event/inbox frames can arrive first) until you see your reply. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process.",
         "inbox": "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error — a script that only defines something exits before its first turn arrives.",
         "tasks": "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned.",
-        "authoring": "This agent's persisted `code` is a durable tool and a SCRIPT: it runs TOP TO BOTTOM, once per `start` and again on `boot`. A bare `def` only defines and exits — put the work at module level, and keep the program running if it must receive later sends. create_agent with `code` + an allowlisted `interpreter`; `delete_agent` removes it. A running program can itself create_agent more agents.",
+        "authoring": "A general-purpose command runner: `start {command, args}`, gated by the `allowed` regexes on the full command line.",
         "ingress_rule": ingress,
         "sealed": ingress != "allow_all_ingress",
     })
@@ -518,81 +480,66 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
     json!({"killed": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGKILL)})
 }
 
-/// `start` — spawn the program in the BACKGROUND and return at once.
+/// `start` — spawn the COMMAND in the BACKGROUND and return at once.
 ///
-/// The `code` is persisted onto the record, so `boot` revives it after a reboot; the
-/// LOADER lays that down as `main.py` beside `agent.json`.
-/// A `code` / `content` value as text, accepting a LIST OF LINES.
-///
-/// A program written as one JSON string is the most fragile thing a model
-/// emits: every newline is an escape and every inner quote another, so one
-/// missed `\"` swallows the rest of the object and the call is lost entirely.
-/// Measured on gemma-4-12B, and again on the `subai_graph` probe, which burned
-/// three consecutive turns on it.
-///
-/// A list removes the failure rather than softening it: newlines become the
-/// array structure instead of escapes, and each element is short enough that a
-/// lost quote costs ONE line rather than the whole document.
-///
-/// A LIST is the only newly accepted shape — anything else returns `None` so
-/// the existing refusals still fire. A bare `42` is a mistake, not a one-line
-/// program, and quietly stringifying it would spawn an interpreter on nonsense.
-pub fn lines_or_str(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Array(items)) => Some(
-            items
-                .iter()
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    Value::Null => String::new(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        _ => None,
-    }
-}
-
+/// args: `command:str` (req), `args:list[str]?` (argv, default `[]`), `env:dict?`
+/// (extra env vars), `cwd:str?`. The FULL line (command + args, shell-joined) must
+/// fullmatch one of the record's `allowed` regexes or the start is refused naming
+/// the patterns. A `code` field is refused explicitly — this runs COMMANDS, not code.
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    let code = lines_or_str(payload.get("code"))
-        .or_else(|| lines_or_str(meta.get("code")))
-        .unwrap_or_default();
-    if code.is_empty() {
-        return json!({"error":
-            "exec_bridge: code (str, or a list of lines) required \
-             (pass it or set it on the record)"});
+    // `code` is not a field — run a command instead (py tools.py `_start`).
+    if payload.get("code").is_some_and(|v| !v.is_null()) {
+        return json!({"error": "exec_bridge: `code` is not a field — run a command instead"});
     }
-    // PER-CALL ARGUMENTS, explicit field — implicit capture of unknown payload keys
-    // would silently swallow a typo'd `cwd` and hand it over as an argument.
-    let args_json = payload
-        .get("args")
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "{}".to_string());
-    if args_json.len() > MAX_ARGS_BYTES {
-        return json!({"error": format!(
-            "exec_bridge: args too large ({} bytes > {MAX_ARGS_BYTES}) — they ride the \
-             process env, which caps near 1 MB for the whole block. Put bulk data in an \
-             agent and pass its id.", args_json.len())});
-    }
-    // THE ALLOWLIST — refuse before spawning, naming the legal set.
-    let requested = payload_str(payload, "interpreter").or_else(|| meta_str(&meta, "interpreter"));
-    let interp = match resolve_interpreter(&meta, requested) {
-        Ok(p) => p,
-        Err(e) => return json!({ "error": format!("exec_bridge: {e}") }),
+    let command = match payload.get("command").and_then(Value::as_str) {
+        Some(c) if !c.trim().is_empty() => c.to_string(),
+        _ => return json!({"error": "exec_bridge: command (str) required"}),
     };
-    // The OPTIONAL shim — unknown names refuse, absent means the raw wire.
-    let shim = payload_str(payload, "shim").or_else(|| meta_str(&meta, "shim"));
-    let program = match apply_shim(shim, &code) {
-        Ok(p) => p,
-        Err(e) => return json!({ "error": e }),
+    // `args` — a list of scalars (str/int/float), each stringified into argv.
+    let raw_args = payload.get("args").cloned().unwrap_or_else(|| json!([]));
+    let args: Vec<String> = match &raw_args {
+        Value::Array(a) => {
+            let mut out = Vec::with_capacity(a.len());
+            for v in a {
+                match v {
+                    Value::String(s) => out.push(s.clone()),
+                    Value::Number(n) => out.push(n.to_string()),
+                    _ => {
+                        return json!({"error":
+                            "exec_bridge: start expects args to be a list of strings"})
+                    }
+                }
+            }
+            out
+        }
+        _ => return json!({"error": "exec_bridge: start expects args to be a list of strings"}),
+    };
+    // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(command.clone());
+    argv.extend(args.iter().cloned());
+    let line = shlex_join(&argv);
+    if let Some(why) = command_permitted(&meta, &line) {
+        return json!({ "error": why });
+    }
+    // The per-call `env` block — a dict of str -> scalar.
+    let env_extra: Map<String, Value> = match payload.get("env") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(m)) => {
+            for v in m.values() {
+                if !matches!(v, Value::String(_) | Value::Number(_)) {
+                    return json!({"error":
+                        "exec_bridge: start expects env to be a dict of str -> str"});
+                }
+            }
+            m.clone()
+        }
+        _ => return json!({"error": "exec_bridge: start expects env to be a dict of str -> str"}),
     };
     let cwd = payload_str(payload, "cwd").or_else(|| meta_str(&meta, "cwd"));
 
-    let argv = build_argv(&meta, &interp, &program);
-    let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &args_json, cwd) {
+    let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &env_extra, cwd) {
         Ok(s) => s,
         Err(e) => return json!({"error": format!("exec_bridge: spawn failed: {e}")}),
     };
@@ -627,6 +574,10 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             pid,
             task,
             ctrl: ctrl_task,
+            // WHAT ran — so a caller can re-issue this job verbatim.
+            command,
+            args,
+            cwd: cwd.map(str::to_string),
             status: "running".to_string(),
             started_at: now_secs(),
             exit_code: None,
@@ -636,36 +587,15 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             stderr: String::new(),
         },
     );
-    // Durable authored agent: the record carries the program.
-    if let Some(agent) = kernel.agents.get(agent_id).map(|e| Arc::clone(&e)) {
-        agent.update_meta(serde_json::Map::from_iter([(
-            "code".to_string(),
-            Value::String(code.to_string()),
-        )]));
-        let _ = fantastic_kernel::persistence::persist(kernel, &agent).await;
-    }
     kernel
         .emit(agent_id, json!({"type": "job_started", "job_id": job_id}))
         .await;
     json!({"job_id": job_id, "status": "running"})
 }
 
-/// `boot` — idempotent rehydration. A record carrying `code` becomes a living program
-/// again, unless one is already running. Its ERROR PROPAGATES (py-canonical):
-/// discarding it made a record naming a non-allowlisted interpreter boot, fail to
-/// spawn, and still look created — indistinguishable from a program that ran and
-/// did nothing.
-async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
-    let meta = snapshot_meta(agent_id, kernel);
-    if let Some(code) = meta_str(&meta, "code") {
-        if !code.is_empty() && !jobs::has_running_job(agent_id, kernel) {
-            // A rehydrate has no caller, so no arguments.
-            let reply = start_reply(agent_id, &json!({"code": code}), kernel).await;
-            if reply.get("error").is_some() {
-                return reply;
-            }
-        }
-    }
+/// `boot` — a NO-OP returning null. Nothing auto-restarts: a command is started by a
+/// caller, not by the record (py `_boot`).
+async fn boot_reply(_agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
     Value::Null
 }
 
@@ -718,7 +648,3 @@ fn rand_job_id() -> u32 {
     static N: AtomicU32 = AtomicU32::new(0);
     N.fetch_add(1, Ordering::Relaxed) ^ (std::process::id().wrapping_mul(2_654_435_761))
 }
-
-/// Per-call `args` ride the process env, which caps near 1 MB for the whole block —
-/// past it `execve` fails with a cryptic E2BIG. Refuse early and say why.
-const MAX_ARGS_BYTES: usize = 256 * 1024;

@@ -1,32 +1,30 @@
-//! Unit tests for the exec_bridge bundle.
+//! Unit tests for the exec_bridge bundle — the general-purpose COMMAND runner.
 //!
-//! Tests that must actually SPAWN find a real interpreter with `which` and WIRE
-//! it onto the agent record, standing in for the operator — the resolver itself
-//! never probes PATH. When the host has no python (rare on dev machines, common
-//! on minimal CI containers) those tests return successfully — we don't want to
-//! fail CI on systems without Python. The resolution tests need no interpreter
-//! at all: they assert on paths, so they run everywhere.
+//! Tests that must actually SPAWN find a real interpreter with `which` and use it
+//! as the `command`, with a permissive `allowed=[".*"]` on the record standing in
+//! for the operator. A program that wants a `kernel` global includes
+//! [`CONNECTOR_SRC`] in its own source (the bridge prepends nothing now). When the
+//! host has no python (rare on dev machines, common on minimal CI containers) those
+//! tests return successfully — we don't fail CI on systems without Python. The gate
+//! tests need no interpreter at all.
 
 use super::*;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use serde_json::Map;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Find a real Python interpreter to WIRE onto the test agent, or `None` to
-/// skip. This is the TEST acting as the operator — the ALLOWLIST itself does
-/// NOT probe PATH (that would invent an interpreter nobody named), so a test
-/// that wants to spawn must list one on the record, exactly as an operator does.
+/// Find a real Python interpreter to use as the test `command`, or `None` to skip.
 fn find_real_python() -> Option<PathBuf> {
     which::which("python3")
         .or_else(|_| which::which("python"))
         .ok()
 }
 
-/// Generate a unique-per-test agent id. The IN_FLIGHT static is
-/// process-global; sharing one id across parallel tests would race.
+/// Generate a unique-per-test agent id. The job table is process-global; sharing
+/// one id across parallel tests would race.
 fn agent_id_for(tmp: &TempDir) -> String {
     format!(
         "py_{}",
@@ -38,29 +36,32 @@ fn agent_id_for(tmp: &TempDir) -> String {
     )
 }
 
-/// A kernel + one exec_bridge agent with a real interpreter ALLOWLISTED on its
-/// record when the host has one, and the leg OPENED. The wiring is deliberate:
-/// the allowlist refuses rather than guessing off PATH, so an agent nobody
-/// configured cannot spawn — which is what the operator does for real.
+/// A `start` payload that runs `code` under `py`. `with_connector` prepends the
+/// vendored wire client, exactly as a program wanting a `kernel` global would.
+fn py_start(py: &Path, code: &str, with_connector: bool) -> Value {
+    let program = if with_connector {
+        format!("{CONNECTOR_SRC}\n{code}")
+    } else {
+        code.to_string()
+    };
+    json!({
+        "type": "start",
+        "command": py.to_string_lossy(),
+        "args": ["-u", "-c", program],
+    })
+}
+
+/// A kernel + one exec_bridge agent with a permissive `allowed=[".*"]` (the
+/// operator opening the leg to any command) and the ingress rule OPEN. The seal +
+/// the allowlist refusal are covered by dedicated tests.
 async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let mut extra = Map::new();
-    if let Some(py) = find_real_python() {
-        extra.insert(
-            "interpreters".to_string(),
-            json!([py.to_string_lossy().to_string()]),
-        );
-    }
-    // The gate is SEALED by default; these tests exercise the verbs, so the
-    // operator opens the leg (the seal itself is covered separately). The record
-    // names the python shim: the connector is now OPT-IN, and these tests are
-    // exactly the programs that assume `kernel` in scope.
     extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
-    extra.insert("shim".to_string(), json!("python"));
+    extra.insert("allowed".to_string(), json!([".*"]));
     mk_kernel_with(tmp, extra).await
 }
 
-/// `mk_kernel`, but the agent record carries exactly the meta given — for the
-/// tests that drive resolution itself and must control every tier.
+/// `mk_kernel`, but the agent record carries exactly the meta given.
 async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
@@ -99,62 +100,116 @@ fn readme_present_and_titled() {
     assert!(README.contains("exec_bridge"));
 }
 
-/// The readme teaches the SCRIPT execution model, not "the `code` IS the tool".
-/// Measured twice on gemma-4-12B (2026-08-06): that phrasing reads as "the code
-/// DEFINES the tool", so the model authored `def run(payload): ...` and sent
-/// `{type:'run'}` expecting a call — two inert agents, nothing written.
+/// The readme teaches the general-purpose COMMAND model, gated by the allowlist,
+/// and is honest that it is not a sandbox.
 #[test]
-fn readme_states_the_script_execution_model() {
-    assert!(README.contains("a SCRIPT"), "{README}");
-    assert!(README.contains("top to bottom"), "{README}");
-    assert!(README.contains("ALLOWLIST"), "{README}");
-    assert!(README.contains("NOT a sandbox"), "{README}");
+fn readme_states_the_command_model() {
+    assert!(README.contains("COMMAND"), "{README}");
+    assert!(README.contains("allowlist"), "{README}");
+    assert!(README.contains("Not a sandbox"), "{README}");
 }
 
-/// No doc in this crate may present the retired `exec` verb as sendable. It is
-/// GONE from `handle`, so a doc that still advertises it teaches a caller to send
-/// something that falls through to the mail path and errors. The only licensed
-/// mention is the sentence that DENIES the verb — that one is load-bearing
-/// (a model that learned `exec` elsewhere needs to be told it is not here).
+// ─── the command gate: a REGEX allowlist ─────────────────────────
+
 #[test]
-fn no_doc_advertises_the_retired_exec_verb() {
-    const LIB_SRC: &str = include_str!("lib.rs");
-    for (which, text) in [("src/readme.md", README), ("src/lib.rs", LIB_SRC)] {
-        for line in text.lines() {
-            if !line.contains("`exec`") {
-                continue;
-            }
-            assert!(
-                line.contains("no `exec`"),
-                "{which} documents the retired `exec` verb as if it existed: {line}"
-            );
-        }
+fn shlex_join_quotes_like_python() {
+    // Safe tokens pass through; spaces/special chars force single-quoting; an
+    // inner quote is escaped `'"'"'`; an empty token becomes ''.
+    assert_eq!(shlex_join(&["ls".into(), "-la".into()]), "ls -la");
+    assert_eq!(shlex_join(&["echo".into(), "a b".into()]), "echo 'a b'");
+    assert_eq!(shlex_join(&["x".into(), "".into()]), "x ''");
+    assert_eq!(
+        shlex_join(&["echo".into(), "it's".into()]),
+        "echo 'it'\"'\"'s'"
+    );
+}
+
+#[test]
+fn command_permitted_fullmatches_and_refuses() {
+    // Empty allowlist ⇒ a loud refusal telling the operator what to set.
+    let e = command_permitted(&Map::new(), "ls").expect("empty allowlist must refuse");
+    assert!(e.contains("allowed=["), "must teach the fix: {e}");
+
+    // A matching line is permitted; the match is ANCHORED (fullmatch), so a
+    // prefix-only pattern cannot smuggle a trailing `; rm -rf /`.
+    let mut meta = Map::new();
+    meta.insert("allowed".to_string(), json!(["ls( .*)?"]));
+    assert!(command_permitted(&meta, "ls").is_none());
+    assert!(command_permitted(&meta, "ls -la").is_none());
+    let e = command_permitted(&meta, "ls; rm -rf /").expect("must refuse a non-fullmatch");
+    assert!(e.contains("not allowed"), "{e}");
+    let e = command_permitted(&meta, "rm -rf /").expect("unlisted command must refuse");
+    assert!(e.contains("ls( .*)?"), "must name the patterns: {e}");
+
+    // DOTALL: a multi-line arg (a `-c` program) is spanned by `.*`.
+    let mut m2 = Map::new();
+    m2.insert("allowed".to_string(), json!([".*"]));
+    assert!(command_permitted(&m2, "python -c 'a\nb\nc'").is_none());
+}
+
+#[test]
+fn validate_meta_refuses_withdrawn_fields_and_bad_allowed() {
+    let b = ExecBridgeBundle;
+    // The withdrawn code-runner fields are refused at the WRITE.
+    for gone in [
+        "code",
+        "shim",
+        "interpreter",
+        "interpreters",
+        "argv_template",
+    ] {
+        let mut meta = Map::new();
+        meta.insert(gone.to_string(), json!("whatever"));
+        let e = b
+            .validate_meta(&meta, &Map::new())
+            .unwrap_or_else(|| panic!("{gone} must be refused"));
+        assert!(e.contains(gone), "refusal must name the field: {e}");
+        assert!(
+            e.contains("allowed"),
+            "refusal must point to `allowed`: {e}"
+        );
     }
+    // `allowed` must be a non-empty list of compilable regexes.
+    let mut empty = Map::new();
+    empty.insert("allowed".to_string(), json!([]));
+    assert!(b.validate_meta(&empty, &Map::new()).is_some());
+    let mut broken = Map::new();
+    broken.insert("allowed".to_string(), json!(["("]));
+    let e = b
+        .validate_meta(&broken, &Map::new())
+        .expect("broken regex refused");
+    assert!(e.contains("broken regex"), "{e}");
+    // A good allowlist validates clean.
+    let mut ok = Map::new();
+    ok.insert("allowed".to_string(), json!(["ls( .*)?", ".*"]));
+    assert!(b.validate_meta(&ok, &Map::new()).is_none());
 }
 
 #[tokio::test]
-async fn reflect_reports_resolved_interpreter() {
+async fn reflect_advertises_the_allowlist_not_interpreters() {
     let tmp = TempDir::new().unwrap();
-    let (kernel, pid) = mk_kernel(&tmp).await;
+    let mut meta = Map::new();
+    meta.insert("allowed".to_string(), json!(["ls( .*)?"]));
+    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
     let r = kernel
-        .send(vec![Item::new(pid.clone(), json!({"type": "reflect"}))])
+        .send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
         .await
         .remove(0)
         .result;
-    assert_eq!(r["id"], pid.as_str());
-    // Py-canonical sentence: the process edge, sealed, allowlisted.
+    assert_eq!(r["id"], a.as_str());
     assert_eq!(
         r["sentence"],
-        "Process edge of the io family — sealed by default, allowlisted interpreters only. Spawns a program in the background; it gets a kernel wire over a private control fd."
+        "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd."
     );
     assert_eq!(r["running"], 0);
-    // The ALLOWLIST `mk_kernel` wired onto the record is advertised verbatim —
-    // never something discovered off PATH. No python on the host ⇒ empty list.
-    match find_real_python() {
-        Some(py) => assert_eq!(r["interpreters"], json!([py.to_string_lossy().to_string()])),
-        None => assert_eq!(r["interpreters"], json!([])),
-    }
-    // Verbs surface.
+    // THE GATE is advertised; the retired interpreter/shim keys are gone.
+    assert_eq!(r["allowed"], json!(["ls( .*)?"]));
+    assert!(r.get("interpreters").is_none(), "{r}");
+    assert!(r.get("shims").is_none(), "{r}");
+    assert!(r["wire"]
+        .as_str()
+        .unwrap_or("")
+        .contains("FANTASTIC_CTRL_FD"));
     for v in [
         "reflect",
         "start",
@@ -168,91 +223,46 @@ async fn reflect_reports_resolved_interpreter() {
     }
 }
 
-#[test]
-fn allowlist_resolves_and_refuses_naming_the_legal_set() {
-    // Empty allowlist ⇒ a loud refusal telling the operator what to set.
-    let e = resolve_interpreter(&Map::new(), None).expect_err("empty allowlist must refuse");
-    assert!(e.contains("interpreters=["), "must teach the fix: {e}");
-
-    // One entry ⇒ requesting nothing is unambiguous and legal.
-    let mut meta = Map::new();
-    meta.insert("interpreters".to_string(), json!(["/venv/bin/python"]));
-    assert_eq!(
-        resolve_interpreter(&meta, None).unwrap(),
-        "/venv/bin/python"
-    );
-
-    // Several ⇒ silence is ambiguous and refused, naming the set.
-    meta.insert(
-        "interpreters".to_string(),
-        json!(["/a/bin/python", "/b/bin/python"]),
-    );
-    let e = resolve_interpreter(&meta, None).expect_err("ambiguity must refuse");
-    assert!(e.contains("/a/bin/python"), "must name the set: {e}");
-
-    // An unlisted request is refused NAMING the legal set — the mechanism
-    // measured (2026-08-06) to let a small model recover on its next turn.
-    let e = resolve_interpreter(&meta, Some("/evil/python")).expect_err("unlisted must refuse");
-    assert!(e.contains("not allowlisted"), "{e}");
-    assert!(e.contains("/b/bin/python"), "must name the set: {e}");
-
-    // A listed request resolves; `~` expands on both sides.
-    assert_eq!(
-        resolve_interpreter(&meta, Some("/b/bin/python")).unwrap(),
-        "/b/bin/python"
-    );
-}
-
-#[test]
-fn shim_is_optional_and_unknown_names_refuse() {
-    // No shim ⇒ the raw program, untouched — the WIRE is the contract.
-    assert_eq!(apply_shim(None, "print(1)").unwrap(), "print(1)");
-    // The python shim prepends the connector.
-    let with = apply_shim(Some("python"), "print(1)").unwrap();
-    assert!(with.starts_with(CONNECTOR_SRC));
-    assert!(with.ends_with("print(1)"));
-    // Unknown ⇒ refusal naming the set, never a silent raw-wire pass-through.
-    let e = apply_shim(Some("ruby"), "x").expect_err("unknown shim must refuse");
-    assert!(e.contains("python"), "must name the legal set: {e}");
-}
-
-#[test]
-fn argv_template_substitutes_and_defaults_to_cpython() {
-    let argv = build_argv(&Map::new(), "/py", "CODE");
-    assert_eq!(argv, vec!["/py", "-u", "-c", "CODE"]);
-    let mut meta = Map::new();
-    meta.insert(
-        "argv_template".to_string(),
-        json!(["<interp>", "-e", "<program>"]),
-    );
-    assert_eq!(build_argv(&meta, "/node", "JS"), vec!["/node", "-e", "JS"]);
-}
-
-/// Precedence is not a fallback: an ABSENT key still walks to the next tier.
-/// Only an explicitly supplied one that cannot resolve refuses.
-///
-/// END TO END: the allowlist refusal reaches the caller as `start`'s reply, and
-/// NOTHING is spawned — no job id, no row in the table. And the leg is SEALED
-/// by default: with no `ingress_rule`, `start` denies before the allowlist is
-/// even consulted, while `reflect` (discovery) still answers.
+/// A `code` field is refused explicitly — this runs COMMANDS, not code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
+async fn start_refuses_a_code_field() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "start", "code": "x = 1", "interpreter": "/no/such/python"}),
+            json!({"type": "start", "code": "x = 1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        r["error"], "exec_bridge: `code` is not a field — run a command instead",
+        "{r}"
+    );
+}
+
+/// A command that matches no `allowed` pattern is refused, naming the patterns, and
+/// nothing is spawned. And a SEALED leg (no ingress_rule) denies `start` before the
+/// allowlist is even consulted, while `reflect` still answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_refuses_unlisted_command_and_sealed_leg_denies() {
+    let tmp = TempDir::new().unwrap();
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    meta.insert("allowed".to_string(), json!(["ls( .*)?"])); // only ls
+    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "start", "command": "/bin/rm", "args": ["-rf", "/"]}),
         )])
         .await
         .remove(0)
         .result;
     assert!(
-        r["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("not allowlisted"),
-        "an unlisted interpreter must refuse naming the set: {r}"
+        r["error"].as_str().unwrap_or("").contains("not allowed"),
+        "an unlisted command must refuse naming the patterns: {r}"
     );
     assert!(r["job_id"].is_null(), "nothing may be spawned: {r}");
     let st = kernel
@@ -273,7 +283,7 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
     let d = k2
         .send(vec![Item::new(
             sealed.clone(),
-            json!({"type": "start", "code": "x"}),
+            json!({"type": "start", "command": "ls"}),
         )])
         .await
         .remove(0)
@@ -293,37 +303,15 @@ async fn start_refuses_unlisted_interpreter_and_sealed_leg_denies() {
         .result;
     assert_eq!(refl["sealed"], json!(true), "{refl}");
     assert!(
-        refl["interpreters"].is_array(),
+        refl["allowed"].is_array(),
         "discovery must work sealed: {refl}"
     );
 }
 
-/// Reflect is how a caller LEARNS its wiring — the ALLOWLIST is advertised so
-/// an authoring model never has to guess an interpreter path.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reflect_advertises_the_allowlist_and_shims() {
-    let tmp = TempDir::new().unwrap();
-    let mut meta = Map::new();
-    meta.insert("interpreters".to_string(), json!(["/wired/bin/python"]));
-    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
-    let r = kernel
-        .send(vec![Item::new(a.clone(), json!({"type": "reflect"}))])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["interpreters"], json!(["/wired/bin/python"]), "{r}");
-    assert_eq!(r["shims"], json!(["python"]), "{r}");
-    assert!(r["wire"]
-        .as_str()
-        .unwrap_or("")
-        .contains("FANTASTIC_CTRL_FD"));
-}
-
 /// SIGINT reaches the job — the program catches it and exits cleanly.
-/// Output arrives as `job_done`, not as `start`'s reply (which is the job id).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_sends_sigint_to_the_job() {
-    let Some(_real) = find_real_python() else {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -336,15 +324,11 @@ signal.signal(signal.SIGINT, h)
 time.sleep(30)
 "#;
     let r = kernel
-        .send(vec![Item::new(
-            pid.clone(),
-            json!({"type": "start", "code": code}),
-        )])
+        .send(vec![Item::new(pid.clone(), py_start(&py, code, false))])
         .await
         .remove(0)
         .result;
     assert!(r["job_id"].is_string(), "start failed: {r}");
-    // Let python install the handler before signalling it.
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let n = kernel
@@ -369,7 +353,7 @@ time.sleep(30)
 /// SIGKILL reaches the job, and the row does not stay stuck `running`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_sigkills_the_job() {
-    let Some(_real) = find_real_python() else {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -378,7 +362,7 @@ async fn stop_sigkills_the_job() {
     let r = kernel
         .send(vec![Item::new(
             pid.clone(),
-            json!({"type": "start", "code": "import time; time.sleep(30)"}),
+            py_start(&py, "import time; time.sleep(30)", false),
         )])
         .await
         .remove(0)
@@ -409,7 +393,7 @@ async fn stop_sigkills_the_job() {
 
 /// The vendored copy must be byte-identical to python's. A copy without this test
 /// is worse than no copy: drift would surface as a program that runs on one kernel
-/// and mysteriously fails on another, which is the hardest class of bug to trace.
+/// and mysteriously fails on another.
 ///
 /// Skips (loudly) when the python tree is absent — the container's rust stage copies
 /// only `src/lib/rust/`. CI checks out the whole repo, so it runs there.
@@ -438,13 +422,11 @@ fn connector_matches_python_source() {
 }
 
 /// Runs everywhere, including a rust-only checkout where the test above skips.
-/// Catches a corrupted or truncated vendor.
 #[test]
 fn connector_carries_the_wire_contract() {
     for needle in [
         "FANTASTIC_CTRL_FD",
         "FANTASTIC_SELF_ID",
-        "FANTASTIC_ARGS",
         "_st.pack(\">I\"",
         "_o._exit(0)",
     ] {
@@ -458,23 +440,18 @@ fn connector_carries_the_wire_contract() {
 // ─── the control-socket handoff ─────────────────────────────────
 
 /// THE decisive test for the durable design: does the control socket actually reach
-/// the child at the advertised number? Everything else — relay, inbox, self-reap —
-/// is built on this one fact.
-///
-/// Deliberately does NOT go through the bundle: it drives `spawn_job` directly, so a
-/// failure points at the fd handoff and nothing else.
+/// the child at the advertised number? `spawn_job` now takes the per-call env block
+/// (no `FANTASTIC_ARGS`), so this drives it directly with an empty env.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_child_receives_the_control_socket_on_the_advertised_fd() {
     let Some(py) = find_real_python() else {
         eprintln!("skipping: no python3");
         return;
     };
-    // The child reports what it sees. `S_IFSOCK` proves it is OUR socket and not some
-    // inherited pipe that happened to land on the same number.
     let code = r#"
 import os, stat
 fd = int(os.environ["FANTASTIC_CTRL_FD"])
-print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ["FANTASTIC_SELF_ID"], "args", os.environ["FANTASTIC_ARGS"])
+print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ["FANTASTIC_SELF_ID"], "env", os.environ.get("MYVAR"))
 "#;
     let argv = vec![
         py.to_string_lossy().to_string(),
@@ -482,7 +459,9 @@ print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ[
         "-c".to_string(),
         code.to_string(),
     ];
-    let sp = crate::spawn::spawn_job(&argv, "owner_agent", r#"{"n":41}"#, None).expect("spawn");
+    let mut env = Map::new();
+    env.insert("MYVAR".to_string(), json!("hello"));
+    let sp = crate::spawn::spawn_job(&argv, "owner_agent", &env, None).expect("spawn");
     let out = sp.child.wait_with_output().await.expect("wait");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -494,34 +473,28 @@ print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ[
         "self_id not delivered: {text}"
     );
     assert!(
-        text.contains(r#"args {"n":41}"#),
-        "args not delivered: {text}"
+        text.contains("env hello"),
+        "per-call env not delivered: {text}"
     );
 }
 
 /// The connector's lifeline: when the parent drops the control socket the child must
-/// reap ITSELF (`_o._exit(0)`), even parked forever. This is what stops a dying kernel
-/// leaving orphaned tools behind — and it only works because `spawn_job` drops the
-/// parent's copy of the child end.
+/// reap ITSELF (`_o._exit(0)`), even parked forever. The program includes the
+/// connector in its own source, exactly as a parked durable tool would.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_child_self_reaps_when_the_control_socket_closes() {
     let Some(py) = find_real_python() else {
         eprintln!("skipping: no python3");
         return;
     };
-    // The self-reap lives in the CONNECTOR (its reader thread sees EOF and
-    // `_o._exit(0)`s) — so this program takes the python shim, exactly as a
-    // parked durable tool would.
-    let code = "import threading\nthreading.Event().wait()\n";
-    let program = apply_shim(Some("python"), code).unwrap();
+    let program = format!("{CONNECTOR_SRC}\nimport threading\nthreading.Event().wait()\n");
     let argv = vec![
         py.to_string_lossy().to_string(),
         "-u".to_string(),
         "-c".to_string(),
         program,
     ];
-    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", "{}", None).expect("spawn");
-    // Parked. Nothing has killed it.
+    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), None).expect("spawn");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         sp.child.try_wait().expect("try_wait").is_none(),
@@ -561,11 +534,11 @@ async fn until(
     None
 }
 
-/// `start` returns AT ONCE — that is the contract. A blocking start would be the
-/// retired run-and-wait verb, back under a new name.
+/// `start` returns AT ONCE — that is the contract. It also RECORDS what ran:
+/// `command`/`args` surface in `status` so a caller can re-issue verbatim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn start_returns_a_job_id_immediately() {
-    let Some(_py) = find_real_python() else {
+async fn start_returns_a_job_id_immediately_and_records_the_invocation() {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -574,7 +547,7 @@ async fn start_returns_a_job_id_immediately() {
     let r = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "start", "code": "import time; time.sleep(30)"}),
+            py_start(&py, "import time; time.sleep(30)", false),
         )])
         .await
         .remove(0)
@@ -582,6 +555,13 @@ async fn start_returns_a_job_id_immediately() {
     assert!(r["job_id"].is_string(), "no job_id: {r}");
     assert_eq!(r["status"], "running");
     assert!(t0.elapsed() < Duration::from_secs(5), "start blocked");
+    let st = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["jobs"][0]["command"], json!(py.to_string_lossy()));
+    assert_eq!(st["jobs"][0]["args"][0], json!("-u"));
     let _ = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
@@ -592,7 +572,7 @@ async fn start_returns_a_job_id_immediately() {
 /// One `progress` per line, and `n` is ONE sequence across stdout AND stderr.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn progress_streams_per_line_with_a_shared_counter() {
-    let Some(_py) = find_real_python() else {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -601,8 +581,11 @@ async fn progress_streams_per_line_with_a_shared_counter() {
     let _ = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "start", "code":
-                "import sys\nprint('o1')\nprint('e1', file=sys.stderr)\nprint('o2')\n"}),
+            py_start(
+                &py,
+                "import sys\nprint('o1')\nprint('e1', file=sys.stderr)\nprint('o2')\n",
+                false,
+            ),
         )])
         .await
         .remove(0)
@@ -615,11 +598,11 @@ async fn progress_streams_per_line_with_a_shared_counter() {
     assert!(done["stderr"].as_str().unwrap().contains("e1"));
 }
 
-/// The connector round-trip: the program reaches ANOTHER agent by id and gets a reply.
-/// This is the whole point of the control socket.
+/// The connector round-trip: a program that includes the wire client reaches ANOTHER
+/// agent by id and gets a reply. This is the whole point of the control socket.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_program_can_send_to_another_agent_and_read_the_reply() {
-    let Some(_py) = find_real_python() else {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
@@ -628,8 +611,11 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     let _ = kernel
         .send(vec![Item::new(
             a.clone(),
-            json!({"type": "start", "code":
-                "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n"}),
+            py_start(
+                &py,
+                "r = kernel.send('core', {'type': 'reflect'})\nprint('GOT', r.get('id'))\n",
+                true,
+            ),
         )])
         .await
         .remove(0)
@@ -643,42 +629,16 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
     );
 }
 
-/// `kernel.args` — this call's arguments, not something baked into the code.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn per_call_args_reach_the_program() {
-    let Some(_py) = find_real_python() else {
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, a) = mk_kernel(&tmp).await;
-    let mut rx = inbox(&kernel, &a);
-    let _ = kernel
-        .send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "code": "print('N', kernel.args['n'] + 1)",
-                   "args": {"n": 41}}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let done = until(&mut rx, |v| v["type"] == "job_done", 20)
-        .await
-        .expect("no job_done");
-    assert!(done["stdout"].as_str().unwrap().contains("N 42"), "{done}");
-}
-
 /// An unknown verb is MAIL for the running program, ACKed `{queued:true}` — and
 /// delivered exactly once (the fanout already did it; re-emitting would double it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_verb_is_queued_to_the_running_program() {
-    let Some(_py) = find_real_python() else {
+    let Some(py) = find_real_python() else {
         return;
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
-    // RAW string: a `\`-continued Rust literal strips the next line's leading
-    // whitespace, which silently destroys Python indentation.
     let code = r#"
 import threading
 seen = []
@@ -690,10 +650,7 @@ kernel.on_message(_on)
 threading.Event().wait()
 "#;
     let _ = kernel
-        .send(vec![Item::new(
-            a.clone(),
-            json!({"type": "start", "code": code}),
-        )])
+        .send(vec![Item::new(a.clone(), py_start(&py, code, true))])
         .await
         .remove(0)
         .result;
@@ -729,33 +686,4 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
         r["error"].as_str().unwrap_or("").contains("no running job"),
         "{r}"
     );
-}
-
-#[tokio::test]
-async fn code_may_be_a_list_of_lines() {
-    // A program written as ONE JSON string is the most fragile thing a model
-    // emits: every newline is an escape, every inner quote another, and one
-    // missed `\"` swallows the rest of the object. A list makes newlines the
-    // array structure instead — measured need, from a probe that burned three
-    // consecutive turns losing a closing quote.
-    assert_eq!(
-        lines_or_str(Some(&json!(["a", "b", "c"]))),
-        Some("a\nb\nc".to_string())
-    );
-}
-
-#[tokio::test]
-async fn a_plain_string_is_unchanged() {
-    assert_eq!(
-        lines_or_str(Some(&json!("x = 1"))),
-        Some("x = 1".to_string())
-    );
-}
-
-#[tokio::test]
-async fn a_bare_number_is_still_refused() {
-    // The list is the ONLY new shape. `42` is a mistake, not a one-line
-    // program, and stringifying it would spawn an interpreter on nonsense.
-    assert_eq!(lines_or_str(Some(&json!(42))), None);
-    assert_eq!(lines_or_str(None), None);
 }

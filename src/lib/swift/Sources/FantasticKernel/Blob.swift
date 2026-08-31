@@ -35,6 +35,16 @@ extension Kernel {
         await asBookkeeping { await self.send([Item(store, payload)])[0].result }
     }
 
+    /// The BINARY bookkeeping edge: a `write_stream`/`read_stream` to the store
+    /// over the raw-bytes channel (never base64), under operator authority. The
+    /// file_bridge string `read`/`write` verbs are GONE — a blob rides the stream
+    /// verbs like any other file (mirrors python `persist_blob`/`load_blob`).
+    func storeBookkeepingBinary(_ store: AgentId, _ header: JSON, _ blob: Data) async
+        -> (JSON, Data)
+    {
+        await asBookkeeping { await self.sendWithBinary(store, header, blob) }
+    }
+
     /// Run `body` as the KERNEL'S OWN BOOKKEEPING — the ONE definition of that
     /// scope, public because callers OUTSIDE the substrate (the AI core's
     /// `save_history`) do bookkeeping too.
@@ -153,10 +163,13 @@ extension Kernel {
         }
         // Operator authority: the loader writing to its OWN discovered store is
         // persistence bookkeeping, not the loader reaching out as an agent.
-        let reply = await storeBookkeeping(store, .object([
-                        "type": .string("write"), "path": .string(path),
-                        "content": .string(content),
-                    ]))
+        let (reply, _) = await storeBookkeepingBinary(
+            store,
+            .object([
+                "type": .string("write_stream"), "path": .string(path),
+                "truncate": .bool(true),
+            ]),
+            Data(content.utf8))
         if let err = reply["error"].asString {
             var out = Refusal.make(Refusal.transportError, "persist_blob: \(err)")
             // Carry the provider's own machine field + recipe through — a gate
@@ -184,14 +197,14 @@ extension Kernel {
         let r = resolveBlob("load_blob", payload)
         guard let ok = r.ok else { return r.refusal ?? .null }
         (store, path) = (ok.store, ok.path)
-        let reply = await storeBookkeeping(
-            store, .object(["type": .string("read"), "path": .string(path)]))
+        let (reply, body) = await storeBookkeepingBinary(
+            store, .object(["type": .string("read_stream"), "path": .string(path)]), Data())
         if reply["error"].asString != nil {
             return .object(["name": payload["name"], "content": .null])
         }
         return .object([
             "name": payload["name"],
-            "content": reply["content"].asString.map { JSON.string($0) } ?? .null,
+            "content": String(data: body, encoding: .utf8).map { JSON.string($0) } ?? .null,
         ])
     }
 
@@ -206,12 +219,13 @@ extension Kernel {
         if storage.isInMemory { return }
         guard let store = findStore() else { return }
         let doc = ledger.settledSnapshot().serialize()
-        _ = await storeBookkeeping(
+        _ = await storeBookkeepingBinary(
             store,
             .object([
-                "type": .string("write"), "path": .string(ledgerBlob),
-                "content": .string(doc),
-            ]))
+                "type": .string("write_stream"), "path": .string(ledgerBlob),
+                "truncate": .bool(true),
+            ]),
+            Data(doc.utf8))
     }
 
     /// Restore settled executions at boot, so dedup holds across a restart: a
@@ -224,9 +238,9 @@ extension Kernel {
     @discardableResult
     public func rehydrateLedger() async -> Int {
         guard let store = findStore() else { return 0 }
-        let reply = await storeBookkeeping(
-            store, .object(["type": .string("read"), "path": .string(ledgerBlob)]))
-        guard let text = reply["content"].asString, !text.isEmpty else { return 0 }
+        let (_, body) = await storeBookkeepingBinary(
+            store, .object(["type": .string("read_stream"), "path": .string(ledgerBlob)]), Data())
+        guard let text = String(data: body, encoding: .utf8), !text.isEmpty else { return 0 }
         guard let doc = try? JSON.parse(text) else {
             print("  [ledger] \(ledgerBlob) unreadable, starting empty")
             return 0

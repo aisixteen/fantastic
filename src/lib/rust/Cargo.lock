@@ -369,6 +369,7 @@ dependencies = [
  "fantastic-bridge",
  "fantastic-cli-bundle",
  "fantastic-core",
+ "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -384,7 +385,6 @@ dependencies = [
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",
- "fantastic-yaml-state",
  "serde_json",
  "tempfile",
  "tokio",
@@ -411,6 +411,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-durable-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-file",
+ "fantastic-kernel",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-exec-bridge"
 version = "0.1.0"
 dependencies = [
@@ -420,6 +434,7 @@ dependencies = [
  "fantastic-kernel",
  "libc",
  "nix 0.29.0",
+ "regex",
  "serde_json",
  "tempfile",
  "tokio",
@@ -431,7 +446,6 @@ name = "fantastic-file"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64",
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
@@ -553,10 +567,10 @@ name = "fantastic-static-loader"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
- "fantastic-yaml-state",
  "serde_json",
  "serde_yaml",
  "tempfile",
@@ -628,19 +642,6 @@ dependencies = [
  "async-trait",
  "fantastic-kernel",
  "serde_json",
-]
-
-[[package]]
-name = "fantastic-yaml-state"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-kernel",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

@@ -13,6 +13,9 @@ import OrderedCollections
 /// double-encoded (stringified) arguments. Returns nil on unparseable JSON.
 func parseOne(_ inner: String) -> ToolCall? {
     let trimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+    // send_binary carries a RAW program in `bytes` (no escaping) — read it as a
+    // string rather than forcing it through the JSON parser. See `sendBinaryRaw`.
+    if let sb = sendBinaryRaw(trimmed) { return sb }
     let bytes = Data(trimmed.utf8)
     // ONE parse, not two. Python tries `json.loads` first and only then
     // `JSONDecoder().raw_decode`; `parsePrefix` IS `raw_decode` and subsumes
@@ -127,4 +130,48 @@ private func recoverStrayTail(_ rest: String) -> OrderedDictionary<String, JSON>
     while body.hasPrefix(",") { body.removeFirst() }
     while body.hasSuffix("}") { body.removeLast() }
     return (try? JSON.parse("{" + body + "}"))?.asObject
+}
+
+/// The `"bytes":"` opener — the raw-program field of a `send_binary` envelope.
+private let sbBytesRegex = try! NSRegularExpression(pattern: "\"bytes\"\\s*:\\s*\"")
+
+/// `send_binary` whose `bytes` field is a program that must NOT be JSON-escaped.
+///
+/// Ported from python `ai_core/tool_parse.py` `_send_binary_raw`. `json.loads`
+/// demands every quote/newline/backslash be escaped, which a model cannot do
+/// reliably on a big program — but the PROGRAM is a string we READ, not data we
+/// parse. So we lift `bytes` out RAW: everything from `"bytes":"` to the final
+/// `"` in the envelope is the program VERBATIM (no unescaping), and only the
+/// STRUCTURE around it is JSON-parsed. `bytes` must be the LAST field (nothing
+/// but closing braces after its value) so its end is unambiguous — the whole
+/// contract. Run FIRST in `parseOne`.
+func sendBinaryRaw(_ inner: String) -> ToolCall? {
+    guard inner.contains("\"send_binary\"") else { return nil }
+    let ns = inner as NSString
+    guard
+        let m = sbBytesRegex.firstMatch(
+            in: inner, range: NSRange(location: 0, length: ns.length))
+    else { return nil }
+    let valStart = m.range.location + m.range.length  // first char of the raw program
+    // bytes is LAST, so its closing quote is the last quote in the envelope.
+    let valEnd = ns.range(of: "\"", options: .backwards).location
+    if valEnd == NSNotFound || valEnd <= valStart { return nil }
+    let raw = ns.substring(with: NSRange(location: valStart, length: valEnd - valStart))
+    // Re-close the JSON with an EMPTY bytes value → a well-formed object we can
+    // parse for the structure (name, target_id, payload metadata) without
+    // touching `raw`.
+    let skeleton = ns.substring(to: valStart) + ns.substring(from: valEnd)
+    guard let obj = (try? JSON.parse(skeleton))?.asObject,
+        obj["name"]?.asString == "send_binary",
+        var args = obj["arguments"]?.asObject
+    else { return nil }
+    // Reinsert the raw string. It lands in `payload` when that is an object
+    // (the common shape), else on `arguments` itself — mirroring python.
+    if case .object(var payload)? = args["payload"] {
+        payload["bytes"] = .string(raw)
+        args["payload"] = .object(payload)
+    } else {
+        args["bytes"] = .string(raw)
+    }
+    return ToolCall(id: mintCallId(), name: "send_binary", arguments: .object(args))
 }

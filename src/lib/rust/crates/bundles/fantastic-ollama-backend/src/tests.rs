@@ -214,7 +214,7 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
     // is proof the dispatch happened and not just that nothing crashed.
     let envelope = format!(
         "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"ff_{backend}\",\
-         \"payload\":{{\"type\":\"write\",\"path\":\"routed.txt\",\"content\":\"ok\"}},\
+         \"payload\":{{\"type\":\"mkdir\",\"path\":\"routed\"}},\
          \"reply_to\":null}}}}</tool_call>"
     );
     let body = ndjson_body(&[json!({"message": {"content": envelope}, "done": true})]);
@@ -236,7 +236,7 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
         .result;
     assert_eq!(reply["response"], envelope, "verbatim text: {reply:#?}");
 
-    let routed = tmp.path().join(".fantastic").join("routed.txt");
+    let routed = tmp.path().join(".fantastic").join("routed");
     for _ in 0..250 {
         if routed.exists() {
             break;
@@ -247,7 +247,6 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
         routed.exists(),
         "the envelope never dispatched: {routed:?} missing"
     );
-    assert_eq!(std::fs::read_to_string(&routed).unwrap(), "ok");
 }
 
 /// Join a decoded pass into the text ai-core would see.
