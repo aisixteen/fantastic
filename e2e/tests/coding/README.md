@@ -19,3 +19,4 @@ The byte surface is the `file_bridge` streams; the EDIT organ is the `text_file`
 | `multiline_edit` | `text_file.patch` (C2) | ONE patch, two hunks — one replacing a 3-line block — everything else byte-identical, no whole-file rewrite |
 | `cancel` | kernel `ps`+`cancel` over an `exec_bridge` job (C1) | find the in-flight job in the task table, kill it — the OS process must actually die |
 | `grant` | the two-sided call gate + the ask protocol (C5) | denied on ingress, ask the human, operator opens the edge, retry to done |
+| `multipatch` | the `patch` TRANSACTION (C2) | ONE call, `edits` across two files — coordinated rename, atomic, no half-applied state |

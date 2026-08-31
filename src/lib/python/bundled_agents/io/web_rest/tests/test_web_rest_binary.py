@@ -64,7 +64,9 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
             content=patch,
             headers={
                 "content-type": "application/octet-stream",
-                "X-Fantastic-Payload": json.dumps({"type": "patch", "path": "m.py"}),
+                "X-Fantastic-Payload": json.dumps(
+                    {"type": "patch", "edits": [{"path": "m.py", "hunks": 1}]}
+                ),
                 "X-Fantastic-Bytes-Field": "bytes",
             },
         )

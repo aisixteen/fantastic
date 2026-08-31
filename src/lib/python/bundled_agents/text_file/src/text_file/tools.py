@@ -227,9 +227,13 @@ async def _reflect(id, payload, kernel):
         "target_id": rec.get("target_id"),
         "patch_grammar": (
             "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
-            "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match the current "
+            "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
             "document EXACTLY ONCE; the patch rides as RAW bytes (real newlines, "
-            "nothing escaped — use send_binary with `bytes` LAST)"
+            "nothing escaped — use send_binary with `bytes` LAST). `patch` is a "
+            "TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one "
+            "file rides the array; the blob holds every edit's hunks "
+            "concatenated in `edits` order, split by the per-edit `hunks` "
+            "count; any failure anywhere writes nothing"
         ),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
@@ -376,16 +380,16 @@ def _parse_hunks(text: str) -> list[tuple[str, str]]:
 
 
 async def _patch(id, payload, kernel):
-    """args: path:str (req), bytes:bytes (req — the utf-8 patch, raw), on:str?, if_match:str?, dry_run:bool?, checkpoint:bool? — SEARCH/REPLACE blocks, each matching EXACTLY ONCE; all-or-nothing; {path, patched:true, hunks, size, version, ckpt_id?}."""
+    """args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."""
     fb = _target(id, payload, kernel)
     if not fb:
         return _unwired("patch")
-    path = payload.get("path", "")
-    if not path:
-        return missing("patch", "path")
+    edits = payload.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return missing("patch", "edits (a list of {path, hunks, if_match?})")
     data = payload.get("bytes")
     if not isinstance(data, (bytes, bytearray)) or not data:
-        return missing("patch", "bytes (the utf-8 patch)")
+        return missing("patch", "bytes (the utf-8 patch — all hunks, in edits order)")
     try:
         patch = bytes(data).decode("utf-8")
     except UnicodeDecodeError:
@@ -400,62 +404,152 @@ async def _patch(id, payload, kernel):
             "bytes",
             "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
         )
-    raw, err = await _read_all(kernel, fb, path)
-    if err is not None:
-        return err
-    if payload.get("if_match") is not None and _version(raw) != payload["if_match"]:
-        return {
-            "error": "version mismatch — the document changed since you read it",
-            "reason": "version_mismatch",
-            "expected": payload["if_match"],
-            "actual": _version(raw),
-        }
-    try:
-        working = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return bad("patch", "path", "a utf-8 text file")
-    # Apply against the EVOLVING content; each SEARCH must be unique at its turn.
-    # Stop at the first failure and write NOTHING (all-or-nothing).
-    for idx, (search, replace) in enumerate(hunks):
-        hits = working.count(search)
-        if hits != 1:
-            reason = "no_match" if hits == 0 else "ambiguous"
-            detail = (
-                "search text not found"
-                if hits == 0
-                else f"search text matches {hits} places"
+    # ── address the one hunk stream: split by per-edit counts ──
+    plan: list[dict] = []
+    cursor = 0
+    for i, e in enumerate(edits):
+        if (
+            not isinstance(e, dict)
+            or not isinstance(e.get("path"), str)
+            or not e["path"]
+        ):
+            return bad("patch", "edits", f"edit {i}: an object with a `path`")
+        n = e.get("hunks")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            return bad(
+                "patch", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)"
             )
-            return {
-                "error": "a hunk did not apply — nothing written",
-                "reason": reason,
-                "failed": [{"index": idx, "reason": detail}],
+        plan.append(
+            {
+                "path": e["path"],
+                "hunks": hunks[cursor : cursor + n],
+                "if_match": e.get("if_match"),
             }
-        working = working.replace(search, replace, 1)
-    new = working.encode("utf-8")
-    if payload.get("dry_run"):
-        return {
-            "path": path,
-            "dry_run": True,
-            "hunks": len(hunks),
-            "version": _version(raw),
-        }
-    ckpt_id = None
-    if payload.get("checkpoint"):
-        ckpt_id, err = await _take_checkpoint(kernel, fb, path)
+        )
+        cursor += n
+    if cursor != len(hunks):
+        return bad(
+            "patch",
+            "edits",
+            f"hunk counts that sum to the blob's blocks — edits claim {cursor}, "
+            f"the patch holds {len(hunks)}",
+        )
+    # ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
+    for e in plan:
+        raw, err = await _read_all(kernel, fb, e["path"])
         if err is not None:
             return err
-    if err := await _write_atomic(kernel, fb, path, new):
-        return err
+        if e["if_match"] is not None and _version(raw) != e["if_match"]:
+            return {
+                "error": "version mismatch — the document changed since you read it",
+                "reason": "version_mismatch",
+                "path": e["path"],
+                "expected": e["if_match"],
+                "actual": _version(raw),
+            }
+        try:
+            working = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return bad("patch", "edits", f"{e['path']!r}: a utf-8 text file")
+        for idx, (search, replace) in enumerate(e["hunks"]):
+            hits = working.count(search)
+            if hits != 1:
+                reason = "no_match" if hits == 0 else "ambiguous"
+                detail = (
+                    "search text not found"
+                    if hits == 0
+                    else f"search text matches {hits} places"
+                )
+                return {
+                    "error": "a hunk did not apply — nothing written",
+                    "reason": reason,
+                    "failed": [{"path": e["path"], "index": idx, "reason": detail}],
+                }
+            working = working.replace(search, replace, 1)
+        e["new"] = working.encode("utf-8")
+    if payload.get("dry_run"):
+        return {
+            "dry_run": True,
+            "edits": [{"path": e["path"], "hunks": len(e["hunks"])} for e in plan],
+        }
+    # ── CHECKPOINT ALL, then APPLY ALL; a mid-apply failure restores ──
+    # everything already written from its pre-image. Pre-images are ALWAYS
+    # taken (they ARE the rollback); `checkpoint:true` only KEEPS them.
+    ckpts: list[tuple[str, str]] = []
+    for e in plan:
+        ckpt_id, err = await _take_checkpoint(kernel, fb, e["path"])
+        if err is not None:
+            return err
+        ckpts.append((e["path"], ckpt_id))
+    written: list[tuple[str, str]] = []
+    for e, (_, ckpt_id) in zip(plan, ckpts):
+        err = await _write_atomic(kernel, fb, e["path"], e["new"])
+        if err is not None:
+            # ROLL BACK what already landed — the pre-images were committed
+            # before the first write, so every restore has a source.
+            for path, ck in written:
+                await _restore_from(kernel, fb, path, ck)
+            err = dict(err) if isinstance(err, dict) else {"error": str(err)}
+            err["restored"] = [p for p, _ in written]
+            err["failed_path"] = e["path"]
+            return err
+        written.append((e["path"], ckpt_id))
     out = {
-        "path": path,
         "patched": True,
-        "hunks": len(hunks),
-        "size": len(new),
-        "version": _version(new),
+        "edits": [
+            {
+                "path": e["path"],
+                "hunks": len(e["hunks"]),
+                "size": len(e["new"]),
+                "version": _version(e["new"]),
+            }
+            for e in plan
+        ],
     }
-    if ckpt_id:
-        out["ckpt_id"] = ckpt_id
+    if payload.get("checkpoint"):
+        out["ckpt_ids"] = [{"path": p, "ckpt_id": c} for p, c in ckpts]
+    else:
+        for path, ck in ckpts:
+            await _drop_quiet(kernel, fb, path, ck)
     return out
+
+
+async def _restore_from(kernel, fb: str, path: str, ckpt_id: str) -> None:
+    """Rollback arm of the patch transaction: put the pre-image back (or delete
+    a file that did not exist). Best-effort by design — it runs INSIDE a failure
+    path that is already being reported."""
+    src = _ckpt_path(path, ckpt_id)
+    absent = (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "read_stream",
+                        "path": src + ".absent",
+                        "offset": 0,
+                        "length": 1,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    if isinstance(absent, dict) and not absent.get("error"):
+        await kernel.send([{"target": fb, "payload": {"type": "delete", "path": path}}])
+        return
+    data, err = await _read_all(kernel, fb, src)
+    if err is None:
+        await _write_atomic(kernel, fb, path, data)
+
+
+async def _drop_quiet(kernel, fb: str, path: str, ckpt_id: str) -> None:
+    """Self-cleaning arm: a COMMITTED transaction discards its pre-images (the
+    caller opted out of keeping them with `checkpoint` unset)."""
+    src = _ckpt_path(path, ckpt_id)
+    await kernel.send([{"target": fb, "payload": {"type": "delete", "path": src}}])
+    await kernel.send(
+        [{"target": fb, "payload": {"type": "delete", "path": src + ".absent"}}]
+    )
 
 
 # ─── checkpoints (on demand; pre-images as plain files) ─────────
