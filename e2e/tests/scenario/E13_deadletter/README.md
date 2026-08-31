@@ -19,7 +19,7 @@ The roster names a ROLE; each runner supplies whatever its kernel has:
 
 | role | python | js | rust | swift |
 |---|---|---|---|---|
-| `kv_store` | `durable_memory` bundle | in-process handler | `yaml_state` bundle | `yaml_state` bundle |
+| `memory` | `text_file` bundle | in-process handler | pending text_file port | pending text_file port |
 | `flaky_plant` | in-process handler | in-process handler | **none — skipped** | **none — skipped** |
 | `render_sink` | `cli` | — | `cli` bundle | `cli` bundle |
 

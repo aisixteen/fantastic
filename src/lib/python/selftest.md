@@ -134,7 +134,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/io/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
 | `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, history.jsonl, file_bridge_id failfast |
 | `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
-| `bundled_agents/durable_memory/selftest.md` | kernel, persistence | modeless durable memory agent — set/read/append/keys/delete, persists through file_bridge_id (failfast until wired), disk-is-truth, cascade cleanup |
+| `bundled_agents/text_file/selftest.md` | kernel, persistence | stateless text-document agent — read/write/patch/append over a gated file leg, on-demand version+if_match, checkpoint/restore, unwired failfast |
 | `bundled_agents/terminal/selftest.md` | kernel, pty | PTY spawn, shell done-token, timeout recovery |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/ai/nvidia/nvidia_nim_backend/selftest.md` | kernel, ai, persistence, http | NVIDIA NIM (OpenAI-compatible); api_key sidecar; rate-limit retry; live single-shot |

@@ -42,4 +42,4 @@ loaders:
           handler_module: exec_bridge.tools
         # Persistence is a capability nobody wired (see the note above).
         - id: memory
-          handler_module: durable_memory.tools
+          handler_module: text_file.tools

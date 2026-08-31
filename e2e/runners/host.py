@@ -5,7 +5,7 @@ assertions, different substrate. Which kernel is a PLUG — `KERNEL=rust` or
 `KERNEL=swift` — exactly as the model is a plug in `backends/`.
 
 ROLES, NOT BUNDLE NAMES. A compiled kernel runs only what is compiled into it,
-so `kv_store` is `durable_memory` here while js registers a handler in
+so `memory` is `text_file` here while js registers a handler in
 process. The scenario declares the role; each runner supplies the implementation
 it has. That is what lets one scenario be shared across four kernels rather than
 copied four times — and a role with no shipped equivalent is refused BY NAME,
@@ -35,7 +35,7 @@ REPO = E2E.parent
 #: bespoke verbs — python and js register them in process; a compiled kernel
 #: would need a probe bundle compiled in. That is a REAL boundary.
 ROLE_BUNDLE = {
-    "kv_store": "durable_memory.tools",
+    "memory": "text_file.tools",
     "render_sink": "cli.tools",
     "compute": "exec_bridge.tools",
     # STATEFUL FIXTURES. TEST-ONLY on every runtime, and gated so a default
@@ -141,25 +141,36 @@ def main(scenario_id: str) -> int:
     # Every id the driver will need to call, declared BEFORE boot — authority
     # flows from above, and `rest` may not raise its own (see driver docstring).
     reach = ["store", "ai", *[e["id"] for e in roster]]
-    k = HostKernel(spec, Path(tempfile.mkdtemp(prefix=f"{rt}_{scenario_id}_")),
-                   reach=reach).boot()
+    k = HostKernel(
+        spec, Path(tempfile.mkdtemp(prefix=f"{rt}_{scenario_id}_")), reach=reach
+    ).boot()
     try:
         print("=" * 74)
         print(f"  {rt.upper()} kernel  ·  {model}  ·  {sc['title']}  ·  :{k.port}")
         print("=" * 74)
 
-        store = k.create(parent_id=k.root_id, id="store",
-                         handler_module="file_bridge.tools",
-                         root=".fantastic", ingress_rule="allow_all_ingress",
-                         callable_by={**BASE, "rest": "*", "ai": "*"})
+        kv_ids = [e["id"] for e in roster if e["role"] == "memory"]
+        store = k.create(
+            parent_id=k.root_id,
+            id="store",
+            handler_module="file_bridge.tools",
+            root=".fantastic",
+            ingress_rule="allow_all_ingress",
+            callable_by={**BASE, "rest": "*", "ai": "*", **{i: "*" for i in kv_ids}},
+        )
         assert store.get("id"), store
 
         for entry in roster:
-            meta = {"parent_id": k.root_id, "id": entry["id"],
-                    "handler_module": ROLE_BUNDLE[entry["role"]],
-                    "callable_by": {**BASE, "rest": "*", "ai": "*"}}
-            if entry["role"] == "kv_store":
-                meta["file_bridge_id"] = store["id"]
+            meta = {
+                "parent_id": k.root_id,
+                "id": entry["id"],
+                "handler_module": ROLE_BUNDLE[entry["role"]],
+                "callable_by": {**BASE, "rest": "*", "ai": "*"},
+            }
+            if entry["role"] == "memory":
+                # The text editor writes THROUGH the store — both gate halves.
+                meta["target_id"] = store["id"]
+                meta["can_call"] = {store["id"]: "*"}
             if entry["role"] == "compute":
                 # The COMMAND allowlist is the only gate — regexes over the
                 # full command line; the runner permits its own python.
@@ -171,15 +182,20 @@ def main(scenario_id: str) -> int:
         can_call = {**BASE, store["id"]: "*"}
         for peer in (sc.get("grants") or {}).get("ai_can_call", []):
             can_call[peer] = "*"
-        ai = k.create(parent_id=k.root_id, id="ai",
-                      handler_module="anthropic_backend.tools",
-                      # VERBATIM on every runtime now — `endpoint` is the URL.
-                      # This used to strip `/messages` because rust and swift
-                      # appended it while python did not.
-                      endpoint=endpoint, model=model,
-                      file_bridge_id=store["id"],
-                      max_tokens=int(limits.get("max_tokens", 4096)),
-                      can_call=can_call, callable_by={**BASE, "rest": "*"})
+        ai = k.create(
+            parent_id=k.root_id,
+            id="ai",
+            handler_module="anthropic_backend.tools",
+            # VERBATIM on every runtime now — `endpoint` is the URL.
+            # This used to strip `/messages` because rust and swift
+            # appended it while python did not.
+            endpoint=endpoint,
+            model=model,
+            file_bridge_id=store["id"],
+            max_tokens=int(limits.get("max_tokens", 4096)),
+            can_call=can_call,
+            callable_by={**BASE, "rest": "*"},
+        )
         assert ai.get("id"), ai
         # NOTHING TO DELIVER. Every backend reads its key from the ENVIRONMENT,
         # and the kernel was spawned with this process's env — so the key is
@@ -206,7 +222,9 @@ def main(scenario_id: str) -> int:
             action, waited = None, time.monotonic() + 60
             while action is None and time.monotonic() < waited:
                 h = k.send("ai", {"type": "history", "client_id": "probe"})
-                for m in reversed((h.get("messages") or []) if isinstance(h, dict) else []):
+                for m in reversed(
+                    (h.get("messages") or []) if isinstance(h, dict) else []
+                ):
                     if m.get("role") == "assistant":
                         action = _extract_action(str(m.get("content") or ""))
                         if action:
@@ -216,15 +234,21 @@ def main(scenario_id: str) -> int:
             print(f"\n  proposal: {action}")
             if action and action.get("target") and action.get("id"):
                 for _ in range(2):
-                    pressed = k.send(action["target"], action.get("payload") or {},
-                                     exec_id=action["id"])
-                print(f"  pressed twice with id {action['id']!r} -> {str(pressed)[:200]}")
+                    pressed = k.send(
+                        action["target"],
+                        action.get("payload") or {},
+                        exec_id=action["id"],
+                    )
+                print(
+                    f"  pressed twice with id {action['id']!r} -> {str(pressed)[:200]}"
+                )
 
         # WAIT FOR THE CHAIN. The router runs detached, so `send` returns after
         # one pass and the work carries on. Poll the thing the scenario calls
         # falsifiable — never the model's prose.
         deadline = time.monotonic() + float(
-            os.environ.get("IDLE", limits.get("idle_seconds", 100)))
+            os.environ.get("IDLE", limits.get("idle_seconds", 100))
+        )
         ok, seen, answered = False, {}, set()
         while time.monotonic() < deadline:
             # The model asked the human — answer so the chain RESUMES (once per
@@ -237,9 +261,14 @@ def main(scenario_id: str) -> int:
                         rid = str(q.get("request_id") or q.get("question") or "q")
                         if rid not in answered:
                             answered.add(rid)
-                            k.send("ai", {"type": "send",
-                                          "text": DEFAULT_QUESTION_ANSWER,
-                                          "client_id": "probe"})
+                            k.send(
+                                "ai",
+                                {
+                                    "type": "send",
+                                    "text": DEFAULT_QUESTION_ANSWER,
+                                    "client_id": "probe",
+                                },
+                            )
                     break
             ok = True
             for check in sc.get("expect") or []:
@@ -248,8 +277,9 @@ def main(scenario_id: str) -> int:
                     # press was harmless — measured on the desk's own tally by
                     # the `side_effects` check the scenario pairs with this one,
                     # so all that is required here is that a press happened.
-                    if pressed is None or (isinstance(pressed, dict)
-                                           and pressed.get("error")):
+                    if pressed is None or (
+                        isinstance(pressed, dict) and pressed.get("error")
+                    ):
                         ok = False
                     continue
                 if "side_effects" in check:
@@ -261,17 +291,22 @@ def main(scenario_id: str) -> int:
                     got = k.send(q["agent"], {"type": "count"})
                     n = got.get("count") if isinstance(got, dict) else None
                     seen[q["agent"]] = got
-                    if n is None:
-                        ok = False
-                    elif "exactly" in q and n != q["exactly"]:
-                        ok = False
-                    elif "at_least" in q and n < q["at_least"]:
+                    if (
+                        n is None
+                        or "exactly" in q
+                        and n != q["exactly"]
+                        or "at_least" in q
+                        and n < q["at_least"]
+                    ):
                         ok = False
                     continue
                 q = check["read"]
-                got = k.send(q["agent"], {"type": "read", "key": q["key"]})
+                # memory is FILES now: the scenario's `key` is the document
+                # path, and the value lives in the text_file `read` reply's
+                # lines — match against the whole reply, not a `value` field.
+                got = k.send(q["agent"], {"type": "read", "path": q["path"]})
                 seen[q["agent"]] = got
-                if check["contains"] not in str(got.get("value")):
+                if check["contains"] not in str(got):
                     ok = False
             if ok:
                 break
@@ -284,7 +319,9 @@ def main(scenario_id: str) -> int:
         if isinstance(msgs, list):
             print(f"\n  --- {len(msgs)} turns ---")
             for m in msgs:
-                print(f"\n  {str(m.get('role','?')).upper()}: {str(m.get('content',''))[:700]}")
+                print(
+                    f"\n  {str(m.get('role', '?')).upper()}: {str(m.get('content', ''))[:700]}"
+                )
 
         for agent, got in seen.items():
             print(f"\n  {agent}.read -> {got}")

@@ -1,0 +1,21 @@
+[project]
+name = "fantastic-text-file"
+version = "0.1.0"
+description = "Stateless text-document agent: read/write/patch/append + on-demand versioning and checkpoints, over a file_bridge agent's stream verbs."
+requires-python = ">=3.11"
+dependencies = []
+
+# No file_bridge IMPORT — every byte routes through the file_bridge AGENT named
+# by `on`/`target_id` at runtime, over read_stream/write_stream/rename/delete/
+# list. The clamp and the gate stay unbypassable because this package holds no
+# disk code at all.
+
+[project.entry-points."fantastic.bundles"]
+text_file = "text_file.tools"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/text_file"]

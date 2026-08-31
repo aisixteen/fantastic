@@ -50,9 +50,9 @@ async def _seed(kernel) -> None:
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "durable_memory.tools",
+                        "handler_module": "text_file.tools",
                         "id": "memory",
-                        "file_bridge_id": "store",
+                        "target_id": "store",
                         "callable_by": {"store": ["read"]},
                     },
                 }
@@ -116,7 +116,7 @@ async def test_a_checkpoint_carries_structure_grants_and_postures(kernel):
 
     assert recs["leaf"]["parent_id"] == "memory"  # depth, not flattened
     assert recs["store"]["ingress_rule"] == "allow_all_ingress"  # io posture
-    assert recs["memory"]["file_bridge_id"] == "store"  # weak binding by id
+    assert recs["memory"]["target_id"] == "store"  # weak binding by id
     assert "read" in recs["memory"]["callable_by"]["store"]  # ingress half
     assert recs["memory"]["can_call"]["$self"] == "*"  # the stamped baseline
 

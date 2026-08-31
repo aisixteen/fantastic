@@ -26,11 +26,11 @@ from pathlib import Path
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import verdict  # noqa: E402
-from backends import backend as _resolve_backend  # noqa: E402
+from helpers import verdict
+
 sys.argv = [sys.argv[0]]
 
-from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402  — reuse fixture + scoring
+from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 
 PROG_FILE = "totaller_prog.py"
 
@@ -80,15 +80,15 @@ async def main():
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "durable_memory.tools",
+            "handler_module": "text_file.tools",
             "id": "monitor",
-            "file_bridge_id": store["id"],
+            "target_id": store["id"],
+            "can_call": {store["id"]: "*"},
             "description": "The sub-AI: owns the totalling job.",
         }}]))[0]["result"]
     # …with a COMMAND-RUNNER child under it (a compute worker the specialist owns).
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
-            "parent_id": root.id,
             "handler_module": P.EXEC_MODULE,
             "id": "totaller",
             "parent_id": "monitor",

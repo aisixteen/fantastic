@@ -1,21 +1,28 @@
-> Durable memory is just `durable_memory` agents you mount anywhere in the tree.
+> Durable memory is FILES — any format you choose, on a gated file surface.
 
-# Memory — durable state, as agents, everywhere
+# Memory — durable state as files, everywhere
 
-Memory here is just agents. A `durable_memory` agent is a key-value store you
-mount ANYWHERE in the tree: under the root for global memory, under any agent
-for that agent's own local memory — as many as you want, long- or short-term,
-plus component/UI state. It is modeless: one set of verbs serves facts to
-remember, current state, anything — the key names its purpose
-(`user.name`, `decision.db`).
+Memory here is not a special store: it is documents you write. The substrate
+imposes NO format — keep your memory as markdown, JSON, plain notes, source
+code, whatever fits the way you think. What makes it memory is only that you
+wrote it down and can find it again.
 
-For an LLM agent, the memory agents mounted under it are auto-loaded into its
-context on boot — you do not fetch memory, it is already present; you only
-`set` what's worth keeping, under a descriptive namespaced key. Mount one with
-`create_agent handler_module=durable_memory.tools`; `reflect readme=true` on it
-for the verb guide (read / keys / set / append / delete).
+Two agents carry it:
 
-`durable_memory` owns no disk surface of its own: it persists THROUGH a gated
-`file_bridge` referenced by `file_bridge_id`, over `write_stream`/`read_stream`
-— so it needs a wired store (`readme=persistence`), and fails loud until one is
-wired.
+- A `file_bridge` agent is the SURFACE — a directory served as an agent, gated
+  and clamped. Raw bytes ride its `read_stream`/`write_stream`.
+- A `text_file` agent is the EDITOR — line-numbered `read`, atomic `write`,
+  surgical `patch` (SEARCH/REPLACE blocks), `append`, and ON DEMAND a
+  `version` hash with an `if_match` guard, plus `checkpoint`/`restore` when a
+  change is worth a pre-image. Point it at any surface with `on:` (or its
+  `target_id` default).
+
+The practice: keep one file per concern, named for what it holds
+(`notes.md`, `decisions.md`, `state.json`). `append` for logs, `patch` for
+precise updates, `read` to recall. A fact worth keeping is a line you write;
+pruning is a patch that removes it. Structure is YOURS — a key-value shape, a
+diary, a table — the medium does not care.
+
+Wiring is the operator's, both ends as always: your `can_call` names the
+text_file agent and the surface; their `callable_by` accepts you. An unwired
+editor fails loud naming `target_id` — nothing persists silently.

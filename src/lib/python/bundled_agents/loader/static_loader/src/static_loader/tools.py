@@ -20,7 +20,7 @@ Manifest shape (`fantastic.yaml`):
 
     agents:
       - id: memory                     # explicit ids (idempotent across reboots)
-        handler_module: durable_memory.tools
+        handler_module: text_file.tools
       - id: worker
         handler_module: exec_bridge.tools
         allowed: ['python3 .*']

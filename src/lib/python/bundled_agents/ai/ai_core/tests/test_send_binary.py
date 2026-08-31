@@ -119,3 +119,47 @@ async def test_dispatch_encodes_the_raw_program_to_bytes():
     assert payload["bytes"] == prog.encode("utf-8"), "raw string encoded to real bytes"
     assert isinstance(payload["bytes"], bytes)
     assert payload["path"] == "main.py"
+
+
+def test_escaped_json_send_binary_decodes_its_escapes():
+    """A model that serializes the WHOLE call as strict JSON (escaped \\n in
+    `bytes`) must get real newlines — strict parse wins over the raw-tail path.
+    Measured 2026-08-31 (E44): the raw path kept the escapes literal and a
+    valid patch died on 'no blocks'."""
+    import json as _json
+
+    from ai_core.tool_parse import extract_tool_calls
+
+    inner = _json.dumps(
+        {
+            "name": "send_binary",
+            "arguments": {
+                "target_id": "editor",
+                "payload": {
+                    "type": "patch",
+                    "path": "config.txt",
+                    "checkpoint": True,
+                    "bytes": "<<<<<<< SEARCH\nport = 8080\n=======\nport = 9090\n>>>>>>> REPLACE\n",
+                },
+            },
+        }
+    )
+    calls = extract_tool_calls("<tool_call>" + inner + "</tool_call>")
+    assert len(calls) == 1
+    b = calls[0]["arguments"]["payload"]["bytes"]
+    assert "\n" in b and "\\n" not in b
+    assert b.startswith("<<<<<<< SEARCH\nport = 8080")
+
+
+def test_raw_unescaped_send_binary_still_rides_verbatim():
+    """The raw-tail contract is untouched: real newlines/quotes in `bytes`
+    (not valid JSON) still lift out verbatim."""
+    from ai_core.tool_parse import extract_tool_calls
+
+    inner = (
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"patch","path":"m.py","bytes":"line "one"\nline two"}}}'
+    )
+    calls = extract_tool_calls("<tool_call>" + inner + "</tool_call>")
+    assert len(calls) == 1
+    assert calls[0]["arguments"]["payload"]["bytes"] == 'line "one"\nline two'

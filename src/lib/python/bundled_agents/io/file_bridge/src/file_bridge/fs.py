@@ -9,7 +9,7 @@ it, because there is no other disk code to go around to.
 Who imports `fs` is DELIBERATELY narrow — the END STATE is the `file_bridge` AGENT (the
 gate) + the cold bootstrap ONLY; every other bundle does disk IO by `send`ing verbs to a
 gated file_bridge agent (referenced by `file_bridge_id`, opened on demand), so the
-deny-all gate is unbypassable too — not just the clamp. `durable_memory` / `scheduler` /
+deny-all gate is unbypassable too — not just the clamp. `text_file` / `scheduler` /
 `ai_core` already route this way (no `fs` import). `kernel_state` (boot-read), and the
 orchestration tools that reach OUTSIDE cwd (`terminal`) still import
 `fs` for now — the latter pending agent-routing once file_bridge agents accept an explicit

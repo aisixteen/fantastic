@@ -14,15 +14,20 @@ loaders:
           handler_module: file_bridge.tools
           root: .fantastic
           ingress_rule: allow_all_ingress
-        - id: memory
-          handler_module: durable_memory.tools
           callable_by:
-            worker: [set, read]
+            memory: ['*']
+        - id: memory
+          handler_module: text_file.tools
+          target_id: store
+          can_call:
+            store: ['*']
+          callable_by:
+            worker: [write, read]
         - id: worker
           handler_module: file_bridge.tools
           ingress_rule: allow_all_ingress
           can_call:
-            memory: [set, read]
+            memory: [write, read]
             quiet: [list]
         # `quiet` is reachable-looking and unreachable: worker's can_call names
         # it, quiet's callable_by does not name worker back.

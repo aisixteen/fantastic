@@ -70,7 +70,7 @@ def _deny(decision) -> JSONResponse:
 
 # ─── the binary leg ─────────────────────────────────────────────
 # JSON has no bytes type, so a verb whose payload (or reply) carries RAW bytes —
-# `patch_text_file`, `write_stream`, `read_stream` — rides an octet-stream body
+# `text_file.patch`, `write_stream`, `read_stream` — rides an octet-stream body
 # instead: the bytes ARE the body, the rest of the envelope is JSON on
 # `X-Fantastic-Payload`, and the one bytes-valued FIELD is named by
 # `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in both directions, never

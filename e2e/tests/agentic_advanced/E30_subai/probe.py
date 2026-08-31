@@ -39,25 +39,24 @@ the docs before authoring, planning language, and the final report.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import secrets
 import sys
 import time
-import tempfile
 from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import (  # noqa: E402
-    BASELINE, Limits, ProxyReader, Watch, distinct_calls, verdict,
+from backends import backend as _resolve_backend
+from helpers import (
+    Watch,
+    distinct_calls,
+    verdict,
 )
-from helpers.kernel import open_kernel  # noqa: E402
-from backends import backend as _resolve_backend  # noqa: E402
-
+from helpers.kernel import open_kernel
 
 # The probe runs in a fresh tmpdir, and the `.env` autoloader reads CWD — so a key in
 # the repo root would never be found. Load it here, before any chdir. Shell wins.
@@ -341,9 +340,10 @@ async def build_fixture(root, *, interpreter: str | None = None):
     (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "durable_memory.tools",
+            "handler_module": "text_file.tools",
             "id": "totals",
-            "file_bridge_id": store["id"],
+            "target_id": store["id"],
+            "can_call": {store["id"]: "*"},
             "callable_by": {"ai": "*", "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
@@ -416,7 +416,7 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
         `id in MINE` alone was not enough, measured 2026-08-07: the combined arm scored
         `agents_made=2` for a model that created NOTHING. The two were an arm's own
         fixture agent (arms now register theirs in MINE) and a chat store an AI backend
-        mounts for itself on first use. The chat store is a `durable_memory` agent whose
+        mounts for itself on first use. (Chat is a JSONL sidecar now, not an agent, so
         id is `<owner>_chat` (deterministic, id-based — there is no `mode` field any
         more); crediting the model with the backend's own bookkeeping is the
         harness-counts-its-own-furniture bug.
@@ -424,8 +424,7 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
         if node.get("id") in MINE:
             return True
         rid = str(node.get("id") or "")
-        r = records.get(node["id"], {})
-        return r.get("handler_module") == "durable_memory.tools" and rid.endswith("_chat")
+        return rid.endswith("_chat")  # historical guard; no such agents exist any more
 
     made = [n for n in nodes if not _fixture(n)]
 

@@ -2,9 +2,10 @@
 
 One organ, precisely: `grep` behind an exec_bridge allowlist. The token's value
 is minted at test time and hidden in a tree the model is never shown, so the
-answer CANNOT come from weights or from the task text — only from actually
-searching. Scored on the memory store + a transcript check that the searcher
-leg ran.
+answer CANNOT come from weights or from the task text — only by actually
+searching. Memory is FILES: the found value is recorded in `found.md` through
+the `text_file` editor. Scored on that file + a transcript check that the
+searcher leg ran.
 """
 
 from __future__ import annotations
@@ -27,16 +28,17 @@ from helpers import Limits, connect, drive, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-XID, MEM, STORE = "searcher", "notes", "kernel_store"
+XID, ED, STORE = "searcher", "notes", "kernel_store"
 
 TASK = (
     "Somewhere under the `src/` directory of this run's working dir, one file "
     "contains a line `SECRET_TOKEN=<value>`. You cannot read the tree "
     "directly — the command runner `searcher` is your search organ: reflect it, "
     "read its `allowed` commands, and use `grep` (start a job, then poll "
-    "{type:'status', job_id} for its stdout) to find that line. Store the "
-    "VALUE (just the value, not the whole line) in the memory agent `notes` "
-    "under the key 'token'. Then stop — a turn with no tool call ends your run."
+    "{type:'status', job_id} for its stdout) to find that line. Then, using "
+    "the text editor agent `notes`, write a file `found.md` whose content is "
+    "just the VALUE (not the whole line). Then stop — a turn with no tool "
+    "call ends your run."
 )
 
 
@@ -47,7 +49,7 @@ async def _call(root, target, payload):
 async def main():
     token = f"zx_{secrets.token_hex(4)}"  # minted NOW — unguessable
     root, core, close = await open_kernel(
-        prefix="coding_search_", reach=[XID, MEM, STORE, "ai", "cli"]
+        prefix="coding_search_", reach=[XID, ED, STORE, "ai", "cli"]
     )
     try:
         os.makedirs("src/sub", exist_ok=True)
@@ -62,14 +64,16 @@ async def main():
                 "handler_module": "file_bridge.tools",
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "callable_by": {ED: "*", "ai": "*", "rest": "*", "web": "*"},
             },
             {
                 "type": "create_agent",
                 "parent_id": root.id,
-                "id": MEM,
-                "handler_module": "durable_memory.tools",
-                "file_bridge_id": STORE,
+                "id": ED,
+                "handler_module": "text_file.tools",
+                "target_id": STORE,
+                "can_call": {STORE: "*"},
+                "description": "Text editor over this run's files.",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
@@ -90,7 +94,7 @@ async def main():
             root,
             core,
             BK,
-            can_call={XID: "*", MEM: "*", "cli": "*"},
+            can_call={XID: "*", ED: "*", "cli": "*", STORE: "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": STORE},
         )
@@ -98,13 +102,15 @@ async def main():
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 
-        val = ((await _call(root, MEM, {"type": "read", "key": "token"})) or {}).get(
-            "value"
-        )
+        content = ""
+        try:
+            content = Path("found.md").read_text()
+        except OSError:
+            pass
         checks = [
             (
-                "the minted value was found and stored",
-                isinstance(val, str) and val.strip() == token,
+                "the minted value was found and recorded",
+                token in content,
             ),
             (
                 "the search organ ran (grep on the leg)",
@@ -112,7 +118,7 @@ async def main():
             ),
         ]
         for name, ok in checks:
-            print(f"  [{'ok' if ok else 'XX'}] {name}  (want {token!r}, got {val!r})")
+            print(f"  [{'ok' if ok else 'XX'}] {name}  (want {token!r}, file {content!r})")
         allok = all(ok for _, ok in checks)
         verdict(
             allok,

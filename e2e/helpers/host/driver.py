@@ -18,7 +18,7 @@ THE ONE REMAINING LIMIT, stated rather than worked around:
     from the surface agent (`rest`) — an AGENT, gated, needing each target
     granted explicitly. There is no wildcard target token, by decision.
 
-Fixtures are NOT bespoke: `kv_store` is the shipped `yaml_state` and `compute`
+Fixtures are NOT bespoke: `memory` is the shipped `text_file` and `compute`
 the shipped `exec_bridge` on every runtime. The three stateful roles come from
 a TEST-ONLY probe bundle that a default build does not carry — a rust feature,
 a swift define, and a `PYTHONPATH` entry. A role with no implementation is

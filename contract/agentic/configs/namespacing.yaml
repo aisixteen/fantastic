@@ -23,16 +23,19 @@ loaders:
         # grandchild is not one of them. The defence is position, not a check of
         # the claimed id.
         - id: notes_a
-          handler_module: durable_memory.tools
-          # memory persists THROUGH its wing's own file leg — durable_memory has
-          # no fs and no loader path of its own.
-          file_bridge_id: space_a
+          handler_module: text_file.tools
+          # memory is FILES written THROUGH its wing's own file leg — text_file
+          # has no fs and no loader path of its own.
+          target_id: space_a
           can_call:
+            space_a: ['*']
             $root: [persist_blob]
         - id: space_a
           handler_module: file_bridge.tools
           root: rooms/a
           ingress_rule: allow_all_ingress
+          callable_by:
+            notes_a: ['*']
 
   # The mirror image of wing_a, one directory over. Nothing wires the two: no
   # `can_call` names anything across the wings, so every cross-wing probe below
@@ -42,9 +45,13 @@ loaders:
     manifest:
       agents:
         - id: notes_b
-          handler_module: durable_memory.tools
-          file_bridge_id: space_b
+          handler_module: text_file.tools
+          target_id: space_b
+          can_call:
+            space_b: ['*']
         - id: space_b
           handler_module: file_bridge.tools
           root: rooms/b
           ingress_rule: allow_all_ingress
+          callable_by:
+            notes_b: ['*']

@@ -40,12 +40,12 @@ def _call(verb_payload: dict) -> str:
         "<tool_call>"
         + json.dumps(
             {
-                "name": "send",
+                "name": "send_binary",
                 "arguments": {
                     "target_id": "c1_store",
                     "payload": verb_payload,
                     "reply_to": "self",
-                    "id": f"c1-{verb_payload['key']}",
+                    "id": f"c1-{verb_payload['path']}",
                 },
             }
         )
@@ -67,10 +67,10 @@ class _FakeProvider:
         last = messages[-1]["content"]
         if self.calls == 1:
             # step 1: a side effect, then next turn will hold its reply
-            yield _call({"type": "set", "key": "step1", "value": "done"})
+            yield _call({"type": "write", "path": "step1", "bytes": "done"})
         elif "green" in last and "[reply to" not in last:
             # THE RESUME TURN: the human's answer — continue exactly here
-            yield _call({"type": "set", "key": "step2", "value": "green-label"})
+            yield _call({"type": "write", "path": "step2", "bytes": "green-label"})
         elif "[reply to" in last:
             if "step2" in last:
                 yield "FINISHED."
@@ -84,10 +84,24 @@ class _FakeProvider:
 @pytest.fixture
 async def wired(seeded_kernel, store_agent):
     seeded_kernel.create(
-        "durable_memory.tools",
+        "text_file.tools",
         id="c1_store",
-        file_bridge_id=store_agent,
+        target_id=store_agent,
+        can_call={store_agent: "*"},
         callable_by={"c1_ai": "*"},
+    )
+    # the surface must ACCEPT the editor (two-sided gate)
+    await seeded_kernel.send(
+        [
+            {
+                "target": seeded_kernel.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": store_agent,
+                    "callable_by": {"c1_store": "*"},
+                },
+            }
+        ]
     )
     seeded_kernel.create(
         "ollama_backend.tools",
@@ -110,10 +124,12 @@ async def wired(seeded_kernel, store_agent):
 async def _value(kernel, key):
     r = (
         await kernel.send(
-            [{"target": "c1_store", "payload": {"type": "read", "key": key}}]
+            [{"target": "c1_store", "payload": {"type": "read", "path": key}}]
         )
     )[0]["result"]
-    return (r or {}).get("value")
+    if not isinstance(r, dict) or "lines" not in r:
+        return None  # not_found (or refused) — the file was never written
+    return "\n".join(ln["text"] for ln in r["lines"]) or None
 
 
 async def _settle(fp, want_calls, timeout=5.0):

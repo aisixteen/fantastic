@@ -104,8 +104,8 @@ anywhere — across kernels.** Read it on the two-kernel example (host Python +
 browser JS, peers over one WS):
 
 - **Three unit kinds, one calling convention.** `exec_bridge` (a background
-  compute job), an AI backend (one inference turn), and `durable_memory` (durable
-  memory) are all reached the same way: one item in a `send([...])` batch. A workflow step
+  compute job), an AI backend (one inference turn), and `text_file` (durable
+  memory as plain files) are all reached the same way: one item in a `send([...])` batch. A workflow step
   written as code and the same step written as an LLM call are **substitutable** —
   swap an `exec_bridge.start` for an `ai.send` and the wiring is unchanged. This
   is the point: anywhere you'd hand-write a classifier / decision / transform, you
@@ -139,13 +139,15 @@ browser JS, peers over one WS):
   it falls out of `send`/`reflect` + each agent's readme. An LLM given only the
   readmes can weave the wiring itself — that's the test bar, not bespoke glue.
 
-- **Validated — emergent memory with judgment.** Told ONLY that a `durable_memory`
-  memory agent exists, an AI saves salient facts, withholds trivia (no excess
-  writes), recalls them on a FRESH history-less turn, updates them, and prunes
-  precisely — managing durable memory through `send` alone; the which-verb/when is
-  derived, not coded. Proof: `integration_tests/memory/test_ai_memory_judgment.py`
-  (asserts on the store, not prose). NOTE: today only the Swift FM backend
-  auto-injects memory each turn; the Python backends reach it on demand by id.
+- **Validated — emergent memory with judgment.** Told ONLY that a memory agent
+  exists, an AI saves salient facts, withholds trivia (no excess writes),
+  recalls them on a FRESH history-less turn, updates them, and prunes precisely
+  — managing durable memory through `send` alone; the which-verb/when is
+  derived, not coded. (Originally proven on the deleted KV store,
+  `integration_tests/memory/test_ai_memory_judgment.py`; memory is now plain
+  FILES via `text_file`, and the judgment claim re-validates against the file
+  face in e2e.) NOTE: today only the Swift FM backend auto-injects memory each
+  turn; the Python backends reach it on demand by id.
 
 ## Run
 
@@ -251,7 +253,7 @@ the frontend's `proxy_loader`. See "Two kernels" in the root readme.
 | `io/file_bridge` | filesystem-as-agent (`read`, `write`, `list`, `delete`, `rename`, `mkdir`) — the **fs edge of the io family**: crossing kernel↔disk is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by the **running-dir law**: root + every path are clamped inside the dir the kernel runs in (`../`, `~`, absolute escapes, outward symlinks refuse) |
 | `io/exec_bridge` | commands-as-agents (`start`, `status`, `stop`, `interrupt`, `clear`, `boot`) — the **process edge of the io family**: crossing kernel↔subprocess is gated like any io_bridge leg (same `ingress_rule`/`egress_rule`/`auth` fields + registries), **SEALED BY DEFAULT** (absent rule ⇒ every verb except `reflect` denies `{reason:"unauthorized"}`; open with `ingress_rule=allow_all_ingress`), and bound by a **regex command ALLOWLIST**: `allowed` on the record is a list of regexes, and `start {command, args}` refuses unless the shell-joined line fullmatches one — enforced through `proc`, the ONE process surface, exactly as `fs` is the one opener. No per-call override, no default, no PATH fallback; an empty `allowed` runs nothing. It is a GENERAL-PURPOSE COMMAND runner, **not** a code runner: there is no `code` field, no `interpreters`, no shim. A durable program is a FILE some process (or a `write_stream`) put on disk; running it is `command` + `args` like anything else, so the job table / output pump / connector relay / fd passing / task-table rows / mail contract are all language-blind. A spawned program speaks the kernel over the inherited `FANTASTIC_CTRL_FD` (`[4-byte BE len | JSON]`); to get a `kernel` global it includes the reference wire client (`exec_bridge/_connector.py`, `CONNECTOR_SRC`) in its own source — the bridge prepends nothing. Any verb the bundle does not own is MAIL for the running program (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `on_cancel` SIGKILLs the real process); `boot` is a no-op (nothing auto-restarts — a command is started by a caller, not the record). The withdrawn fields (`code`/`shim`/`interpreter`/`interpreters`/`argv_template`) are refused at WRITE time (`validate_meta`) and at `start`. NOT a sandbox: an allowlisted command is a NAMED command, with all of that command's reach. |
 | `scheduler` | recurring tasks; persistence routed through `file_bridge_id` |
-| `durable_memory` | modeless durable key-value memory agent; mount anywhere (no `mode` — the key names its purpose); persists `state.yaml` THROUGH a gated `file_bridge` agent referenced by `file_bridge_id` (deny-all by default; `set`/`append`/`delete` failfast until wired+opened) — owns no disk surface of its own, like `scheduler`/`ai_core`. Verbs: `set`/`read`/`append`/`keys`/`delete`. |
+| `text_file` | stateless TEXT-DOCUMENT agent — durable memory as plain files, ANY format (the substrate imposes none): line-numbered `read`, atomic `write` (tmp+rename on the target), SEARCH/REPLACE `patch` (all-or-nothing, fails loud), `append`; ON DEMAND: `version` hash + `if_match` guard, `checkpoint`/`checkpoints`/`restore`/`drop` (pre-images as plain files under `.ckpt/`, ids = the dispatch's task pid). Owns NO disk: every byte is a GATED send to the `file_bridge` named by `on:` or its `target_id` meta — fails loud unwired. |
 | `terminal_backend` | PTY shell backend (at `bundled_agents/terminal/`). VSCode-ported terminal robustness: streaming flow control (reader pauses past 100K unacked chars, resumes on the `ack` verb), incremental UTF-8 decode (no split-char `<?>` litter across `os.read` chunks), serialized full-buffer writes (bracketed-paste-safe), image-paste bridge (browser-clipboard image → `paste_image` → file saved + path typed into the PTY for a CLI like `claude`). The xterm view (`terminal_view`) lives in the TS frontend kernel (`ts/`). |
 | `ai/ollama/ollama_backend` | local LLM agent (ollama); per-client chat threads, FIFO lock, menu cache; RAW prompt-and-parse tool-calling (see `ai_core`) |
 | `ai/nvidia/nvidia_nim_backend` | NVIDIA NIM LLM agent (OpenAI-compatible); api_key sidecar via `file_bridge_id`; rate-limit retry; same surface as ollama_backend |
@@ -585,8 +587,8 @@ unbypassable:
    to a file_bridge agent referenced by **`file_bridge_id`** on its record. The operator/LLM
    **wires + opens** that provider on demand (`create_agent parent_id=<owner> file_bridge … ingress_rule=…`,
    then set `file_bridge_id`). So the *access control* is real for in-process bundles too —
-   not just the clamp. `durable_memory` / `scheduler` / `ai_core` / `nvidia_nim` already route
-   this way; they failfast if `file_bridge_id` is unset (no silent RAM).
+   not just the clamp. `text_file` / `scheduler` / `ai_core` / `nvidia_nim` already route
+   this way; writes fail loud when no surface is wired (no silent RAM).
 
 The ONLY code that imports `fs` directly is **the file_bridge agent itself** (it IS the
 gate) and **the cold bootstrap** — the bring-up *before* any agent/gate exists, not an

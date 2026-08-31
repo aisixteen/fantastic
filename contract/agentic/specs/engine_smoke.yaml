@@ -15,13 +15,13 @@ expect:
   closed_roster_sender: worker
   steps:
     - name: the declared worker→memory edge is usable
-      reach: {from: worker, to: memory, send: {type: set, key: probe, value: 1}}
+      reach: {from: worker, to: memory, send: {type: write, path: probe.txt, bytes_utf8: "1"}}
       expect: {allow: true}
     - name: a loader reaches its own child on the structural baseline
       reach: {from: static_loader, to: memory, send: {type: reflect}}
       expect: {allow: true}
     - name: a verb outside the grant is refused by the sender's own egress
-      reach: {from: worker, to: memory, send: {type: delete, key: probe}}
+      reach: {from: worker, to: memory, send: {type: append, path: probe.txt, bytes_utf8: x}}
       expect: {allow: false, side: egress}
     - name: can_call without callable_by is refused BY THE CALLEE
       reach: {from: worker, to: quiet, send: {type: list, path: ""}}

@@ -6,7 +6,7 @@ config: namespacing.yaml
 name: namespacing
 description: >
   TWO wings, symmetric and unwired to each other. Each is a static_loader owning
-  one memory (durable_memory) and one file space (file_bridge), and the two wings
+  one memory (a text_file editor) and one file space (file_bridge), and the two wings
   declare the SAME shapes under DIFFERENT parents — which is the point: a child's
   state has to be told apart by WHERE it sits, not by what it is called. The
   memories share a store (the one `.fantastic` provider, declared in wing_a's roster)
@@ -23,19 +23,19 @@ expect:
     # "not denied" is NOT "succeeded": a persist that failed for want of a store
     # answers no denial at all, so the write is asserted on its own reply.
     - name: a wing reaches its own memory, and the write actually lands
-      reach: {from: wing_a, to: notes_a, send: {type: set, key: room, value: a}}
-      expect: {allow: true, contains: {ok: true}}
+      reach: {from: wing_a, to: notes_a, send: {type: write, path: room.txt, bytes_utf8: a}}
+      expect: {allow: true, contains: {path: room.txt}}
     - name: a wing reaches its own file space on the structural baseline
       reach: {from: wing_b, to: space_b, send: {type: write_stream, path: note.txt, bytes_utf8: "from b", truncate: true}}
       expect: {allow: true}
     - name: a wing may not reach the other wing's memory
-      reach: {from: wing_a, to: notes_b, send: {type: read, key: room}}
+      reach: {from: wing_a, to: notes_b, send: {type: read, path: room.txt}}
       expect: {allow: false, side: egress}
     - name: a memory may not reach the neighbouring wing's file space
       reach: {from: notes_a, to: space_b, send: {type: list, path: ""}}
       expect: {allow: false, side: egress}
     - name: a file space may not reach the memory beside it in its OWN wing
-      reach: {from: space_a, to: notes_a, send: {type: read, key: room}}
+      reach: {from: space_a, to: notes_a, send: {type: read, path: room.txt}}
       expect: {allow: false, side: egress}
     # The granted egress is not enough: the loader's byte store refuses a
     # grandchild on INGRESS, whichever namespace the payload names.
@@ -49,14 +49,14 @@ expect:
     # `can_call` names anything across the wings, so every cross-wing refusal
     # below is the DEFAULT posture, not a rule somebody wrote.
 
-    - name: a key set in one wing's memory is readable in that wing
-      reach: {from: wing_a, to: notes_a, send: {type: read, key: room}}
-      expect: {allow: true, contains: {value: a}}
+    - name: a note written in one wing's memory is readable in that wing
+      reach: {from: wing_a, to: notes_a, send: {type: read, path: room.txt}}
+      expect: {allow: true, contains: {lines.*.text: a}}
       because: C20
 
-    - name: and is ABSENT from the other wing's memory — same key, different owner
-      operator: {to: notes_b, send: {type: read, key: room}}
-      expect: {not_contains: {value: a}}
+    - name: and is ABSENT from the other wing's memory — same path, different owner
+      operator: {to: notes_b, send: {type: read, path: room.txt}}
+      expect: {reason: not_found}
       because: C20
 
     - name: the same relative path in two file spaces names two different files
@@ -71,7 +71,7 @@ expect:
       expect: {contains: {bytes: from b}}
       because: C20
 
-    - name: each memory's sidecar lands under its OWN loader, never the neighbour's
+    - name: each memory agent stands under its OWN loader, never the neighbour's
       operator: {to: kernel, send: {type: reflect, tree: ids}}
       expect: {contains: {tree.*: notes_a}}
       because: C20
@@ -80,9 +80,9 @@ expect:
       reboot: {}
     - assert_tree: {same_as: before_reboot}
       because: C20
-    - operator: {to: notes_a, send: {type: read, key: room}}
-      expect: {contains: {value: a}}
+    - operator: {to: notes_a, send: {type: read, path: room.txt}}
+      expect: {contains: {lines.*.text: a}}
       because: C20
-    - operator: {to: notes_b, send: {type: read, key: room}}
-      expect: {not_contains: {value: a}}
+    - operator: {to: notes_b, send: {type: read, path: room.txt}}
+      expect: {reason: not_found}
       because: C20
