@@ -1,132 +1,90 @@
-//! Per-client chat history, held in the AI's own `<self>_chat` store.
+//! Per-client chat history — an append-only JSONL sidecar on the AI's own leg.
 //!
-//! The store is a `durable_memory` CHILD of the AI agent — one key per
-//! `client_id`, holding that client's message list. It persists through the
-//! SAME `file_bridge` leg the AI names in its `file_bridge_id`, so the AI
-//! writes no disk itself and nothing here depends on the loader.
+//! One file per client at `agents/<self>/chat_<safe_client>.jsonl`, ONE JSON
+//! line per turn, written through the `file_bridge` the AI names in its
+//! `file_bridge_id`. The encoding is ai_core's PRIVATE choice as a consumer
+//! (this code is its only reader; models get turns through `history`/`recall`)
+//! — the substrate imposes no format on anyone.
 //!
-//! This replaced the loader BLOB channel (`persist_blob`/`load_blob` on a
-//! `chat_<client>.json` sidecar). That path routed every chat write through
-//! whatever persistence provider the loader had DISCOVERED, so on a kernel
-//! with no `.fantastic`-rooted store (`persistence.provider = null`) each write
-//! vanished silently and `history` stayed empty forever while `send` reported
-//! success. The blob channel itself stays — it is still the loader's own — but
-//! chat no longer rides it. Mirrors python `ai_core.core._ensure_chat_agent` /
-//! `_load_history` / `_save_history`.
+//! This replaced the `<self>_chat` durable_memory child when durable_memory was
+//! deleted (memory is plain FILES now). Line index == store index — load-bearing
+//! for `recall.before` and `derive_reaction`, exactly as in python.
+//!
+//! Mirrors python `ai_core.core._chat_path` / `_load_history` / `_save_history`
+//! (python is the immutable reference).
 
 use crate::helpers::{file_bridge_id, safe_client};
 use fantastic_kernel::send::with_operator;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-/// `handler_module` the chat store runs. The durable_memory bundle must be
-/// registered for the store to answer — an unregistered bundle still gets a
-/// record, it just never dispatches.
-const CHAT_HANDLER: &str = "durable_memory.tools";
+/// read chunk size on the stream verbs.
+const CHUNK: usize = 65536;
 
-/// The AI's chat-store id (`<self>_chat`), keyed by agent id. python's
-/// module-level `_chat_agent` dict — a pure lookup cache, always re-validated
-/// against the live tree before use.
-static CHAT_AGENT: OnceLock<Mutex<HashMap<AgentId, String>>> = OnceLock::new();
-
-fn cache() -> std::sync::MutexGuard<'static, HashMap<AgentId, String>> {
-    CHAT_AGENT
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("CHAT_AGENT poisoned")
+/// The chat sidecar's path on the agent's OWN file leg.
+fn chat_path(self_id: &AgentId, client_id: &str) -> String {
+    format!("agents/{}/chat_{}.jsonl", self_id.0, safe_client(client_id))
 }
 
-/// The AI's chat store — a `durable_memory` child holding its durable
-/// conversation log. Discovered by id among this agent's children, or created
-/// (idempotent + cached). `None` only if creation fails.
+/// The client's conversation, parsed line-by-line off the sidecar. Empty on a
+/// missing leg, a missing file, or unreadable content. A torn tail line (a
+/// crash mid-append) is skipped rather than poisoning the whole history.
 ///
-/// The id is DETERMINISTIC (`<self>_chat`), so finding it back is a lookup, not
-/// a scan for a handler_module/mode pair.
-pub async fn ensure_chat_agent(self_id: &AgentId, kernel: &Arc<Kernel>) -> Option<String> {
-    let cached = cache().get(self_id).cloned();
-    if let Some(cached) = cached {
-        if kernel.agents.contains_key(&AgentId::from(cached.as_str())) {
-            return Some(cached);
-        }
-        cache().remove(self_id);
-    }
-    let want = format!("{}_chat", self_id.0);
-    if kernel.agents.contains_key(&AgentId::from(want.as_str())) {
-        cache().insert(self_id.clone(), want.clone());
-        return Some(want);
-    }
-    // BOOKKEEPING, PROCESSED FROM ABOVE — the same standing the blob channel
-    // had. This store is the AI's own conversation state, not an operator
-    // composition decision, and the agent does not choose to have one. Without
-    // operator authority every AI agent would need an explicit `create_agent`
-    // grant on the root just to keep its history.
-    let r = with_operator(kernel.send(vec![Item::new(
-        AgentId::from("kernel"),
-        json!({
-            "type": "create_agent",
-            // The store is MINE — a child of this AI agent, reached through the
-            // `$children` baseline with no grant. `create_agent` is kernel-owned,
-            // so the placement is STATED rather than implied by the address.
-            "parent_id": self_id.0,
-            "id": want,
-            "handler_module": CHAT_HANDLER,
-            // The store persists through the SAME file leg as its owner —
-            // durable_memory has no fs of its own. Absent here means absent
-            // there: the store is still created, and its writes failfast
-            // exactly as durable_memory's do. No fallback is invented.
-            "file_bridge_id": file_bridge_id(self_id, kernel),
-            // SAY WHAT IT IS. A type-derived id advertises "key/value store"
-            // loudly, and a model asked to use "this kernel's key/value store"
-            // will pick it (measured in python 2026-08-24). An internal agent
-            // that looks general-purpose is a discoverability defect.
-            "description": format!(
-                "Internal conversation store for the AI agent `{}` — one key per \
-                 client_id, holding that client's message history. NOT \
-                 general-purpose memory: do not read or write it to store facts, \
-                 results or notes. It is written by the agent's own turn loop.",
-                self_id.0
-            ),
-        }),
-    )]))
-    .await
-    .remove(0)
-    .result;
-    let cid = r.get("id").and_then(Value::as_str).map(str::to_string)?;
-    cache().insert(self_id.clone(), cid.clone());
-    Some(cid)
-}
-
-/// The client's conversation, read from the chat store (key-per-client).
-/// Empty on a missing store, a missing key, or a non-list value.
+/// BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the loader's
+/// persist_blob and the old chat-store create: the agent does not choose to
+/// have a conversation log. Confused-deputy-safe by construction: the target
+/// is the record's OWN `file_bridge_id` (operator-set), the verb is literal,
+/// and the path is self-scoped (`agents/<self>/…`, client sanitized).
 pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, client_id: &str) -> Vec<Value> {
-    let Some(cid) = ensure_chat_agent(self_id, kernel).await else {
+    let Some(fb) = file_bridge_id(self_id, kernel) else {
         return Vec::new();
     };
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from(cid.as_str()),
-            json!({"type": "read", "key": safe_client(client_id)}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    match r.get("value") {
-        Some(Value::Array(a)) => a.clone(),
-        _ => Vec::new(),
+    let leg = AgentId::from(fb.as_str());
+    let path = chat_path(self_id, client_id);
+    let mut raw: Vec<u8> = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let (r, body) = with_operator(kernel.send_with_binary(
+            &leg,
+            json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
+            Vec::new(),
+        ))
+        .await;
+        if !r.is_object() || r.get("error").is_some() {
+            break;
+        }
+        if !body.is_empty() {
+            raw.extend_from_slice(&body);
+        }
+        let eof = r.get("eof").and_then(Value::as_bool).unwrap_or(true);
+        if eof || body.is_empty() {
+            break;
+        }
+        offset = r
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(offset + body.len() as u64);
     }
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&raw);
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(Value::is_object)
+        .collect()
 }
 
-/// APPEND this turn's new messages to the chat store (key-per-client).
+/// APPEND this turn's new messages — one `write_stream` (absent offset =
+/// append-at-end, creates the file) per turn, one JSON line each.
 ///
 /// The durable record is never trimmed — the projection only shapes what the
-/// model is shown, so compaction and `recall` need the FULL conversation on the
-/// next turn.
-///
-/// ONE `append` PER TURN: `append` adds its value as ONE element, so handing it
-/// the whole list nests the turns (`[[user, assistant]]`) and history reads back
-/// empty of messages. Python carries the same note for the same reason.
+/// model is shown, so compaction and `recall` need the FULL conversation on
+/// the next turn. PROCESSED FROM ABOVE — see `load_history`: own leg, literal
+/// verb, self-scoped path. Without this every fixture would need a
+/// can_call/callable_by pair just so an AI can keep its own history.
 pub async fn append_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
@@ -136,16 +94,22 @@ pub async fn append_history(
     if new_turns.is_empty() {
         return;
     }
-    let Some(cid) = ensure_chat_agent(self_id, kernel).await else {
+    let Some(fb) = file_bridge_id(self_id, kernel) else {
         return;
     };
-    let key = safe_client(client_id);
+    let leg = AgentId::from(fb.as_str());
+    let path = chat_path(self_id, client_id);
     for turn in new_turns {
-        let _ = kernel
-            .send(vec![Item::new(
-                AgentId::from(cid.as_str()),
-                json!({"type": "append", "key": key, "value": turn}),
-            )])
-            .await;
+        let mut line = match serde_json::to_string(turn) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        line.push('\n');
+        let _ = with_operator(kernel.send_with_binary(
+            &leg,
+            json!({"type": "write_stream", "path": path}),
+            line.into_bytes(),
+        ))
+        .await;
     }
 }

@@ -310,7 +310,6 @@ name = "fantastic-ai-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -329,7 +328,6 @@ dependencies = [
  "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-cli-bundle",
- "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -371,7 +369,6 @@ dependencies = [
  "fantastic-bridge",
  "fantastic-cli-bundle",
  "fantastic-core",
- "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
@@ -383,6 +380,7 @@ dependencies = [
  "fantastic-scheduler",
  "fantastic-static-loader",
  "fantastic-terminal-backend",
+ "fantastic-text-file",
  "fantastic-tools",
  "fantastic-web",
  "fantastic-web-rest",
@@ -410,20 +408,6 @@ name = "fantastic-core"
 version = "0.1.0"
 dependencies = [
  "tempfile",
-]
-
-[[package]]
-name = "fantastic-durable-memory"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-file",
- "fantastic-kernel",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -504,7 +488,6 @@ dependencies = [
  "async-trait",
  "fantastic-ai-core",
  "fantastic-bundle",
- "fantastic-durable-memory",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
@@ -521,7 +504,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-ai-core",
- "fantastic-durable-memory",
  "fantastic-file",
  "fantastic-kernel",
  "futures-util",
@@ -571,10 +553,10 @@ name = "fantastic-static-loader"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "fantastic-durable-memory",
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-kernel",
+ "fantastic-text-file",
  "serde_json",
  "serde_yaml",
  "tempfile",
@@ -598,6 +580,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-text-file"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-file",
+ "fantastic-kernel",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-tools"
 version = "0.1.0"
 dependencies = [
@@ -618,6 +614,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-io-bridge",
  "fantastic-kernel",
+ "fantastic-text-file",
  "fantastic-web-rest",
  "fantastic-web-ws",
  "futures-util",
@@ -1852,6 +1849,17 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

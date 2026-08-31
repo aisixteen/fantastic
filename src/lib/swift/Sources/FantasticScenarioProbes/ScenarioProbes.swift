@@ -11,7 +11,7 @@
 // `#if SCENARIO_PROBES`, which only `e2e/runners/host.py` builds with. A
 // production binary carries none of it.
 //
-// Substituting a shipped bundle instead (`durable_memory` for `dispenser`) was the
+// Substituting a shipped bundle instead (a KV store for `dispenser`) was the
 // alternative and is worse: it has no `dispense` verb and no side-effect
 // counter, so the row would go green while measuring something else.
 //

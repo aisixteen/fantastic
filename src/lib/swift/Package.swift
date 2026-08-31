@@ -44,7 +44,7 @@ let package = Package(
         .library(name: "FantasticIoBridge", targets: ["FantasticIoBridge"]),
         .library(name: "FantasticBundles", targets: [
             "FantasticFile",
-            "FantasticDurableMemory",
+            "FantasticTextFile",
             "FantasticProxyAgent",
             "FantasticTools",
             "FantasticScheduler",
@@ -120,10 +120,9 @@ let package = Package(
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
-            name: "FantasticDurableMemory",
+            name: "FantasticTextFile",
             dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections"),
-                           .product(name: "Yams", package: "Yams")]
+                           .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
             name: "FantasticProxyAgent",
@@ -132,7 +131,7 @@ let package = Package(
         ),
         // apple_kvs — synced KV (iCloud KVS), Apple-only (gated by `#if
         // canImport(Darwin)`; reports unavailable elsewhere). Sibling of
-        // durable_memory in surface, synced + live-only in semantics.
+        // KV in surface, synced + live-only in semantics.
         .target(
             name: "FantasticAppleKVS",
             dependencies: ["FantasticKernel", "FantasticJSON",
@@ -299,7 +298,7 @@ let package = Package(
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticDurableMemory", "FantasticAppleKVS",
+                "FantasticTextFile", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend", "FantasticLlamaCppBackend",
@@ -371,11 +370,6 @@ let package = Package(
             name: "FantasticAICoreTests",
             dependencies: [
                 "FantasticAICore", "FantasticKernel", "FantasticJSON",
-                // The chat store's handler. The AI core binds it by
-                // handler_module STRING (weak binding — `FantasticAICore`
-                // itself must never depend on it); the harness has to register
-                // the real bundle for `<agent>_chat` to answer.
-                "FantasticDurableMemory",
             ]
         ),
 
@@ -409,7 +403,7 @@ let package = Package(
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticDurableMemory", "FantasticKernelStartup",
+                "FantasticTextFile", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",
                 // The agentic runner boots the rosters the shared corpus at
                 // `contract/agentic/` declares, so it needs the bundles those

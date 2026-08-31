@@ -99,3 +99,29 @@ fn not_send_binary_is_untouched() {
     assert_eq!(calls[0].name, "send");
     assert_eq!(calls[0].arguments["payload"]["text"], "hi");
 }
+
+/// A model that serializes the WHOLE call as strict JSON (escaped `\n` in
+/// `bytes`) must get real newlines — strict parse wins over the raw-tail path.
+/// Measured 2026-08-31 (python E44): the raw path kept the escapes literal and
+/// a valid patch died on "no blocks".
+#[test]
+fn escaped_json_send_binary_decodes_its_escapes() {
+    let inner = serde_json::json!({
+        "name": "send_binary",
+        "arguments": {
+            "target_id": "editor",
+            "payload": {
+                "type": "patch",
+                "path": "config.txt",
+                "checkpoint": true,
+                "bytes": "<<<<<<< SEARCH\nport = 8080\n=======\nport = 9090\n>>>>>>> REPLACE\n",
+            },
+        },
+    })
+    .to_string();
+    let calls = super::extract_tool_calls(&format!("<tool_call>{inner}</tool_call>"));
+    assert_eq!(calls.len(), 1);
+    let b = calls[0].arguments["payload"]["bytes"].as_str().unwrap();
+    assert!(b.contains('\n') && !b.contains("\\n"), "{b:?}");
+    assert!(b.starts_with("<<<<<<< SEARCH\nport = 8080"));
+}

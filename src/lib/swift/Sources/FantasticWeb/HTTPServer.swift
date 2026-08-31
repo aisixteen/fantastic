@@ -271,7 +271,7 @@ public final class WebServer: @unchecked Sendable {
         for (k, v) in request.headers { lowerHeaders[k.lowercased()] = v }
 
         // ── BINARY leg (parity with py web_rest) ──
-        // A verb whose payload OR reply carries RAW bytes — patch_text_file /
+        // A verb whose payload OR reply carries RAW bytes — text_file.patch /
         // write_stream / read_stream — rides an octet-stream body instead of
         // JSON: the raw body IS the blob, the rest of the envelope is JSON on
         // `X-Fantastic-Payload`, and the one bytes-valued field is named by

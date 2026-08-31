@@ -1178,7 +1178,7 @@ fn ingest_chunk_single_chunk_completes_immediately() {
 }
 
 /// The BINARY leg of the REST surface (octet-stream body) — mirror of the
-/// Python `web_rest` binary leg. An octet POST of a `patch_text_file` carries
+/// Python `web_rest` binary leg. An octet POST of a `text_file.patch` carries
 /// the patch in the raw body and the envelope on `X-Fantastic-Payload`; the
 /// reply is JSON `{patched:true}`. A `read_stream` returns an OCTET reply whose
 /// body is the raw file bytes and whose `X-Fantastic-Payload` header carries the
@@ -1195,6 +1195,10 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        fantastic_text_file::HANDLER_MODULE,
+        fantastic_text_file::TextFileBundle,
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -1241,20 +1245,36 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
                 "handler_module": "file_bridge.tools", "id": fb_id,
                 "root": "served",
                 "ingress_rule": "allow_all_ingress",
+                "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*", "ed_octet": "*" },
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // The EDITOR: patch moved off the bridge — text_file owns SEARCH/REPLACE
+    // and reaches disk only through gated sends to the file leg.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "text_file.tools", "id": "ed_octet",
+                "target_id": fb_id,
+                "can_call": { fb_id: "*" },
                 "callable_by": { "$self": "*", "$parent": "*", "$children": "*", rest_id: "*" },
             }),
         )])
         .await
         .remove(0)
         .result;
-    // web_rest child — may reach the file_bridge (call gate: egress side).
+    // web_rest child — may reach the file_bridge AND the editor (egress side).
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
             json!({
                 "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_rest.tools", "id": rest_id,
-                "can_call": { fb_id: "*" },
+                "can_call": { fb_id: "*", "ed_octet": "*" },
             }),
         )])
         .await
@@ -1272,16 +1292,17 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
     wait_until_port_accepts(port).await;
 
     let url = format!("http://127.0.0.1:{port}/{rest_id}/{fb_id}");
+    let ed_url = format!("http://127.0.0.1:{port}/{rest_id}/ed_octet");
     let client = reqwest::Client::new();
 
-    // ── patch_text_file: patch rides the raw octet body ──────────────────
+    // ── text_file.patch: patch rides the raw octet body, to the EDITOR ───
     let patch = "<<<<<<< SEARCH\nhello world\n=======\ngoodbye world\n>>>>>>> REPLACE\n";
     let resp = client
-        .post(&url)
+        .post(&ed_url)
         .header("Content-Type", "application/octet-stream")
         .header(
             "X-Fantastic-Payload",
-            r#"{"type":"patch_text_file","path":"greeting.txt"}"#,
+            r#"{"type":"patch","path":"greeting.txt"}"#,
         )
         .body(patch)
         .send()

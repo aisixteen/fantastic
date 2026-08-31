@@ -8,10 +8,10 @@
 //! `kernel_state` in python. Parity asserts the per-runtime value, never
 //! equality.
 
-use fantastic_durable_memory::DurableMemoryBundle;
 use fantastic_file::FileBundle;
 use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel};
 use fantastic_static_loader::{StaticLoaderBundle, HANDLER_MODULE};
+use fantastic_text_file::TextFileBundle;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -140,7 +140,7 @@ fn mk_kernel() -> Arc<Kernel> {
     kernel.bundles.register("file_bridge.tools", FileBundle);
     kernel
         .bundles
-        .register("durable_memory.tools", DurableMemoryBundle);
+        .register(fantastic_text_file::HANDLER_MODULE, TextFileBundle);
     kernel
         .bundles
         .register("exec_bridge.tools", fantastic_exec_bridge::ExecBridgeBundle);
@@ -262,10 +262,13 @@ async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 /// `_decode_bytes_fields` + its bytes-path decode. Runs under whatever
 /// sender/operator context the caller set, so `send_with_binary`'s gate applies.
 async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
+    // Binary channel when the payload carries content (`bytes_utf8` — the
+    // text_file byte verbs: write/patch/append) or is a stream verb; the
+    // mirror of python, where real bytes ride the payload in-process.
     let is_stream = matches!(
         payload.get("type").and_then(Value::as_str),
         Some("read_stream" | "write_stream")
-    );
+    ) || payload.get("bytes_utf8").is_some();
     if !is_stream {
         return k
             .send(vec![Item::new(AgentId::from(target), payload)])

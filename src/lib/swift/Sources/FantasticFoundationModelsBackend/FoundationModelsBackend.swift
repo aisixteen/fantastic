@@ -18,10 +18,11 @@
 // to the model (the shared core runs in `stateless` mode for FM).
 //
 // The model's DURABLE memory is the always-inject path: at `boot` the
-// bundle self-mounts `mem` + `data` durable_memory agents, and
-// `makeProvider` splices each agent's current keys into the
-// session instructions on EVERY send. Recall is structural, not
-// prompted.
+// bundle self-mounts a private memory FILE surface (a `file_bridge`
+// child) plus a `text_file` editor over it, and the session
+// instructions splice each memory document's content in on EVERY
+// send. Recall is structural, not prompted; the format is the
+// model's own (memory is plain files).
 //
 // All the shared agent machinery (history, epoch cancellation, verb
 // dispatch, token/done events) lives in `FantasticAICore.AIBackend`.
@@ -82,10 +83,9 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                     ]
                 },
                 // Always-inject durable memory: the shared core appends
-                // this AFTER the substrate prompt (primer + menu + send
-                // how-to). Each mounted durable_memory agent's keys +
-                // any custom `instructions` meta land in the FM session's
-                // instructions every turn — recall is structural.
+                // this AFTER the substrate prompt. Each memory DOCUMENT's
+                // content + any custom `instructions` meta land in the FM
+                // session's instructions every turn — recall is structural.
                 systemPromptExtra: { agent, kernel in
                     await Self.fullInstructions(agent: agent, kernel: kernel)
                 },
@@ -121,8 +121,9 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         ollama_backend; runs stateless against the native on-device model.
         Tool-calling is RAW: no Apple @Generable Tool — the model generates text and \
         FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
-        Durable memory: on boot, mem+data durable_memory agents are auto-mounted and their \
-        contents spliced into the model instructions on every send (always-on; no explicit recall needed).
+        Durable memory: on boot a private memory file surface + a text_file editor are \
+        auto-mounted; every memory document's content is spliced into the model \
+        instructions on every send (always-on; no explicit recall needed).
         """
     }
 
@@ -149,26 +150,16 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
 
     // MARK: - Durable memory (self-mount + always-inject)
 
-    /// Idempotently mount `mem` + `data` durable_memory agents under
-    /// this backend at boot, so the model's durable memory exists — and
-    /// is auto-injected — before turn one. No-op if an agent of each mode
-    /// already exists (children rehydrate from disk on reboot).
+    /// Idempotently mount the memory FILE surface + its `text_file` editor
+    /// under this backend at boot, so the model's durable memory exists — and
+    /// is auto-injected — before turn one. Idempotent by id (children
+    /// rehydrate from disk on reboot).
     func mountMemoryAgents(agentId: AgentId, kernel: Kernel) async {
-        let have = Set(
-            memoryAgents(agentId: agentId, kernel: kernel).compactMap {
-                kernel.agent($0)?.metaValue(forKey: "mode")?.asString
-            })
-        // durable_memory persists THROUGH a file_bridge provider (no own disk
-        // surface). Discover the `.fantastic` store + wire `file_bridge_id` so
-        // the mounted memory persists. No store wired ⇒ field omitted (the
-        // memory is RAM-only and `set` failfasts — no silent fallback).
+        // Self-wire THIS backend's own `file_bridge_id` to the discovered store
+        // so the shared core persists the chat JSONL sidecar through it (FM is
+        // self-bootstrapping; ollama/NIM expect the operator to set this). Only
+        // when absent + a store exists; no store ⇒ history stays RAM-empty.
         let storeId = kernel.findStore()?.value
-
-        // Self-wire THIS backend's own `file_bridge_id` to the same store
-        // so the shared core persists chat history through it (FM is
-        // self-bootstrapping — it already self-mounts memory + discovers
-        // the store; ollama/NIM expect the operator to set this). Only when
-        // absent + a store exists; no store ⇒ history stays RAM-empty.
         if let storeId, kernel.agent(agentId)?.metaValue(forKey: "file_bridge_id") == nil {
             _ = await kernel.send([Item(agentId, .object([
                     "type": .string("update_agent"),
@@ -177,71 +168,62 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 ]))])[0].result
         }
 
-        for mode in ["mem", "data"] where !have.contains(mode) {
-            var rec: JSON = .object([
+        // MEMORY IS FILES: mount a private file surface (clamped inside the
+        // running dir) + a text_file editor over it. Idempotent by id —
+        // children rehydrate from disk on reboot.
+        let memFbId = "\(agentId.value)_memory_files"
+        let edId = "\(agentId.value)_memory"
+        if kernel.agent(AgentId(memFbId)) == nil {
+            let rec: JSON = .object([
                 "type": .string("create_agent"),
-                // ITS OWN subtree: placement is stated by `parent_id`, and the
-                // kernel-owned verb goes to the root.
                 "parent_id": .string(agentId.value),
-                "handler_module": .string("durable_memory.tools"),
-                "mode": .string(mode),
+                "handler_module": .string("file_bridge.tools"),
+                "id": .string(memFbId),
+                "root": .string(".fantastic/agents/\(agentId.value)/memory"),
+                // The io seal gates every verb until opened; the editor is the
+                // intended caller and the two-sided call gate still applies.
+                "ingress_rule": .string("allow_all_ingress"),
+                "callable_by": .object([edId: .string("*")]),
+                "description": .string(
+                    "The FM backend's private memory surface — raw byte streams "
+                        + "under its own directory."),
             ])
-            if let storeId {
-                rec["file_bridge_id"] = .string(storeId)
-                // Two-sided deny-all: the mounted memory persists read/write/delete
-                // to the store directly, so wiring `file_bridge_id` also grants that
-                // egress edge on the child.
-                rec["can_call"] = .object([storeId: .string("*")])
-            }
-            // Boot-time self-provisioning runs FROM ABOVE (operator): the backend
-            // creates its OWN memory subtree, confers the store egress its children
-            // need (a subset it discovered, not one it holds itself), AND opens the
-            // store's reciprocal `callable_by` for each child — exactly the authority
-            // an operator has, which a lateral agent send does not.
-            let reply = await KernelTaskLocals.$currentSender.withValue(nil) {
+            // Boot-time self-provisioning runs FROM ABOVE (operator).
+            _ = await KernelTaskLocals.$currentSender.withValue(nil) {
                 await kernel.send([Item(AgentId("kernel"), rec)])[0].result
             }
-            if let storeId, let childId = reply["id"].asString {
-                await openStoreIngress(store: storeId, caller: childId, kernel: kernel)
+        }
+        if kernel.agent(AgentId(edId)) == nil {
+            let rec: JSON = .object([
+                "type": .string("create_agent"),
+                "parent_id": .string(agentId.value),
+                "handler_module": .string("text_file.tools"),
+                "id": .string(edId),
+                "target_id": .string(memFbId),
+                "can_call": .object([memFbId: .string("*")]),
+                "description": .string(
+                    "The model's durable memory — plain text documents, any "
+                        + "format (write/patch/append/read); every document's "
+                        + "content is injected into the instructions each turn."),
+            ])
+            _ = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await kernel.send([Item(AgentId("kernel"), rec)])[0].result
             }
         }
     }
 
-    /// Open the store's `callable_by` for a mounted memory child (ingress half of
-    /// the two-sided gate), merged with the store's existing grant. Runs as operator
-    /// — the boot-time provisioning authority.
-    private func openStoreIngress(store: String, caller: String, kernel: Kernel) async {
-        var accept: JSON =
-            kernel.agent(AgentId(store))?.metaValue(forKey: "callable_by") ?? .object([:])
-        if case .object(var map) = accept {
-            map[caller] = .string("*")
-            accept = .object(map)
-        }
-        _ = await KernelTaskLocals.$currentSender.withValue(nil) {
-            await kernel.send([Item(AgentId("core"), .object([
-                    "type": .string("update_agent"),
-                    "id": .string(store),
-                    "callable_by": accept,
-                ]))])[0].result
-        }
-    }
-
-    /// Agent ids of this backend's mounted durable_memory agents.
-    ///
-    /// EXCLUDES the shared core's chat store (`<self>_chat`), which is a
-    /// durable_memory child too but holds the TRANSCRIPT, not the model's
-    /// memory: injecting its keys would put the conversation into the system
-    /// prompt, and counting it as a mounted mode would skew `mountMemoryAgents`.
+    /// Agent ids of this backend's mounted memory EDITORS (`text_file`
+    /// children). The chat transcript is a JSONL sidecar file, not an agent,
+    /// so nothing needs excluding any more.
     func memoryAgents(agentId: AgentId, kernel: Kernel) -> [AgentId] {
         guard let agent = kernel.agent(agentId) else { return [] }
-        let chatId = AIBackend.chatStoreId(for: agentId.value)
         return agent.childIds().filter {
-            $0.value != chatId && kernel.agent($0)?.handlerModule == "durable_memory.tools"
+            kernel.agent($0)?.handlerModule == "text_file.tools"
         }
     }
 
-    /// The system-prompt body + each mounted durable_memory agent's
-    /// current keys spliced in. Because the FM session is rebuilt
+    /// The system-prompt body + each memory DOCUMENT's current content
+    /// spliced in. Because the FM session is rebuilt
     /// per send, this single hook covers boot + every turn + post-
     /// compaction for free — the model's durable memory is ALWAYS
     /// present, never recalled (the "always inject" principle).
@@ -253,27 +235,42 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         var blocks: [String] = []
         let base = agent.metaValue(forKey: "instructions")?.asString ?? ""
         if !base.isEmpty { blocks.append(base) }
-        // Same exclusion as `memoryAgents`: the chat store is the transcript, not
-        // memory — its keys never go into the instructions.
-        let chatId = AIBackend.chatStoreId(for: agent.id.value)
-        let memAgentIds =
-            agent.childIds().filter {
-                $0.value != chatId && kernel.agent($0)?.handlerModule == "durable_memory.tools"
+        // Memory is FILES: for each mounted text_file editor, list its surface
+        // and splice every (small) document's content in verbatim. The format
+        // inside each document is the model's own — nothing is parsed.
+        let editors = agent.childIds().filter {
+            kernel.agent($0)?.handlerModule == "text_file.tools"
+        }
+        for edId in editors {
+            guard
+                let surface = kernel.agent(edId)?.metaValue(forKey: "target_id")?.asString,
+                !surface.isEmpty
+            else { continue }
+            let listing = await KernelTaskLocals.$currentSender.withValue(nil) {
+                await kernel.send([
+                    Item(AgentId(surface), .object(["type": .string("list"), "path": .string("")]))
+                ])[0].result
             }
-        for memAgentId in memAgentIds {
-            // durable_memory is modeless and has no whole-store verb (full parity
-            // with python), so reconstruct the block from `keys` + `read`.
-            let keysReply = await kernel.send([Item(memAgentId, .object(["type": .string("keys")]))])[0].result
-            let keys = (keysReply["keys"].asArray ?? []).compactMap { $0.asString }
-            var lines: [String] = []
-            for key in keys {
-                let r = await kernel.send([Item(memAgentId, .object(["type": .string("read"), "key": .string(key)]))])[0].result
-                if r["value"].isNull { continue }
-                lines.append("\(key): \(r["value"].serialize())")
+            var docs: [String] = []
+            for f in listing["files"].asArray ?? [] {
+                guard f["type"].asString == "file", let name = f["name"].asString,
+                    (f["size"].asInt ?? 0) <= 16384
+                else { continue }
+                let (r, body) = await KernelTaskLocals.$currentSender.withValue(nil) {
+                    await kernel.sendWithBinary(
+                        AgentId(surface),
+                        .object([
+                            "type": .string("read_stream"), "path": .string(name),
+                        ]), Data())
+                }
+                guard r["error"].asString == nil,
+                    let text = String(data: body, encoding: .utf8), !text.isEmpty
+                else { continue }
+                docs.append("### \(name)\n\(text)")
             }
-            guard !lines.isEmpty else { continue }
-            let label = kernel.agent(memAgentId)?.metaValue(forKey: "mode")?.asString ?? "durable"
-            blocks.append("## Your \(label) memory (\(memAgentId.value)):\n" + lines.joined(separator: "\n"))
+            guard !docs.isEmpty else { continue }
+            blocks.append(
+                "## Your memory (edit via `\(edId.value)`):\n" + docs.joined(separator: "\n\n"))
         }
         return blocks.joined(separator: "\n\n")
     }

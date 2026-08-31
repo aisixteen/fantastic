@@ -47,7 +47,7 @@ public struct AIBackendConfig: Sendable {
     /// Extra system-prompt text appended AFTER the shared assembly
     /// (primer + self-reflect + context how-to). The Apple-FM
     /// backend uses this for its always-inject durable memory (each
-    /// mounted durable_memory agent's keys + any custom
+    /// memory documents' content + any custom
     /// `instructions` meta). Receives the agent + kernel so it can read
     /// state on demand; runs every turn. Default empty (ollama / NIM).
     public var systemPromptExtra: @Sendable (Agent, Kernel) async -> String

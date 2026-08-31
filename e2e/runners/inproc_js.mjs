@@ -2,7 +2,7 @@
 //
 // Same scenario file as `runners/host.py` — task,
 // roster by role, grants, assertions. What differs is only how a role is
-// played: this kernel registers a handler in process, so `kv_store` is a live
+// played: this kernel registers a handler in process, so `memory` is a live
 // JS handler rather than the `yaml_state` bundle a compiled kernel must use.
 //
 // One difference that is NOT cosmetic: in this kernel `reflect` is kernel-owned
@@ -225,19 +225,42 @@ for (const entry of sc.roster) {
     }));
     continue;
   }
-  if (entry.role !== "kv_store") {
+  if (entry.role !== "memory") {
     console.log(`  role ${entry.role} unsupported by this runner`);
     console.log(`\n${MARKER} FAIL — unsupported role ${entry.role}`);
     process.exit(1);
   }
+  // Memory is FILES now: an in-process text_file face — documents keyed by
+  // path, line-numbered read, append — matching the surface the other
+  // runtimes serve with the real bundle. Content is whatever the model wrote.
   const data = {};
   stores[entry.id] = data;
   k.registerBundle(`${entry.id}.tools`, (_id, p) => {
-    if (p.type === "set") {
-      data[p.key] = p.value;
-      return { ok: true };
+    const body = p.bytes ?? p.bytes_utf8;
+    if (p.type === "write") {
+      if (!p.path) return { error: "write: path required", reason: "missing_arg" };
+      data[p.path] = String(body ?? "");
+      return { path: p.path, size: data[p.path].length };
     }
-    if (p.type === "read") return { key: p.key, value: data[p.key] ?? null };
+    if (p.type === "append") {
+      if (!p.path) return { error: "append: path required", reason: "missing_arg" };
+      data[p.path] = (data[p.path] ?? "") + String(body ?? "");
+      return { path: p.path, size: data[p.path].length };
+    }
+    if (p.type === "read") {
+      if (!p.path) return { error: "read: path required", reason: "missing_arg" };
+      const doc = data[p.path];
+      if (doc === undefined)
+        return { error: `file '${p.path}' not found`, reason: "not_found", path: p.path };
+      const lines = doc.split("\n");
+      if (lines.at(-1) === "") lines.pop();
+      return {
+        path: p.path,
+        lines: lines.map((text, i) => ({ n: i + 1, text })),
+        total: lines.length,
+        eof: true,
+      };
+    }
     return { error: `unknown verb ${p.type}` };
   });
   // Declared on the RECORD — see the note at the top.
@@ -301,9 +324,11 @@ for (const check of sc.expect) {
     if (!good) ok = false;
     continue;
   }
-  const got = stores[check.agent]?.[check.key];
-  console.log(`  ${check.agent}.read(${check.key}) -> ${JSON.stringify(got ?? null)}`);
-  if (!String(JSON.stringify(got)).includes(check.contains)) ok = false;
+  // memory is FILES: the scenario's key is the document path; match against
+  // the whole document (the model's format is its own).
+  const got = stores[check.agent]?.[check.path];
+  console.log(`  ${check.agent}.read(${check.path}) -> ${JSON.stringify(got ?? null)}`);
+  if (!String(got ?? "").includes(check.contains)) ok = false;
 }
 console.log(`  RESULT: ${ok ? "PASS — discovered + acted" : "FAIL"}`);
 console.log(`\n${MARKER} ${ok ? "PASS" : "FAIL"} — js kernel`);

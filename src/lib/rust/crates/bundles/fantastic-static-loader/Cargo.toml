@@ -16,9 +16,10 @@ async-trait = { workspace = true }
 serde_yaml = "0.9"
 
 [dev-dependencies]
+# The shared agentic corpus declares text_file memory agents.
+fantastic-text-file = { path = "../fantastic-text-file" }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 # The agentic runner (tests/agentic.rs) boots the same rosters the shared corpus
 # at `contract/agentic/` declares, so it needs the bundles those manifests name.
-fantastic-durable-memory = { path = "../fantastic-durable-memory" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }

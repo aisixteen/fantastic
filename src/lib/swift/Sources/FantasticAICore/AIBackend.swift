@@ -103,13 +103,6 @@ public final class AIBackend: @unchecked Sendable {
     var projectionCache: [String: JSON] = [:]
     var compactionMark: [String: (Int, String)] = [:]
 
-    /// The AI's chat-store id (`<self>_chat`, a `durable_memory` child), keyed by
-    /// agent id — python's module-global `_chat_agent`. The conversation lives
-    /// THERE and persists through THAT agent's own `file_bridge_id`; this backend
-    /// writes no disk and no longer routes chat through the loader's blob channel
-    /// (which made every turn vanish when the loader had no provider wired).
-    private let chatAgentLock = NSLock()
-    private var chatAgentCache: [String: String] = [:]
 
     init(config: AIBackendConfig) {
         self.config = config
@@ -801,27 +794,9 @@ enum AIPassOutcome {
         return .object(row)
     }
 
-    // MARK: - the chat store (`<self>_chat`, a durable_memory child)
+    // MARK: - the chat sidecar (append-only JSONL on the AI's own leg)
 
-    /// The deterministic id of an AI agent's chat store — a `durable_memory`
-    /// child holding one key per client_id. Public because the FM backend, which
-    /// self-mounts its OWN durable_memory agents, must tell them apart from this
-    /// one (it is not the model's memory; it is the transcript).
-    public static func chatStoreId(for agentId: String) -> String { "\(agentId)_chat" }
-
-    private func cachedChatAgent(_ id: String) -> String? {
-        chatAgentLock.lock()
-        defer { chatAgentLock.unlock() }
-        return chatAgentCache[id]
-    }
-
-    private func setCachedChatAgent(_ id: String, _ chatId: String?) {
-        chatAgentLock.lock()
-        defer { chatAgentLock.unlock() }
-        chatAgentCache[id] = chatId
-    }
-
-    /// Trim + sanitise a client id so it is safe as a store KEY.
+    /// Trim + sanitise a client id so it is safe as a filename suffix.
     /// Mirrors Rust `safe_client` / Python `_safe_client`.
     func safeClient(_ clientId: String) -> String {
         let trimmed = clientId.trimmingCharacters(in: .whitespaces)
@@ -833,104 +808,80 @@ enum AIPassOutcome {
         return out.isEmpty ? "cli" : out
     }
 
-    /// The AI's chat store — a `durable_memory` child, its durable conversation
-    /// log, which persists through ITS OWN `file_bridge_id` (the AI writes NO disk
-    /// itself). Found by id or created (idempotent + cached). `nil` only if
-    /// creation fails. Mirrors python `_ensure_chat_agent`.
-    func ensureChatAgent(agent: Agent, kernel: Kernel) async -> String? {
-        let selfId = agent.id.value
-        if let cached = cachedChatAgent(selfId), kernel.agent(AgentId(cached)) != nil {
-            return cached
-        }
-        setCachedChatAgent(selfId, nil)
-        // BOUND BY ID, not discovered by flag: the store's id is deterministic, so
-        // finding it back is a lookup, not a scan of the tree for a magic meta.
-        let want = AIBackend.chatStoreId(for: selfId)
-        if kernel.agent(AgentId(want)) != nil {
-            setCachedChatAgent(selfId, want)
-            return want
-        }
-        // BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the blob
-        // channel this replaced. The store is the AI's own conversation state,
-        // not an operator composition decision, and `create_agent` is
-        // kernel-owned: without operator authority every AI agent would need a
-        // `create_agent` grant on the root just to keep its history.
-        let payload: JSON = .object([
-            "type": .string("create_agent"),
-            // The store is MINE — a child of this AI agent, reached through the
-            // `$children` baseline with no grant. Placement is STATED, since
-            // `create_agent` is answered by the root.
-            "parent_id": .string(selfId),
-            "id": .string(want),
-            "handler_module": .string("durable_memory.tools"),
-            // The store persists through the SAME file leg as its owner —
-            // durable_memory has no fs of its own. Absent leg ⇒ the field is
-            // null, its writes failfast, and history stays empty. No fallback.
-            "file_bridge_id": agent.metaValue(forKey: "file_bridge_id") ?? .null,
-            // SAY WHAT IT IS. A type-derived id advertises "key/value store"
-            // loudly, and a model asked to use "this kernel's key/value store"
-            // will pick it and write the wrong agent. An internal agent that
-            // looks general-purpose is a discoverability defect.
-            "description": .string(
-                "Internal conversation store for the AI agent `\(selfId)` — one key per "
-                    + "client_id, holding that client's message history. NOT general-purpose "
-                    + "memory: do not read or write it to store facts, results or notes. It is "
-                    + "written by the agent's own turn loop."),
-        ])
-        let r = await kernel.asBookkeeping {
-            await kernel.send([Item(AgentId("kernel"), payload)])[0].result
-        }
-        guard let cid = r["id"].asString else { return nil }
-        setCachedChatAgent(selfId, cid)
-        return cid
+    /// The chat sidecar's path on the agent's OWN file leg — one JSONL file per
+    /// client, one JSON line per turn. The encoding is the AI core's PRIVATE
+    /// choice as a consumer; the substrate imposes no format on anyone.
+    /// Mirrors python `_chat_path` (durable_memory is gone; memory is files).
+    private func chatPath(agentId: String, client: String) -> String {
+        "agents/\(agentId)/chat_\(safeClient(client)).jsonl"
     }
 
-    /// The client's conversation, read from the chat store (key-per-client).
-    /// Empty when there is no store, no key, or the key holds something else.
-    /// Mirrors python `_load_history`.
+    private func chatLeg(_ agent: Agent) -> String? {
+        agent.metaValue(forKey: "file_bridge_id")?.asString.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The client's conversation, parsed line-by-line off the JSONL sidecar.
+    /// Empty on a missing leg, a missing file, or unreadable content; a torn
+    /// tail line (a crash mid-append) is skipped rather than poisoning the
+    /// whole history.
+    ///
+    /// BOOKKEEPING, PROCESSED FROM ABOVE — the agent does not choose to have a
+    /// conversation log. Confused-deputy-safe: the target is the record's OWN
+    /// `file_bridge_id`, the verb is literal, the path self-scoped
+    /// (`agents/<self>/…`, client sanitized). Mirrors python `_load_history`.
     func loadHistory(agent: Agent, client: String, kernel: Kernel) async -> [JSON] {
-        guard let cid = await ensureChatAgent(agent: agent, kernel: kernel) else { return [] }
-        let r = await kernel.asBookkeeping {
-            await kernel.send([
-                Item(
-                    AgentId(cid),
+        guard let fb = chatLeg(agent) else { return [] }
+        let path = chatPath(agentId: agent.id.value, client: client)
+        let raw: Data = await kernel.asBookkeeping {
+            var acc = Data()
+            var offset = 0
+            while true {
+                let (r, body) = await kernel.sendWithBinary(
+                    AgentId(fb),
                     .object([
-                        "type": .string("read"),
-                        "key": .string(self.safeClient(client)),
-                    ]))
-            ])[0].result
+                        "type": .string("read_stream"), "path": .string(path),
+                        "offset": .integer(Int64(offset)),
+                    ]), Data())
+                guard case .object = r, r["error"].asString == nil else { break }
+                if !body.isEmpty { acc.append(body) }
+                if r["eof"].asBool ?? true { break }
+                if body.isEmpty { break }
+                offset = Int(r["next_offset"].asInt ?? Int64(offset + body.count))
+            }
+            return acc
         }
-        return r["value"].asArray ?? []
+        guard !raw.isEmpty, let text = String(data: raw, encoding: .utf8) else { return [] }
+        var turns: [JSON] = []
+        for line in text.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty, let parsed = try? JSON.parse(Data(t.utf8)),
+                case .object = parsed
+            else { continue }
+            turns.append(parsed)
+        }
+        return turns
     }
 
-    /// APPEND this turn's new messages to the chat store (key-per-client). The
-    /// durable record is never trimmed; the projection only shapes what the model
-    /// sees. Mirrors python `_save_history`.
+    /// APPEND this turn's new messages — one `write_stream` (absent offset =
+    /// append-at-end, creates the file) per turn, one JSON line each. The
+    /// durable record is never trimmed; the projection only shapes what the
+    /// model sees. PROCESSED FROM ABOVE — see `loadHistory`; and it clears the
+    /// caller's kill flag too: a cancel must never corrupt what was already
+    /// durable. Mirrors python `_save_history`.
     private func saveHistory(
         agent: Agent, client: String, kernel: Kernel, newTurns: [JSON]
     ) async {
         if newTurns.isEmpty { return }
-        guard let cid = await ensureChatAgent(agent: agent, kernel: kernel) else { return }
-        // ONE append PER TURN — `append` adds its value as ONE element, so handing
-        // it the whole list nests the turns ([[user, assistant]]) and history reads
-        // back empty of messages.
-        //
-        // KERNEL BOOKKEEPING, not the caller's send: it clears the caller's
-        // identity AND the caller's kill flag. Clearing only the sender left the
-        // write inside the turn's killed subtree, where dispatch is inert — so
-        // cancelling mid-stream destroyed a turn that was already committed. A
-        // cancel must never corrupt what was already durable.
+        guard let fb = chatLeg(agent) else { return }
+        let path = chatPath(agentId: agent.id.value, client: client)
         for turn in newTurns {
+            let line = turn.serialize() + "\n"
             _ = await kernel.asBookkeeping {
-                await kernel.send([
-                    Item(
-                        AgentId(cid),
-                        .object([
-                            "type": .string("append"),
-                            "key": .string(self.safeClient(client)),
-                            "value": turn,
-                        ]))
-                ])[0].result
+                await kernel.sendWithBinary(
+                    AgentId(fb),
+                    .object(["type": .string("write_stream"), "path": .string(path)]),
+                    Data(line.utf8)
+                ).0
             }
         }
     }

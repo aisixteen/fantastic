@@ -1,7 +1,7 @@
-// FM backend memory: idempotent self-mount of mem/data durable_memory agents at
-// boot, and the load-bearing inject — each agent's keys/values spliced into the
-// model's instructions. Grounded on tool output (keys+read → fullInstructions),
-// so it runs without the actual on-device model.
+// FM backend memory: idempotent self-mount of the memory FILE surface + its
+// text_file editor at boot, and the load-bearing inject — each memory
+// DOCUMENT's content spliced into the model's instructions. Grounded on tool
+// output, so it runs without the actual on-device model.
 
 import FantasticJSON
 import FantasticKernel
@@ -20,8 +20,9 @@ struct FmMemoryInjectTests {
         return u
     }
 
-    /// Wire the `.fantastic` store so the self-mounted memory agents discover a
-    /// provider (`findStore`) and persist through it (no own disk surface).
+    /// Wire the `.fantastic` store so the backend self-wires its own
+    /// `file_bridge_id` (the chat sidecar's leg) — the memory surface is the
+    /// backend's OWN private file_bridge child, mounted at boot.
     private func wireStore(_ kernel: Kernel) async {
         _ = await kernel.send([Item("core", [
                 "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
@@ -34,7 +35,7 @@ struct FmMemoryInjectTests {
         return AgentId(rec["id"].asString ?? "")
     }
 
-    @Test func bootSelfMountsMemAndDataIdempotently() async throws {
+    @Test func bootSelfMountsMemorySurfaceAndEditorIdempotently() async throws {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
@@ -43,17 +44,19 @@ struct FmMemoryInjectTests {
         _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
 
         let bundle = FoundationModelsBackendBundle()
-        let agents = bundle.memoryAgents(agentId: fmId, kernel: kernel)
-        #expect(agents.count == 2)
-        let modes = Set(agents.compactMap { kernel.agent($0)?.metaValue(forKey: "mode")?.asString })
-        #expect(modes == ["mem", "data"])
+        // ONE editor (text_file), wired to the backend's private file surface.
+        let editors = bundle.memoryAgents(agentId: fmId, kernel: kernel)
+        #expect(editors.map { $0.value } == ["\(fmId.value)_memory"])
+        let surface = kernel.agent(editors[0])?.metaValue(forKey: "target_id")?.asString
+        #expect(surface == "\(fmId.value)_memory_files")
+        #expect(kernel.agent(AgentId(surface ?? ""))?.handlerModule == "file_bridge.tools")
 
         // Idempotent: a second boot does not add more agents.
         _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
-        #expect(bundle.memoryAgents(agentId: fmId, kernel: kernel).count == 2)
+        #expect(bundle.memoryAgents(agentId: fmId, kernel: kernel).count == 1)
     }
 
-    @Test func stateYamlReachesInstructions() async throws {
+    @Test func memoryDocumentReachesInstructions() async throws {
         let tmp = tmpDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let kernel = try await startKernel(workdir: tmp.path)
@@ -62,19 +65,22 @@ struct FmMemoryInjectTests {
         _ = await kernel.send([Item(fmId, ["type": "boot"])])[0].result
 
         let bundle = FoundationModelsBackendBundle()
-        // Set a distinctive fact on the mounted `mem` agent.
-        let memAgent = bundle.memoryAgents(agentId: fmId, kernel: kernel).first {
-            kernel.agent($0)?.metaValue(forKey: "mode")?.asString == "mem"
-        }
-        #expect(memAgent != nil)
-        _ = await kernel.send([Item(memAgent!, ["type": "set", "key": "user.name", "value": "Ada_Lovelace_42"])])[0].result
+        // Write a distinctive memory DOCUMENT through the editor — any format,
+        // the model's own choice; nothing is parsed on the way in.
+        let ed = bundle.memoryAgents(agentId: fmId, kernel: kernel)[0]
+        let w = await kernel.sendWithBinary(
+            ed,
+            .object(["type": .string("write"), "path": .string("notes.md")]),
+            Data("user.name: Ada_Lovelace_42\n".utf8)
+        ).0
+        #expect(w["error"].asString == nil, "\(w)")
 
-        // The inject hook must splice the agent's keys/values into the
-        // instructions — distinctive token present grounds the test on
-        // real tool output, not a prompt marker.
+        // The inject hook splices the document's content into the
+        // instructions — the distinctive token grounds the test on real tool
+        // output, not a prompt marker.
         let fmAgent = kernel.agent(fmId)!
         let inst = await bundle.fullInstructions(agent: fmAgent, kernel: kernel)
-        #expect(inst.contains("Ada_Lovelace_42"))
-        #expect(inst.contains("user.name"))
+        #expect(inst.contains("Ada_Lovelace_42"), "\(inst)")
+        #expect(inst.contains("notes.md"))
     }
 }

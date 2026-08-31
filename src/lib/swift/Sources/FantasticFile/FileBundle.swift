@@ -5,7 +5,7 @@
 // verb resolves the supplied path within `root` and refuses if the
 // canonical result escapes (`..` traversal protection).
 //
-// Verbs: reflect / boot / list / read_stream / write_stream / patch_text_file /
+// Verbs: reflect / boot / list / read_stream / write_stream /
 //        pump / delete / rename / mkdir.
 
 import FantasticIoBridge
@@ -158,7 +158,6 @@ public struct FileBundle: AgentBundle {
 
     /// Binary channel: `read_stream` (empty request → reply BODY = one raw chunk),
     /// `write_stream` (request BODY = one raw chunk → status reply, no body), and
-    /// `patch_text_file` (request BODY = the utf-8 patch → status reply, no body).
     /// Symmetric with py/rust's `bytes`-in-the-dict; never base64. Same
     /// sealed-by-default gate + running-dir clamp as the text channel. Any other
     /// verb routes through the text `handle` (its blob is unused).
@@ -166,7 +165,7 @@ public struct FileBundle: AgentBundle {
         agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
     ) async throws -> (JSON?, Data) {
         let verb = header["type"].asString ?? ""
-        guard verb == "read_stream" || verb == "write_stream" || verb == "patch_text_file"
+        guard verb == "read_stream" || verb == "write_stream"
         else {
             let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
             return (reply, Data())
@@ -197,9 +196,6 @@ public struct FileBundle: AgentBundle {
         if agent.metaValue(forKey: "readonly")?.asBool == true {
             return (readonlyRefusal(), Data())
         }
-        if verb == "patch_text_file" {
-            return (patchTextFile(root: root, header: header, blob: blob), Data())
-        }
         return (writeStream(root: root, header: header, blob: blob), Data())
     }
 
@@ -217,7 +213,6 @@ public struct FileBundle: AgentBundle {
                 "list": "args: path?. Returns {path, files}.",
                 "read_stream": "args: path, offset?, length?. SOURCE — one raw chunk; reply {bytes, next_offset, eof, size} on the binary channel.",
                 "write_stream": "args: path, bytes, offset?, truncate?. SINK — one raw chunk; reply {written, offset, size}. Refuses non-bytes.",
-                "patch_text_file": "args: path, bytes(=patch). Applies SEARCH/REPLACE hunks to an existing text file atomically; reply {patched, hunks, size} on the binary channel.",
                 "delete": "args: path. Returns {path, deleted: true}.",
                 "rename": "args: old_path, new_path. Returns {old_path, new_path}.",
                 "mkdir": "args: path. Returns {path, created: true}.",
@@ -276,6 +271,13 @@ public struct FileBundle: AgentBundle {
         guard let target = resolve(root: root, path: relative) else {
             return .object(["error": .string("path escapes root")])
         }
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            return .object([
+                "error": .string("path \"\(relative)\" not found"),
+                "reason": .string("not_found"),
+                "path": .string(relative),
+            ])
+        }
         do {
             try FileManager.default.removeItem(at: target)
             return .object([
@@ -300,7 +302,14 @@ public struct FileBundle: AgentBundle {
             return .object(["error": .string("path escapes root")])
         }
         do {
-            try FileManager.default.moveItem(at: oldURL, to: newURL)
+            // py `os.replace` / rust `fs::rename` semantics: an existing
+            // destination is atomically CLOBBERED — the tmp+rename commit every
+            // consumer (text_file among them) builds its atomicity on.
+            if FileManager.default.fileExists(atPath: newURL.path) {
+                _ = try FileManager.default.replaceItemAt(newURL, withItemAt: oldURL)
+            } else {
+                try FileManager.default.moveItem(at: oldURL, to: newURL)
+            }
             return .object([
                 "old_path": .string(oldRel),
                 "new_path": .string(newRel),
@@ -410,7 +419,15 @@ public struct FileBundle: AgentBundle {
         guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir),
             !isDir.boolValue
         else {
-            return (.object(["error": .string("file \(path) not found")]), Data())
+            // Python parity: the refusal names its reason and path (consumers —
+            // text_file checkpoints among them — branch on `reason`).
+            return (
+                .object([
+                    "error": .string("file \(path) not found"),
+                    "reason": .string("not_found"),
+                    "path": .string(path),
+                ]), Data()
+            )
         }
         guard let handle = try? FileHandle(forReadingFrom: target) else {
             return (.object(["error": .string("cannot open \(path)")]), Data())
@@ -468,157 +485,6 @@ public struct FileBundle: AgentBundle {
             "written": .integer(Int64(blob.count)),
             "offset": .integer(Int64(off)),
             "size": .integer(Int64(size)),
-        ])
-    }
-
-    // MARK: - patch_text_file (binary channel)
-
-    // A STRUCTURED whole-file edit that reuses the file stream: read the current
-    // text, apply SEARCH/REPLACE hunks, write it back ATOMICALLY (temp + rename via
-    // `Data.write(options:.atomic)`). The patch is TEXT (utf-8) but rides as raw
-    // BYTES on the binary channel so a hunk full of quotes/backslashes/newlines is
-    // never JSON-escaped. Each hunk's SEARCH must match the CURRENT content EXACTLY
-    // ONCE — 0 matches or an ambiguous >1 FAILS LOUD (no fuzzy apply). All-or-
-    // nothing: on any failed hunk, nothing is written. Mirrors py `_patch_text_file`.
-    private static let hStart = "<<<<<<< SEARCH"
-    private static let hDiv = "======="
-    private static let hEnd = ">>>>>>> REPLACE"
-
-    private struct PatchParseError: Error { let message: String }
-
-    /// Parse SEARCH/REPLACE blocks into (search, replace) pairs. The text inside a
-    /// block is taken VERBATIM (the marker lines excluded). Throws on a block that
-    /// opens but does not close. Mirrors py `_parse_hunks`.
-    private func parseHunks(_ text: String) throws -> [(String, String)] {
-        // `components(separatedBy:)` KEEPS empty trailing/interior lines (py
-        // `str.split("\n")` semantics) — `split(separator:)` would drop them.
-        let lines = text.components(separatedBy: "\n")
-        var hunks: [(String, String)] = []
-        var i = 0
-        let n = lines.count
-        while i < n {
-            if lines[i] != FileBundle.hStart {
-                i += 1
-                continue
-            }
-            var j = i + 1
-            var search: [String] = []
-            while j < n && lines[j] != FileBundle.hDiv {
-                search.append(lines[j])
-                j += 1
-            }
-            if j >= n { throw PatchParseError(message: "a SEARCH block has no `=======` divider") }
-            j += 1
-            var replace: [String] = []
-            while j < n && lines[j] != FileBundle.hEnd {
-                replace.append(lines[j])
-                j += 1
-            }
-            if j >= n { throw PatchParseError(message: "a block has no closing `>>>>>>> REPLACE`") }
-            hunks.append((search.joined(separator: "\n"), replace.joined(separator: "\n")))
-            i = j + 1
-        }
-        return hunks
-    }
-
-    /// Count non-overlapping occurrences of `needle` in `haystack` (py `str.count`).
-    private func countOccurrences(of needle: String, in haystack: String) -> Int {
-        if needle.isEmpty { return haystack.count + 1 }
-        var count = 0
-        var lower = haystack.startIndex
-        while let r = haystack.range(of: needle, options: [.literal], range: lower..<haystack.endIndex) {
-            count += 1
-            lower = r.upperBound
-        }
-        return count
-    }
-
-    /// Replace the FIRST occurrence of `needle` (py `str.replace(a, b, 1)`).
-    private func replaceFirst(_ needle: String, with replacement: String, in haystack: String)
-        -> String
-    {
-        guard let r = haystack.range(of: needle, options: [.literal]) else { return haystack }
-        return haystack.replacingCharacters(in: r, with: replacement)
-    }
-
-    /// SEARCH/REPLACE whole-file edit. The patch arrives as raw utf-8 BYTES (`blob`)
-    /// on the binary channel. Returns `{path, patched, hunks, size}` or
-    /// `{error, reason, failed:[{index, reason}]}`. Refused if readonly (checked by
-    /// the caller). Mirrors py `_patch_text_file`.
-    private func patchTextFile(root: URL, header: JSON, blob: Data) -> JSON {
-        let path = header["path"].asString ?? ""
-        if path.isEmpty { return Refusal.missing("patch_text_file", "path") }
-        if blob.isEmpty { return Refusal.missing("patch_text_file", "bytes (the utf-8 patch)") }
-        guard let patch = String(data: blob, encoding: .utf8) else {
-            return Refusal.bad("patch_text_file", "bytes", "valid utf-8 (the patch is text)")
-        }
-        guard let target = resolve(root: root, path: path) else {
-            return .object(["error": .string("path escapes root")])
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir),
-            !isDir.boolValue
-        else {
-            return .object([
-                "error": .string("no text file at \(path)"),
-                "reason": .string("not_found"),
-            ])
-        }
-        let hunks: [(String, String)]
-        do {
-            hunks = try parseHunks(patch)
-        } catch let e as PatchParseError {
-            return Refusal.bad("patch_text_file", "bytes", "a well-formed patch — \(e.message)")
-        } catch {
-            return Refusal.bad("patch_text_file", "bytes", "a well-formed patch")
-        }
-        if hunks.isEmpty {
-            return Refusal.bad(
-                "patch_text_file", "bytes",
-                "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block")
-        }
-        guard var working = try? String(contentsOf: target, encoding: .utf8) else {
-            return .object([
-                "error": .string("cannot read \(path)"),
-                "reason": .string("transport_error"),
-            ])
-        }
-        // Apply against the EVOLVING content; each SEARCH must be unique at its turn.
-        // Stop at the first failure and write NOTHING (all-or-nothing).
-        for (idx, hunk) in hunks.enumerated() {
-            let (search, replace) = hunk
-            let hits = countOccurrences(of: search, in: working)
-            if hits != 1 {
-                let reason = hits == 0 ? "no_match" : "ambiguous"
-                let detail =
-                    hits == 0 ? "search text not found" : "search text matches \(hits) places"
-                return .object([
-                    "error": .string("a hunk did not apply — nothing written"),
-                    "reason": .string(reason),
-                    "failed": .array([
-                        .object([
-                            "index": .integer(Int64(idx)),
-                            "reason": .string(detail),
-                        ])
-                    ]),
-                ])
-            }
-            working = replaceFirst(search, with: replace, in: working)
-        }
-        let out = Data(working.utf8)
-        do {
-            try out.write(to: target, options: .atomic)  // atomic: temp + rename
-        } catch {
-            return .object([
-                "error": .string("write \(path): \(error)"),
-                "reason": .string("transport_error"),
-            ])
-        }
-        return .object([
-            "path": .string(path),
-            "patched": .bool(true),
-            "hunks": .integer(Int64(hunks.count)),
-            "size": .integer(Int64(out.count)),
         ])
     }
 
