@@ -47,8 +47,10 @@ pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
 /// Default ollama HTTP endpoint.
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 
-/// Default model id (overridable via the agent record's `model` field).
-pub const DEFAULT_MODEL: &str = "gemma4:e2b";
+/// NO guessy default (by default, no defaults): never name a network-reaching
+/// model. The sentinel exists only so reflect can say what's true; the request
+/// path fails loud when the model is unset/sentinel.
+pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
 /// Default sampling temperature sent to ollama (overridable via the record's
 /// `temperature` field). ollama's own default is 0.8 (creative) — wrong for an
@@ -102,6 +104,12 @@ impl Provider for OllamaProvider {
     }
 
     async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+        // NO guessy default: fail loud before the wire if no model is named.
+        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+            return Err("ollama_backend: no `model` set — this connector does not \
+                guess one. Name a model on the agent record (model=...)."
+                .to_string());
+        }
         let mut options = serde_json::Map::new();
         options.insert("temperature".to_string(), json!(self.temperature));
         if let Some(n) = self.num_ctx {

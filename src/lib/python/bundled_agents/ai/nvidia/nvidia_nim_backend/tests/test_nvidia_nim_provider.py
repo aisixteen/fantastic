@@ -58,7 +58,7 @@ async def test_chat_yields_text_chunks_in_order():
         '{"choices":[{"delta":{"content":"!"}}]}',
         "[DONE]",
     )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    p = NvidiaNimProvider(api_key="nvapi-test", model="nvidia-test", transport=_mock_transport(body))
     try:
         out = await _collect(p)
     finally:
@@ -74,7 +74,7 @@ async def test_chat_passes_tool_call_text_through_untouched():
         '{"choices":[{"delta":{"content":"<tool_call>{\\"name\\":\\"send\\"}</tool_call>"}}]}',
         "[DONE]",
     )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    p = NvidiaNimProvider(api_key="nvapi-test", model="nvidia-test", transport=_mock_transport(body))
     try:
         out = await _collect(p)
     finally:
@@ -90,7 +90,7 @@ async def test_chat_handles_done_marker_and_stops():
         "[DONE]",
         '{"choices":[{"delta":{"content":"after-done"}}]}',
     )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    p = NvidiaNimProvider(api_key="nvapi-test", model="nvidia-test", transport=_mock_transport(body))
     try:
         out = await _collect(p)
     finally:
@@ -106,7 +106,7 @@ async def test_chat_skips_blank_and_malformed_events():
         b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
         b"data: [DONE]\n\n"
     )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    p = NvidiaNimProvider(api_key="nvapi-test", model="nvidia-test", transport=_mock_transport(body))
     try:
         out = await _collect(p)
     finally:
@@ -120,7 +120,7 @@ async def test_chat_ignores_empty_choices_arrays():
         '{"choices":[{"delta":{"content":"ok"}}]}',
         "[DONE]",
     )
-    p = NvidiaNimProvider(api_key="nvapi-test", transport=_mock_transport(body))
+    p = NvidiaNimProvider(api_key="nvapi-test", model="nvidia-test", transport=_mock_transport(body))
     try:
         out = await _collect(p)
     finally:
@@ -165,7 +165,7 @@ async def test_chat_raises_on_http_error():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})
 
-    p = NvidiaNimProvider(api_key="nvapi-bad", transport=httpx.MockTransport(handler))
+    p = NvidiaNimProvider(api_key="nvapi-bad", model="nvidia-test", transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(httpx.HTTPStatusError):
             await _collect(p)

@@ -559,3 +559,29 @@ async fn history_persists_and_round_trips() {
         "chat file not on disk: {expected_path:?}"
     );
 }
+
+/// NO guessy default (mirror of the Python provider test): the sentinel
+/// `DEFAULT_MODEL` is not a real id, and the request path fails loud — naming
+/// `model` — rather than putting the sentinel (or an empty string) on the wire.
+#[tokio::test]
+async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
+    assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
+    for m in [DEFAULT_MODEL.to_string(), String::new()] {
+        let p = OllamaProvider {
+            endpoint: "http://127.0.0.1:1/api/chat".to_string(),
+            model: m,
+            temperature: 0.3,
+            num_ctx: None,
+            num_predict: None,
+            think: None,
+        };
+        let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
+            Ok(_) => panic!("chat must refuse an unset/sentinel model"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("ollama_backend: no `model` set") && err.contains("model=..."),
+            "unexpected error: {err}"
+        );
+    }
+}

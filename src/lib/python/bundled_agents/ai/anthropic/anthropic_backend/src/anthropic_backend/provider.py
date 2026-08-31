@@ -27,7 +27,12 @@ from typing import AsyncIterator
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
 DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = "claude-opus-4-8"  # latest, smartest
+# NO guessy default (by default, no defaults): this connector never names a model
+# that reaches the network. The sentinel exists ONLY so `reflect` can say what is
+# true; `chat()` fails loud naming `model` if it is ever left unset. (Same shape as
+# the llamacpp sentinel, but anthropic REQUIRES a model on the wire, so it raises
+# rather than omitting the field.)
+DEFAULT_MODEL = "(no default — set the `model` meta)"
 API_VERSION = "2023-06-01"
 
 # EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
@@ -149,6 +154,11 @@ class AnthropicProvider:
         key = os.environ.get("ANTHROPIC_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         if not key:
             raise RuntimeError("ANTHROPIC_KEY not set in environment (.env)")
+        if not self._model or self._model == DEFAULT_MODEL:
+            raise RuntimeError(
+                "anthropic_backend: no `model` set — this connector does not guess "
+                "one. Name a model on the agent record (model=...)."
+            )
 
         system, anth_messages = _to_anthropic(messages)
         body: dict = {

@@ -282,9 +282,9 @@ public func startKernel(
         _ = r.updateMeta(["guid": .string(rootGuid)])
     }
 
-    _ = portHint  // unused now; CLI / daemon mode passes port via
-    // meta on the persisted `web` record. portHint was a vestige
-    // of the old auto-create-web path.
+    // NOTE: `portHint` is unused in disk mode — CLI / daemon mode passes the
+    // port via meta on the persisted `web` record (a vestige of the old
+    // auto-create-web path, kept in the signature for the daemon entrypoint).
 
     return kernel
 }

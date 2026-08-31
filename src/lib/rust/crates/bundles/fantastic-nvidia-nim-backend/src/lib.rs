@@ -44,8 +44,10 @@ pub const README: &str = include_str!("readme.md");
 /// Default NIM endpoint — OpenAI-compatible.
 pub const DEFAULT_ENDPOINT: &str = "https://integrate.api.nvidia.com/v1";
 
-/// Default model (matches the Python provider).
-pub const DEFAULT_MODEL: &str = "nvidia/llama-3_1-nemotron-ultra-253b-v1";
+/// NO guessy default (by default, no defaults): never name a network-reaching
+/// model. The sentinel exists only so reflect can say what's true; the request
+/// path fails loud when the model is unset/sentinel.
+pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
 /// Headless / REPL caller default.
 pub const DEFAULT_CLIENT_ID: &str = fantastic_ai_core::DEFAULT_CLIENT_ID;
@@ -173,6 +175,12 @@ impl Provider for NimProvider {
     }
 
     async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+        // NO guessy default: fail loud before the wire if no model is named.
+        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+            return Err("nvidia_nim_backend: no `model` set — this connector does \
+                not guess one. Name a model on the agent record (model=...)."
+                .to_string());
+        }
         // RAW: no native `tools`/`tool_choice` — ai-core parses the `<tool_call>`
         // envelope out of the streamed text.
         let body = json!({

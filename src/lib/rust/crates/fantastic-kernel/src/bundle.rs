@@ -30,7 +30,6 @@ use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use crate::tasks::TaskId;
 use async_trait::async_trait;
-use base64::Engine;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,33 +105,23 @@ pub trait Bundle: Send + Sync {
     /// `Vec<u8>` is the raw reply body (empty when the verb returns no
     /// bytes, e.g. `write_stream`'s status reply).
     ///
-    /// Default impl: a verb with no binary surface gets its request `blob`
-    /// base64-decoded into `header["data"]` and routed through
-    /// [`Self::handle`] (the legacy text-handler bridge for verbs like a
-    /// generic upload), returning an empty reply body. Bundles that carry
-    /// raw bytes either way (`file_bridge.read_stream`/`write_stream`,
-    /// `terminal_backend.paste_image`) override this to skip base64.
+    /// Default impl: a bundle with no binary surface gets its JSON `header`
+    /// dispatched through [`Self::handle`] and the raw `blob` is DROPPED —
+    /// never base64-encoded onto the payload. base64 on the wire is banned
+    /// (pure streams): raw bytes ride the binary carrier only, and a bundle
+    /// that actually wants them overrides this method
+    /// (`file_bridge.read_stream`/`write_stream`,
+    /// `terminal_backend.paste_image`). This mirrors the fallback the shipped
+    /// overrides already use for their non-binary verbs (header→`handle`,
+    /// blob unused). Returns an empty reply body.
     async fn handle_binary(
         &self,
         agent_id: &AgentId,
         header: Value,
-        blob: Vec<u8>,
+        _blob: Vec<u8>,
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Vec<u8>), BundleError> {
-        let mut payload = header;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("data".to_string(), Value::String(encoded));
-        } else {
-            // Header wasn't an object — synthesize a minimal one carrying
-            // the encoded blob so the handler still gets something
-            // useful. Matches the "be liberal on input" stance the
-            // wire protocol takes elsewhere.
-            let mut map = serde_json::Map::new();
-            map.insert("data".to_string(), Value::String(encoded));
-            payload = Value::Object(map);
-        }
-        let reply = self.handle(agent_id, &payload, kernel).await?;
+        let reply = self.handle(agent_id, &header, kernel).await?;
         Ok((reply, Vec::new()))
     }
 

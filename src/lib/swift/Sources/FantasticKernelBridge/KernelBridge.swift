@@ -493,9 +493,8 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ),
                 // `connected` is the canonical field (python/rust); the transport
                 // attaches only after a successful boot/handshake, so it tracks
-                // attachment. `attached` kept as a swift-side alias.
+                // attachment.
                 "connected": .bool(attached),
-                "attached": .bool(attached),
                 "ingress_rule": .string(ingressName),
                 "egress_rule": .string(egressName),
                 "sealed": .bool(ingressName != "allow_all_ingress"),

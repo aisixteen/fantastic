@@ -52,6 +52,7 @@ def _capture(sink: list, sse: str, status: int = 200):
 
 
 def _provider(sink: list, sse: str, **kw) -> AnthropicProvider:
+    kw.setdefault("model", "claude-test")
     return AnthropicProvider(transport=_capture(sink, sse), **kw)
 
 
@@ -247,6 +248,7 @@ async def test_a_successful_call_makes_exactly_one_request():
     doubled every call and every token billed."""
     sink: list = []
     p = AnthropicProvider(
+        model="claude-test",
         transport=_sequence([(200, _text("hi"), "text/event-stream")], sink)
     )
     assert await _drain(p) == "hi"
@@ -258,6 +260,7 @@ async def test_cloudflare_error_page_is_retried_then_succeeds():
     1-2s reverse-proxy restart killed a 26-pass run at pass 5."""
     sink: list = []
     p = AnthropicProvider(
+        model="claude-test",
         transport=_sequence(
             [
                 (521, "<!DOCTYPE html>...", "text/html"),
@@ -274,6 +277,7 @@ async def test_transport_error_gives_up_after_the_bound():
     """Bounded, not infinite — a persistently down endpoint still fails loudly."""
     sink: list = []
     p = AnthropicProvider(
+        model="claude-test",
         transport=_sequence([(521, "<!DOCTYPE html>", "text/html")], sink)
     )
     with pytest.raises(RuntimeError, match="anthropic 521"):
@@ -286,6 +290,7 @@ async def test_json_error_body_is_never_retried():
     spend the same broken request N times."""
     sink: list = []
     p = AnthropicProvider(
+        model="claude-test",
         transport=_sequence([(503, '{"type":"error"}', "application/json")], sink)
     )
     with pytest.raises(RuntimeError, match="anthropic 503"):
@@ -299,6 +304,7 @@ async def test_client_errors_are_never_retried():
     to api.anthropic.com."""
     sink: list = []
     p = AnthropicProvider(
+        model="claude-test",
         transport=_sequence([(401, "<!DOCTYPE html>", "text/html")], sink)
     )
     with pytest.raises(RuntimeError, match="anthropic 401"):

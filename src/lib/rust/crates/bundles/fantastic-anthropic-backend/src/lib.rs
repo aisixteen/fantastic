@@ -53,8 +53,10 @@ pub const README: &str = include_str!("readme.md");
 /// Python is canonical: the value is the URL.
 pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
-/// Default model (a current, cost-reasonable Claude).
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// NO guessy default (by default, no defaults): this connector never names a
+/// model that reaches the network. The sentinel exists only so reflect can say
+/// what's true; the request path fails loud when the model is unset/sentinel.
+pub const DEFAULT_MODEL: &str = "(no default — set the `model` meta)";
 
 /// Anthropic API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -259,6 +261,12 @@ impl Provider for AnthropicProvider {
     }
 
     async fn chat(&self, messages: &[Value]) -> Result<ProviderStream, String> {
+        // NO guessy default: fail loud before the wire if no model is named.
+        if self.model.is_empty() || self.model == DEFAULT_MODEL {
+            return Err("anthropic_backend: no `model` set — this connector does \
+                not guess one. Name a model on the agent record (model=...)."
+                .to_string());
+        }
         // RAW by default: no native `tools`/`tool_choice` — ai-core parses the
         // `<tool_call>` envelope out of the streamed text. The optional
         // `tool_use` route declares the one `send` tool and translates what

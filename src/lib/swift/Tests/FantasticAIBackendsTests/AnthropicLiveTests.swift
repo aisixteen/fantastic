@@ -33,7 +33,9 @@ struct AnthropicLiveTests {
     func liveTurn() async throws {
         let provider = AnthropicProvider(
             endpoint: env("ANTHROPIC_ENDPOINT") ?? DEFAULT_ENDPOINT,
-            model: env("ANTHROPIC_MODEL") ?? DEFAULT_MODEL,
+            // Explicit model — DEFAULT_MODEL is now the fail-loud sentinel, so a
+            // live turn must name a real model (the connector never guesses one).
+            model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-4-6",
             apiKey: env("ANTHROPIC_API_KEY") ?? "",
             maxTokens: 64,
             toolUse: false)
