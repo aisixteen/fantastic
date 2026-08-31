@@ -27,12 +27,12 @@ limits:
   idle_seconds: 60
 
 roster:
-  - role: kv_store
+  - role: memory
     id: yaml_store
-    sentence: A key/value store.
+    sentence: A text-document memory — plain files, any format.
     verbs:
-      read: "args: key — returns {key, value}"
-      set: "args: key, value — stores it"
+      read: "args: path — returns {path, lines: [{n, text}], version}"
+      write: "args: path, bytes — stores the document"
   - role: purchase_desk
     id: purchase
   - role: render_sink

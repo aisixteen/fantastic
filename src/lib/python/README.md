@@ -98,10 +98,12 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   NAMED command, not a sandbox — the operator chose which commands may run,
   nothing
   more.
-- **durable_memory** — modeless durable key-value memory agent; mount anywhere
-  (no `mode` — the key names its purpose). Persists `state.yaml` THROUGH a gated `file_bridge`
-  agent (`file_bridge_id`, deny-all by default) — owns no disk surface of
-  its own; failfast until wired. Reached like any other unit by id
+- **text_file** — stateless text-document agent; durable memory as plain FILES
+  in any format (the substrate imposes none). Line-numbered `read`, atomic
+  `write`, SEARCH/REPLACE `patch`, `append`; on-demand `version`/`if_match` +
+  `checkpoint`/`restore`. Owns no disk of its own — every byte is a gated send
+  to the `file_bridge` named by `on:`/`target_id`; fails loud until wired.
+  Reached like any other unit by id
   (`send(<id>, {...})`), so compute, inference, and memory share one
   calling convention.
 - **terminal_backend** — PTY shell session. The browser xterm view
@@ -297,7 +299,7 @@ uv run pytest -n auto
     ├── web/                                  # HTTP+WS transport (uvicorn) + favicon
     ├── file/, scheduler/                     # filesystem + recurring tasks
     ├── io/exec_bridge/                       # the PROCESS edge — sealed-by-default command runner, regex command ALLOWLIST (`allowed`), one spawn surface (proc.py), control wire; a program is a FILE + a command
-    ├── durable_memory/                       # modeless durable key-value memory (durable_memory.tools)
+    ├── text_file/                            # stateless text-document agent — file memory, patch, checkpoints (text_file.tools)
     ├── terminal/                             # PTY shell (handler_module terminal_backend.tools; xterm view lives in ts/)
     ├── ai/ai_core/                           # shared AI agent loop/state (queue/FIFO lock/menu cache, prompt assembly, agentic _run loop, verb bodies); all three AI backends bind to it
     ├── ai/ollama/ollama_backend              # local LLM (ollama) — thin binding over ai_core

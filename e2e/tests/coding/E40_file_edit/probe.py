@@ -1,10 +1,11 @@
 """coding/file_edit — the model EDITS with the patch organ. LLM-driven.
 
-One organ, precisely: `file_bridge.patch_text_file`. The task is a surgical
-config change; the score is the FILE — the target line changed, every other
-line byte-identical (a whole-file rewrite that happens to match would pass the
-diff, so the transcript must also show a `patch_text_file` call — the organ,
-not a bypass).
+One organ, precisely: the `text_file` editor's `patch` verb (patch moved OFF
+the bridge — text_file owns SEARCH/REPLACE and reaches disk only through gated
+sends to the file agent). The task is a surgical config change; the score is
+the FILE — the target line changed, every other line byte-identical (a
+whole-file rewrite that happens to match would pass the diff, so the
+transcript must also show a `patch` call — the organ, not a bypass).
 """
 
 from __future__ import annotations
@@ -33,11 +34,11 @@ CONFIG = (
 )
 
 TASK = (
-    "The file agent `edit_fb` serves this run's files. In `config.txt`, change "
-    "`port = 8080` to `port = 9090` — and change NOTHING else. Use the file "
-    "agent's `patch_text_file` verb (reflect `edit_fb` to learn its exact "
-    "shape); do NOT rewrite the whole file. When the patch is applied, stop — "
-    "a turn with no tool call ends your run."
+    "The editor agent `editor` edits this run's files. In `config.txt`, change "
+    "`port = 8080` to `port = 9090` — and change NOTHING else. Use the "
+    "editor's `patch` verb (reflect `editor` to learn its exact shape); do "
+    "NOT rewrite the whole file. When the patch is applied, stop — a turn "
+    "with no tool call ends your run."
 )
 
 
@@ -47,7 +48,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_edit_", reach=[FB, "ai", "cli"]
+        prefix="coding_edit_", reach=[FB, "editor", "ai", "cli"]
     )
     try:
         r = await _call(
@@ -60,17 +61,31 @@ async def main():
                 "handler_module": "file_bridge.tools",
                 "root": ".",
                 "ingress_rule": "allow_all_ingress",
-                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*", "editor": "*"},
             },
         )
         assert not r.get("error"), f"create {FB}: {r}"
+        r = await _call(
+            root,
+            root.id,
+            {
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": "editor",
+                "handler_module": "text_file.tools",
+                "target_id": FB,
+                "can_call": {FB: "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+            },
+        )
+        assert not r.get("error"), f"create editor: {r}"
         Path("config.txt").write_text(CONFIG)
 
         conn = await connect(
             root,
             core,
             BK,
-            can_call={FB: "*", "cli": "*"},
+            can_call={FB: "*", "editor": "*", "cli": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
@@ -87,7 +102,7 @@ async def main():
             ),
             (
                 "the PATCH organ was used, not a rewrite",
-                "patch_text_file" in transcript,
+                '"patch"' in transcript,
             ),
         ]
         for name, ok in checks:

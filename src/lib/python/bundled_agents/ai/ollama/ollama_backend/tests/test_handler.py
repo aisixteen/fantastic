@@ -90,7 +90,7 @@ async def test_reflect_includes_file_bridge_id_and_no_history(
 
 
 async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
-    # History is auto-mounted (a `chat` durable_memory, persisted through the loader) — the
+    # History is auto-mounted (a `chat` the chat sidecar, persisted through the loader) — the
     # AI needs NO file_bridge_id. (store_agent gives the loader a store to persist to.)
     oid = await _make_ollama(seeded_kernel)  # NO file_bridge_id
     fp = _FakeProvider([["ok"]])
@@ -313,7 +313,7 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
 
 
 async def test_run_persists_history(seeded_kernel, store_agent):
-    """Default caller (no client_id) persists user+assistant to the chat durable_memory."""
+    """Default caller (no client_id) persists user+assistant to the chat JSONL sidecar."""
     oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["reply"]])
     ot._providers[oid] = fp
@@ -337,7 +337,7 @@ async def test_run_persists_history(seeded_kernel, store_agent):
 
 
 async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
-    """Two client_ids → two distinct threads in the chat durable_memory."""
+    """Two client_ids → two distinct threads in the chat JSONL sidecar."""
     oid = await _make_ollama(seeded_kernel, store_agent)
     fp = _FakeProvider([["A-reply"], ["B-reply"]])
     ot._providers[oid] = fp

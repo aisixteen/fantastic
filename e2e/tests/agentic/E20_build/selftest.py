@@ -31,11 +31,11 @@ from pathlib import Path
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import verdict  # noqa: E402
-from backends import backend as _resolve_backend  # noqa: E402
+from helpers import verdict
+
 sys.argv = [sys.argv[0]]
 
-from tests.agentic.E20_build import probe as P  # noqa: E402  — share ONE fixture + discovery
+from tests.agentic.E20_build import probe as P  # noqa: E402
 from tests.agentic.E20_build.probe import CANARY_FILE, EXECUTOR_LEG  # noqa: E402
 
 READINGS = {f"reading_{i}.txt": secrets.randbelow(9000) + 1000 for i in range(1, 4)}
@@ -110,9 +110,10 @@ async def main():
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "durable_memory.tools",
+            "handler_module": "text_file.tools",
             "id": "totals",
-            "file_bridge_id": store["id"],
+            "target_id": store["id"],
+            "can_call": {store["id"]: "*"},
             # accept the running program's `set`, which arrives from the runner leg
             "callable_by": {EXECUTOR_LEG: "*"},
         }}]))[0]["result"]

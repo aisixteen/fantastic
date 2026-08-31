@@ -33,7 +33,7 @@ AI rehaul backlog (TODO — not in scope for the current decoupling).
 These items will need a coordinated redesign across all LLM
 backends + the TS ai_view before the next major bump:
   1. Cross-backend conversation portability — history now lives in a
-     mounted chat durable_memory (per-client key, persisted through its
+     chat JSONL sidecar (one line per turn, persisted through its
      loader; the AI writes no disk itself), but it is a child of THIS
      agent, so switching upstream_id still starts a fresh conversation.
      Future: history travels with the chat tile, backends become
@@ -115,11 +115,6 @@ _projection: dict[str, dict] = {}
 # durable store + which client's thread it was, so `_derive_reaction` can scan from there
 # for the model's recall/persist reaction. Internal; never surfaced in a verb reply.
 _compaction_mark: dict[str, dict] = {}
-
-# The AI's chat-store id (`<self>_chat`, a durable_memory child), keyed by agent id.
-# The conversation lives there (persisted THROUGH the loader) — the AI writes NO disk.
-_chat_agent: dict[str, str] = {}
-
 
 # ─── shared constants ───────────────────────────────────────────
 
@@ -330,139 +325,115 @@ def _safe_client(client_id: str) -> str:
 
 
 def _file_bridge_id(self_id: str, kernel) -> str | None:
-    """Still used by the nvidia backend for its api_key sidecar. Chat history NO LONGER
-    uses it — that lives in a `durable_memory` child (below), persisted via its file leg."""
+    """The agent's file leg: chat history persists through it (the JSONL sidecar
+    below), and the nvidia backend reads its api_key sidecar through it."""
     rec = kernel.get(self_id) or {}
     return rec.get("file_bridge_id")
 
 
-async def _ensure_chat_agent(self_id: str, kernel) -> str | None:
-    """The AI's chat store — a `durable_memory` child, its durable conversation log, which
-    persists THROUGH the loader (the AI writes NO disk itself). Discovered among this
-    agent's children, or created (idempotent + cached). None only if creation fails."""
-    cached = _chat_agent.get(self_id)
-    if cached and kernel.get(cached):
-        return cached
-    _chat_agent.pop(self_id, None)
-    try:
-        online = (
-            await kernel.send(
-                [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
-            )
-        )[0]["result"]
-    except Exception:
-        online = {}
-    # BOUND BY ID, not discovered by flag. The store's id is deterministic
-    # (`<self>_chat`), so finding it back is a lookup — the old path scanned the
-    # tree for `handler_module==<kv>.tools and mode=="chat"`, a magic-string
-    # sniff that died with the store's modes.
-    want = f"{self_id}_chat"
-    if kernel.get(want):
-        _chat_agent[self_id] = want
-        return want
-    del online  # the listing was only needed by the scan
-    # BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as `persist_blob`.
-    # This store is the AI's own conversation state, not an operator composition
-    # decision, and the agent does not choose to have one. It used to be a
-    # self-addressed create (`send(self_id, …)`), which the gate exempts because
-    # acting on YOURSELF drops the privileged check. Now that `create_agent` is
-    # kernel-owned the same call is agent→root, and without this every AI agent
-    # would have to be granted `create_agent` on the root just to keep its history.
-    with operator_context():
-        r = (
-            await kernel.send(
-                [
-                    {
-                        "target": "kernel",
-                        "payload": {
-                            "type": "create_agent",
-                            # The store is MINE — a child of this AI agent, reached through the
-                            # `$children` baseline with no grant. `create_agent` is kernel-owned,
-                            # so the placement is stated rather than implied by the address.
-                            "parent_id": self_id,
-                            "id": f"{self_id}_chat",
-                            "handler_module": "durable_memory.tools",
-                            # The store persists through the SAME file leg as its
-                            # owner — durable_memory has no fs of its own.
-                            "file_bridge_id": (kernel.get(self_id) or {}).get(
-                                "file_bridge_id"
-                            ),
-                            # SAY WHAT IT IS. This store is an implementation detail of the AI
-                            # agent, but an anonymous child id advertises "key/value store" — and a
-                            # type-derived id advertises "key/value store" far louder than a
-                            # purposeful name like `notes` does. Measured 2026-08-24
-                            # (`live_compose`, the model): asked to store a digest in "this
-                            # kernel's key/value store", the model saw both, reasoned
-                            # "the state-agent-looking child could be a KV
-                            # store", wrote there, read it back to verify, and reported DONE —
-                            # every step consistent, the value in the wrong agent. An internal
-                            # agent that looks like a general-purpose one is a discoverability
-                            # defect: the tree IS the interface, so an agent that will not be
-                            # chosen correctly must say so itself.
-                            "description": (
-                                f"Internal conversation store for the AI agent `{self_id}` — one "
-                                "key per client_id, holding that client's message history. NOT "
-                                "general-purpose memory: do not read or write it to store facts, "
-                                "results or notes. It is written by the agent's own turn loop."
-                            ),
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    cid = r.get("id") if isinstance(r, dict) else None
-    if cid:
-        _chat_agent[self_id] = cid
-    return cid
+def _chat_path(self_id: str, client_id: str) -> str:
+    """The chat sidecar's path on the agent's OWN file leg — one JSONL file per
+    client, one JSON line per turn. The encoding is ai_core's PRIVATE choice as
+    a consumer (this code is its only reader; models get turns through the
+    `history`/`recall` verbs) — the substrate imposes no format on anyone."""
+    return f"agents/{self_id}/chat_{_safe_client(client_id)}.jsonl"
 
 
 async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
-    """The client's conversation, read from the chat store (key-per-client)."""
-    cid = await _ensure_chat_agent(self_id, kernel)
-    if not cid:
+    """The client's conversation, read from the JSONL sidecar on the agent's
+    file leg. LINE INDEX == STORE INDEX — `recall.before` and the compaction
+    cursor page by it, so the identity is load-bearing. No leg wired, or no
+    sidecar yet, reads as empty (writes are the loud half)."""
+    fb = _file_bridge_id(self_id, kernel)
+    if not fb:
         return []
-    r = (
-        await kernel.send(
-            [
-                {
-                    "target": cid,
-                    "payload": {"type": "read", "key": _safe_client(client_id)},
-                }
-            ]
-        )
-    )[0]["result"]
-    val = r.get("value") if isinstance(r, dict) else None
-    return val if isinstance(val, list) else []
+    path = _chat_path(self_id, client_id)
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        # BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the loader's
+        # persist_blob and the old chat-store create: the agent does not choose
+        # to have a conversation log. Confused-deputy-safe by construction: the
+        # target is the record's OWN `file_bridge_id` (operator-set), the verb
+        # is literal, and the path is self-scoped (`agents/<self>/…`, client
+        # sanitized) — no caller can aim it at anyone else's namespace.
+        with operator_context():
+            r = (
+                await kernel.send(
+                    [
+                        {
+                            "target": fb,
+                            "payload": {
+                                "type": "read_stream",
+                                "path": path,
+                                "offset": offset,
+                                "length": 65536,
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return []  # no sidecar yet = no history
+        b = r.get("bytes") or b""
+        chunks.append(bytes(b))
+        if r.get("eof") or not b:
+            break
+        offset = r.get("next_offset", offset + len(b))
+    out: list[dict] = []
+    for line in b"".join(chunks).decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            turn = json.loads(line)
+        except ValueError:
+            # A torn tail line (a crash mid-append) is the ONE legal defect in
+            # an append-only log; skipping it loses at most that turn and never
+            # shifts the index of the lines before it.
+            continue
+        if isinstance(turn, dict):
+            out.append(turn)
+    return out
 
 
 async def _save_history(
     self_id: str, kernel, client_id: str, new_turns: list[dict]
 ) -> None:
-    """APPEND this turn's new messages to the chat store (key-per-client). The
-    durable record is never trimmed; the projection only shapes what the model sees."""
+    """APPEND this turn's new messages to the JSONL sidecar — one line per turn,
+    one `write_stream` append per turn (absent offset = append-at-end; creates
+    the file). The durable record is never trimmed; the projection only shapes
+    what the model sees. Ordering: the per-agent FIFO lock serializes an
+    agent's sends, which is what makes the leg's stat-then-seek append safe —
+    an EXTERNAL concurrent writer to the same sidecar would not be.
+    No `file_bridge_id` wired ⇒ nothing persists — and stays loudly absent
+    from `history`, never silently in RAM."""
     if not new_turns:
         return
-    cid = await _ensure_chat_agent(self_id, kernel)
-    if not cid:
+    fb = _file_bridge_id(self_id, kernel)
+    if not fb:
         return
-    # ONE append PER TURN — `append` adds its value as one element, so handing
-    # it the whole list nested the turns ([[user, assistant]]) and history read
-    # back empty of messages.
+    path = _chat_path(self_id, client_id)
     for turn in new_turns:
-        (
-            await kernel.send(
-                [
-                    {
-                        "target": cid,
-                        "payload": {
-                            "type": "append",
-                            "key": _safe_client(client_id),
-                            "value": turn,
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
+        line = (json.dumps(turn, ensure_ascii=False) + "\n").encode("utf-8")
+        # PROCESSED FROM ABOVE — see `_load_history`: own leg, literal verb,
+        # self-scoped path. Without this every fixture would need a
+        # can_call/callable_by pair just so an AI can keep its own history.
+        with operator_context():
+            (
+                await kernel.send(
+                    [
+                        {
+                            "target": fb,
+                            "payload": {
+                                "type": "write_stream",
+                                "path": path,
+                                "bytes": line,
+                            },
+                        }
+                    ]
+                )
+            )[0]["result"]
 
 
 async def _get_provider(self_id: str, kernel, cfg: Backend):
@@ -1565,7 +1536,7 @@ def _make_send(cfg: Backend):
         send_to = payload.get("send_to")
         if not isinstance(send_to, str) or not send_to.strip():
             send_to = None
-        # History is auto-mounted (a durable_memory child, persisted via its file leg) —
+        # History is auto-mounted (the JSONL sidecar, persisted via its file leg) —
         # no operator wiring needed; nothing to failfast on here.
         # Backends that require a provider up front (nvidia: api_key) failfast here.
         if cfg.require_provider:

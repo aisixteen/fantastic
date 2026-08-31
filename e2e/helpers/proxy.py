@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 W = 78
 
@@ -44,7 +44,7 @@ def distinct_calls(transcript: list[str]) -> int:
     """
     seen = set()
     for block in re.findall(
-        r"<tool_call>(.*?)</tool_call>", "".join(transcript), re.S
+        r"<tool_call>(.*?)</tool_call>", "".join(transcript), re.DOTALL
     ):
         seen.add(" ".join(block.split()))
     return len(seen)
@@ -64,7 +64,10 @@ def find_question(text: str) -> dict | None:
     import json
 
     for line in text.splitlines():
-        line = line.strip()
+        # Models routinely wrap the JSON line in a markdown code span
+        # (`{...}`) — measured 2026-08-31, E33: a real ask went undetected and
+        # the chain waited forever. The wrapper is formatting, not content.
+        line = line.strip().strip("`").strip()
         if not (line.startswith("{") and '"question"' in line):
             continue
         try:
@@ -102,7 +105,7 @@ class Limits:
     show_system: bool = False
 
     @classmethod
-    def from_env(cls, env, **defaults) -> "Limits":
+    def from_env(cls, env, **defaults) -> Limits:
         d = {**defaults}
         g = lambda k, cast, cur: cast(env.get(k, cur))  # noqa: E731
         return cls(
@@ -138,7 +141,7 @@ class ProxyReader:
         L = self.limits
         if self.n == 1 and L.show_system and messages:
             box("SYSTEM BLOCK", messages[0].get("content", ""), "┊")
-        for m in (messages[self._seen :] if self._seen else messages):
+        for m in messages[self._seen :] if self._seen else messages:
             # The assistant turn is printed from the STREAM below, so skipping it
             # here lets `_seen` be exactly `len(messages)` instead of a `+1` guess
             # that broke on parallel tool calls and dropped one message per turn.

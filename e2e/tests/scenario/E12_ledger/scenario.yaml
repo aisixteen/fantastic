@@ -17,7 +17,7 @@ task: >-
   Get exactly ONE coin for the job 'alpha': make the dispense call in a way that
   is SAFE TO REPEAT, then repeat that exact call once and compare the two
   receipts. Store {'receipt': <receipt>, 'match': <true/false>} under the key
-  'coin' in the key/value store. Then say COIN SECURED.
+  a document named exactly 'coin' (no extension) in the memory agent. Then say COIN SECURED.
 
 limits:
   max_turns: 14
@@ -25,12 +25,12 @@ limits:
   idle_seconds: 150
 
 roster:
-  - role: kv_store
+  - role: memory
     id: yaml_store
-    sentence: A key/value store.
+    sentence: A text-document memory — plain files, any format.
     verbs:
-      read: "args: key — returns {key, value}"
-      set: "args: key, value — stores it"
+      read: "args: path — returns {path, lines: [{n, text}], version}"
+      write: "args: path, bytes — stores the document"
   - role: dispenser
     id: dispenser
   - role: render_sink
@@ -43,5 +43,5 @@ grants:
 # asks the runner how many times the side effect actually ran.
 expect:
   - side_effects: {agent: dispenser, exactly: 1}
-  - read: {agent: yaml_store, key: coin}
+  - read: {agent: yaml_store, path: coin}
     contains: "match"

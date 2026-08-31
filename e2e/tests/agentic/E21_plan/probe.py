@@ -30,24 +30,24 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import secrets
 import socket
 import sys
-import time
-import tempfile
 from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import (  # noqa: E402
-    BASELINE, Limits, Watch, connect, distinct_calls, drive, verdict,
+from backends import backend as _resolve_backend
+from helpers import (
+    Limits,
+    Watch,
+    connect,
+    distinct_calls,
+    verdict,
 )
-from helpers.kernel import open_kernel  # noqa: E402
-from backends import backend as _resolve_backend  # noqa: E402
-
+from helpers.kernel import open_kernel
 
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
@@ -196,9 +196,10 @@ async def main():
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "durable_memory.tools",
+            "handler_module": "text_file.tools",
             "id": "yaml_store",
-            "file_bridge_id": store["id"],
+            "target_id": store["id"],
+            "can_call": {store["id"]: "*"},
             "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
         }}]))[0]["result"]
     # The three guards. All start SEALED (no ingress_rule) — the kernel's default. The

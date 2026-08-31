@@ -309,9 +309,8 @@ async def test_a_sidecar_round_trips_whatever_its_size(kernel, size):
 
 
 async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
-    """The same defect at the level it actually bites: a `durable_memory` agent
-    whose accumulated memory outgrew one chunk silently forgot the tail on its
-    next read."""
+    """The same defect at the level it actually bites: a `text_file` document
+    that outgrew one stream chunk silently lost its tail on the next read."""
     (
         await kernel.send(
             [
@@ -324,6 +323,7 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
                         "id": "store",
                         "root": ".fantastic",
                         "ingress_rule": "allow_all_ingress",
+                        "callable_by": {"memory": "*"},
                     },
                 }
             ]
@@ -337,9 +337,10 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
                     "payload": {
                         "type": "create_agent",
                         "parent_id": kernel.id,
-                        "handler_module": "durable_memory.tools",
+                        "handler_module": "text_file.tools",
                         "id": "memory",
-                        "file_bridge_id": "store",
+                        "target_id": "store",
+                        "can_call": {"store": "*"},
                     },
                 }
             ]
@@ -353,7 +354,11 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
                 [
                     {
                         "target": "memory",
-                        "payload": {"type": "set", "key": "big", "value": blob},
+                        "payload": {
+                            "type": "write",
+                            "path": "big.txt",
+                            "bytes": blob.encode(),
+                        },
                     }
                 ]
             )
@@ -361,10 +366,10 @@ async def test_a_large_memory_survives_the_agent_that_owns_it(kernel):
     )
     got = (
         await kernel.send(
-            [{"target": "memory", "payload": {"type": "read", "key": "big"}}]
+            [{"target": "memory", "payload": {"type": "read", "path": "big.txt"}}]
         )
     )[0]["result"]
-    assert got["value"] == blob
+    assert got["lines"][0]["text"] == blob
 
 
 # ─── a6 — operator provenance: the escalation windows ───────────
@@ -477,30 +482,31 @@ def test_operator_context_escalations_are_fixed_and_self_scoped():
     SUBSTRATE enters `operator_context()` on a caller's behalf sends something
     FIXED — a hardcoded target and verb, scoped to the caller itself.
 
-    `durable_memory._load` / `._persist` send to the leg named by the agent's
-    OWN record (`file_bridge_id` — operator-set at create, never taken from a
-    payload) with a literal stream verb and a literal path. The caller controls
-    only its own content. This test reads the source and fails if a
-    caller-controlled target, verb or path appears inside an escalation,
-    because that is the shape that turns bookkeeping into a confused deputy.
+    `scheduler._file_read` / `._file_write` — the remaining canonical
+    operator-context users — send to the LOADER by its literal id with a literal
+    blob verb; the sidecar name comes from internal callers' constants, never a
+    caller payload. This test reads the source and fails if a caller-controlled
+    target, verb or path appears inside an escalation, because that is the
+    shape that turns bookkeeping into a confused deputy.
     """
     import inspect
 
-    from durable_memory import tools as dm
+    from scheduler import tools as sch
 
-    for fn, verb in ((dm._load, '"read_stream"'), (dm._persist, '"write_stream"')):
+    for fn, verb in (
+        (sch._file_read, '"load_blob"'),
+        (sch._file_write, '"persist_blob"'),
+    ):
         src = inspect.getsource(fn)
         assert "operator_context()" in src
-        # target: the record's own binding, resolved by _fbid(agent) — never
-        # payload-derived. verb + path: literals.
-        assert "_fbid(agent)" in src, (
-            f"{fn.__name__}: target is not the record's own leg"
+        # target: the loader, by literal id — never payload-derived.
+        assert '"kernel_state"' in src, (
+            f"{fn.__name__}: target is not the literal loader id"
         )
         assert "payload.get" not in src and "payload[" not in src, (
             f"{fn.__name__}: escalation must not read a caller payload"
         )
         assert verb in src, f"{fn.__name__}: verb is not literal"
-        assert "STATE_PATH" in src, f"{fn.__name__}: path is not fixed"
 
 
 async def test_a_bare_test_driver_is_an_operator_and_that_is_deliberate(kernel):

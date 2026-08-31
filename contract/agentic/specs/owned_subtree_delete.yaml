@@ -25,8 +25,8 @@ expect:
     - name: the doomed roster's own wiring works before anything is deleted
       reach: {from: a_head, to: a_leaf, send: {type: list, path: ""}}
       expect: {allow: true}
-    - name: the sidecar-bearing member is reachable from its head
-      reach: {from: a_head, to: a_notes, send: {type: set, key: probe, value: 1}}
+    - name: the roster's second member is reachable from its head
+      reach: {from: a_head, to: a_notes, send: {type: write, path: probe.txt, bytes_utf8: "1"}}
       expect: {allow: true}
     - name: the neighbour roster is wired the same way, independently
       reach: {from: b_head, to: b_leaf, send: {type: list, path: ""}}

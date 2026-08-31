@@ -44,19 +44,21 @@ import re
 import secrets
 import shlex
 import sys
-import time
 from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import (  # noqa: E402
-    BASELINE, Limits, Watch, connect, distinct_calls, drive, verdict,
+from backends import backend as _resolve_backend
+from helpers import (
+    Limits,
+    Watch,
+    connect,
+    distinct_calls,
+    verdict,
 )
-from helpers.kernel import open_kernel  # noqa: E402
-from backends import backend as _resolve_backend  # noqa: E402
-
+from helpers.kernel import open_kernel
 
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
@@ -335,7 +337,7 @@ async def run(
             # its own update_agent grant) reach this store — accept the AI directly.
             # The wire surfaces too: over REST/WS the harness's own reads arrive AS
             # `rest`/`web`, and ingress is two-sided (inert in-process — no such ids).
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+            "callable_by": {"ai": "*", "totals": "*", "rest": "*", "web": "*"},
         }}]))[0]["result"]
     # The readings live behind an OPEN file agent — this probe is about building a
     # program, not about guessing an auth posture (that is `live_plan.py`'s job).
@@ -358,9 +360,10 @@ async def run(
     mem = (await root.send([{"target": root.id, "payload": {
             "type": "create_agent",
             "parent_id": root.id,
-            "handler_module": "durable_memory.tools",
+            "handler_module": "text_file.tools",
             "id": "totals",
-            "file_bridge_id": store["id"],
+            "target_id": store["id"],
+            "can_call": {store["id"]: "*"},
             "description": "Durable store for computed results.",
             # Two-sided deny-all: accept the AI directly, AND the command runner — the
             # program's `set` lands from the runner leg (its owner) over the control wire.

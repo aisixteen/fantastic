@@ -20,7 +20,7 @@ Manifest:
 ```yaml
 agents:
   - id: memory
-    handler_module: durable_memory.tools
+    handler_module: text_file.tools
   - id: worker
     handler_module: exec_bridge.tools
     allowed: ['python3 .*']   # the command(s) this leg may spawn

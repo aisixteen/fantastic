@@ -904,7 +904,7 @@ def _guard_blob_owner(aid: str) -> str | None:
     an operator creates at the root is a direct child. Position bounds who can
     reach the verb; it says nothing about which namespace they may name.
 
-    An OPERATOR send (`sender` is None: the loader's own flush, `durable_memory`
+    An OPERATOR send (`sender` is None: the loader's own flush, `text_file`
     persisting itself under `operator_context`, the CLI) is the bookkeeping this
     verb exists for and stays ungated — that is the origin root of trust, and an
     agent cannot forge it. An AGENT may only name ITSELF.

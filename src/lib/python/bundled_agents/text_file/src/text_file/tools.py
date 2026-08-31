@@ -1,0 +1,617 @@
+"""text_file bundle — a stateless text-document agent over the file stream.
+
+Format-free by design: the substrate imposes no memory format, so a document is
+whatever text the caller writes (markdown, JSON, source). This agent supplies
+the TEXT operations — line-read, atomic write, SEARCH/REPLACE patch, append —
+plus ON-DEMAND versioning (`version` content hash on every reply; an
+`if_match` guard that fires only when passed) and ON-DEMAND checkpoints
+(pre-images as plain files under `.ckpt/` on the same surface; retention is the
+caller's).
+
+NO DISK CODE HERE. Every byte routes through the file_bridge AGENT named by
+`on` (per call) or the record's `target_id`, over its stream verbs — plain
+GATED sends, sender = this agent, so the operator wires both ends
+(`can_call`/`callable_by`) and the leg's clamp + ingress rule apply unchanged.
+`operator_context()` is deliberately NOT used: these verbs take caller-supplied
+paths, which is exactly what the confused-deputy rule forbids escalating.
+
+Atomicity ownership: this agent owns the TRANSACTION protocol — write goes to
+`<path>.tmp.<pid>` then `rename` (the leg's one atomic op); a checkpointed
+mutate commits the pre-image BEFORE touching the target; a patch verifies every
+hunk before writing anything. The residual failure is a stream call dying
+mid-sequence: rare, and biased SAFE by ordering — the crash leaves visible
+tmp/`.ckpt` debris, never lost data or a half-written target.
+
+Checkpoint ids ARE the dispatch's kernel task pid (`<agent>:<hex8>`) — one id
+space with `ps`, the trace, and the chat turn that caused the mutation.
+POSIX-legal verbatim as a filename (this project does not target Windows).
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+from kernel import current_task
+from kernel._refusal import (
+    NOT_FOUND,
+    UNHANDLED,
+    bad,
+    missing,
+    refusal,
+)
+
+#: where pre-images live on the TARGET surface — plain files, visible to `list`.
+CKPT_DIR = ".ckpt"
+#: read/write chunk size on the stream verbs.
+CHUNK = 65536
+
+
+# ─── the target surface ─────────────────────────────────────────
+
+
+def _target(id: str, payload: dict, kernel) -> str | None:
+    """The file_bridge id this call operates on: `on` wins, else the record's
+    `target_id`. None means unwired — every verb fails loud on it."""
+    on = payload.get("on")
+    if isinstance(on, str) and on:
+        return on
+    rec = kernel.get(id) or {}
+    tid = rec.get("target_id")
+    return tid if isinstance(tid, str) and tid else None
+
+
+def _unwired(verb: str) -> dict:
+    return refusal(
+        NOT_FOUND,
+        f"{verb}: no target surface — pass on=<file_bridge id> or set "
+        "`target_id` on this agent's record",
+        hint="the operator wires both ends: this agent's can_call names the "
+        "leg, and the leg's callable_by accepts this agent",
+    )
+
+
+def _version(data: bytes) -> str:
+    """The on-demand version: a content hash, computed, never stored."""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _pid() -> str:
+    """This dispatch's kernel task pid — the checkpoint id space."""
+    return current_task() or "op:00000000"
+
+
+# ─── stream I/O (every byte through the gated leg) ──────────────
+
+
+async def _read_all(kernel, fb: str, path: str):
+    """Whole file via the leg's `read_stream` chunk loop. Returns
+    `(bytes, None)` or `(None, refusal-dict)` — the leg's own refusal
+    (not_found, unauthorized) passes through verbatim."""
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": fb,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": path,
+                            "offset": offset,
+                            "length": CHUNK,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return None, (r if isinstance(r, dict) else {"error": str(r)})
+        b = r.get("bytes") or b""
+        chunks.append(bytes(b))
+        if r.get("eof") or not b:
+            break
+        offset = r.get("next_offset", offset + len(b))
+    return b"".join(chunks), None
+
+
+async def _write_chunks(kernel, fb: str, path: str, data: bytes):
+    """Write `data` to `path` on the leg — truncate-first, then append chunks.
+    NOT atomic on its own; `_write_atomic` adds the tmp+rename commit."""
+    off = 0
+    first = True
+    while first or off < len(data):
+        chunk = data[off : off + CHUNK]
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": fb,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": path,
+                            "bytes": chunk,
+                            "offset": off,
+                            "truncate": first,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return r if isinstance(r, dict) else {"error": str(r)}
+        off += len(chunk)
+        first = False
+    return None
+
+
+async def _write_atomic(kernel, fb: str, path: str, data: bytes):
+    """The COMMIT: write to a tmp sibling, then the leg's one atomic `rename`.
+    A crash before the rename leaves only tmp debris."""
+    tmp = f"{path}.tmp.{_pid().replace(':', '_')}"
+    if err := await _write_chunks(kernel, fb, tmp, data):
+        return err
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {"type": "rename", "old_path": tmp, "new_path": path},
+                }
+            ]
+        )
+    )[0]["result"]
+    if not isinstance(r, dict) or r.get("error"):
+        return r if isinstance(r, dict) else {"error": str(r)}
+    return None
+
+
+def _ckpt_path(path: str, ckpt_id: str) -> str:
+    # `/` in the document path would nest under .ckpt; flatten it so every
+    # pre-image of one document lives in ONE listable dir.
+    return f"{CKPT_DIR}/{path.replace('/', '__')}/{ckpt_id}"
+
+
+async def _if_match_guard(kernel, fb: str, path: str, want: str | None):
+    """The on-demand optimistic guard: only fires when the caller passed
+    `if_match`. Returns a refusal dict on mismatch, else None."""
+    if want is None:
+        return None
+    data, err = await _read_all(kernel, fb, path)
+    if err is not None:
+        return err
+    have = _version(data)
+    if have != want:
+        return {
+            "error": "version mismatch — the document changed since you read it",
+            "reason": "version_mismatch",
+            "expected": want,
+            "actual": have,
+        }
+    return None
+
+
+async def _take_checkpoint(kernel, fb: str, path: str):
+    """Commit the pre-image BEFORE any mutate touches the target. A file that
+    does not exist yet checkpoints as ABSENT (restore = delete)."""
+    ckpt_id = _pid()
+    data, err = await _read_all(kernel, fb, path)
+    if err is not None and err.get("reason") == "not_found":
+        data = None  # pre-image: absence
+    elif err is not None:
+        return None, err
+    marker = data if data is not None else b""
+    dest = _ckpt_path(path, ckpt_id)
+    # An absent pre-image is recorded as an empty file with an `.absent` twin —
+    # restore then deletes the document instead of emptying it.
+    if err := await _write_chunks(kernel, fb, dest, marker):
+        return None, err
+    if data is None:
+        if err := await _write_chunks(kernel, fb, dest + ".absent", b""):
+            return None, err
+    return ckpt_id, None
+
+
+# ─── verbs ──────────────────────────────────────────────────────
+
+
+async def _reflect(id, payload, kernel):
+    """no args — identity, verb guide, and the wired default surface."""
+    rec = kernel.get(id) or {}
+    return {
+        "id": id,
+        "sentence": rec.get("description")
+        or "Text documents on a file surface — any format, the caller's choice: "
+        "line-read, atomic write, SEARCH/REPLACE patch, append; versioning and "
+        "checkpoints ON DEMAND.",
+        "target_id": rec.get("target_id"),
+        "patch_grammar": (
+            "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
+            "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match the current "
+            "document EXACTLY ONCE; the patch rides as RAW bytes (real newlines, "
+            "nothing escaped — use send_binary with `bytes` LAST)"
+        ),
+        "verbs": {
+            n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
+        },
+    }
+
+
+async def _boot(id, payload, kernel):
+    """no args — no-op; this agent holds no state to hydrate."""
+    return None
+
+
+async def _read(id, payload, kernel):
+    """args: path:str (req), on:str?, offset:int=0 (line), limit:int=200 — {path, lines:[{n,text}], total, eof, version}; refuses binary."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("read")
+    path = payload.get("path", "")
+    if not path:
+        return missing("read", "path")
+    data, err = await _read_all(kernel, fb, path)
+    if err is not None:
+        return err
+    if b"\x00" in data:
+        return bad("read", "path", "a text file (this one is binary)")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return bad("read", "path", "valid utf-8 (this file is not)")
+    all_lines = text.split("\n")
+    # A trailing newline yields one phantom empty tail element — drop it so
+    # `total` counts real lines.
+    if all_lines and all_lines[-1] == "":
+        all_lines.pop()
+    off = max(0, int(payload.get("offset") or 0))
+    limit = max(1, int(payload.get("limit") or 200))
+    page = all_lines[off : off + limit]
+    return {
+        "path": path,
+        "lines": [{"n": off + i + 1, "text": t} for i, t in enumerate(page)],
+        "total": len(all_lines),
+        "eof": off + limit >= len(all_lines),
+        "version": _version(data),
+    }
+
+
+async def _write(id, payload, kernel):
+    """args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("write")
+    path = payload.get("path", "")
+    if not path:
+        return missing("write", "path")
+    data = payload.get("bytes")
+    if not isinstance(data, (bytes, bytearray)):
+        return missing("write", "bytes (the document, raw bytes)")
+    data = bytes(data)
+    if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
+        return err
+    ckpt_id = None
+    if payload.get("checkpoint"):
+        ckpt_id, err = await _take_checkpoint(kernel, fb, path)
+        if err is not None:
+            return err
+    if err := await _write_atomic(kernel, fb, path, data):
+        return err
+    out = {"path": path, "size": len(data), "version": _version(data)}
+    if ckpt_id:
+        out["ckpt_id"] = ckpt_id
+    return out
+
+
+async def _append(id, payload, kernel):
+    """args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("append")
+    path = payload.get("path", "")
+    if not path:
+        return missing("append", "path")
+    data = payload.get("bytes")
+    if not isinstance(data, (bytes, bytearray)):
+        return missing("append", "bytes (one raw chunk)")
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "write_stream",
+                        "path": path,
+                        "bytes": bytes(data),
+                        # absent offset = append at end (creates the file)
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    if not isinstance(r, dict) or r.get("error"):
+        return r if isinstance(r, dict) else {"error": str(r)}
+    whole, err = await _read_all(kernel, fb, path)
+    if err is not None:
+        return err
+    return {"path": path, "size": r.get("size"), "version": _version(whole)}
+
+
+# ─── patch (moved from file_bridge — same grammar, same guarantees) ─────
+# A STRUCTURED whole-document edit: SEARCH/REPLACE hunks applied against the
+# EVOLVING content, each hunk required to match EXACTLY ONCE; any failure
+# writes NOTHING (all-or-nothing, no fuzzy apply). The patch is TEXT (utf-8)
+# but rides as raw BYTES so quote/newline-heavy hunks are never JSON-escaped.
+_H_START, _H_DIV, _H_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
+
+
+def _parse_hunks(text: str) -> list[tuple[str, str]]:
+    """Parse SEARCH/REPLACE blocks into (search, replace) pairs. The text inside a
+    block is taken VERBATIM (the marker lines excluded). Raises ValueError on a block
+    that opens but does not close."""
+    lines = text.split("\n")
+    hunks: list[tuple[str, str]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i] != _H_START:
+            i += 1
+            continue
+        j = i + 1
+        search: list[str] = []
+        while j < n and lines[j] != _H_DIV:
+            search.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a SEARCH block has no `=======` divider")
+        j += 1
+        replace: list[str] = []
+        while j < n and lines[j] != _H_END:
+            replace.append(lines[j])
+            j += 1
+        if j >= n:
+            raise ValueError("a block has no closing `>>>>>>> REPLACE`")
+        hunks.append(("\n".join(search), "\n".join(replace)))
+        i = j + 1
+    return hunks
+
+
+async def _patch(id, payload, kernel):
+    """args: path:str (req), bytes:bytes (req — the utf-8 patch, raw), on:str?, if_match:str?, dry_run:bool?, checkpoint:bool? — SEARCH/REPLACE blocks, each matching EXACTLY ONCE; all-or-nothing; {path, patched:true, hunks, size, version, ckpt_id?}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("patch")
+    path = payload.get("path", "")
+    if not path:
+        return missing("patch", "path")
+    data = payload.get("bytes")
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return missing("patch", "bytes (the utf-8 patch)")
+    try:
+        patch = bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return bad("patch", "bytes", "valid utf-8 (the patch is text)")
+    try:
+        hunks = _parse_hunks(patch)
+    except ValueError as e:
+        return bad("patch", "bytes", f"a well-formed patch — {e}")
+    if not hunks:
+        return bad(
+            "patch",
+            "bytes",
+            "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
+        )
+    raw, err = await _read_all(kernel, fb, path)
+    if err is not None:
+        return err
+    if payload.get("if_match") is not None and _version(raw) != payload["if_match"]:
+        return {
+            "error": "version mismatch — the document changed since you read it",
+            "reason": "version_mismatch",
+            "expected": payload["if_match"],
+            "actual": _version(raw),
+        }
+    try:
+        working = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return bad("patch", "path", "a utf-8 text file")
+    # Apply against the EVOLVING content; each SEARCH must be unique at its turn.
+    # Stop at the first failure and write NOTHING (all-or-nothing).
+    for idx, (search, replace) in enumerate(hunks):
+        hits = working.count(search)
+        if hits != 1:
+            reason = "no_match" if hits == 0 else "ambiguous"
+            detail = (
+                "search text not found"
+                if hits == 0
+                else f"search text matches {hits} places"
+            )
+            return {
+                "error": "a hunk did not apply — nothing written",
+                "reason": reason,
+                "failed": [{"index": idx, "reason": detail}],
+            }
+        working = working.replace(search, replace, 1)
+    new = working.encode("utf-8")
+    if payload.get("dry_run"):
+        return {
+            "path": path,
+            "dry_run": True,
+            "hunks": len(hunks),
+            "version": _version(raw),
+        }
+    ckpt_id = None
+    if payload.get("checkpoint"):
+        ckpt_id, err = await _take_checkpoint(kernel, fb, path)
+        if err is not None:
+            return err
+    if err := await _write_atomic(kernel, fb, path, new):
+        return err
+    out = {
+        "path": path,
+        "patched": True,
+        "hunks": len(hunks),
+        "size": len(new),
+        "version": _version(new),
+    }
+    if ckpt_id:
+        out["ckpt_id"] = ckpt_id
+    return out
+
+
+# ─── checkpoints (on demand; pre-images as plain files) ─────────
+
+
+async def _checkpoint(id, payload, kernel):
+    """args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("checkpoint")
+    path = payload.get("path", "")
+    if not path:
+        return missing("checkpoint", "path")
+    data, err = await _read_all(kernel, fb, path)
+    if err is not None:
+        return err
+    ckpt_id, err = await _take_checkpoint(kernel, fb, path)
+    if err is not None:
+        return err
+    return {"ckpt_id": ckpt_id, "path": path, "version": _version(data)}
+
+
+async def _checkpoints(id, payload, kernel):
+    """args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("checkpoints")
+    path = payload.get("path", "")
+    if not path:
+        return missing("checkpoints", "path")
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "list",
+                        "path": f"{CKPT_DIR}/{path.replace('/', '__')}",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    if not isinstance(r, dict) or r.get("error"):
+        # no dir yet = no checkpoints, honestly empty
+        return {"path": path, "ckpts": []}
+    ckpts = [
+        {"id": f["name"], "size": f.get("size")}
+        for f in r.get("files") or []
+        if f.get("type") == "file" and not f["name"].endswith(".absent")
+    ]
+    return {"path": path, "ckpts": ckpts}
+
+
+async def _restore(id, payload, kernel):
+    """args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("restore")
+    path = payload.get("path", "")
+    if not path:
+        return missing("restore", "path")
+    ckpt_id = payload.get("ckpt_id", "")
+    if not ckpt_id:
+        return missing("restore", "ckpt_id")
+    if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
+        return err
+    src = _ckpt_path(path, ckpt_id)
+    # An `.absent` twin means the pre-image was NO FILE — restore deletes.
+    absent = (
+        await kernel.send(
+            [
+                {
+                    "target": fb,
+                    "payload": {
+                        "type": "read_stream",
+                        "path": src + ".absent",
+                        "offset": 0,
+                        "length": 1,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    if isinstance(absent, dict) and not absent.get("error"):
+        r = (
+            await kernel.send(
+                [{"target": fb, "payload": {"type": "delete", "path": path}}]
+            )
+        )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return r if isinstance(r, dict) else {"error": str(r)}
+        return {"restored": True, "path": path, "deleted": True}
+    data, err = await _read_all(kernel, fb, src)
+    if err is not None:
+        if err.get("reason") == "not_found":
+            return refusal(
+                NOT_FOUND, f"restore: no checkpoint {ckpt_id!r} for {path!r}"
+            )
+        return err
+    if err := await _write_atomic(kernel, fb, path, data):
+        return err
+    return {"restored": True, "path": path, "version": _version(data)}
+
+
+async def _drop(id, payload, kernel):
+    """args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}."""
+    fb = _target(id, payload, kernel)
+    if not fb:
+        return _unwired("drop")
+    path = payload.get("path", "")
+    ckpt_id = payload.get("ckpt_id", "")
+    if not path:
+        return missing("drop", "path")
+    if not ckpt_id:
+        return missing("drop", "ckpt_id")
+    src = _ckpt_path(path, ckpt_id)
+    r = (
+        await kernel.send([{"target": fb, "payload": {"type": "delete", "path": src}}])
+    )[0]["result"]
+    if not isinstance(r, dict) or r.get("error"):
+        return r if isinstance(r, dict) else {"error": str(r)}
+    # best-effort: the `.absent` twin, if any (its absence is not an error)
+    await kernel.send(
+        [{"target": fb, "payload": {"type": "delete", "path": src + ".absent"}}]
+    )
+    return {"dropped": True, "ckpt_id": ckpt_id, "path": path}
+
+
+VERBS = {
+    "reflect": _reflect,
+    "boot": _boot,
+    "read": _read,
+    "write": _write,
+    "patch": _patch,
+    "append": _append,
+    "checkpoint": _checkpoint,
+    "checkpoints": _checkpoints,
+    "restore": _restore,
+    "drop": _drop,
+}
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse a write this bundle cannot honour: `target_id`, when present, must
+    be a non-empty agent-id string (the default surface this agent operates on)."""
+    if "target_id" in meta:
+        t = meta["target_id"]
+        if not isinstance(t, str) or not t:
+            return "target_id must be a non-empty file_bridge agent id"
+    return None
+
+
+async def handler(id: str, payload: dict, kernel) -> dict | None:
+    t = payload.get("type")
+    fn = VERBS.get(t)
+    if fn is None:
+        return refusal(UNHANDLED, f"text_file: unknown type {t!r}", verb=t)
+    return await fn(id, payload, kernel)

@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -56,14 +55,14 @@ from pathlib import Path
 # file into a folder can never silently break its imports again.
 sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
                             if (d / ".e2e-root").exists())))
-from helpers import (  # noqa: E402
-    BASELINE, Limits, ProxyReader, Watch, distinct_calls, verdict,
+from helpers import (
+    verdict,
 )
-from backends import backend as _resolve_backend  # noqa: E402
+
 _ARGV = sys.argv[:]
 sys.argv = [sys.argv[0]]
 
-from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402  — ONE fixture, ONE scoring path
+from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
 
 # `brain` stays LOCAL even when the builder is a paid API. Override to compare.
 BRAIN_BACKEND = os.environ.get("BRAIN_BACKEND", "llamacpp")

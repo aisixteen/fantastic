@@ -274,7 +274,7 @@ async def test_dehydrate_reads_the_running_system_back_through_one_reflect(
     # walks the subtree, so declaring it in the manifest is enough.
     assert d["agents"]["store"]["parent_id"] == "static_loader"
     assert d["agents"]["memory"]["parent_id"] == "static_loader"
-    assert d["agents"]["memory"]["handler_module"] == "durable_memory.tools"
+    assert d["agents"]["memory"]["handler_module"] == "text_file.tools"
     assert set(d["children"]["static_loader"]) == {
         "store",
         "memory",

@@ -230,7 +230,7 @@ class Agent:
 
         `root_path` is a DERIVED ADDRESS ONLY — the loader agent owns
         all disk I/O; an Agent never reads or writes it. Sidecar bundles
-        (file / durable_memory / readme) compute their paths under it, and
+        (file / chat / readme) compute their paths under it, and
         the loader maps `<root_path>/agent.json` ←→ this record. Children
         address at `<root_path>/agents/<child_id>/`.
         """

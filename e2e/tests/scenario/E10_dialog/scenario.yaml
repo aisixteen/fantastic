@@ -10,11 +10,11 @@
 id: dialog
 title: it DISCOVERS an unnamed peer from the tree and really acts on it
 
-# The task NAMES NOTHING. Which agent stores key/value data, and which verbs it
+# The task NAMES NOTHING. Which agent stores documents, and which verbs it
 # takes, are what the model has to work out — that is the measurement.
 task: >-
-  Somewhere in this kernel is an agent that stores key/value data. Find it, and
-  store the number 42 under the key 'answer'. Then say ANSWER STORED.
+  Somewhere in this kernel is an agent that stores data durably. Find it, and
+  store the number 42 in a document named exactly 'answer' (no extension). Then say ANSWER STORED.
 
 limits:
   max_turns: 10
@@ -22,16 +22,16 @@ limits:
   idle_seconds: 100
 
 # The fixture, by ROLE rather than by bundle name: a compiled kernel can only
-# run bundles compiled into it, so `store` is `durable_memory` on python, `yaml_state` on rust/swift, and an
-# in-process handler on python/js. The role is the contract; the runner picks
-# the implementation it has.
+# run bundles compiled into it — the role is the contract; the runner picks
+# the implementation it has (python: `text_file`; rust/swift: pending the
+# text_file port — red until then, python leads).
 roster:
-  - role: kv_store
+  - role: memory
     id: yaml_store
-    sentence: A key/value store.
+    sentence: A text-document memory — plain files, any format.
     verbs:
-      read: "args: key — returns {key, value}"
-      set: "args: key, value — stores it"
+      read: "args: path — returns {path, lines: [{n, text}], version}"
+      write: "args: path, bytes — stores the document"
   - role: render_sink
     id: cli
 
@@ -43,5 +43,5 @@ grants:
 # FALSIFIABLE. Scored against the store's contents, never the model's prose —
 # a model that says ANSWER STORED without calling anything cannot pass.
 expect:
-  - read: {agent: yaml_store, key: answer}
+  - read: {agent: yaml_store, path: answer}
     contains: "42"

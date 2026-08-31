@@ -17,7 +17,7 @@ task: >-
   re-sending the call yourself — a call can carry a retries budget. Afterwards,
   find out what became of each of those two executions, and store
   {'pump': <the pump result>, 'valve': {'status': <status>, 'attempts': <attempts>}}
-  under the key 'report' in the key/value store. Then say REPORT FILED.
+  in a document named exactly 'report' (no extension) in the memory agent. Then say REPORT FILED.
 
 limits:
   max_turns: 14
@@ -25,12 +25,12 @@ limits:
   idle_seconds: 150
 
 roster:
-  - role: kv_store
+  - role: memory
     id: yaml_store
-    sentence: A key/value store.
+    sentence: A text-document memory — plain files, any format.
     verbs:
-      read: "args: key — returns {key, value}"
-      set: "args: key, value — stores it"
+      read: "args: path — returns {path, lines: [{n, text}], version}"
+      write: "args: path, bytes — stores the document"
   - role: flaky_plant
     id: plant
   - role: render_sink
@@ -44,5 +44,5 @@ grants:
 # different envelope count, which is why the probe also reads the report.
 expect:
   - side_effects: {agent: plant, at_least: 3}
-  - read: {agent: yaml_store, key: report}
+  - read: {agent: yaml_store, path: report}
     contains: "valve"

@@ -428,14 +428,19 @@ def parse_one(inner: str) -> dict | None:
     (stringified) arguments. Returns None on unparseable JSON.
     """
     inner = inner.strip()
-    # send_binary carries a RAW program in `bytes` (no escaping) — read it as a string
-    # rather than forcing it through json.loads. See `_send_binary_raw`.
-    if (sb := _send_binary_raw(inner)) is not None:
-        return sb
     try:
         obj = json.loads(inner)
         rest = ""
     except (json.JSONDecodeError, ValueError):
+        # send_binary carrying a RAW program in `bytes` (real newlines, real
+        # quotes — no escaping) is not JSON, so it lands here; `_send_binary_raw`
+        # lifts the program out verbatim. Tried ONLY after strict JSON fails:
+        # a model that escaped its payload correctly (measured 2026-08-31, E44:
+        # `"bytes":"<<<<<<< SEARCH\nport ..."`) parses above and gets its
+        # escapes DECODED — the raw path would have kept them literal and the
+        # patch died on "no blocks", twice, with no way for the model to see why.
+        if (sb := _send_binary_raw(inner)) is not None:
+            return sb
         # Trailing junk after a COMPLETE object — observed live from
         # gpt-oss:120b, which closes `arguments` early and then emits
         # `,"reply_to":"self"}}` (one brace too many). `raw_decode` takes the

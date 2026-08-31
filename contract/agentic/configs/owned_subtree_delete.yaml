@@ -12,14 +12,13 @@ loaders:
           handler_module: file_bridge.tools
           ingress_rule: allow_all_ingress
           can_call:
-            a_notes: [set, read]
+            a_notes: [write, read]
             a_leaf: [list]
-        # Carries a sidecar (`state.yaml`), so the cascade has more to remove
-        # than one agent.json.
+        # The roster's second member — a text editor the head drives.
         - id: a_notes
-          handler_module: durable_memory.tools
+          handler_module: text_file.tools
           callable_by:
-            a_head: [set, read]
+            a_head: [write, read]
         - id: a_leaf
           handler_module: file_bridge.tools
           ingress_rule: allow_all_ingress

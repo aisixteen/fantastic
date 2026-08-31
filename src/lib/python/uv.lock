@@ -7,7 +7,6 @@ members = [
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cli",
-    "fantastic-durable-memory",
     "fantastic-exec-bridge",
     "fantastic-file-bridge",
     "fantastic-io-bridge",
@@ -20,6 +19,7 @@ members = [
     "fantastic-scheduler",
     "fantastic-static-loader",
     "fantastic-terminal-backend",
+    "fantastic-text-file",
     "fantastic-web",
     "fantastic-web-rest",
     "fantastic-web-ws",
@@ -226,17 +226,6 @@ version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
 
 [[package]]
-name = "fantastic-durable-memory"
-version = "0.1.0"
-source = { editable = "bundled_agents/durable_memory" }
-dependencies = [
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
-
-[[package]]
 name = "fantastic-exec-bridge"
 version = "0.1.0"
 source = { editable = "bundled_agents/io/exec_bridge" }
@@ -271,7 +260,6 @@ dependencies = [
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cli" },
-    { name = "fantastic-durable-memory" },
     { name = "fantastic-exec-bridge" },
     { name = "fantastic-file-bridge" },
     { name = "fantastic-io-bridge" },
@@ -283,6 +271,7 @@ dependencies = [
     { name = "fantastic-scheduler" },
     { name = "fantastic-static-loader" },
     { name = "fantastic-terminal-backend" },
+    { name = "fantastic-text-file" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
     { name = "fantastic-web-ws" },
@@ -303,7 +292,6 @@ requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
-    { name = "fantastic-durable-memory", editable = "bundled_agents/durable_memory" },
     { name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" },
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "fantastic-io-bridge", editable = "bundled_agents/io/io_bridge" },
@@ -315,6 +303,7 @@ requires-dist = [
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
     { name = "fantastic-terminal-backend", editable = "bundled_agents/terminal" },
+    { name = "fantastic-text-file", editable = "bundled_agents/text_file" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
     { name = "fantastic-web-ws", editable = "bundled_agents/io/web_ws" },
@@ -431,6 +420,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" }]
+
+[[package]]
+name = "fantastic-text-file"
+version = "0.1.0"
+source = { editable = "bundled_agents/text_file" }
 
 [[package]]
 name = "fantastic-web"

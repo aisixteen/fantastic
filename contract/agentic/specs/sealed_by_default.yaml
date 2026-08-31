@@ -7,7 +7,7 @@ name: sealed_by_default
 description: >
   A freshly declared io leg denies, and opening it is a conscious act. Five
   file_bridge legs and one exec_bridge leg differing ONLY in posture, plus a
-  durable_memory whose persistence was never wired — so every refusal below is
+  text_file editor with no target surface wired — so every refusal below is
   attributable to one declared fact and nothing else.
 
   The manifest declares NO grants at all. Every roster agent is a child of the

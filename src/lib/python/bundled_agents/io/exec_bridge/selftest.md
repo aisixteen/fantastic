@@ -83,7 +83,7 @@ Expect the row to finalize, NOT to stay `running`. The OS subprocess is SIGKILLe
 ### Test 4: a program reaches another agent over the control wire
 
 ```bash
-$K kernel create_agent parent_id=kernel_state handler_module=durable_memory.tools id=mem file_bridge_id=store callable_by='{"xb":"*"}' >/dev/null
+$K kernel create_agent parent_id=kernel_state handler_module=text_file.tools id=mem file_bridge_id=store callable_by='{"xb":"*"}' >/dev/null
 $K kernel update_agent id=xb can_call='{"mem":"*"}' >/dev/null
 # Write the program to a FILE (connector + body), then run it as a command.
 python3 - <<'PYGEN' >/dev/null
