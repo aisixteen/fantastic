@@ -593,8 +593,8 @@ impl Kernel {
     /// payload travels as `(header, blob)` instead of a single JSON
     /// `Value`. Dispatches through the target bundle's
     /// [`crate::bundle::Bundle::handle_binary`] (whose default impl
-    /// base64-encodes the blob into `header["data"]` and calls
-    /// `handle`).
+    /// dispatches the JSON header through `handle` and drops the raw
+    /// blob — never base64; a bundle that wants the bytes overrides it).
     ///
     /// State events: emits `{"type":"send_binary", sender, target,
     /// verb, summary}` for telemetry parity with text dispatch. Watcher

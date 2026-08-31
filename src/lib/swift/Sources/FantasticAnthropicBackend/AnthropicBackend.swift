@@ -50,7 +50,11 @@ func readApiKey() -> String? {
 func noKeyError() -> String {
     "anthropic_backend: no api key — set \(KEY_VARS.joined(separator: " or "))"
 }
-public let DEFAULT_MODEL = "claude-sonnet-4-6"
+/// NO guessy default (by default, no defaults): this connector never names a
+/// model that reaches the network. The sentinel exists ONLY so `reflect` can say
+/// what is true; `chat()` fails loud when the model is unset or still this value.
+/// (py-canonical `anthropic_backend.provider.DEFAULT_MODEL`.)
+public let DEFAULT_MODEL = "(no default — set the `model` meta)"
 public let ANTHROPIC_VERSION = "2023-06-01"
 /// `max_tokens` is REQUIRED by the Messages API — defaulted when unset.
 public let DEFAULT_MAX_TOKENS = 8192
@@ -196,6 +200,13 @@ struct AnthropicProvider: AIProvider {
         let toolUse = toolUse
         return AsyncThrowingStream { continuation in
             let task = Task {
+                if model.isEmpty || model == DEFAULT_MODEL {
+                    continuation.finish(
+                        throwing: AnthropicError.stream(
+                            "anthropic_backend: no `model` set — this connector does not "
+                                + "guess one. Name a model on the agent record (model=...)."))
+                    return
+                }
                 let (system, turns) = translateAnthropicMessages(messages)
                 var body: OrderedDictionary<String, JSON> = [:]
                 body["model"] = .string(model)

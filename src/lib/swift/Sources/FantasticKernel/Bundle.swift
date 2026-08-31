@@ -38,8 +38,9 @@ public protocol AgentBundle: Sendable {
     /// raw bytes flow in BOTH directions, never base64 (mirrors py/rust's
     /// `read_stream`/`write_stream`). The returned `Data` is the raw reply body
     /// (empty when the verb returns no bytes, e.g. `write_stream`'s status).
-    /// Default: base64-decode the request blob into `header["data"]` and route
-    /// through `handle` (the legacy text bridge), returning an empty reply body.
+    /// Default: REFUSE — a bundle with no binary edge does not accept binary
+    /// frames. There is NO base64 fallback (raw bytes ride the binary carrier,
+    /// never base64); a bundle that speaks binary overrides this.
     func handleBinary(
         agentId: AgentId,
         header: JSON,
@@ -108,11 +109,15 @@ extension AgentBundle {
         blob: Data,
         kernel: Kernel
     ) async throws -> (JSON?, Data) {
-        // Default: base64 the blob into header.data and call handle. No reply body.
-        var payload = header
-        payload["data"] = .string(blob.base64EncodedString())
-        let reply = try await handle(agentId: agentId, payload: payload, kernel: kernel)
-        return (reply, Data())
+        // NO base64 fallback (pure streams): a bundle with no binary edge refuses
+        // the frame loudly rather than smuggling the blob through the text `handle`.
+        let verb = header["type"].asString ?? "(none)"
+        return (
+            .object([
+                "error": .string(
+                    "\(name): no binary edge — verb \"\(verb)\" does not accept binary frames")
+            ]), Data()
+        )
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {}

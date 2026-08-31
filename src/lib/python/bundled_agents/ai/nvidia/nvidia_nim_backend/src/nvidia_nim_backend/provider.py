@@ -19,7 +19,10 @@ import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 
 DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
-DEFAULT_MODEL = "nvidia/llama-3_1-nemotron-ultra-253b-v1"
+# NO guessy default (by default, no defaults): never name a network-reaching model.
+# The sentinel exists ONLY so `reflect` can say what is true; `chat()` fails loud
+# naming `model` if it is left unset.
+DEFAULT_MODEL = "(no default — set the `model` meta)"
 
 
 class NvidiaNimProvider:
@@ -49,6 +52,11 @@ class NvidiaNimProvider:
     async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
         """Stream raw text tokens — NO tools array. ai_core parses any
         `<tool_call>` envelope out of the text stream."""
+        if not self._model or self._model == DEFAULT_MODEL:
+            raise RuntimeError(
+                "nvidia_nim_backend: no `model` set — this connector does not guess "
+                "one. Name a model on the agent record (model=...)."
+            )
         client = self._get_client()
         body: dict = {
             "model": self._model,

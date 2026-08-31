@@ -39,10 +39,11 @@ fn unknown_handler_returns_none() {
     assert!(reg.get("nope.tools").is_none());
 }
 
-/// Default `handle_binary` impl base64-encodes the blob into
-/// `payload["data"]` and forwards through `handle`.
+/// Default `handle_binary` impl dispatches the JSON header through `handle`
+/// and DROPS the raw blob — never base64-encoded onto the payload (pure
+/// streams: base64 on the wire is banned).
 #[tokio::test]
-async fn default_handle_binary_base64s_into_payload_data() {
+async fn default_handle_binary_dispatches_header_and_drops_blob() {
     struct CaptureBundle;
     #[async_trait]
     impl Bundle for CaptureBundle {
@@ -71,8 +72,8 @@ async fn default_handle_binary_base64s_into_payload_data() {
         .unwrap();
     let reply = reply.unwrap();
     assert_eq!(reply["type"], "frob");
-    // Base64 of CAFEBABE is "yv66vg==".
-    assert_eq!(reply["data"], "yv66vg==");
-    // Default impl returns no reply body (request bytes only).
+    // The raw blob is NOT base64-encoded onto the payload — `data` stays absent.
+    assert_eq!(reply["data"], Value::Null);
+    // Default impl returns no reply body.
     assert!(body.is_empty());
 }

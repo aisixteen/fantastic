@@ -602,3 +602,31 @@ async fn the_tool_use_route_declares_send_and_translates_blocks_back_to_raw() {
         "input_json_delta fragments were not reassembled: {text:?}"
     );
 }
+
+/// NO guessy default (mirror of the Python provider test): the sentinel
+/// `DEFAULT_MODEL` is not a real id, and the request path fails loud — naming
+/// `model` — rather than putting the sentinel (or an empty string) on the wire.
+#[tokio::test]
+async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
+    assert_eq!(DEFAULT_MODEL, "(no default — set the `model` meta)");
+    let kernel = Arc::new(Kernel::new());
+    for m in [DEFAULT_MODEL.to_string(), String::new()] {
+        let p = AnthropicProvider {
+            self_id: AgentId::from("ant_x"),
+            endpoint: "http://127.0.0.1:1/v1/messages".to_string(),
+            model: m,
+            max_tokens: 16,
+            tool_use: false,
+            kernel: Arc::clone(&kernel),
+            client_id: "cli".to_string(),
+        };
+        let err = match p.chat(&[json!({"role": "user", "content": "hi"})]).await {
+            Ok(_) => panic!("chat must refuse an unset/sentinel model"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("anthropic_backend: no `model` set") && err.contains("model=..."),
+            "unexpected error: {err}"
+        );
+    }
+}

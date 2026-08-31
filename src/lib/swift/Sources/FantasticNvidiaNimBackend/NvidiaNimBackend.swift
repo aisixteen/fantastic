@@ -20,6 +20,12 @@ import OrderedCollections
 
 public let HANDLER_MODULE = "nvidia_nim_backend.tools"
 
+/// NO guessy default (by default, no defaults): never name a network-reaching
+/// model. The sentinel exists ONLY so `reflect` can say what is true; `chat()`
+/// fails loud when the model is unset or still this value.
+/// (py-canonical `nvidia_nim_backend.provider.DEFAULT_MODEL`.)
+public let DEFAULT_MODEL = "(no default — set the `model` meta)"
+
 public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     public let name = "nvidia_nim_backend"
 
@@ -106,7 +112,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
     }
 
     fileprivate static func model(agent: Agent) -> String {
-        agent.metaValue(forKey: "model")?.asString ?? "meta/llama-3.1-70b-instruct"
+        agent.metaValue(forKey: "model")?.asString ?? DEFAULT_MODEL
     }
 }
 
@@ -126,6 +132,11 @@ struct NvidiaNimProvider: AIProvider {
         let apiKey = apiKey
         return AsyncThrowingStream { continuation in
             let task = Task {
+                if model.isEmpty || model == DEFAULT_MODEL {
+                    continuation.finish(
+                        throwing: NimError.noModel)
+                    return
+                }
                 var req = HTTPClientRequest(url: "\(host)/v1/chat/completions")
                 req.method = .POST
                 req.headers.add(name: "Content-Type", value: "application/json")
@@ -189,9 +200,13 @@ struct NvidiaNimProvider: AIProvider {
 /// prior inline `"HTTP \(code)"` done-event error string exactly.
 private enum NimError: Error, CustomStringConvertible {
     case http(Int)
+    case noModel
     var description: String {
         switch self {
         case .http(let code): return "HTTP \(code)"
+        case .noModel:
+            return "nvidia_nim_backend: no `model` set — this connector does not "
+                + "guess one. Name a model on the agent record (model=...)."
         }
     }
 }
