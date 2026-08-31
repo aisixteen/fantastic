@@ -239,6 +239,13 @@ async def drive(
     """
     root, aid, L = conn.root, conn.id, conn.limits
     answered: set = set()
+    # THE TRANSCRIPT FOLLOWS THE DRIVEN CLIENT. The wire reader polls durable
+    # history by client_id and was born defaulting to "probe" — a probe driving
+    # any other client got an empty transcript, a blind no-progress loop, and
+    # transcript checks that fail while the model quietly succeeds (measured:
+    # coding/file_edit:rust, n=0 with 6 rows under the real client).
+    if getattr(conn.proxy, "client_id", None) is not None:
+        conn.proxy.client_id = client_id
 
     # SURFACE A FAILED SEND — ai_core returns errors, it does not raise.
     first = (await root.send([{

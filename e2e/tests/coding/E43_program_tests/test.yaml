@@ -1,0 +1,14 @@
+id: program_tests
+group: coding
+title: the model runs the tests, FIXES the bug, and proves it green
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  max_tokens: 16384
+  idle_seconds: 90
+  max_turns: 24
+  no_progress_turns: 10
+  turn_chars: 80000
+  turn_seconds: 480
+env: {}
