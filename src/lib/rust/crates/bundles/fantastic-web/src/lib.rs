@@ -29,8 +29,8 @@
 
 use async_trait::async_trait;
 use axum::{
-    body::Body,
-    extract::{ws::Message, ws::WebSocket, Json, Path as AxPath, Query, State, WebSocketUpgrade},
+    body::{Body, Bytes},
+    extract::{ws::Message, ws::WebSocket, Path as AxPath, Query, State, WebSocketUpgrade},
     http::{header, HeaderMap, Request, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -499,6 +499,19 @@ async fn build_router_from_siblings(
 /// `X-Fantastic-Auth`: dispatch metadata rides the carrier, never the body.
 const EXEC_ID_HEADER: &str = "x-fantastic-execution-id";
 
+/// The binary leg — JSON has no bytes type, so a verb whose payload OR reply
+/// carries RAW bytes (`patch_text_file`, `write_stream`, `read_stream`) rides an
+/// octet-stream body instead of JSON: the raw body IS the blob, the rest of the
+/// envelope is JSON on `X-Fantastic-Payload`, and the one bytes-valued field is
+/// named by `X-Fantastic-Bytes-Field` (default `bytes`). Symmetric in BOTH
+/// directions, never base64 — the HTTP mirror of the WS binary frame. Mirrors
+/// Python `web_rest/tools.py`.
+const OCTET_CT: &str = "application/octet-stream";
+/// Header carrying the JSON envelope on an octet-stream request/reply.
+const PAYLOAD_HEADER: &str = "x-fantastic-payload";
+/// Header naming the one bytes-valued field on an octet-stream request/reply.
+const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
+
 /// Translate a Python/FastAPI-style path with `{name}` placeholders
 /// into axum 0.7's `:name` syntax. Wildcards (`{name:path}`) become
 /// `*name` (axum's catch-all). Idempotent — already-axum paths pass
@@ -603,7 +616,7 @@ async fn serve_rest_post_dynamic(
     axum::Extension(owner): axum::Extension<RestOwner>,
     AxPath(target_id): AxPath<String>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    body: Bytes,
 ) -> Response {
     let target = AgentId::from(target_id.as_str());
     // NAMING an execution — python parity (`web_rest/tools.py`). The
@@ -617,6 +630,104 @@ async fn serve_rest_post_dynamic(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(str::to_owned);
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // ── binary leg ──────────────────────────────────────────────────────
+    // Content-Type: application/octet-stream ⇒ the raw body IS the blob; the
+    // rest of the envelope rides `X-Fantastic-Payload` (JSON). Rust's JSON
+    // `Value` can't hold bytes, so the blob travels the dedicated binary
+    // channel (`send_with_binary`) — the SAME one `read_stream` /
+    // `write_stream` / `patch_text_file` already use over the WS binary frame.
+    // The gate + sender/self-id tagging live INSIDE `send_with_binary` exactly
+    // as they do for the JSON `send` path.
+    if content_type.starts_with(OCTET_CT) {
+        let payload: Value = match headers.get(PAYLOAD_HEADER).and_then(|v| v.to_str().ok()) {
+            Some(s) => match serde_json::from_str(s) {
+                Ok(v) => v,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        json!({"error": "web_rest: X-Fantastic-Payload is not valid JSON"})
+                            .to_string(),
+                    )
+                        .into_response();
+                }
+            },
+            None => json!({}),
+        };
+        if !payload.is_object() {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                json!({"error": "web_rest: X-Fantastic-Payload must be a JSON object"}).to_string(),
+            )
+                .into_response();
+        }
+        let blob = body.to_vec();
+        let (reply, out_body) = fantastic_kernel::send::with_sender(owner.0.clone(), async {
+            state.kernel.send_with_binary(&target, payload, blob).await
+        })
+        .await;
+        // A reply that carries raw bytes (e.g. `read_stream`) goes back the
+        // same way it came in — octet body + JSON header — never base64.
+        if !out_body.is_empty() {
+            let mut resp_headers = header::HeaderMap::new();
+            resp_headers.insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static(OCTET_CT),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&reply.to_string()) {
+                if let Ok(name) = header::HeaderName::from_bytes(PAYLOAD_HEADER.as_bytes()) {
+                    resp_headers.insert(name, v);
+                }
+            }
+            if let Ok(name) = header::HeaderName::from_bytes(BYTES_FIELD_HEADER.as_bytes()) {
+                resp_headers.insert(name, header::HeaderValue::from_static("bytes"));
+            }
+            return (StatusCode::OK, resp_headers, out_body).into_response();
+        }
+        // No bytes in the reply (e.g. `write_stream` / `patch_text_file`
+        // status) — fall back to the JSON envelope, same shape as below.
+        if reply.is_null() {
+            return (StatusCode::NO_CONTENT, ()).into_response();
+        }
+        let status = StatusCode::OK; // a dispatched reply is 200 even when it carries {error} (py parity); only the INGRESS gate + malformed request are 4xx
+        return (
+            status,
+            [(header::CONTENT_TYPE, "application/json")],
+            reply.to_string(),
+        )
+            .into_response();
+    }
+
+    // ── JSON leg (unchanged) ────────────────────────────────────────────
+    let payload: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    json!({"error": "web_rest: request body is not valid JSON"}).to_string(),
+                )
+                    .into_response();
+            }
+        }
+    };
+    if !payload.is_object() {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({"error": "web_rest: body must be a JSON object"}).to_string(),
+        )
+            .into_response();
+    }
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
         let mut item = Item::new(target.clone(), payload);
         if let Some(id) = exec_id {
@@ -630,11 +741,7 @@ async fn serve_rest_post_dynamic(
     if reply.is_null() {
         return (StatusCode::NO_CONTENT, ()).into_response();
     }
-    let status = if reply.get("error").is_some() {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
+    let status = StatusCode::OK; // a dispatched reply is 200 even when it carries {error} (py parity); only the INGRESS gate + malformed request are 4xx
     (
         status,
         [(header::CONTENT_TYPE, "application/json")],

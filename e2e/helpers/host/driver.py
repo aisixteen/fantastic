@@ -44,6 +44,19 @@ ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"]
 #: already rides `X-Fantastic-Auth`; dispatch metadata belongs on the carrier
 #: next to it, leaving the JSON body purely the agent's own verb payload.
 EXEC_ID_HEADER = "X-Fantastic-Execution-Id"
+# The binary leg — mirror of web_rest. A payload/reply field whose value is raw
+# bytes rides an octet-stream body; the rest of the envelope is JSON on
+# `X-Fantastic-Payload`, the field named by `X-Fantastic-Bytes-Field`. Never base64.
+_OCTET = "application/octet-stream"
+_PAYLOAD_HEADER = "X-Fantastic-Payload"
+_BYTES_FIELD_HEADER = "X-Fantastic-Bytes-Field"
+
+
+def _bytes_field(d: dict):
+    for k, v in d.items():
+        if isinstance(v, (bytes, bytearray)):
+            return k, bytes(v)
+    return None, None
 
 #: The host runtimes this driver can spawn. Adding one is adding a ROW.
 #:
@@ -250,15 +263,33 @@ class HostKernel:
         scenario whose subject is a safe repeat is measurable through HTTP
         because of this header.
         """
-        headers = {"content-type": "application/json"}
+        field, blob = _bytes_field(payload)
+        if field is not None:
+            # Binary leg: the bytes ARE the body; the rest of the envelope is JSON
+            # on a header — the same shape web_rest reconstructs.
+            rest = {k: v for k, v in payload.items() if k != field}
+            headers = {
+                "content-type": _OCTET,
+                _PAYLOAD_HEADER: json.dumps(rest),
+                _BYTES_FIELD_HEADER: field,
+            }
+            data = blob
+        else:
+            headers = {"content-type": "application/json"}
+            data = json.dumps(payload).encode()
         if exec_id is not None:
             headers[EXEC_ID_HEADER] = exec_id
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/rest/{target}",
-            data=json.dumps(payload).encode(), headers=headers)
+            f"http://127.0.0.1:{self.port}/rest/{target}", data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read() or b"null")
+                raw = r.read()
+                if r.headers.get("content-type", "").startswith(_OCTET):
+                    # A bytes-carrying reply (e.g. read_stream) comes back the same way.
+                    rest = json.loads(r.headers.get(_PAYLOAD_HEADER) or "{}")
+                    rest[r.headers.get(_BYTES_FIELD_HEADER) or "bytes"] = raw
+                    return rest
+                return json.loads(raw or b"null")
         except urllib.error.HTTPError as e:
             return {"error": f"HTTP {e.code}", "body": e.read().decode()[:300]}
 
