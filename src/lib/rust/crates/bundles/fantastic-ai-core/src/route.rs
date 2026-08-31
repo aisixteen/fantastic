@@ -167,6 +167,28 @@ pub async fn route_reply(
     send_to: Option<String>,
     system_prompt: Option<String>,
 ) {
+    // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
+    // detached, and a tokio spawn does NOT inherit the task-local sender
+    // (python's create_task copies contextvars, which is why python was gated
+    // and rust was not — measured 2026-09-01, E53_grant: a verb-scoped wall
+    // held on python/swift and was silently bypassed here). Re-enter the
+    // sender scope for the WHOLE routing pass: dispatches, the binary
+    // carrier, and reply deliveries all attribute to the AI agent.
+    let sid = self_id.clone();
+    fantastic_kernel::send::with_sender(sid, async move {
+        route_reply_gated(self_id, kernel, text, client_id, send_to, system_prompt).await
+    })
+    .await
+}
+
+async fn route_reply_gated(
+    self_id: AgentId,
+    kernel: Arc<Kernel>,
+    text: String,
+    client_id: String,
+    send_to: Option<String>,
+    system_prompt: Option<String>,
+) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
 
