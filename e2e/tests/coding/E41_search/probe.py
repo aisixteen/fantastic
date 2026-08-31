@@ -22,9 +22,9 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, drive, verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402
+from backends import backend as _resolve_backend
+from helpers import Limits, connect, drive, verdict
+from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 XID, MEM, STORE = "searcher", "notes", "kernel_store"
@@ -56,20 +56,28 @@ async def main():
 
         for payload in (
             {
-                "type": "create_agent", "parent_id": root.id, "id": STORE,
-                "handler_module": "file_bridge.tools", "root": ".",
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": STORE,
+                "handler_module": "file_bridge.tools",
+                "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
-                "type": "create_agent", "parent_id": root.id, "id": MEM,
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": MEM,
                 "handler_module": "durable_memory.tools",
                 "file_bridge_id": STORE,
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
-                "type": "create_agent", "parent_id": root.id, "id": XID,
-                "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": XID,
+                "handler_module": "exec_bridge.tools",
+                "cwd": os.getcwd(),
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["grep .*", "find .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -79,7 +87,9 @@ async def main():
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         conn = await connect(
-            root, core, BK,
+            root,
+            core,
+            BK,
             can_call={XID: "*", MEM: "*", "cli": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": STORE},
@@ -92,16 +102,24 @@ async def main():
             "value"
         )
         checks = [
-            ("the minted value was found and stored",
-             isinstance(val, str) and val.strip() == token),
-            ("the search organ ran (grep on the leg)",
-             "grep" in transcript and XID in transcript),
+            (
+                "the minted value was found and stored",
+                isinstance(val, str) and val.strip() == token,
+            ),
+            (
+                "the search organ ran (grep on the leg)",
+                "grep" in transcript and XID in transcript,
+            ),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}  (want {token!r}, got {val!r})")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "found by SEARCHING — the value never left the tree"
-                if allok else "a search check failed")
+        verdict(
+            allok,
+            "found by SEARCHING — the value never left the tree"
+            if allok
+            else "a search check failed",
+        )
     finally:
         await close()
 

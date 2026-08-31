@@ -24,25 +24,16 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, drive, verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402
+from backends import backend as _resolve_backend
+from helpers import Limits, connect, drive, verdict
+from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 RUNNER, FB = "runner", "edit_fb"
 INTERP = sys.executable
 
-PROG_BUGGY = (
-    "def inc(x):\n"
-    "    return x + 2  # BUG: off by one\n"
-)
-TEST = (
-    "from prog import inc\n"
-    "\n"
-    "\n"
-    "def test_inc():\n"
-    "    assert inc(1) == 2\n"
-)
+PROG_BUGGY = "def inc(x):\n    return x + 2  # BUG: off by one\n"
+TEST = "from prog import inc\n\n\ndef test_inc():\n    assert inc(1) == 2\n"
 
 TASK = (
     "This run's working dir holds `prog.py` and `test_prog.py`. The command "
@@ -69,14 +60,20 @@ async def main():
 
         for payload in (
             {
-                "type": "create_agent", "parent_id": root.id, "id": FB,
-                "handler_module": "file_bridge.tools", "root": ".",
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": FB,
+                "handler_module": "file_bridge.tools",
+                "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
-                "type": "create_agent", "parent_id": root.id, "id": RUNNER,
-                "handler_module": "exec_bridge.tools", "cwd": os.getcwd(),
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": RUNNER,
+                "handler_module": "exec_bridge.tools",
+                "cwd": os.getcwd(),
                 "ingress_rule": "allow_all_ingress",
                 "allowed": [re.escape(INTERP) + r" -m pytest .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -86,7 +83,9 @@ async def main():
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         conn = await connect(
-            root, core, BK,
+            root,
+            core,
+            BK,
             can_call={RUNNER: "*", FB: "*", "cli": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
@@ -98,7 +97,8 @@ async def main():
         # TRUTH, recomputed by the probe: the suite as it stands NOW.
         final = subprocess.run(
             [INTERP, "-m", "pytest", "test_prog.py", "-q"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         checks = [
@@ -111,8 +111,12 @@ async def main():
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "run → read failure → fix → green: the coder loop, model-driven"
-                if allok else "a program_tests check failed")
+        verdict(
+            allok,
+            "run → read failure → fix → green: the coder loop, model-driven"
+            if allok
+            else "a program_tests check failed",
+        )
     finally:
         await close()
 

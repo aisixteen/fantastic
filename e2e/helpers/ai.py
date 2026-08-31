@@ -39,7 +39,6 @@ from helpers.proxy import (
     find_question,
 )
 
-
 BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
 
 
@@ -102,15 +101,21 @@ async def connect(
         # `rest` leg — an agent, gated like any other — so the AI must accept it
         # or the very first `send` is refused at ingress. Granted at CREATE
         # time, from above, because the leg may not raise its own authority.
-        **({"callable_by": {**(callable_by or {}),
-                            getattr(root, "leg_id", "rest"): "*",
-                            # ...and the EVENT face, which dispatches a `watch`
-                            # as itself. The gate is two-sided: without this the
-                            # subscription is refused at ingress and the stream
-                            # reads as an agent that simply never emits.
-                            getattr(root, "watch_id", "web"): "*"}}
-           if getattr(root, "leg_id", None) else
-           ({"callable_by": callable_by} if callable_by else {})),
+        **(
+            {
+                "callable_by": {
+                    **(callable_by or {}),
+                    getattr(root, "leg_id", "rest"): "*",
+                    # ...and the EVENT face, which dispatches a `watch`
+                    # as itself. The gate is two-sided: without this the
+                    # subscription is refused at ingress and the stream
+                    # reads as an agent that simply never emits.
+                    getattr(root, "watch_id", "web"): "*",
+                }
+            }
+            if getattr(root, "leg_id", None)
+            else ({"callable_by": callable_by} if callable_by else {})
+        ),
         **backend.record(),
         **(record or {}),
     }
@@ -138,11 +143,18 @@ async def connect(
             # would silently drop grants the fixture already placed on `cli`.
             cb = dict(peer.get("callable_by") or {})
             cb[aid] = "*"
-            await root.send([{
-                "target": root.id,
-                "payload": {"type": "update_agent", "id": stream_to,
-                            "callable_by": cb},
-            }])
+            await root.send(
+                [
+                    {
+                        "target": root.id,
+                        "payload": {
+                            "type": "update_agent",
+                            "id": stream_to,
+                            "callable_by": cb,
+                        },
+                    }
+                ]
+            )
 
     # NOTHING TO DELIVER. Backends read their key from the ENVIRONMENT, and this
     # kernel runs in THIS process — so the variable the probe was started with is
@@ -167,7 +179,8 @@ async def connect(
         from helpers.proxy import ProxyReader
 
         conn.proxy = ProxyReader(
-            await backend.provider(aid, root), L, trips=conn.trips, watch=watch)
+            await backend.provider(aid, root), L, trips=conn.trips, watch=watch
+        )
         core._providers[aid] = conn.proxy
 
     # SEE A DEAD CHAIN — subscribe to the AI's own status events. A failed
@@ -221,8 +234,14 @@ async def connect(
 
 async def _live_tasks(root, aid) -> list[dict]:
     """The AI's in-flight rows, asked of the ROOT — `ps` is a kernel verb."""
-    rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]
-            ["result"]).get("tasks") or []
+    rows = (
+        (
+            (await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0][
+                "result"
+            ]
+        ).get("tasks")
+        or []
+    )
     return [t for t in rows if t.get("agent") == aid and t.get("verb") != "ps"]
 
 
@@ -248,10 +267,16 @@ async def drive(
         conn.proxy.client_id = client_id
 
     # SURFACE A FAILED SEND — ai_core returns errors, it does not raise.
-    first = (await root.send([{
-        "target": aid,
-        "payload": {"type": "send", "text": task, "client_id": client_id},
-    }]))[0]["result"]
+    first = (
+        await root.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": task, "client_id": client_id},
+                }
+            ]
+        )
+    )[0]["result"]
     if isinstance(first, dict) and first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {first['error']} **\n", flush=True)
 
@@ -267,8 +292,18 @@ async def drive(
             if rid not in answered:
                 answered.add(rid)
                 ans = on_question(q) if on_question else DEFAULT_QUESTION_ANSWER
-                await root.send([{"target": aid, "payload": {
-                    "type": "send", "text": ans, "client_id": client_id}}])
+                await root.send(
+                    [
+                        {
+                            "target": aid,
+                            "payload": {
+                                "type": "send",
+                                "text": ans,
+                                "client_id": client_id,
+                            },
+                        }
+                    ]
+                )
                 last, idle = conn.proxy.n, 0.0
         if calls != seen_calls:
             seen_calls, stale = calls, 0
@@ -279,8 +314,16 @@ async def drive(
         # model that simply stops producing turns evades all of them and the run
         # sits out the full idle window before scoring.
         if idle >= 30 and conn.proxy.n == last and last > 0:
-            rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))
-                    [0]["result"]).get("tasks") or []
+            rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             if not [t for t in rows if t.get("agent") == aid and t.get("verb") != "ps"]:
                 capped = (
                     f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
@@ -298,10 +341,16 @@ async def drive(
             # Cancel through the TASK TABLE — the same ps/cancel an operator
             # would use, addressed to the ROOT because they are kernel verbs.
             for t in await _live_tasks(root, aid):
-                c = (await root.send([{
-                    "target": "kernel",
-                    "payload": {"type": "cancel", "task_id": t["id"]},
-                }]))[0]["result"]
+                c = (
+                    await root.send(
+                        [
+                            {
+                                "target": "kernel",
+                                "payload": {"type": "cancel", "task_id": t["id"]},
+                            }
+                        ]
+                    )
+                )[0]["result"]
                 if isinstance(c, dict) and c.get("error"):
                     print(f"  ** CANCEL REFUSED: {c['error']} **", flush=True)
             break

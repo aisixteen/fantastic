@@ -21,9 +21,9 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, drive, verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402
+from backends import backend as _resolve_backend
+from helpers import Limits, connect, drive, verdict
+from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 XID, STORE = "gitter", "kernel_store"
@@ -69,14 +69,20 @@ async def main():
 
         for payload in (
             {
-                "type": "create_agent", "parent_id": root.id, "id": STORE,
-                "handler_module": "file_bridge.tools", "root": ".",
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": STORE,
+                "handler_module": "file_bridge.tools",
+                "root": ".",
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
             },
             {
-                "type": "create_agent", "parent_id": root.id, "id": XID,
-                "handler_module": "exec_bridge.tools", "cwd": str(repo),
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": XID,
+                "handler_module": "exec_bridge.tools",
+                "cwd": str(repo),
                 "ingress_rule": "allow_all_ingress",
                 "allowed": ["git .*"],
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
@@ -86,7 +92,9 @@ async def main():
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         conn = await connect(
-            root, core, BK,
+            root,
+            core,
+            BK,
             can_call={XID: "*", "cli": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": STORE},
@@ -98,17 +106,25 @@ async def main():
         log = _git(repo, "log", "--oneline")
         status = _git(repo, "status", "--porcelain")
         checks = [
-            ("the change is committed with the asked message",
-             "update readings" in log and "seed" in log),
+            (
+                "the change is committed with the asked message",
+                "update readings" in log and "seed" in log,
+            ),
             ("the working tree is clean", status.strip() == ""),
-            ("the git organ ran (the leg, not magic)",
-             XID in transcript and "git" in transcript),
+            (
+                "the git organ ran (the leg, not magic)",
+                XID in transcript and "git" in transcript,
+            ),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "committed by the model, through the organ"
-                if allok else "a git check failed")
+        verdict(
+            allok,
+            "committed by the model, through the organ"
+            if allok
+            else "a git check failed",
+        )
     finally:
         await close()
 
