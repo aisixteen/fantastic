@@ -257,13 +257,6 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
-    // Chat history is a `<self>_chat` durable_memory child, so the REAL store
-    // bundle has to be registered — otherwise the create lands a record that
-    // never dispatches and every history assertion tests nothing.
-    kernel.bundles.register(
-        "durable_memory.tools",
-        fantastic_durable_memory::DurableMemoryBundle,
-    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -294,9 +287,9 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 /// Create a `file_bridge` leg rooted at `root`, opened, and accepting the agent
 /// that persists through it.
 ///
-/// Each AI gets its OWN leg: its `<self>_chat` store writes `state.yaml` at the
-/// LEG's root (durable_memory owns no path of its own), so two AIs sharing one
-/// leg would share one chat file and one set of per-client keys.
+/// Each AI gets its OWN leg: its chat sidecar lands at the LEG's root
+/// (`agents/<self>/chat_<client>.jsonl`), so two AIs sharing one leg would
+/// interleave under one `agents/` tree.
 async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, owner: &str) {
     let _ = kernel
         .send(vec![Item::new(
@@ -356,9 +349,9 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
                 "context_window": 32768,
                 // Deny-all: the backend streams its turn to `cli` and its
                 // api-key/blob-era wiring named the leg — both explicit grants
-                // (wiring pairs with granting). The CHAT store needs no grant
-                // here: it is a `<self>_chat` CHILD, reached through the
-                // `$children` baseline, and it talks to the leg from ABOVE.
+                // (wiring pairs with granting). The chat SIDECAR needs no
+                // grant: its reads/writes are bookkeeping, processed from
+                // ABOVE (operator context in `history.rs`).
                 "can_call": { file_id: "*", "cli": "*" },
             }),
         )])
@@ -827,65 +820,38 @@ async fn history_persists_and_round_trips() {
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["content"], "ack");
 
-    // WHERE it lives: the AI's OWN `<self>_chat` durable_memory child, one key
-    // per client — NOT a loader blob sidecar. The blob channel routed through
-    // whatever provider the LOADER discovered, so a kernel with none wired
-    // dropped every chat write while `send` still reported success.
-    let chat_id = format!("{backend}_chat");
-    let refl = kernel
-        .send(vec![Item::new(
-            AgentId::from(chat_id.as_str()),
-            json!({"type": "reflect"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(refl["id"], chat_id, "the chat store must exist: {refl:#?}");
-    assert_eq!(
-        refl["file_bridge_id"],
-        json!(format!("ff_{backend}")),
-        "the store persists through the AI's OWN leg: {refl:#?}"
-    );
+    // WHERE it lives: an append-only JSONL sidecar on the AI's OWN leg —
+    // `agents/<self>/chat_<client>.jsonl`, one JSON line per turn. NOT a chat
+    // agent (durable_memory is gone; memory is plain files) and NOT a loader
+    // blob sidecar (that channel routed through whatever provider the LOADER
+    // discovered, and dropped every write when none was wired).
+    let sidecar = tmp.path().join(".fantastic").join(format!(
+        "agents/{}/chat_{}.jsonl",
+        backend,
+        safe_client(client_id)
+    ));
     assert!(
-        refl["keys"]
-            .as_array()
-            .expect("keys")
-            .contains(&json!(safe_client(client_id))),
-        "one key per client_id: {refl:#?}"
+        sidecar.exists(),
+        "chat never persisted through the AI's own leg: {sidecar:?}"
     );
-
-    // WHAT it holds: the turns themselves, appended ONE PER TURN (appending the
-    // whole list would nest them as [[user, assistant]] and read back empty).
-    let stored = kernel
-        .send(vec![Item::new(
-            AgentId::from(chat_id.as_str()),
-            json!({"type": "read", "key": safe_client(client_id)}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let turns = stored["value"].as_array().expect("stored turns");
-    assert_eq!(turns.len(), 2, "one append per message: {turns:#?}");
+    let raw = std::fs::read_to_string(&sidecar).unwrap();
+    let turns: Vec<Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    // ONE LINE PER TURN — line index == store index (recall/reaction paging).
+    assert_eq!(turns.len(), 2, "one JSONL line per message: {raw:?}");
     assert_eq!(turns[0]["role"], "user");
     assert_eq!(turns[0]["content"], "ping");
     assert_eq!(turns[1]["role"], "assistant");
     assert_eq!(turns[1]["content"], "ack");
 
-    // …and it reached DISK through that leg — `state.yaml` at the leg's root.
-    let state_yaml = tmp.path().join(".fantastic").join("state.yaml");
+    // No chat AGENT exists any more — the sidecar is a file, not a child.
+    let chat_id = format!("{backend}_chat");
     assert!(
-        state_yaml.exists(),
-        "chat store never persisted through the file leg: {state_yaml:?}"
-    );
-    // The old blob sidecar is gone for good — no second, silent disk path.
-    let blob = tmp.path().join(format!(
-        ".fantastic/agents/{}/chat_{}.json",
-        backend,
-        safe_client(client_id)
-    ));
-    assert!(
-        !blob.exists(),
-        "chat must not ride the loader blob channel any more: {blob:?}"
+        !kernel.agents.contains_key(&AgentId::from(chat_id.as_str())),
+        "the `<self>_chat` child must be gone: {chat_id}"
     );
 }
 
@@ -908,10 +874,6 @@ async fn chat_persists_with_no_loader_provider_wired() {
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
-    kernel.bundles.register(
-        "durable_memory.tools",
-        fantastic_durable_memory::DurableMemoryBundle,
-    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -962,11 +924,11 @@ async fn chat_persists_with_no_loader_provider_wired() {
     );
     assert_eq!(messages[0]["content"], "ping");
     assert_eq!(messages[1]["content"], "ack");
-    // …and it is REALLY on disk, in the leg the AI named.
-    let state_yaml = leg_root.join("state.yaml");
+    // …and it is REALLY on disk, in the leg the AI named — the JSONL sidecar.
+    let sidecar = leg_root.join(format!("agents/{backend_id}/chat_cli.jsonl"));
     assert!(
-        state_yaml.exists(),
-        "nothing was written through the AI's own leg: {state_yaml:?}"
+        sidecar.exists(),
+        "nothing was written through the AI's own leg: {sidecar:?}"
     );
 }
 
@@ -1658,10 +1620,6 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
     kernel.bundles.register("raiser.tools", Raiser);
-    kernel.bundles.register(
-        "durable_memory.tools",
-        fantastic_durable_memory::DurableMemoryBundle,
-    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),

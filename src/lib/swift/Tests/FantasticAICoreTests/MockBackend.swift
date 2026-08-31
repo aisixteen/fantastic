@@ -7,7 +7,6 @@
 // dispatch path) — and because the SCRIPT half of it is a prerequisite for
 // routing tests rather than a nicety: see `ProviderScript`.
 
-import FantasticDurableMemory
 import FantasticJSON
 import FantasticKernel
 import OrderedCollections
@@ -166,9 +165,9 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
 
 /// In-memory file_bridge stand-in: dict-backed STREAM verbs (`write_stream` /
 /// `read_stream` on the binary channel — the string read/write verbs are gone),
-/// so the real chat-store persistence path (the `<self>_chat` durable_memory
-/// child → its own `file_bridge_id` → write_stream/read_stream) is exercised
-/// without touching disk.
+/// so the real chat persistence path (the JSONL sidecar
+/// `agents/<self>/chat_<client>.jsonl` → the AI's own `file_bridge_id` →
+/// write_stream/read_stream) is exercised without touching disk.
 final class MockFileBridge: AgentBundle, @unchecked Sendable {
     let name = "mock_file_bridge"
     private let lock = NSLock()
@@ -206,9 +205,19 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
         let path = header["path"].asString ?? ""
         switch header["type"].asString ?? "" {
         case "write_stream":
-            put(agentId, path, String(data: blob, encoding: .utf8) ?? "")
+            // Stream semantics, not replace: absent offset + no truncate =
+            // APPEND at end (the JSONL sidecar's whole write path). Mirrors the
+            // real bundle; a replace here silently ate every turn but the last.
+            let incoming = String(data: blob, encoding: .utf8) ?? ""
+            let existing =
+                (header["truncate"].asBool == true) ? "" : (get(agentId, path) ?? "")
+            let content = existing + incoming
+            put(agentId, path, content)
             return (
-                .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data()
+                .object([
+                    "written": .bool(true),
+                    "size": .integer(Int64(content.utf8.count)),
+                ]), Data()
             )
         case "read_stream":
             guard let c = get(agentId, path) else {
@@ -409,11 +418,6 @@ func bootMockKernel(
     let registry = BundleRegistry()
     registry.register("mock_backend.tools", MockBundle(config: config))
     registry.register("file_bridge.tools", MockFileBridge())
-    // The chat store's handler: the shared core mounts `<backend>_chat` as a
-    // durable_memory child and the conversation lives there. Without it
-    // registered the store agent exists but answers nothing, and `history` is
-    // empty for a reason that has nothing to do with the test.
-    registry.register("durable_memory.tools", DurableMemoryBundle())
     let recorder = PayloadRecorder()
     registry.register("mock_recorder.tools", recorder)
     registry.register("mock_raiser.tools", RaisingBundle())
@@ -482,10 +486,9 @@ func bootMockKernel(
     for other in backendIds { grant[other] = .string("*") }
     var out: [String: AgentId] = [:]
     for id in backendIds {
-        // ONE FILE LEG PER BACKEND. The chat store copies its owner's
-        // `file_bridge_id`, and durable_memory writes `state.yaml` at the leg's
-        // ROOT — so two backends sharing one leg would share one document and
-        // interleave their transcripts under the same client key.
+        // ONE FILE LEG PER BACKEND. The chat sidecar lands at the leg's root
+        // (`agents/<self>/chat_<client>.jsonl`) — a private leg keeps each
+        // backend's transcripts under its own `agents/` tree.
         let legId = "store_\(id)"
         _ = await kernel.send([Item(AgentId("core"), .object([
                 "type": .string("create_agent"),
@@ -557,17 +560,27 @@ func waitForHistory(
     }
 }
 
-/// The turns as the CHAT STORE itself holds them: `<agent>_chat` is a
-/// durable_memory agent with one key per client. Reading it directly is what
-/// proves the transcript is durable in the store rather than only in the
-/// backend's reply.
+/// The turns as the SIDECAR itself holds them: an append-only JSONL file
+/// `agents/<self>/chat_<client>.jsonl` on the backend's own leg, one JSON line
+/// per turn. Reading the leg directly is what proves the transcript is durable
+/// rather than only in the backend's reply.
 func chatStoreRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
-    let r = await kernel.send([
-        Item(
-            AgentId("\(id.value)_chat"),
-            .object(["type": .string("read"), "key": .string(client)]))
-    ])[0].result
-    return r["value"].asArray ?? []
+    let (r, body) = await kernel.sendWithBinary(
+        AgentId("store_\(id.value)"),
+        .object([
+            "type": .string("read_stream"),
+            "path": .string("agents/\(id.value)/chat_\(client).jsonl"),
+        ]), Data())
+    guard r["error"].asString == nil, let text = String(data: body, encoding: .utf8) else {
+        return []
+    }
+    var turns: [JSON] = []
+    for line in text.components(separatedBy: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, let parsed = try? JSON.parse(Data(t.utf8)) else { continue }
+        turns.append(parsed)
+    }
+    return turns
 }
 
 /// This client's persisted turns.

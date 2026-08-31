@@ -89,10 +89,16 @@ fn send_binary_raw(inner: &str) -> Option<ToolCall> {
 /// double-encoded (stringified) arguments. `None` on unparseable JSON.
 pub fn parse_one(inner: &str) -> Option<ToolCall> {
     let inner = inner.trim();
-    // send_binary carries a RAW program in `bytes` (no escaping) — read it as a
-    // string rather than forcing it through the strict parse. MUST run first.
-    if let Some(sb) = send_binary_raw(inner) {
-        return Some(sb);
+    // send_binary carrying a RAW program in `bytes` (real newlines, real
+    // quotes) is not valid JSON, so the raw-tail lift applies ONLY when the
+    // strict parse fails. A model that escaped its whole call correctly parses
+    // strictly and gets its escapes DECODED — measured 2026-08-31 (python E44):
+    // the raw path ran first, kept `\n` literal, and a valid patch died on
+    // "no blocks" twice with no way for the model to see why.
+    if serde_json::from_str::<Value>(inner).is_err() {
+        if let Some(sb) = send_binary_raw(inner) {
+            return Some(sb);
+        }
     }
     let (obj, rest) = parse_prefix(inner)?;
     let Value::Object(obj) = obj else {

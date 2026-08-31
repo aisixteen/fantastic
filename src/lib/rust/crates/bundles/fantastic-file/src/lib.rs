@@ -13,7 +13,6 @@
 //! | `list`   | `path?`                    | `{path, files: [{name, path, type, size?}]}` |
 //! | `read_stream` | `path`, `offset?`, `length?` | binary channel — reply body = one raw chunk |
 //! | `write_stream`| `path`, `offset?`, `truncate?` | binary channel — request body = one raw chunk |
-//! | `patch_text_file` | `path`, body = patch (utf-8) | binary channel — SEARCH/REPLACE edit → `{path, patched, hunks, size}` |
 //! | `pump`   | `source?`, `source_path`, `sink?`, `sink_path?` | server-side SOURCE→SINK copy |
 //! | `delete` | `path`                     | `{path, deleted: true}`               |
 //! | `rename` | `old_path`, `new_path`     | `{old_path, new_path}`                |
@@ -150,8 +149,8 @@ impl Bundle for FileBundle {
             // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
             // bytes/root itself, so it rides the text channel without a clamp.
             "pump" => pump_reply(agent_id, payload, kernel).await,
-            // Stream verbs + the patch verb carry RAW BYTES — binary channel only.
-            "read_stream" | "write_stream" | "patch_text_file" => json!({
+            // Stream verbs carry RAW BYTES — binary channel only.
+            "read_stream" | "write_stream" => json!({
                 "error": format!(
                     "{verb} carries raw bytes — call it on the binary channel \
                      (send_with_binary), not text send"
@@ -195,7 +194,7 @@ impl Bundle for FileBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(Reply, Vec<u8>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
-        if !matches!(verb, "read_stream" | "write_stream" | "patch_text_file") {
+        if !matches!(verb, "read_stream" | "write_stream") {
             // file_bridge has no other binary verb — route the header through
             // the text path (which gates + dispatches); the blob is unused.
             let reply = self.handle(agent_id, &header, kernel).await?;
@@ -239,16 +238,6 @@ impl Bundle for FileBundle {
                     Ok((Some(readonly_refusal()), Vec::new()))
                 } else {
                     Ok((Some(write_stream_reply(&root, &header, &blob)), Vec::new()))
-                }
-            }
-            "patch_text_file" => {
-                if readonly {
-                    Ok((Some(readonly_refusal()), Vec::new()))
-                } else {
-                    Ok((
-                        Some(patch_text_file_reply(&root, &header, &blob)),
-                        Vec::new(),
-                    ))
                 }
             }
             _ => unreachable!(),
@@ -311,8 +300,14 @@ fn read_stream_reply(root: &Path, header: &Value) -> (Value, Vec<u8>) {
         Err(e) => return (json!({"error": e}), Vec::new()),
     };
     if !target.is_file() {
+        // Python parity: the not-found refusal names its reason and path
+        // (consumers — text_file checkpoints among them — branch on `reason`).
         return (
-            json!({"error": format!("file {path_str:?} not found")}),
+            json!({
+                "error": format!("file {path_str:?} not found"),
+                "reason": "not_found",
+                "path": path_str,
+            }),
             Vec::new(),
         );
     }
@@ -418,168 +413,6 @@ fn write_chunk(
         .map(|m| m.len())
         .map_err(|e| format!("stat {}: {e}", target.display()))?;
     Ok((off, size))
-}
-
-// ─── patch_text_file ────────────────────────────────────────────
-// A STRUCTURED whole-file edit that reuses the file stream: read the current
-// text, apply SEARCH/REPLACE hunks, write it back atomically (temp + rename).
-// The patch is TEXT (utf-8) but rides as raw BYTES on the binary channel so a
-// hunk full of quotes/backslashes/newlines is never JSON-escaped. Each hunk's
-// SEARCH must match the CURRENT content EXACTLY ONCE — 0 matches or an ambiguous
-// >1 FAILS LOUD (no fuzzy apply). All-or-nothing: on any failed hunk, nothing is
-// written. Mirrors py `file_bridge._patch_text_file`.
-const H_START: &str = "<<<<<<< SEARCH";
-const H_DIV: &str = "=======";
-const H_END: &str = ">>>>>>> REPLACE";
-
-/// Parse SEARCH/REPLACE blocks into `(search, replace)` pairs. The text inside a
-/// block is taken VERBATIM (the marker lines excluded). Returns `Err` on a block
-/// that opens but does not close. Mirrors py `_parse_hunks`.
-fn parse_hunks(text: &str) -> Result<Vec<(String, String)>, String> {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut hunks: Vec<(String, String)> = Vec::new();
-    let n = lines.len();
-    let mut i = 0;
-    while i < n {
-        if lines[i] != H_START {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        let mut search: Vec<&str> = Vec::new();
-        while j < n && lines[j] != H_DIV {
-            search.push(lines[j]);
-            j += 1;
-        }
-        if j >= n {
-            return Err("a SEARCH block has no `=======` divider".to_string());
-        }
-        j += 1;
-        let mut replace: Vec<&str> = Vec::new();
-        while j < n && lines[j] != H_END {
-            replace.push(lines[j]);
-            j += 1;
-        }
-        if j >= n {
-            return Err("a block has no closing `>>>>>>> REPLACE`".to_string());
-        }
-        hunks.push((search.join("\n"), replace.join("\n")));
-        i = j + 1;
-    }
-    Ok(hunks)
-}
-
-/// Count non-overlapping occurrences of `needle` in `haystack` (py `str.count`).
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() {
-        // py `"abc".count("")` == len+1; a hunk with an empty SEARCH is not a
-        // real target, but mirror the semantics so `hits != 1` still fails loud.
-        return haystack.chars().count() + 1;
-    }
-    haystack.matches(needle).count()
-}
-
-/// Apply the patch `blob` (utf-8) to the EXISTING text file at `header.path`,
-/// writing it back atomically. Mirrors py `_patch_text_file`. The readonly/gate
-/// checks run in `handle_binary` before this is reached.
-fn patch_text_file_reply(root: &Path, header: &Value, blob: &[u8]) -> Value {
-    let path_str = header.get("path").and_then(Value::as_str).unwrap_or("");
-    if path_str.is_empty() {
-        return fantastic_kernel::refusal::missing("patch_text_file", "path");
-    }
-    if blob.is_empty() {
-        return fantastic_kernel::refusal::missing("patch_text_file", "bytes (the utf-8 patch)");
-    }
-    let patch = match std::str::from_utf8(blob) {
-        Ok(s) => s,
-        Err(_) => {
-            return fantastic_kernel::refusal::bad(
-                "patch_text_file",
-                "bytes",
-                "valid utf-8 (the patch is text)",
-            )
-        }
-    };
-    let target = match resolve_safe(root, path_str) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
-    };
-    if !target.is_file() {
-        return json!({
-            "error": format!("no text file at {path_str:?}"),
-            "reason": "not_found",
-        });
-    }
-    let hunks = match parse_hunks(patch) {
-        Ok(h) => h,
-        Err(e) => {
-            return fantastic_kernel::refusal::bad(
-                "patch_text_file",
-                "bytes",
-                &format!("a well-formed patch — {e}"),
-            )
-        }
-    };
-    if hunks.is_empty() {
-        return fantastic_kernel::refusal::bad(
-            "patch_text_file",
-            "bytes",
-            "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
-        );
-    }
-    let mut working = match std::fs::read_to_string(&target) {
-        Ok(s) => s,
-        Err(e) => {
-            return fantastic_kernel::refusal::refusal(
-                fantastic_kernel::refusal::TRANSPORT_ERROR,
-                format!("read {}: {e}", target.display()),
-            )
-        }
-    };
-    // Apply against the EVOLVING content; each SEARCH must be unique at its turn.
-    // Stop at the first failure and write NOTHING (all-or-nothing).
-    for (idx, (search, replace)) in hunks.iter().enumerate() {
-        let hits = count_occurrences(&working, search);
-        if hits != 1 {
-            let (reason, detail) = if hits == 0 {
-                ("no_match", "search text not found".to_string())
-            } else {
-                ("ambiguous", format!("search text matches {hits} places"))
-            };
-            return json!({
-                "error": "a hunk did not apply — nothing written",
-                "reason": reason,
-                "failed": [{"index": idx, "reason": detail}],
-            });
-        }
-        working = working.replacen(search, replace, 1);
-    }
-    if let Err(e) = write_text_atomic(&target, &working) {
-        return fantastic_kernel::refusal::refusal(fantastic_kernel::refusal::TRANSPORT_ERROR, e);
-    }
-    json!({
-        "path": path_str,
-        "patched": true,
-        "hunks": hunks.len(),
-        "size": working.len(),
-    })
-}
-
-/// Whole-file atomic write: temp sibling + rename over. Mirrors py
-/// `fs.write_bytes(atomic=True)` (`target.name + ".tmp"` then `os.replace`).
-fn write_text_atomic(target: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {e}"))?;
-    }
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = target.with_file_name(format!("{name}.tmp"));
-    std::fs::write(&tmp, content.as_bytes())
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, target).map_err(|e| format!("rename {}: {e}", target.display()))?;
-    Ok(())
 }
 
 /// The PUMP — a server-side SOURCE→SINK copy, chunk by chunk, in ONE call.
@@ -800,7 +633,6 @@ fn reflect_reply(agent_id: &AgentId, root: &Path, readonly: bool, hidden: &[Stri
             "mkdir": "args: path:str (req).",
             "read_stream": "BINARY channel. args: path:str (req), offset:int=0, length:int=65536. Reply body = one raw chunk.",
             "write_stream": "BINARY channel. args: path:str (req), offset:int? (default append), truncate:bool=false; request body = one raw chunk.",
-            "patch_text_file": "BINARY channel. args: path:str (req); request body = the patch (utf-8). SEARCH/REPLACE hunks applied to an EXISTING text file, written back ATOMICALLY. Each SEARCH must match EXACTLY ONCE; no_match/ambiguous fails loud, all-or-nothing.",
             "pump": "args: source:str? + source_path:str (req) + sink:str? + sink_path:str? + chunk:int=65536. Server-side SOURCE→SINK copy.",
         }
     })
@@ -866,7 +698,11 @@ fn delete_reply(root: &Path, payload: &Value) -> Value {
         Err(e) => return json!({"error": e}),
     };
     if !target.exists() {
-        return json!({"error": format!("path {path_str:?} not found")});
+        return json!({
+            "error": format!("path {path_str:?} not found"),
+            "reason": "not_found",
+            "path": path_str,
+        });
     }
     let result = if target.is_dir() {
         std::fs::remove_dir_all(&target)

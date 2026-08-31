@@ -32,7 +32,7 @@ import FantasticTools
 import FantasticWeb
 import FantasticWebRest
 import FantasticWebWS
-import FantasticDurableMemory
+import FantasticTextFile
 import Foundation
 
 #if os(macOS)
@@ -54,7 +54,7 @@ public func defaultBundleRegistry() -> BundleRegistry {
         r.register(PLANT_MODULE, PlantProbe())
         r.register(PURCHASE_MODULE, PurchaseProbe())
     #endif
-    r.register("durable_memory.tools", DurableMemoryBundle())
+    r.register("text_file.tools", TextFileBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())
     r.register("tools.tools", ToolsBundle())
     r.register("scheduler.tools", SchedulerBundle())

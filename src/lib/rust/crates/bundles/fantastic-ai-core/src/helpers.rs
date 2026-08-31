@@ -8,11 +8,11 @@
 //!
 //! The blob-channel file I/O that used to live here (`chat_path` / `file_read` /
 //! `file_write` / `file_delete`, all four riding the LOADER's `persist_blob` /
-//! `load_blob`) is GONE. Chat was its only caller, and chat now lives in a
-//! `<self>_chat` `durable_memory` child that persists through the AI's OWN
-//! `file_bridge_id` (see [`crate::history`]) — python-canonical, and independent
-//! of whether the loader discovered a persistence provider. With no caller left
-//! the helpers were deleted rather than kept as a second, unused disk path.
+//! `load_blob`) is GONE. Chat was its only caller, and chat now lives in an
+//! append-only JSONL sidecar (`agents/<self>/chat_<client>.jsonl`) written
+//! through the AI's OWN `file_bridge_id` (see [`crate::history`]) —
+//! python-canonical, and independent of whether the loader discovered a
+//! persistence provider.
 
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::Value;

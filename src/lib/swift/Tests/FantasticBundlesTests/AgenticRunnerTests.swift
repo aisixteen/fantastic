@@ -14,7 +14,7 @@ import FantasticFile
 import FantasticJSON
 import FantasticKernel
 import FantasticStaticLoader
-import FantasticDurableMemory
+import FantasticTextFile
 import Foundation
 import OrderedCollections
 import Testing
@@ -145,7 +145,7 @@ private func makeKernel(workdir: URL) -> Kernel {
     let registry = BundleRegistry()
     registry.register("static_loader.tools", StaticLoaderBundle())
     registry.register("file_bridge.tools", FileBundle())
-    registry.register("durable_memory.tools", DurableMemoryBundle())
+    registry.register("text_file.tools", TextFileBundle())
     registry.register("exec_bridge.tools", ExecBridgeBundle())
     registry.register("lifecycle_probe.tools", LifecycleProbe())
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
@@ -253,6 +253,18 @@ private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, paylo
     -> JSON
 {
     await KernelTaskLocals.$currentSender.withValue(sender) {
+        // Any payload carrying `bytes_utf8` rides the BINARY channel — the
+        // text_file byte verbs (write/patch/append) alongside write_stream.
+        // Mirror of the rust runner's dispatch.
+        if !payload["bytes_utf8"].isNull, payload["type"].asString != "write_stream" {
+            var header = payload
+            if case .object(var o) = header {
+                o["bytes_utf8"] = nil
+                header = .object(o)
+            }
+            let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
+            return await k.sendWithBinary(AgentId(target), header, blob).0
+        }
         switch payload["type"].asString ?? "" {
         case "write_stream":
             var header = payload

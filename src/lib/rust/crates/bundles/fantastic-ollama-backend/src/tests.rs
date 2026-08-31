@@ -44,11 +44,6 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
-    // Chat history is a `<self>_chat` durable_memory child of the backend.
-    kernel.bundles.register(
-        "durable_memory.tools",
-        fantastic_durable_memory::DurableMemoryBundle,
-    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -555,36 +550,33 @@ async fn history_persists_and_round_trips() {
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["content"], "ack");
 
-    // The turns live in the backend's OWN `<self>_chat` durable_memory child,
-    // persisted through the leg named by `file_bridge_id` — not in a loader
-    // blob sidecar, whose writes vanished whenever the loader had discovered no
-    // persistence provider.
-    let chat_id = format!("{backend}_chat");
-    let stored = kernel
-        .send(vec![Item::new(
-            AgentId::from(chat_id.as_str()),
-            json!({"type": "read", "key": safe_client(client_id)}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let turns = stored["value"].as_array().expect("stored turns");
-    assert_eq!(turns.len(), 2, "one append per message: {turns:#?}");
-    assert_eq!(turns[0]["content"], "ping");
-    assert_eq!(turns[1]["content"], "ack");
-    let state_yaml = tmp.path().join(".fantastic").join("state.yaml");
-    assert!(
-        state_yaml.exists(),
-        "chat store never persisted through the file leg: {state_yaml:?}"
-    );
-    let blob = tmp.path().join(format!(
-        ".fantastic/agents/{}/chat_{}.json",
+    // The turns live in an append-only JSONL sidecar on the backend's OWN leg
+    // (`agents/<self>/chat_<client>.jsonl`, one JSON line per turn) — not in a
+    // chat agent (durable_memory is gone) and not in a loader blob sidecar,
+    // whose writes vanished whenever the loader had no provider.
+    let sidecar = tmp.path().join(".fantastic").join(format!(
+        "agents/{}/chat_{}.jsonl",
         backend,
         safe_client(client_id)
     ));
     assert!(
-        !blob.exists(),
-        "chat must not ride the loader blob channel any more: {blob:?}"
+        sidecar.exists(),
+        "chat never persisted through the backend's own leg: {sidecar:?}"
+    );
+    let raw = std::fs::read_to_string(&sidecar).unwrap();
+    let turns: Vec<serde_json::Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(turns.len(), 2, "one JSONL line per message: {raw:?}");
+    assert_eq!(turns[0]["content"], "ping");
+    assert_eq!(turns[1]["content"], "ack");
+    assert!(
+        !kernel.agents.contains_key(&fantastic_kernel::AgentId::from(
+            format!("{backend}_chat").as_str()
+        )),
+        "the `<self>_chat` child must be gone"
     );
 }
 

@@ -78,22 +78,21 @@ substrate's universal `ps` + `cancel` (the `cancel` key teaches how).
 
 ### Test 2: send streams + persists the thread
 
-Default caller is `client_id="cli"`, so the thread is the `cli` key of the
-backend's own chat store. History is per-client, held in an `ob_chat`
-`durable_memory` child that persists THROUGH the leg named by the backend's
-`file_bridge_id` — the AI writes no disk itself. Read it back with the
-`history` verb (NOT a `chat_<client>.json` sidecar — that path is gone).
+Default caller is `client_id="cli"`, so the thread lands in the backend's
+per-client JSONL sidecar `agents/ob/chat_cli.jsonl` — one JSON line per turn —
+written THROUGH the leg named by the backend's `file_bridge_id` (the AI writes
+no disk itself; there is no chat agent and no loader blob path). Read it back
+with the `history` verb.
 
 ```bash
 call ob '{"type":"send","text":"reply with the single word: ok"}' | jq -e '.final'
 call ob '{"type":"history"}' \
   | jq -e '.messages | length >= 2 and (.[-1].content | ascii_downcase | contains("ok"))'
-# the store is a real agent, and it persists through `fa`:
-call ob_chat '{"type":"reflect"}' | jq -e '.file_bridge_id == "fa" and (.keys | index("cli"))'
-test -f /tmp/ob_test/root/state.yaml
+# the sidecar is a plain file on `fa`'s root — one line per turn:
+test -s /tmp/ob_test/root/agents/ob/chat_cli.jsonl
 ```
-Expect: a `final`; `history` has ≥ 2 messages, last contains "ok"; `ob_chat`
-reflects the `cli` key and `state.yaml` exists under `fa`'s root.
+Expect: a `final`; `history` has ≥ 2 messages, last contains "ok"; the JSONL
+sidecar exists (non-empty) under `fa`'s root.
 
 ### Test 3: history persists across calls
 

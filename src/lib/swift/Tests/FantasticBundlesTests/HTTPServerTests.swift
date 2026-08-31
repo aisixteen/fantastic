@@ -184,8 +184,8 @@ struct HTTPServerTests {
         // reply carries raw bytes rides an octet-stream body — the raw body IS
         // the blob, the rest of the envelope on `X-Fantastic-Payload`, the
         // bytes field named by `X-Fantastic-Bytes-Field` (default `bytes`).
-        // Never base64. Here: patch_text_file (patch in the body → JSON
-        // {patched:true}) and read_stream (octet reply = the file bytes).
+        // Never base64. Here: text_file.patch (patch in the body, to the
+        // EDITOR → JSON {patched:true}) and read_stream (octet reply = bytes).
         let kernel = try await startKernelInMemory(portHint: 0)
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
 
@@ -208,14 +208,28 @@ struct HTTPServerTests {
                 "ingress_rule": .string("allow_all_ingress"),
             ]))])[0].result
 
-        // web_rest leg, opened, allowed to reach the file agent.
+        // The EDITOR: patch moved off the bridge — text_file owns
+        // SEARCH/REPLACE and reaches disk only through gated sends to `files`.
+        _ = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("create_agent"),
+                "parent_id": .string("core"),
+                "handler_module": .string("text_file.tools"),
+                "id": .string("ed"),
+                "target_id": .string("files"),
+                "can_call": .object(["files": .string("*")]),
+                "callable_by": .object([
+                    "$self": .string("*"), "$parent": .string("*"),
+                    "$children": .string("*"), "rest": .string("*"),
+                ]),
+            ]))])[0].result
+        // web_rest leg, opened, allowed to reach the file agent AND the editor.
         let rec = await kernel.send([Item(AgentId("kernel"), .object([
                 "type": .string("create_agent"),
                 "parent_id": .string("web"),
                 "handler_module": .string("web_rest.tools"),
                 "id": .string("rest"),
                 "ingress_rule": .string("allow_all_ingress"),
-                "can_call": .object(["files": .string("*")]),
+                "can_call": .object(["files": .string("*"), "ed": .string("*")]),
             ]))])[0].result
         let restId = rec["id"].asString ?? "rest"
         // The file agent must accept the leg (two-sided gate): it is root's
@@ -225,6 +239,7 @@ struct HTTPServerTests {
                 "callable_by": .object([
                     "$self": .string("*"), "$parent": .string("*"),
                     "$children": .string("*"), restId: .string("*"),
+                    "ed": .string("*"),
                 ]),
             ]))])[0].result
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(restId)]))])[0].result
@@ -243,11 +258,11 @@ struct HTTPServerTests {
         // ── patch_text_file: patch rides the octet body, JSON envelope on the
         //    header → JSON reply {patched:true}. ──
         let patch = "<<<<<<< SEARCH\nhello world\n=======\ngoodbye world\n>>>>>>> REPLACE\n"
-        var patchReq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/\(restId)/files")!)
+        var patchReq = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/\(restId)/ed")!)
         patchReq.httpMethod = "POST"
         patchReq.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         patchReq.setValue(
-            "{\"type\":\"patch_text_file\",\"path\":\"note.txt\"}",
+            "{\"type\":\"patch\",\"path\":\"note.txt\"}",
             forHTTPHeaderField: "X-Fantastic-Payload")
         patchReq.setValue("bytes", forHTTPHeaderField: "X-Fantastic-Bytes-Field")
         patchReq.httpBody = patch.data(using: .utf8)

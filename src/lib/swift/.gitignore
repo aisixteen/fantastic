@@ -11,3 +11,8 @@ DerivedData/
 build/
 *.swiftmodule
 *.swiftdoc
+# transient test workdirs (running-dir law roots them in cwd)
+fantastic-*-*/
+.agentic_*/
+fantastic-binleg-*/
+fantastic-patch-*/

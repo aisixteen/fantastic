@@ -23,7 +23,7 @@ and persistence stops** — that's your choice, with no fallback to soften it.)
 `null` = RAM); each tree node carries its posture inline (`ingress_rule` —
 absent on an io leg ⇒ sealed; `root`; `file_bridge_id`). One `reflect
 tree=all` shows every leg's lock + the live provider. And **one store serves
-both**: bundles that need a sidecar (`durable_memory`, `scheduler`, the ai
+both**: bundles that need a sidecar (`scheduler`, the ai
 backends) point their `file_bridge_id` at this same `.fantastic` store and
 write store-relative `agents/<id>/<file>`, so their state lands next to their
 own `agent.json` — one bridge, records + sidecars together.

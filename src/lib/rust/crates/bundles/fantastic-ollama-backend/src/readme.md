@@ -33,7 +33,7 @@ whole, for a caller that wants a different role.
 Because this backend owns the per-client conversation, it owns the context:
 per-client `chat.json` history, auto-compaction on overflow (`context_strategy`,
 default `compact`, + `[context-notice]`), and the `recall` / `context_status` verbs.
-The durable transcript is never trimmed. Requires `file_bridge_id` for the store.
+The durable transcript is never trimmed. Requires `file_bridge_id` for the JSONL sidecar.
 
 Verbs: `send` (args `text`, `client_id?`, `system_prompt?`, `send_to?`) · `history` ·
 `recall` · `context_status` · `status` · `reflect` · `boot` · `shutdown`.

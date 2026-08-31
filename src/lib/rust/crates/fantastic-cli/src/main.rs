@@ -51,8 +51,8 @@ fn register_default_bundles() -> BundleRegistry {
         reg.register(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
     }
     reg.register(
-        "durable_memory.tools",
-        fantastic_durable_memory::DurableMemoryBundle,
+        fantastic_text_file::HANDLER_MODULE,
+        fantastic_text_file::TextFileBundle,
     );
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);

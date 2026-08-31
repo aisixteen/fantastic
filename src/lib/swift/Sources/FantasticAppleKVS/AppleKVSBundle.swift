@@ -1,7 +1,7 @@
 // apple_kvs — a synced, cross-device key-value store agent backed by Apple
 // iCloud KVS (NSUbiquitousKeyValueStore). The reusable storage primitive for
 // small, per-entry, cross-device collections (the kernel/runner directory is
-// the first consumer). Sibling-in-spirit to durable_memory, but synced + LIVE-ONLY:
+// the first consumer). A synced, LIVE-ONLY key/value face (text_file covers local files):
 // no local persistence, no fallback — unavailable when signed-out or offline.
 //
 // A single agent IS the whole default KVS; callers namespace keys as
