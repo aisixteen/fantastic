@@ -21,19 +21,15 @@ sys.path.insert(
         next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
     ),
 )
-from backends import backend as _resolve_backend  # noqa: E402
-from helpers import Limits, connect, drive, verdict  # noqa: E402
-from helpers.kernel import open_kernel  # noqa: E402
+from backends import backend as _resolve_backend
+from helpers import Limits, connect, drive, verdict
+from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 FB = "edit_fb"
 
 CONFIG = (
-    "# service config\n"
-    "host = 127.0.0.1\n"
-    "port = 8080\n"
-    "workers = 4\n"
-    "log_level = info\n"
+    "# service config\nhost = 127.0.0.1\nport = 8080\nworkers = 4\nlog_level = info\n"
 )
 
 TASK = (
@@ -54,20 +50,26 @@ async def main():
         prefix="coding_edit_", reach=[FB, "ai", "cli"]
     )
     try:
-        r = await _call(root, root.id, {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "id": FB,
-            "handler_module": "file_bridge.tools",
-            "root": ".",
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
-        })
+        r = await _call(
+            root,
+            root.id,
+            {
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": FB,
+                "handler_module": "file_bridge.tools",
+                "root": ".",
+                "ingress_rule": "allow_all_ingress",
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+            },
+        )
         assert not r.get("error"), f"create {FB}: {r}"
         Path("config.txt").write_text(CONFIG)
 
         conn = await connect(
-            root, core, BK,
+            root,
+            core,
+            BK,
             can_call={FB: "*", "cli": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
@@ -79,16 +81,24 @@ async def main():
         after = Path("config.txt").read_text()
         checks = [
             ("port changed", "port = 9090" in after and "8080" not in after),
-            ("everything else byte-identical",
-             after == CONFIG.replace("port = 8080", "port = 9090")),
-            ("the PATCH organ was used, not a rewrite",
-             "patch_text_file" in transcript),
+            (
+                "everything else byte-identical",
+                after == CONFIG.replace("port = 8080", "port = 9090"),
+            ),
+            (
+                "the PATCH organ was used, not a rewrite",
+                "patch_text_file" in transcript,
+            ),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "a surgical patch, by the model, through the organ"
-                if allok else "a file_edit check failed")
+        verdict(
+            allok,
+            "a surgical patch, by the model, through the organ"
+            if allok
+            else "a file_edit check failed",
+        )
     finally:
         await close()
 
