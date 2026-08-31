@@ -324,7 +324,38 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
         &id,
     )
     .await;
-    add_backend(kernel, &id, &file_id).await
+    let peer = add_backend(kernel, &id, &file_id).await;
+    // WIRING PAIRS WITH GRANTING, both ends: the primary hands replies to the
+    // peer and the peer routes back — with the routing pass now GATED (the
+    // model's calls are the agent's calls), both edges need both halves.
+    for (holder, other) in [
+        (primary.clone(), peer.clone()),
+        (peer.clone(), primary.clone()),
+    ] {
+        let ff = format!("ff_{holder}");
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("core"),
+                json!({
+                    "type": "update_agent",
+                    "id": holder.as_str(),
+                    // update REPLACES the named field — the stamped baseline
+                    // must ride along or self-delivery loses its own egress.
+                    "can_call": {
+                        "$self": "*", "$parent": "*", "$children": "*",
+                        ff: "*", "cli": "*", other.as_str(): "*",
+                    },
+                    "callable_by": {
+                        "$self": "*", "$parent": "*", "$children": "*",
+                        other.as_str(): "*",
+                    },
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+    }
+    peer
 }
 
 /// Create one backend agent bound to `file_id`. Separate from [`mk_kernel`]
@@ -1642,8 +1673,16 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     .await;
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
     let raiser = format!("{backend_id}_raiser");
+    // Both halves of the edge: the routing pass is GATED (the model's calls
+    // are the agent's calls), so the backend needs egress to the raiser and
+    // the raiser must accept the backend.
     let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "raiser.tools", "id": raiser}))])
+            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "raiser.tools", "id": raiser, "callable_by": {backend_id.as_str(): "*"}}))])
+            .await
+            .remove(0)
+            .result;
+    let _ = kernel
+            .send(vec![Item::new(AgentId::from("core"), json!({"type": "update_agent", "id": backend_id.as_str(), "can_call": {"$self": "*", "$parent": "*", "$children": "*", file_id.as_str(): "*", "cli": "*", raiser.as_str(): "*"}}))])
             .await
             .remove(0)
             .result;

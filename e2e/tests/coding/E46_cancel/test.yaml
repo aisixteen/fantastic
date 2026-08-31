@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: cancel
+group: coding
+title: the model ABORTS a running job — ps finds it, cancel kills it, the process dies
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  max_tokens: 8192
+  idle_seconds: 60
+  max_turns: 16
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}
