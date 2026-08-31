@@ -25,6 +25,13 @@ pub struct Job {
     pub task: TaskId,
     /// The relay task serving this job's control socket.
     pub ctrl: JoinHandle<()>,
+    /// The exact invocation — the program/binary. Reported by `status` so a caller
+    /// that wants to re-run a job re-issues these verbatim.
+    pub command: String,
+    /// The exact invocation — the argv passed to `command`.
+    pub args: Vec<String>,
+    /// The working directory the job ran in, if one was given.
+    pub cwd: Option<String>,
     /// `running` | `stopping` | `done` | `failed` | `stopped`.
     pub status: String,
     /// Unix epoch seconds at spawn.
@@ -68,10 +75,14 @@ pub fn snap(job_id: &str, j: &Job, full: bool) -> Value {
         "started_at": j.started_at,
         "lines": j.lines,
         "last_line": j.last_line,
+        // WHAT ran — so a caller can re-issue this job verbatim.
+        "command": j.command,
+        "args": j.args,
     });
     if full {
         v["stdout"] = json!(j.stdout);
         v["stderr"] = json!(j.stderr);
+        v["cwd"] = json!(j.cwd);
     }
     v
 }

@@ -153,42 +153,43 @@ extension Kernel {
             // root meta, minted once at boot + read back verbatim thereafter.
             obj["guid"] = target.metaValue(forKey: "guid") ?? .null
             // The execution model is stated HERE, not only behind
-            // `readme:'self-extension'`. Measured twice on gemma-4-12B (2026-08-06):
-            // the old "the `code` IS the tool" reads as "the code DEFINES the tool",
-            // so the model authored `def run(payload): ...` and sent {type:'run'}
-            // expecting a call. Two agents shipped inert (one was valid Python),
-            // nothing was written, and {queued:true} never appeared because no job
-            // stayed alive. It had planned the structure correctly and lost on the
-            // contract.
-            //
-            // WHAT IS SHARED, AND WHAT IS NOT — this used to claim
-            // "python/rust/swift say it verbatim", which is not true of rust. Shared
-            // word-for-word are the SCRIPT facts, the ones that cost those runs: the
-            // `code` is a SCRIPT, it runs TOP TO BOTTOM when created and again on
-            // reboot, it survives a reboot, and a bare `def` only defines and exits —
-            // so the work goes at module level.
-            //
-            // The RECEIVE clause names the shape the executor's connector really
-            // implements ("call kernel.on_message(cb) and keep running"), and
-            // `executorClause()` appends each REGISTERED executor's own receive shape
-            // after it (see `Kernel.scriptExecutors`). Deriving the tail rather than
-            // hard-coding it is what keeps the advertised shape true for whatever
-            // executors a given build actually ships.
-            //
-            // Overstating agreement is the same defect class as two copies of one fact
-            // where one is wrong: it invites the next editor to "restore parity" by
-            // copying a clause that is false for another runtime's executors.
-            obj["self_extension"] = .string(
-                "You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {type:'create_agent', handler_module:'\(executorForExample())', id:'<name>', code:'<your program as one JSON string>'}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits — put the work at module level. To handle later sends, call kernel.on_message(cb) and keep running. USE - send the tool a turn by its id; a LIVE script acks {queued:true} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {type:'delete_agent', id:'<name>'}. LEARN - before writing `code`, send 'kernel' the payload {type:'reflect', readme:'self-extension'} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. "
-                    + executorClause()
-            )
-            // Always-on doc-tree FRAME: `readmes` (the token-annotated topic
-            // index) + `docs` (a one-liner teaching keyed fetch). So the manual's
-            // map is in front of a caller from the first root reflect.
-            obj["readmes"] = readmeIndex(target)
-            obj["docs"] = .string(
-                "This kernel's manual is a keyed doc tree. To read it, send 'kernel' a reflect payload with a string `readme` field: {type:'reflect', readme:'index'} lists every topic with its ~token cost; {type:'reflect', readme:'<key>'} opens one (e.g. readme:'self-extension', readme:'streams'); {type:'reflect', readme:true} is the short orientation. The field is named exactly `readme` (a string) - not 'readme_key'. Read only what a task needs."
-            )
+            // `readme:'self-extension'`. A DURABLE PROGRAM is a FILE plus a COMMAND —
+            // there is no `code` field (a program embedded as a JSON string is exactly
+            // how a call gets lost to escaping). Mirrors python `kernel_state`'s root
+            // self_extension: write the program with the file leg's STREAM verbs (or
+            // `send_binary`), run it on the general-purpose exec_bridge COMMAND runner
+            // (`start {command, args}`, gated by its `allowed` regexes), re-run the
+            // same command to keep it current.
+            // Mirrors python `reflect_root_extra(full=...)`: the DEFAULT (distilled)
+            // root reflect carries only the COMPACT self_extension — the one shape a
+            // model MUST get right (a durable program is a FILE + a command, no
+            // `code` field), since a weak model that lacks it writes something that
+            // cannot work and does not follow the pointer to go read it. The full
+            // prose + the `readmes`/`docs` doc-tree frame ride ONLY `detail:'full'`,
+            // so the always-injected AI/FM system prompt stays in budget (the
+            // on-device FM context is a hard 4096 tokens).
+            if payload["detail"].asString == "full" {
+                obj["self_extension"] = .string(
+                    "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a `code`-carrying agent. There is no `code` field: a program used to be embedded as a JSON string, which is exactly how a call gets lost to escaping. Assemble these THREE pieces and you have built something that persists and re-runs, with no `code` field at all:\n"
+                        + "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. Use the file leg's STREAM verbs — {type:'write_stream', path, bytes, truncate:true} to write, {type:'read_stream', path, offset} to read, one raw chunk at a time — or `send_binary` (same call, but write the program RAW in the LAST `bytes` field, nothing escaped). That is the only byte path; the string read/write verbs are gone.\n"
+                        + "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect it, read its `allowed` regexes, then send {type:'start', command:'<path>', args:[...]}; poll {type:'status'}. It runs commands, not inline programs.\n"
+                        + "3. RE-RUN: the file is durable on disk, so the SAME `start` command run again later re-executes the SAME program against whatever the inputs hold THEN — that is how a thing 'keeps itself up to date'.\n"
+                        + "A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING command runner) that owns a program file — you never author a new handler_module (you cannot add modules to the catalog and do not need to). 'A specialist with child workers' = a parent agent whose children are exec_bridge runners, each with its own program file.\n"
+                        + "WIRING TO A SIBLING: you cannot raise your OWN authority, but if you hold `update_agent` (e.g. on the root) you may open ANY agent's ingress — including a sibling like `totals`/`readings` that is not your child. To let your worker call `totals`: grant the worker `can_call:{totals}` AND `update_agent id='totals'` to add the worker to `totals.callable_by` (send the WHOLE map — update replaces, not merges).\n"
+                        + "A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket (FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply comes back on the SAME fd as {op:'reply', rid, data}. It is not inline — read frames until one carries your `rid`, skipping event/inbox frames.\n"
+                        + "COMPOSE the agents you were given for everything else (`list_agents`, reflect each, send). CREATE/DELETE plain agents (create_agent with a handler_module and grants, delete_agent) work as before."
+                )
+                // Doc-tree FRAME (full only): `readmes` (the token-annotated topic
+                // index) + `docs` (a one-liner teaching keyed fetch).
+                obj["readmes"] = readmeIndex(target)
+                obj["docs"] = .string(
+                    "This kernel's manual is a keyed doc tree. To read it, send 'kernel' a reflect payload with a string `readme` field: {type:'reflect', readme:'index'} lists every topic with its ~token cost; {type:'reflect', readme:'<key>'} opens one (e.g. readme:'self-extension', readme:'streams'); {type:'reflect', readme:true} is the short orientation. The field is named exactly `readme` (a string) - not 'readme_key'. Read only what a task needs."
+                )
+            } else {
+                obj["self_extension"] = .string(
+                    "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE it to a file: {write_stream, path, bytes, truncate:true}, or `send_binary` (program RAW in the LAST `bytes` field, nothing escaped). (2) RUN it on the COMMAND runner: `start {command, args}`, gated by its `allowed` regexes (reflect it). (3) Re-run the same command to keep it current. A COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new handler_module (you can't add modules). To wire your worker to a SIBLING (`totals`): grant it `can_call:{totals}` AND `update_agent id='totals'` to add it to `totals.callable_by` — you may open ANY agent's ingress if you hold `update_agent`; only editing your OWN grants is refused. Read {type:'reflect', readme:'self-extension'} for the fd wire + detail."
+                )
+            }
         }
         switch payload["tree"].asString ?? "all" {
         case "all": obj["tree"] = treeNode(target)

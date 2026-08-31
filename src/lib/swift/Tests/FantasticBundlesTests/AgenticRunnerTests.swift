@@ -14,7 +14,7 @@ import FantasticFile
 import FantasticJSON
 import FantasticKernel
 import FantasticStaticLoader
-import FantasticYamlState
+import FantasticDurableMemory
 import Foundation
 import OrderedCollections
 import Testing
@@ -145,7 +145,7 @@ private func makeKernel(workdir: URL) -> Kernel {
     let registry = BundleRegistry()
     registry.register("static_loader.tools", StaticLoaderBundle())
     registry.register("file_bridge.tools", FileBundle())
-    registry.register("yaml_state.tools", YamlStateBundle())
+    registry.register("durable_memory.tools", DurableMemoryBundle())
     registry.register("exec_bridge.tools", ExecBridgeBundle())
     registry.register("lifecycle_probe.tools", LifecycleProbe())
     let kernel = Kernel(storage: .disk(workdir), bundles: registry)
@@ -235,14 +235,43 @@ private func hydrate(_ sc: Scenario, workdir: URL) async throws -> Hydration {
 /// there is no sender, which makes a bare send an OPERATOR send and therefore
 /// worthless as evidence about an agent's authority.
 private func reach(_ k: Kernel, _ sender: String, _ target: String, _ payload: JSON) async -> JSON {
-    await KernelTaskLocals.$currentSender.withValue(AgentId(sender)) {
-        await k.send([Item(AgentId(target), payload)])[0].result
-    }
+    await dispatchCorpus(k, sender: AgentId(sender), target: target, payload: payload)
 }
 
 private func operatorSend(_ k: Kernel, _ target: String, _ payload: JSON) async -> JSON {
-    await KernelTaskLocals.$currentSender.withValue(nil) {
-        await k.send([Item(AgentId(target), payload)])[0].result
+    await dispatchCorpus(k, sender: nil, target: target, payload: payload)
+}
+
+/// Dispatch one corpus send under `sender` (nil = operator, ungated). A
+/// `write_stream`/`read_stream` rides the BINARY channel — file_bridge's string
+/// verbs are gone. Mirrors python `_engine.py`: for a write, `bytes_utf8` becomes
+/// the raw blob; for a read, the returned blob folds back into the reply's
+/// `bytes` field (utf-8) so a `contains: {bytes: ...}` matcher can see it. The
+/// gate still applies — `sendWithBinary` honours the two-sided call gate when a
+/// sender is set.
+private func dispatchCorpus(_ k: Kernel, sender: AgentId?, target: String, payload: JSON) async
+    -> JSON
+{
+    await KernelTaskLocals.$currentSender.withValue(sender) {
+        switch payload["type"].asString ?? "" {
+        case "write_stream":
+            var header = payload
+            if case .object(var o) = header {
+                o["bytes_utf8"] = nil
+                header = .object(o)
+            }
+            let blob = Data((payload["bytes_utf8"].asString ?? "").utf8)
+            return await k.sendWithBinary(AgentId(target), header, blob).0
+        case "read_stream":
+            let (reply, body) = await k.sendWithBinary(AgentId(target), payload, Data())
+            if case .object(var o) = reply {
+                o["bytes"] = .string(String(data: body, encoding: .utf8) ?? "")
+                return .object(o)
+            }
+            return reply
+        default:
+            return await k.send([Item(AgentId(target), payload)])[0].result
+        }
     }
 }
 
@@ -317,15 +346,33 @@ private func matchStep(_ label: String, _ expect: JSON, _ reply: JSON) {
         fail("error does not contain \"\(sub)\"")
     }
     if case .object(let m) = expect["contains"] {
-        for (path, want) in m where !dig(reply, path).contains(want) {
+        for (path, want) in m where !dig(reply, path).contains(where: { pyEq($0, want) }) {
             fail("\(path) does not contain \(want.serialize())")
         }
     }
     if case .object(let m) = expect["not_contains"] {
-        for (path, unwanted) in m where dig(reply, path).contains(unwanted) {
+        for (path, unwanted) in m where dig(reply, path).contains(where: { pyEq($0, unwanted) }) {
             fail("\(path) contains \(unwanted.serialize()) and must not")
         }
     }
+}
+
+/// Python-flavoured equality for the corpus matcher: exact JSON equality, PLUS
+/// the `True == 1` / `False == 0` the corpus authors rely on (`contains:
+/// {written: true}` against a reply that may carry `1`, and the reverse). Rust
+/// needed the same `py_eq` helper.
+private func pyEq(_ a: JSON, _ b: JSON) -> Bool {
+    if a == b { return true }
+    func num(_ j: JSON) -> Double? {
+        switch j {
+        case .bool(let x): return x ? 1 : 0
+        case .integer(let i): return Double(i)
+        case .double(let d): return d
+        default: return nil
+        }
+    }
+    if let x = num(a), let y = num(b) { return x == y }
+    return false
 }
 
 /// `grant`/`revoke` — sugar over an OPERATOR `update_agent`.

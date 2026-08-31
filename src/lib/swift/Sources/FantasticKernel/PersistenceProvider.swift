@@ -2,8 +2,8 @@
 //
 // Mirrors py `kernel_state` + rust `persistence.rs`: the substrate no longer
 // owns an `fs` surface for records. It persists THROUGH a DISCOVERED
-// `file_bridge` provider's `read`/`write` verbs (records are JSON text, so the
-// text verbs suffice — no stream codec needed). NO FALLBACKS: no provider ⇒
+// `file_bridge` provider's `read_stream`/`write_stream` verbs over the raw-bytes
+// binary channel (the string `read`/`write` verbs are GONE). NO FALLBACKS: no provider ⇒
 // the live tree stays in RAM (lost on restart until a store is wired). Cold
 // primitives (boot read, root seed) stay direct — the chicken-egg bring-up.
 
@@ -84,34 +84,44 @@ extension Kernel {
         await KernelTaskLocals.$currentSender.withValue(nil) { await send([Item(storeId, payload)])[0].result }
     }
 
-    /// Read a store-relative path through the provider, PUMPED TO EOF.
+    /// The BINARY store edge — `read_stream`/`write_stream` over the raw-bytes
+    /// channel (the file_bridge string `read`/`write` verbs are GONE). Operator
+    /// authority, like `storeSend`.
+    private func storeSendBinary(_ storeId: AgentId, _ header: JSON, _ blob: Data) async
+        -> (JSON, Data)
+    {
+        await KernelTaskLocals.$currentSender.withValue(nil) {
+            await sendWithBinary(storeId, header, blob)
+        }
+    }
+
+    /// Read a store-relative path through the provider, PUMPED TO EOF over the
+    /// `read_stream` SOURCE.
     ///
-    /// To EOF, not one chunk. The provider's `read` caps at `max_read_chars`
-    /// (16384 by default), so a single read silently TRUNCATED anything larger —
-    /// and for a record that meant the JSON parse failed on the fragment, the
-    /// merge fell back to an empty map, and every non-kernel key already on disk
-    /// was quietly dropped on the next write. A partial read that looks like a
-    /// successful one is the worst shape available.
+    /// To EOF, not one chunk: a single read caps at the chunk size, so a large
+    /// record's JSON parse would fail on the fragment, the merge fall back to an
+    /// empty map, and every non-kernel key already on disk be quietly dropped on
+    /// the next write. A partial read that looks like a successful one is the
+    /// worst shape available.
     private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
-        var out = ""
+        var data = Data()
         var offset = 0
         while true {
-            let got = await storeSend(
+            let (got, body) = await storeSendBinary(
                 storeId,
                 .object([
-                    "type": .string("read"), "path": .string(path),
+                    "type": .string("read_stream"), "path": .string(path),
                     "offset": .integer(Int64(offset)),
-                ]))
-            if got["error"].asString != nil { return out.isEmpty ? nil : out }
-            out += got["content"].asString ?? ""
-            // A provider that reports neither truncation nor a moving cursor
-            // gets ONE pass — the loop must not spin on a surface that cannot
-            // answer.
-            guard got["truncated"].asBool == true,
-                let next = got["next_offset"].asInt, Int(next) > offset
-            else { return out }
+                ]), Data())
+            if got["error"].asString != nil {
+                return data.isEmpty ? nil : String(data: data, encoding: .utf8)
+            }
+            data.append(body)
+            if got["eof"].asBool == true { break }
+            guard let next = got["next_offset"].asInt, Int(next) > offset else { break }
             offset = Int(next)
         }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Persist an agent's record onto its per-agent `agent.json` THROUGH the
@@ -137,27 +147,15 @@ extension Kernel {
         existing["handler_module"] = agent.handlerModule.map { .string($0) }
         existing["parent_id"] = agent.parentId.map { .string($0.value) }
         for (k, v) in agent.meta { existing[k] = v }
-        // The program is a FILE beside the record — see `Persistence.codeFile`.
-        var code: String?
-        if case .string(let c)? = existing[Persistence.codeField], !c.isEmpty {
-            code = c
-            existing[Persistence.codeField] = nil
-        }
+        // The record persists AS-IS — a single stream, no `code`/`main.py` split.
         let serialized = JSON.object(existing).serializePretty(indent: 2)
-        _ = await storeSend(
+        _ = await storeSendBinary(
             storeId,
             .object([
-                "type": .string("write"), "path": .string(af), "content": .string(serialized),
-            ]))
-        if let code {
-            let cf = reldir.isEmpty
-                ? Persistence.codeFile : "\(reldir)/\(Persistence.codeFile)"
-            _ = await storeSend(
-                storeId,
-                .object([
-                    "type": .string("write"), "path": .string(cf), "content": .string(code),
-                ]))
-        }
+                "type": .string("write_stream"), "path": .string(af),
+                "truncate": .bool(true),
+            ]),
+            Data(serialized.utf8))
     }
 
     /// Seed a `readme.md` (copy-if-missing) into the agent's dir THROUGH the
@@ -168,11 +166,13 @@ extension Kernel {
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
         let path = reldir.isEmpty ? "readme.md" : "\(reldir)/readme.md"
         if await readViaStore(storeId, path) != nil { return }  // already present
-        _ = await storeSend(
+        _ = await storeSendBinary(
             storeId,
             .object([
-                "type": .string("write"), "path": .string(path), "content": .string(content),
-            ]))
+                "type": .string("write_stream"), "path": .string(path),
+                "truncate": .bool(true),
+            ]),
+            Data(content.utf8))
     }
 
     /// Remove an agent's dir THROUGH the provider (the `delete` verb). Never the

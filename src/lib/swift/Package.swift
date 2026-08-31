@@ -44,7 +44,7 @@ let package = Package(
         .library(name: "FantasticIoBridge", targets: ["FantasticIoBridge"]),
         .library(name: "FantasticBundles", targets: [
             "FantasticFile",
-            "FantasticYamlState",
+            "FantasticDurableMemory",
             "FantasticProxyAgent",
             "FantasticTools",
             "FantasticScheduler",
@@ -120,7 +120,7 @@ let package = Package(
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
-            name: "FantasticYamlState",
+            name: "FantasticDurableMemory",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections"),
                            .product(name: "Yams", package: "Yams")]
@@ -132,7 +132,7 @@ let package = Package(
         ),
         // apple_kvs — synced KV (iCloud KVS), Apple-only (gated by `#if
         // canImport(Darwin)`; reports unavailable elsewhere). Sibling of
-        // yaml_state in surface, synced + live-only in semantics.
+        // durable_memory in surface, synced + live-only in semantics.
         .target(
             name: "FantasticAppleKVS",
             dependencies: ["FantasticKernel", "FantasticJSON",
@@ -299,7 +299,7 @@ let package = Package(
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticYamlState", "FantasticAppleKVS",
+                "FantasticDurableMemory", "FantasticAppleKVS",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend", "FantasticLlamaCppBackend",
@@ -404,7 +404,7 @@ let package = Package(
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticYamlState", "FantasticKernelStartup",
+                "FantasticDurableMemory", "FantasticKernelStartup",
                 "FantasticFoundationModelsBackend",
                 // The agentic runner boots the rosters the shared corpus at
                 // `contract/agentic/` declares, so it needs the bundles those

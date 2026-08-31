@@ -1,71 +1,37 @@
-// Python subprocess execution bundle (macOS only).
+// Process edge of the io family — swift mirror of the canonical python
+// `io/exec_bridge` (canonical; on disagreement this file is wrong). Rust's
+// `fantastic-exec-bridge` is the second reference.
 //
-// Mirrors python's `exec_bridge`: `start` spawns `python -u -c <connector +
-// code>` as a BACKGROUND child and returns `{job_id, status:"running"}` AT ONCE.
-// The program's output is NOT the reply — it arrives as `job_done` on this
-// agent's inbox. The `code` is persisted on the agent record, so the program is
-// a DURABLE tool that `boot` revives after a restart, and any verb this bundle
-// does not own is MAIL for the running program. There is no run-and-wait verb
-// (`exec` is GONE — a second spawn path could never reach a live job's
-// `on_message`). The iOS sandbox forbids subprocess, so this is macOS-only.
+// Crossing kernel↔subprocess is gated like any io_bridge leg: SEALED BY DEFAULT
+// (absent `ingress_rule` ⇒ every verb except `reflect` denies), and bound by a
+// regex command ALLOWLIST — `allowed` on the record is a list of regexes, and
+// `start {command, args}` refuses unless the shell-joined line fullmatches one.
+// No per-call override, no default, no PATH fallback; an empty `allowed` runs
+// nothing. The withdrawn `code`/`shim`/`interpreter`/`interpreters`/
+// `argv_template` fields are refused at WRITE time (`validateMeta`) and at
+// `start`.
 //
-// ## The child is a JOB, and the job is a kernel TASK
+// It is a GENERAL-PURPOSE COMMAND runner, NOT a code runner. A program is a FILE
+// some process (or a `write_stream`) put on disk; running it is `command` +
+// `args`, exactly like anything else — so the job table / output pump / connector
+// relay / fd passing / task-table rows / mail contract are all language-blind.
 //
-// A job OUTLIVES the dispatch that started it — `start` replies the moment the
-// child is up — so the DISPATCH's row cannot stand for it. Each job takes its
-// OWN row in the kernel task table (`ps` shows `{agent:<this>, verb:"start"}`
-// for as long as the child lives), and cancelling that row must reach the real
-// OS process.
+// The bridge publishes a WIRE — the inherited `FANTASTIC_CTRL_FD`, framed
+// `[4-byte BE length | JSON]` — and nothing else. A program that wants a `kernel`
+// global includes the reference wire client (`CONNECTOR_SRC`) in its own source;
+// the bridge prepends nothing. `start` spawns in the BACKGROUND and returns
+// `{job_id, status:"running"}` at once, streaming `progress`/`job_done`; `boot`
+// is a no-op (nothing auto-restarts — a command is started by a caller, not the
+// record). Any verb this bundle does not own is MAIL for the running program
+// (`{queued:true}`); jobs are kernel TASKS (`ps`/`cancel`, `onCancel` SIGKILLs
+// the real process).
 //
-// The handle that makes it reachable is the JOB TABLE below (`jobs`): the live
-// `Process` of every in-flight job, keyed by the TASK it belongs to. It is what
-// makes `cancel` real — cancelling a Swift `Task` only flips a cooperative flag;
-// the `python3` child would keep running, parentless and unreachable (the ORPHAN
-// bug that leaked 33 connector processes in this repo, and that rust hit with
-// `kill_on_drop(false)`). `onCancel` — the substrate's SIGTERM half, awaited
-// BEFORE the task is aborted — reaches into the table and SIGKILLs the child.
-// One `teardown`, shared by every death: cancel, delete, and shutdown.
-//
-// `stop` (SIGKILL) / `interrupt` (SIGINT) stay what they are in rust: verbs
-// that signal the PROGRAM, agent-scoped, addressed by the caller. Cancelling a
-// CALL is the kernel's job (`ps` → `cancel`); signalling a program is the
-// bundle's.
-//
-// The wait is asynchronous: the kernel's dispatch never sits on a blocking
-// `waitUntilExit()` (that pinned a cooperative-pool thread AND could not be
-// interrupted). The child's exit arrives through `terminationHandler`, its
-// pipes drain concurrently through `readabilityHandler` (so a chatty script
-// can't dead-lock on a full 64K pipe buffer), and the handler simply `await`s.
-//
-// ## Which interpreter — and a deliberate divergence from canonical
-//
-// `payload.python` → `payload.venv` → `record.python` → `record.venv` → REFUSE.
-// Python's ladder ends in `sys.executable`; this one ends in an error naming both
-// fields, because a Swift kernel is not a python process and holds no such fact,
-// and "by default no defaults" forbids guessing a path in its place. The rule and
-// the reasoning live in `Interpreter.swift`; the refusal is advertised in this
-// bundle's readme and in `reflect`'s sentence.
-
-// ## SECURITY — DEFERRED, AND A KNOWN HOLE (read before trusting the sandbox claim)
-//
-// An authored python program is **NOT sandboxed**. `python -u -c <code>` is a full CPython
-// with the entire stdlib: `open()`, `socket`, `subprocess` all work. PROVEN 2026-08-05 — a
-// job did `open('ESCAPED.txt','w')` and the file appeared on disk.
-//
-// So "your code's only capability is the kernel connector; it has no direct disk, net, or
-// process access" would be FALSE here. Where an interpreter happens to grant less, you get
-// less — but that is a property of the interpreter, not a promise this bundle makes. The
-// connector is the RECOMMENDED path, not the only one, and routing this bundle's data IO
-// "through the loader" would be a convention a program can ignore in one line, not a gate.
-//
-// CONSEQUENCE FOR THE OPERATOR: registering a python executor GRANTS ARBITRARY LOCAL CODE
-// EXECUTION to whatever authors a program — including an LLM. It is a conscious opt-in, and
-// the risk is the operator's, deliberately (rust gates it behind the `full` feature; swift
-// behind `#if os(macOS)`).
-//
-// RESOLUTION IS DEFERRED. Making the claim true needs an OS mechanism — `sandbox-exec`, a
-// separate uid, or the container image — not anything reachable in-process. Until then this
-// is understood and accepted, not overlooked.
+// NOT a sandbox. An allowlisted command is a NAMED command, with all of that
+// command's reach — a python it permits still has `open()`, `socket`,
+// `subprocess`. The allowlist buys exactly one property: the OPERATOR chose WHICH
+// commands may run, and a program cannot pick a different one. Anything stronger
+// needs an OS mechanism (`sandbox-exec`, a separate uid, a container) and is
+// DEFERRED. The iOS sandbox forbids subprocess, so this is macOS-only.
 //
 #if os(macOS)
 
@@ -73,8 +39,67 @@
     import FantasticJSON
     import FantasticKernel
     import Foundation
+    import OrderedCollections
 
     public let HANDLER_MODULE = "exec_bridge.tools"
+
+    // ── the command gate: a REGEX allowlist (py `_command_permitted`) ──
+
+    /// This leg's `allowed` — regexes a command line must fullmatch to run. A bare
+    /// string is a one-element list; empty ⇒ the leg runs nothing (a legal state).
+    func allowedPatterns(_ record: Agent?) -> [String] {
+        switch record?.metaValue(forKey: "allowed") {
+        case .some(.string(let s)): return [s]
+        case .some(.array(let a)): return a.map { $0.asString ?? $0.serialize() }
+        default: return []
+        }
+    }
+
+    /// `nil` when `line` fullmatches an allowed pattern; else the refusal text.
+    ///
+    /// The FULL command line (command + args, shell-joined) is matched ANCHORED —
+    /// the equivalent of python's `re.fullmatch(pat, line, re.DOTALL)`: the match
+    /// must span the WHOLE string (so `echo.*` cannot smuggle `echo; rm -rf /` past
+    /// a prefix) and `.` spans newlines (an argv element may contain them). An empty
+    /// allowlist runs nothing.
+    func commandPermitted(_ record: Agent?, _ line: String) -> String? {
+        let pats = allowedPatterns(record)
+        if pats.isEmpty {
+            return
+                "exec_bridge: no commands are allowed on this leg — an operator must "
+                + "set `allowed=[<regex>, ...]` naming what may run"
+        }
+        let full = NSRange(line.startIndex..<line.endIndex, in: line)
+        for pat in pats {
+            guard
+                let re = try? NSRegularExpression(
+                    pattern: pat, options: [.dotMatchesLineSeparators])
+            else { continue }
+            if let m = re.firstMatch(in: line, options: [], range: full), m.range == full {
+                return nil
+            }
+        }
+        return "exec_bridge: command not allowed: \(line.debugDescription) — this leg permits: \(pats)"
+    }
+
+    /// Shell-join argv the way python's `shlex.join` does — POSIX quoting, so the
+    /// joined line the allowlist matches is the same one a shell would see.
+    func shlexJoin(_ argv: [String]) -> String {
+        argv.map(shlexQuote).joined(separator: " ")
+    }
+
+    /// One token, quoted per python's `shlex.quote`. Safe set is `[\w@%+=:,./-]`;
+    /// anything else forces single-quoting with inner `'` escaped as `'"'"'`.
+    func shlexQuote(_ s: String) -> String {
+        if s.isEmpty { return "''" }
+        let safe = s.utf8.allSatisfy { b in
+            (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+                || b == 95 || b == 64 || b == 37 || b == 43 || b == 61 || b == 58
+                || b == 44 || b == 46 || b == 47 || b == 45
+        }
+        if safe { return s }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
 
     public final class ExecBridgeBundle: AgentBundle, @unchecked Sendable {
         public let name = "exec_bridge"
@@ -82,51 +107,55 @@
 
         // MARK: - the job table
 
-        /// One in-flight child — the REAL resource this bundle owns.
+        /// One in-flight (or finished) program — the REAL resource this bundle owns.
         ///
-        /// `taskId` is the row in the kernel's task table that the child belongs
-        /// to (the job's own row, spawned by `start`). `onCancel` matches on it, so
-        /// killing one job never touches another running concurrently on the same
-        /// agent. `pid` is captured at spawn: it is what we signal, and it
-        /// stays valid to compare even after `Process` has reaped the child.
+        /// Keyed by its public `jobId`; every verb filters by `agent` (owner), so a
+        /// job_id from another agent is still "no job". `taskId` is the row in the
+        /// kernel task table the pump holds; `onCancel` matches on it, so killing one
+        /// job never touches another running on the same agent. The invocation
+        /// (`command`/`args`/`cwd`) is recorded so `status` can report WHAT ran.
         private struct Job {
             let agent: AgentId
-            let taskId: TaskId?
+            var taskId: TaskId?
             let process: Process
             let pid: Int32
-            /// A live job owns its control relay and its public job id.
-            var jobId: String? = nil
-            var relay: Relay? = nil
+            var relay: Relay?
+            let command: String
+            let args: [String]
+            let cwd: String?
+            let startedAt: Double
             var status: String = "running"
             var exitCode: Int32? = nil
+            var lines: Int = 0
+            var lastLine: String = ""
+            var stdout: String = ""
+            var stderr: String = ""
         }
 
-        /// Guards `jobs` + `nextKey`. Never held across an `await` (only around
-        /// dictionary work + the `kill(2)` calls, which do not block).
+        /// Guards `jobs`. Never held across an `await`.
         private let lock = NSLock()
-        /// Live children, keyed by an internal handle (a job id). Per-INSTANCE, not
-        /// a global: one bundle instance is registered per kernel, so two kernels in
-        /// one process (the test suite) cannot see each other's children.
-        private var jobs: [UInt64: Job] = [:]
-        private var nextKey: UInt64 = 0
+        /// Live/finished children, keyed by job id. Per-INSTANCE (one bundle per
+        /// kernel), so two kernels in one process cannot see each other's children.
+        private var jobs: [String: Job] = [:]
 
         public var readme: String? {
             """
-            exec_bridge — the process edge of the io family. Sealed by default \
-            (`ingress_rule=allow_all_ingress` opens it); interpreter ALLOWLIST \
-            (`interpreters=[…]` on the record — no default, no PATH fallback; an \
-            unlisted `interpreter` refuses naming the legal set). `start {code?, \
-            args?, interpreter?, shim?}` spawns in the BACKGROUND → {job_id, \
-            status:"running"} at once. The record's persisted `code` is a durable \
-            SCRIPT run top to bottom, revived by `boot` (whose error propagates): `def run(payload): ...` and nothing else defines `run`, exits, and does no work — put the work at module level, and to receive later sends keep running via kernel.on_message(callback). \
-            The bridge publishes a WIRE: the inherited FANTASTIC_CTRL_FD, framed \
-            [4-byte BE length | JSON]. `shim:"python"` prepends the wire client (a \
-            `kernel` global: send/emit/reflect/watch/on_message + self_id + args); \
-            name no shim and the program speaks the wire itself. Any verb this \
+            exec_bridge — the process edge of the io family, a general-purpose \
+            COMMAND runner. Sealed by default (`ingress_rule=allow_all_ingress` \
+            opens it); the LAW is the regex ALLOWLIST (`allowed=[<regex>, ...]` on \
+            the record — no default, no PATH fallback; `start {command, args}` \
+            refuses unless the shell-joined line fullmatches one). Spawns in the \
+            BACKGROUND → {job_id, status:"running"} at once, streaming progress and \
+            a final job_done. NOT a code runner: there is no `code`, no \
+            `interpreter`, no shim — a program is a FILE some process put on disk, \
+            run as `command` + `args` like anything else. The bridge publishes a \
+            WIRE: the inherited FANTASTIC_CTRL_FD, framed [4-byte BE length | JSON]. \
+            A program that wants a `kernel` global includes the reference wire \
+            client in its own source; the bridge prepends nothing. Any verb this \
             bundle does not own is MAIL for the running program ({queued:true}); \
-            jobs are kernel TASKS (ps/cancel reap the real OS process). NOT a \
-            sandbox: an allowlisted interpreter is a NAMED interpreter with all of \
-            that interpreter's reach.
+            jobs are kernel TASKS (ps/cancel reap the real OS process). Not a \
+            sandbox: an allowlisted command is a NAMED command with all of that \
+            command's reach.
             """
         }
 
@@ -140,7 +169,7 @@
             let verb = payload["type"].asString ?? ""
             // AUTH GATE — the process edge is an io_bridge leg: SEALED by default,
             // kind "spawn". `reflect` is UNGATED (discovery works sealed); mail is
-            // deliberately ungated too (py parity — the fanout already delivered).
+            // ungated too (py parity — the fanout already delivered).
             let owned = ["start", "boot", "shutdown", "status", "clear", "interrupt", "stop"]
             if owned.contains(verb), let agent = kernel.agent(agentId) {
                 let rule = try resolveIngress(
@@ -165,18 +194,21 @@
             case "start":
                 return await startReply(agentId: agentId, payload: payload, kernel: kernel)
             case "boot":
-                return await bootReply(agentId: agentId, kernel: kernel)
+                return .null
             case "shutdown":
-                return .object(["ok": .bool(true)])
+                return .null
+            case "status":
+                return statusReply(agentId, payload: payload)
+            case "clear":
+                return clearReply(agentId, payload: payload)
             case "interrupt":
-                return .object(["interrupted": .integer(Int64(signalAll(agentId, SIGINT)))])
+                return .object(["interrupted": .integer(Int64(signalJobs(agentId, payload, SIGINT)))])
             case "stop":
-                return .object(["killed": .integer(Int64(signalAll(agentId, SIGKILL)))])
+                return .object(["killed": .integer(Int64(signalJobs(agentId, payload, SIGKILL)))])
             default:
                 // ADDRESSABLE INBOX. A verb this bundle does not own is MAIL for the
-                // running program — the substrate's fanout has already delivered it to
-                // the job's `_pyself_` proxy, so this only ACKs. Re-emitting would
-                // double-deliver.
+                // running program — the substrate's fanout has already delivered it,
+                // so this only ACKs. Re-emitting would double-deliver.
                 if hasRunningJob(agentId) {
                     return .object(["queued": .bool(true)])
                 }
@@ -187,78 +219,90 @@
             }
         }
 
-        /// Any live durable job of this agent.
+        /// Any live process of this owner.
         private func hasRunningJob(_ agentId: AgentId) -> Bool {
             lock.withLock {
-                jobs.values.contains {
-                    $0.agent == agentId && $0.jobId != nil && $0.process.isRunning
-                }
+                jobs.values.contains { $0.agent == agentId && $0.process.isRunning }
             }
         }
 
-        /// `start` — spawn the program in the BACKGROUND and return at once.
+        /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
         ///
-        /// The `code` is persisted onto the record so `boot` revives it after a reboot;
-        /// the LOADER lays that down as `main.py` beside `agent.json`.
+        /// args: command:str (req), args:list[str]? (argv, default []), env:dict?
+        /// (extra env vars), cwd:str?. The FULL line (command + args, shell-joined)
+        /// must fullmatch one of the record's `allowed` regexes or the start is
+        /// refused naming the patterns. A `code` field is refused explicitly.
         private func startReply(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
-            let agent = kernel.agent(agentId)
-            // A LIST of lines is accepted and joined — see `linesOrString`: a
-            // multi-line program as ONE JSON string is where a model loses a
-            // closing quote and the whole call with it.
-            let code =
-                linesOrString(payload["code"])
-                ?? agent?.metaValue(forKey: "code").flatMap(linesOrString) ?? ""
-            if code.isEmpty {
+            let record = kernel.agent(agentId)
+            // `code` is not a field — run a command instead (py `_start`).
+            if !payload["code"].isNull {
                 return .object([
-                    "error": .string(
-                        "exec_bridge: code (str, or a list of lines) required "
-                            + "(pass it or set it on the record)")
+                    "error": .string("exec_bridge: `code` is not a field — run a command instead")
                 ])
             }
-            // PER-CALL ARGUMENTS. A missing `args` serializes to "null"; the script
-            // contract is an object, so absent means empty rather than null.
-            let rawArgs = payload["args"].serialize()
-            let argsJSON = rawArgs == "null" ? "{}" : rawArgs
-            if argsJSON.utf8.count > Self.maxArgsBytes {
-                return .object([
-                    "error": .string(
-                        "exec_bridge: args too large (\(argsJSON.utf8.count) bytes > "
-                            + "\(Self.maxArgsBytes)) — they ride the process env, which caps "
-                            + "near 1 MB for the whole block. Put bulk data in an agent and "
-                            + "pass its id.")
-                ])
+            guard let command = payload["command"].asString,
+                !command.trimmingCharacters(in: .whitespaces).isEmpty
+            else {
+                return .object(["error": .string("exec_bridge: command (str) required")])
             }
-            // WHICH interpreter — refused loudly rather than degraded to another one, and
-            // validated BEFORE the spawn (see `Interpreter.swift`: a bad `$0` makes
-            // /bin/sh exit 127 long after `start` has already answered "running").
-            let interp: String
-            do {
-                interp = try Interpreter.resolve(payload: payload, record: agent)
-            } catch {
-                return .object(["error": .string("exec_bridge: \(error)")])
+            // `args` — a list of scalars (str/int/float), each stringified into argv.
+            var args: [String] = []
+            let rawArgs = payload["args"]
+            if !rawArgs.isNull {
+                guard let arr = rawArgs.asArray else {
+                    return .object([
+                        "error": .string(
+                            "exec_bridge: start expects args to be a list of strings")
+                    ])
+                }
+                for v in arr {
+                    switch v {
+                    case .string(let s): args.append(s)
+                    case .integer(let i): args.append(String(i))
+                    case .double(let d): args.append(numString(d))
+                    default:
+                        return .object([
+                            "error": .string(
+                                "exec_bridge: start expects args to be a list of strings")
+                        ])
+                    }
+                }
             }
-            let cwd = payload["cwd"].asString ?? agent?.metaValue(forKey: "cwd")?.asString
+            // The FULL argv, shell-joined, matched against the allowlist BEFORE spawn.
+            let argv = [command] + args
+            let line = shlexJoin(argv)
+            if let why = commandPermitted(record, line) {
+                return .object(["error": .string(why)])
+            }
+            // The per-call `env` block — a dict of str -> scalar.
+            var envExtra: [String: String] = [:]
+            let rawEnv = payload["env"]
+            if !rawEnv.isNull {
+                guard let m = rawEnv.asObject else {
+                    return .object([
+                        "error": .string(
+                            "exec_bridge: start expects env to be a dict of str -> str")
+                    ])
+                }
+                for (k, v) in m {
+                    switch v {
+                    case .string(let s): envExtra[k] = s
+                    case .integer(let i): envExtra[k] = String(i)
+                    case .double(let d): envExtra[k] = numString(d)
+                    default:
+                        return .object([
+                            "error": .string(
+                                "exec_bridge: start expects env to be a dict of str -> str")
+                        ])
+                    }
+                }
+            }
+            let cwd = payload["cwd"].asString ?? record?.metaValue(forKey: "cwd")?.asString
 
-            // The OPTIONAL shim — unknown names refuse, absent means the raw wire.
-            let shimName = payload["shim"].asString ?? agent?.metaValue(forKey: "shim")?.asString
-            let program: String
-            switch shimName {
-            case nil, "":
-                program = code
-            case "python":
-                program = CONNECTOR_SRC + "\n" + code
-            case .some(let other):
-                return .object([
-                    "error": .string(
-                        "exec_bridge: shim \"\(other)\" is unknown — this bridge serves "
-                            + "[\"python\"]")
-                ])
-            }
             let spawned: Spawn.Spawned
             do {
                 spawned = try Spawn.job(
-                    interp: interp, code: program, selfId: agentId.value, argsJSON: argsJSON,
-                    cwd: cwd)
+                    argv: argv, selfId: agentId.value, envExtra: envExtra, cwd: cwd)
             } catch {
                 return .object(["error": .string("exec_bridge: spawn failed: \(error)")])
             }
@@ -269,72 +313,51 @@
 
             let pid = spawned.process.processIdentifier
             // The job OUTLIVES this dispatch, so it needs its OWN task-table row —
-            // otherwise the kernel loses sight of it the moment we reply, and a
-            // subprocess nobody can reach is the orphan bug.
-            // The row key is only known after `insert`, so the pump reads it from a box
-            // the insert fills — the task body may start on another thread first.
-            let keyBox = KeyBox()
+            // otherwise a subprocess nobody can reach is the orphan bug.
             let taskId = kernel.spawnTask(agent: agentId, verb: "start") { [weak self] in
                 await self?.pump(
-                    agentId: agentId, jobId: jobId, spawned: spawned, keyBox: keyBox,
-                    kernel: kernel)
+                    agentId: agentId, jobId: jobId, spawned: spawned, kernel: kernel)
             }
-            let key = insert(
-                Job(
+            lock.withLock {
+                jobs[jobId] = Job(
                     agent: agentId, taskId: taskId, process: spawned.process, pid: pid,
-                    jobId: jobId, relay: relay))
-
-            keyBox.set(key)
-            // Durable authored agent: the record carries the program.
-            if let agent {
-                _ = agent.updateMeta(["code": .string(code)])
-                await kernel.persistRecord(agent)
+                    relay: relay, command: command, args: args, cwd: cwd,
+                    startedAt: Date().timeIntervalSince1970)
             }
             await kernel.emit(
                 agentId, .object(["type": .string("job_started"), "job_id": .string(jobId)]))
             return .object(["job_id": .string(jobId), "status": .string("running")])
         }
 
-        /// `boot` — idempotent rehydration. A record carrying `code` becomes a living
-        /// program again, unless one is already running.
-        ///
-        /// A boot that could NOT revive the program says so. `{ok:true}` while nothing
-        /// started is the silence the interpreter refusal exists to replace: a record
-        /// with `code` but no `python`/`venv` cannot revive in this runtime (python's
-        /// `_boot` persists its own `sys.executable` for exactly this case; there is
-        /// nothing here to persist), and the operator has to be able to see that.
-        private func bootReply(agentId: AgentId, kernel: Kernel) async -> JSON {
-            guard let code = kernel.agent(agentId)?.metaValue(forKey: "code")?.asString,
-                !code.isEmpty, !hasRunningJob(agentId)
-            else { return .object(["ok": .bool(true)]) }
-            // A rehydrate has no caller, so no arguments.
-            let started = await startReply(
-                agentId: agentId, payload: .object(["code": .string(code)]), kernel: kernel)
-            if let err = started["error"].asString {
-                return .object(["ok": .bool(false), "error": .string(err)])
-            }
-            return .object(["ok": .bool(true)])
-        }
-
-        /// The job's task-table body: stream both pipes as `progress`, then `job_done`.
+        /// The job's task-table body: drain both pipes, emit `progress` per line,
+        /// await exit, update the row, emit `job_done`. The row STAYS after exit so
+        /// `status`/`clear` can see it (python/rust parity).
         private func pump(
-            agentId: AgentId, jobId: String, spawned: Spawn.Spawned, keyBox: KeyBox,
-            kernel: Kernel
+            agentId: AgentId, jobId: String, spawned: Spawn.Spawned, kernel: Kernel
         ) async {
-            // `drain` is readabilityHandler + continuation. `readDataToEndOfFile()` would
-            // BLOCK a cooperative-pool thread, which starves the pool the moment two jobs
-            // run at once — it passed alone and timed out in a full suite.
-            async let out = drain(spawned.stdout.fileHandleForReading)
-            async let err = drain(spawned.stderr.fileHandleForReading)
-            let o = String(data: await out, encoding: .utf8) ?? ""
-            let e = String(data: await err, encoding: .utf8) ?? ""
+            async let outD = drain(spawned.stdout.fileHandleForReading)
+            async let errD = drain(spawned.stderr.fileHandleForReading)
+            let o = String(data: await outD, encoding: .utf8) ?? ""
+            let e = String(data: await errD, encoding: .utf8) ?? ""
+            await emitLines(o, stream: "stdout", agentId: agentId, jobId: jobId, kernel: kernel)
+            await emitLines(e, stream: "stderr", agentId: agentId, jobId: jobId, kernel: kernel)
+
             let exit = ExitBox()
             spawned.process.terminationHandler = { p in exit.finish(p.terminationStatus) }
+            if !spawned.process.isRunning { exit.finish(spawned.process.terminationStatus) }
             let code = await exit.wait()
-            // Retire the row — otherwise `in_flight` never falls back to 0 and a finished
-            // job looks alive forever.
-            if let k = keyBox.get() { remove(k) }
             relayFor(jobId)?.stop()
+            lock.withLock {
+                if var j = jobs[jobId] {
+                    j.exitCode = code
+                    j.stdout = o
+                    j.stderr = e
+                    j.status =
+                        j.status == "stopping"
+                        ? "stopped" : (code == 0 ? "done" : "failed")
+                    jobs[jobId] = j
+                }
+            }
             await kernel.emit(
                 agentId,
                 .object([
@@ -344,48 +367,124 @@
                 ]))
         }
 
-        /// Per-call `args` ride the process env, which caps near 1 MB for the whole
-        /// block — past it `execve` fails with a cryptic E2BIG. Refuse early, say why.
-        private static let maxArgsBytes = 256 * 1024
-
-        /// A job's registry key, published after `insert` and read by its pump. The
-        /// pump body can begin on another thread before `insert` returns, so this is a
-        /// handoff rather than a captured value.
-        private final class KeyBox: @unchecked Sendable {
-            private let lock = NSLock()
-            private var key: UInt64?
-            func set(_ k: UInt64) { lock.withLock { key = k } }
-            func get() -> UInt64? { lock.withLock { key } }
+        /// Emit one `progress` per output line; the counter is SHARED across stdout
+        /// and stderr (it lives on the job row), so `n` is one monotonic sequence.
+        private func emitLines(
+            _ text: String, stream: String, agentId: AgentId, jobId: String, kernel: Kernel
+        ) async {
+            if text.isEmpty { return }
+            var parts = text.components(separatedBy: "\n")
+            if parts.last == "" { parts.removeLast() }
+            for line in parts {
+                let n = lock.withLock { () -> Int in
+                    if var j = jobs[jobId] {
+                        j.lines += 1
+                        j.lastLine = line
+                        jobs[jobId] = j
+                        return j.lines
+                    }
+                    return 0
+                }
+                await kernel.emit(
+                    agentId,
+                    .object([
+                        "type": .string("progress"), "job_id": .string(jobId),
+                        "n": .integer(Int64(n)), "line": .string(line),
+                        "stream": .string(stream),
+                    ]))
+            }
         }
+
+        // MARK: - status / clear
+
+        private func snap(_ jobId: String, _ j: Job, full: Bool) -> JSON {
+            var o: OrderedDictionary<String, JSON> = [
+                "job_id": .string(jobId),
+                "task_id": j.taskId.map { JSON.string($0.value) } ?? .null,
+                "status": .string(j.status),
+                "exit_code": j.exitCode.map { JSON.integer(Int64($0)) } ?? .null,
+                "started_at": .double(j.startedAt),
+                "lines": .integer(Int64(j.lines)),
+                "last_line": .string(j.lastLine),
+                "command": .string(j.command),
+                "args": .array(j.args.map(JSON.string)),
+            ]
+            if full {
+                o["stdout"] = .string(j.stdout)
+                o["stderr"] = .string(j.stderr)
+                o["cwd"] = j.cwd.map { JSON.string($0) } ?? .null
+            }
+            return .object(o)
+        }
+
+        /// `status` — one job (full output) or all of THIS agent's jobs (summary).
+        private func statusReply(_ agentId: AgentId, payload: JSON) -> JSON {
+            lock.withLock {
+                if let jid = payload["job_id"].asString {
+                    guard let j = jobs[jid], j.agent == agentId else {
+                        return .object(["error": .string("exec_bridge: no job \"\(jid)\"")])
+                    }
+                    return .object(["jobs": .array([snap(jid, j, full: true)])])
+                }
+                let rows = jobs.filter { $0.value.agent == agentId }
+                    .map { snap($0.key, $0.value, full: false) }
+                return .object(["jobs": .array(rows)])
+            }
+        }
+
+        /// `clear` — drop finished rows of this agent (one, or all non-running).
+        private func clearReply(_ agentId: AgentId, payload: JSON) -> JSON {
+            let want = payload["job_id"].asString
+            let doomed: [String] = lock.withLock {
+                jobs.filter { (id, j) in
+                    j.agent == agentId
+                        && (want.map { $0 == id } ?? (j.status != "running" && j.status != "stopping"))
+                }.map { $0.key }
+            }
+            lock.withLock { for id in doomed { jobs.removeValue(forKey: id) } }
+            return .object(["cleared": .integer(Int64(doomed.count))])
+        }
+
+        /// `interrupt` / `stop` — signal this agent's jobs, or one named `job_id`.
+        /// Returns how many were actually signalled.
+        private func signalJobs(_ agentId: AgentId, _ payload: JSON, _ sig: Int32) -> Int {
+            let want = payload["job_id"].asString
+            return lock.withLock {
+                var n = 0
+                for (id, var j) in jobs {
+                    if j.agent != agentId || (want.map { $0 != id } ?? false) { continue }
+                    if !j.process.isRunning { continue }  // already gone — never pretend
+                    if sig == SIGKILL {
+                        j.status = "stopping"
+                        jobs[id] = j
+                    }
+                    if kill(j.pid, sig) == 0 { n += 1 }
+                }
+                return n
+            }
+        }
+
+        // MARK: - lifecycle
 
         /// The relay serving a given job, if it is still registered.
         private func relayFor(_ jobId: String) -> Relay? {
-            lock.withLock { jobs.values.first { $0.jobId == jobId }?.relay }
+            lock.withLock { jobs[jobId]?.relay }
         }
 
-        /// The agent is going away — SIGKILL every child it still owns, so a
-        /// deleted agent cannot leave a `python3` behind.
+        /// The agent is going away — SIGKILL every child it still owns.
         public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
             teardownAgent(agentId)
         }
 
-        /// Same, on kernel shutdown: the process is about to exit and orphan
-        /// whatever it still holds.
         public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
             teardownAgent(agentId)
         }
 
-        /// THE CANCEL HOOK — the SIGTERM half, and the whole reason this bundle
-        /// keeps a job table.
-        ///
-        /// The kernel is about to abort `taskId`'s Swift `Task`. That frees NO OS
-        /// resource: the `python3 -c ...` child of that dispatch would keep running
-        /// with nothing pointing at it — an orphan. We own the process, so we kill
-        /// it, and the substrate awaits us BEFORE it aborts anything.
-        ///
-        /// TASK-scoped, not agent-scoped (matching the python canonical): a second
-        /// job running concurrently on the same agent is a DIFFERENT task and
-        /// survives untouched. `stop` is the agent-scoped, kill-them-all verb.
+        /// THE CANCEL HOOK — the SIGTERM half. The kernel is about to abort
+        /// `taskId`'s Swift `Task`, which frees no OS resource: the child of that
+        /// dispatch would keep running, orphaned. We own the process, so we kill it,
+        /// and the substrate awaits us BEFORE it aborts anything. TASK-scoped: a
+        /// second job on the same agent is a different task and survives.
         public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
             let doomed = lock.withLock {
                 jobs.values.filter { $0.agent == agentId && $0.taskId == taskId }
@@ -393,12 +492,8 @@
             for job in doomed { teardown(job) }
         }
 
-        // MARK: - pipes
-
         /// Read one pipe to EOF without pinning a thread: `readabilityHandler` fires
         /// on Foundation's own queue, and the empty read that means EOF resumes us.
-        /// A killed child EOFs too (the kernel closes its write ends), so this always
-        /// completes.
         private func drain(_ handle: FileHandle) async -> Data {
             let box = DataBox()
             return await withCheckedContinuation { (c: CheckedContinuation<Data, Never>) in
@@ -414,119 +509,130 @@
             }
         }
 
-        // MARK: - the table + the ONE teardown
-
-        private func insert(_ job: Job) -> UInt64 {
-            lock.withLock {
-                nextKey += 1
-                jobs[nextKey] = job
-                return nextKey
-            }
-        }
-
-        private func remove(_ key: UInt64) {
-            lock.withLock { _ = jobs.removeValue(forKey: key) }
-        }
-
-        /// Free the REAL resource of ONE job: SIGKILL its child. The single teardown
-        /// every death path shares — `onCancel` (the job's task is going away) and
-        /// `onDelete` / `onShutdown` (the agent/kernel is going away). The caller-driven
-        /// signals (`stop` / `interrupt`) go through `signalAll`, which reports a count.
-        /// Idempotent, and never signals a pid it
-        /// no longer owns: an exited child has been reaped by `Process`, and firing at
-        /// its number could hit whatever the OS recycled it into.
+        /// Free the REAL resource of ONE job: SIGKILL its child + stop its relay.
+        /// Idempotent; never signals a pid it no longer owns.
         private func teardown(_ job: Job) {
-            guard job.process.isRunning else { return }
-            kill(job.pid, SIGKILL)
+            if job.process.isRunning { kill(job.pid, SIGKILL) }
+            job.relay?.stop()
         }
 
-        /// SIGKILL every child of `agentId` — the cascade the agent's death drives.
         private func teardownAgent(_ agentId: AgentId) {
             let doomed = lock.withLock { jobs.values.filter { $0.agent == agentId } }
             for job in doomed { teardown(job) }
         }
 
-        /// Signal every in-flight child of `agentId` — the `stop` / `interrupt`
-        /// verbs (agent-scoped, like rust's). Returns how many were actually
-        /// signalled.
-        private func signalAll(_ agentId: AgentId, _ sig: Int32) -> Int {
-            let live = lock.withLock { jobs.values.filter { $0.agent == agentId } }
-            var n = 0
-            for job in live where job.process.isRunning {
-                if kill(job.pid, sig) == 0 { n += 1 }
-            }
-            return n
-        }
+        // MARK: - validate_meta
 
-        private func inFlight(_ agentId: AgentId) -> Int {
-            lock.withLock { jobs.values.filter { $0.agent == agentId }.count }
+        /// Refuse a write this bundle cannot honour, at the WRITE (py `validate_meta`).
+        public func validateMeta(
+            _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
+        ) -> String? {
+            if let spec = meta["ingress_rule"],
+                let rule = try? IngressRules.resolve(spec),
+                let deny = rule as? IngressRules.DenyInbound, let bad = deny.unknown
+            {
+                return "ingress_rule=\"\(bad)\" is not a rule this bundle implements — "
+                    + "legal values: allow_all, deny_inbound, password"
+            }
+            // The withdrawn code-runner fields are refused at WRITE time.
+            for gone in ["code", "shim", "interpreter", "interpreters", "argv_template"] {
+                if let v = meta[gone], !v.isNull {
+                    return
+                        "exec_bridge: `\(gone)` is not a field — this is a general-purpose "
+                        + "COMMAND runner; gate it with `allowed=[<regex>, ...]`"
+                }
+            }
+            // `allowed` must be a non-empty list of compilable regexes.
+            if let raw = meta["allowed"], !raw.isNull {
+                let pats: [String]
+                switch raw {
+                case .string(let s): pats = [s]
+                case .array(let a): pats = a.map { $0.asString ?? $0.serialize() }
+                default: pats = []
+                }
+                if pats.isEmpty {
+                    return "allowed must be a non-empty list of regexes, e.g. allowed=['ls( .*)?']"
+                }
+                for pat in pats {
+                    if (try? NSRegularExpression(pattern: pat)) == nil {
+                        return "allowed contains a broken regex \"\(pat)\""
+                    }
+                }
+            }
+            return nil
         }
 
         // MARK: - reflect
 
-        /// EVERY key of `verbs` must be a verb `handle` really dispatches, and every
-        /// verb it dispatches belongs here. The map used to advertise `exec` — a verb
-        /// that has not existed since jobs became background+addressable — while
-        /// omitting `start` and `shutdown`, the two that carry the work. There is no
-        /// `status` here either (python has one; this runtime does not).
-        ///
-        /// `python` reports the interpreter `start` WOULD use, or `<unresolved: …>` —
-        /// never the one a broken `venv` would have degraded to, because reflect is how
-        /// a caller learns its wiring is wrong. The `sentence` states this runtime's
-        /// deliberate divergence from canonical (no default interpreter) so a caller
-        /// meets the refusal on the discovery surface, not on a failed job.
         private func reflectReply(_ agentId: AgentId, kernel: Kernel) -> JSON {
             let record = kernel.agent(agentId)
+            let running = lock.withLock {
+                jobs.values.filter { $0.agent == agentId && $0.process.isRunning }.count
+            }
+            let ingress = execIngressName(record)
             return .object([
                 "id": .string(agentId.value),
-                "kind": .string("exec_bridge"),
                 "sentence": .string(
-                    "Process edge of the io family — sealed by default, allowlisted interpreters only. Spawns a program in the background; it gets a kernel wire over a private control fd."
+                    "Process edge of the io family — a general-purpose COMMAND runner, sealed by default, gated by the `allowed` regexes. Spawns commands in the background; a child may speak the kernel over a private control fd."
                 ),
                 "cwd": record?.metaValue(forKey: "cwd") ?? .string("<process default>"),
-                "interpreters": .array(
-                    Interpreter.allowed(record: record).map(JSON.string)),
-                "shims": .array([.string("python")]),
-                "running": .integer(Int64(inFlight(agentId))),
-                // Through `manifoldSpec` + `ruleName`: this used to read the RAW string,
-                // so a leg configured via the `auth` STEM reported a name the registry
-                // would not accept — and, after scoping, would have reflected `sealed`
-                // while its own gate opened the leg. One resolution path, one answer.
-                "ingress_rule": .string(execIngressName(record)),
-                "sealed": .bool(execIngressName(record) != "allow_all_ingress"),
+                "allowed": .array(allowedPatterns(record).map(JSON.string)),
+                "running": .integer(Int64(running)),
                 "verbs": .object([
-                    "reflect": .string(
-                        "Identity + interpreter + count of in-flight subprocesses. No args."),
+                    "reflect": .string("Identity + running job count + auth posture. No args."),
                     "start": .string(
-                        "args: code? (defaults to the record's `code`), args? (object, THIS call's kernel.args), interpreter? (one of the allowlist; optional when it lists exactly one), shim? (\"python\" or absent ⇒ the raw wire), cwd?. Spawns in the BACKGROUND and returns {job_id, status:\"running\"} at once — the program's output is NOT this reply."
+                        "args: command:str (req), args:list[str]? (argv, default []), env:dict? (extra env vars), cwd:str?. The FULL line (command + args) must fullmatch one of the record's `allowed` regexes or the start is refused naming the patterns. Spawns in the BACKGROUND; returns {job_id, status:'running'} at once and streams progress/job_done."
                     ),
-                    "boot": .string(
-                        "No args. Idempotent rehydration: re-starts the record's `code` unless a job is already running. Returns {ok:true}, or {ok:false, error} when the program could not be revived (e.g. a non-allowlisted interpreter) — the error PROPAGATES rather than booting silently broken."
+                    "status": .string(
+                        "args: job_id:str?. One job (with full output) or all of this agent's jobs."
                     ),
+                    "clear": .string("args: job_id:str?. Drop finished rows of this agent."),
                     "interrupt": .string(
-                        "No args. SIGINT to every in-flight child of this agent. Returns {interrupted:int}."
+                        "args: job_id:str?. SIGINT in-flight subprocesses. Returns {interrupted:int}."
                     ),
                     "stop": .string(
-                        "No args. SIGKILL to every in-flight child of this agent. Returns {killed:int}."
+                        "args: job_id:str?. SIGKILL in-flight subprocesses. Returns {killed:int}."
                     ),
-                    "shutdown": .string("No args. Returns {ok:true}."),
+                    "boot": .string(
+                        "No-op. Nothing auto-restarts: a command is started by a caller, not the record."
+                    ),
                 ]),
+                "emits": .object([
+                    "job_started": .string("{type:'job_started', job_id}"),
+                    "progress": .string(
+                        "{type:'progress', job_id, n, line, stream} — one per output line"),
+                    "job_done": .string(
+                        "{type:'job_done', job_id, exit_code, ok, stdout, stderr}"),
+                ]),
+                "wire": .string(
+                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | JSON], both directions. To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
+                ),
                 "inbox": .string(
-                    "There is no `exec`: any verb NOT listed above is MAIL for the running program, delivered to its `kernel.on_message(callback)` and ACKed {queued:true}. With no live job it is an error — a script that only `def`s something exits before its first turn arrives."
+                    "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error."
                 ),
                 "tasks": .string(
-                    "Each running job IS a row in the kernel TASK TABLE ({agent:<this id>, verb:\"start\"} in `ps`). `cancel task_id=<id>` kills it — this bundle's `on_cancel` hook SIGKILLs the real OS subprocess before the kernel aborts the task, so a cancelled call never orphans a `python3`. `stop`/`interrupt` are the signal-precise verbs (they signal the PROGRAM; `cancel` ends the CALL)."
+                    "Every running job holds a row in the kernel TASK TABLE (`task_id` in each `status` snapshot; listed by the universal `ps`). `cancel task_id=<id>` kills it — the OS subprocess is SIGKILLed by this bundle's `on_cancel` hook before the kernel aborts the task, so nothing is orphaned."
                 ),
+                "authoring": .string(
+                    "A general-purpose command runner: `start {command, args}`, gated by the `allowed` regexes on the full command line."
+                ),
+                "ingress_rule": .string(ingress),
+                "sealed": .bool(ingress != "allow_all_ingress"),
             ])
         }
     }
 
+    /// Stringify a JSON double the way python's `str(float)` roughly would.
+    private func numString(_ d: Double) -> String {
+        if d == d.rounded() && abs(d) < 1e15 {
+            return String(format: "%.1f", d)
+        }
+        return String(d)
+    }
+
     // MARK: - small thread-safe boxes
 
-    /// The child's exit status, delivered by `terminationHandler` (which fires on
-    /// a Foundation thread) to whoever `await`s it. Stores the status when nobody
-    /// is waiting yet, so an instant exit cannot be missed. Same shape as the
-    /// kernel's own `DispatchBox`.
+    /// The child's exit status, delivered by `terminationHandler` to whoever awaits.
     private final class ExitBox: @unchecked Sendable {
         private let lock = NSLock()
         private var status: Int32?
@@ -577,10 +683,7 @@
         }
     }
 
-    /// The SCOPED ingress rule name for this leg — the same resolution the gate performs.
-    /// This used to be read as a RAW string, so a leg configured through the `auth` STEM
-    /// reported a name the registry would not accept and, after scoping, would have
-    /// reflected `sealed` while its own gate opened the leg. One path, one answer.
+    /// The SCOPED ingress rule name for this leg — the same resolution the gate does.
     private func execIngressName(_ record: Agent?) -> String {
         ruleName(
             manifoldSpec(

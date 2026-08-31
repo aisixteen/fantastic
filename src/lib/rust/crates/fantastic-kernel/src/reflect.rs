@@ -266,20 +266,53 @@ pub fn apply_reflect_flags(
             "persistence".to_string(),
             json!({ "provider": crate::persistence::find_store(kernel).map(|id| id.0) }),
         );
-        // The EXECUTION MODEL rides here, not only the affordance. Measured twice on
-        // gemma-4-12B (2026-08-06): "the `code` IS the tool" reads as "the code
-        // DEFINES the tool", so the model authored `def run(payload): ...` and sent
-        // {type:'run'} expecting a call. Two agents shipped inert (one was valid
-        // Python), nothing was ever written, and {queued:true} never appeared because
-        // no job stayed alive. It had planned the structure correctly and lost on the
-        // contract — so the SCRIPT semantics live in the pointer a weak model reads,
-        // word-for-word with python's.
-        //
-        // The tail (which executors, and each one's receive shape) is DERIVED from the
-        // registry by `executor_clause` — never hand-written, see `EXECUTORS`.
+        // The EXECUTION MODEL rides here, not only the affordance. The SHAPE of a
+        // durable program cannot be left to a readme, because a model that lacks it
+        // writes something that cannot work — and the weak models are exactly the
+        // ones that never follow the pointer to go read it. A durable program is a
+        // FILE plus a command; there is NO `code` field (a program squeezed into a
+        // JSON string is lost to one stray quote — the old `code` field's whole
+        // failure). Word-for-word with python's full `self_extension`.
         obj.insert(
             "self_extension".to_string(),
-            json!(format!("You can extend yourself: author your own durable tools as script agents. ADD - send 'kernel' {{type:'create_agent', handler_module:'{}', id:'<name>', code:'<your program as one JSON string>'}}; the `code` is a SCRIPT: it runs top to bottom when created and again on reboot, and it survives reboot. A bare `def` only defines and exits - put the work at module level. To handle later sends, keep the script running and take each turn from kernel.on_message - each executor's exact shape is named below. USE - send the tool a turn by its id; a LIVE script acks {{queued:true}} and streams results back as emitted say/done events tagged with your client_id (watch its id). REMOVE - send 'kernel' {{type:'delete_agent', id:'<name>'}}. LEARN - before writing `code`, send 'kernel' the payload {{type:'reflect', readme:'self-extension'}} (readme is a plain string field; do NOT invent a 'readme_key' field) to fetch the authoring doc - it has a COMPLETE copy-pasteable example plus each executor's exact script API, receive pattern, and code-escaping rules. A running script can itself create_agent more agents - tools compose into more tools. {}", executor_for_example(kernel), executor_clause(kernel))),
+            json!(
+                "A DURABLE PROGRAM is a FILE you write plus a command that runs it — \
+                 not a `code`-carrying agent. There is no `code` field: a program used \
+                 to be embedded as a JSON string, which is exactly how a call gets lost \
+                 to escaping. Assemble these THREE pieces and you have built something \
+                 that persists and re-runs, with no `code` field at all:\n\
+                 1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON \
+                 string. Use the file leg's STREAM verbs — {type:'write_stream', path, \
+                 bytes, truncate:true} to write, {type:'read_stream', path, offset} to \
+                 read, one raw chunk at a time — or `send_binary` (same call, but write \
+                 the program RAW in the LAST `bytes` field, nothing escaped). That is \
+                 the only byte path; the string read/write verbs are gone.\n\
+                 2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect \
+                 it, read its `allowed` regexes, then send \
+                 {type:'start', command:'<path>', args:[...]}; poll {type:'status'}. \
+                 It runs commands, not inline programs.\n\
+                 3. RE-RUN: the file is durable on disk, so the SAME `start` command run \
+                 again later re-executes the SAME program against whatever the inputs \
+                 hold THEN — that is how a thing 'keeps itself up to date'.\n\
+                 A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING \
+                 command runner) that owns a program file — you never author a new \
+                 handler_module (you cannot add modules to the catalog and do not need \
+                 to). 'A specialist with child workers' = a parent agent whose children \
+                 are exec_bridge runners, each with its own program file.\n\
+                 WIRING TO A SIBLING: you cannot raise your OWN authority, but if you \
+                 hold `update_agent` (e.g. on the root) you may open ANY agent's ingress \
+                 — including a sibling like `totals`/`readings` that is not your child. \
+                 To let your worker call `totals`: grant the worker `can_call:{totals}` \
+                 AND `update_agent id='totals'` to add the worker to `totals.callable_by` \
+                 (send the WHOLE map — update replaces, not merges).\n\
+                 A SPAWNED PROGRAM reaches agents over its control fd — a TWO-WAY socket \
+                 (FANTASTIC_CTRL_FD): write {op:'send', rid, target, payload}; the reply \
+                 comes back on the SAME fd as {op:'reply', rid, data}. It is not inline \
+                 — read frames until one carries your `rid`, skipping event/inbox frames.\n\
+                 COMPOSE the agents you were given for everything else (`list_agents`, \
+                 reflect each, send). CREATE/DELETE plain agents (create_agent with a \
+                 handler_module and grants, delete_agent) work as before."
+            ),
         );
         // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic
         // index) + `docs` (a one-liner teaching keyed fetch). So the manual's map is
@@ -453,83 +486,6 @@ fn available_bundles(kernel: &Arc<Kernel>) -> Vec<Value> {
             .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
     });
     out
-}
-
-/// The SCRIPT-EXECUTOR table: `handler_module` → how its script receives later
-/// turns. THE single source for the root `self_extension`'s executor tail, which
-/// renders this list INTERSECTED with what is actually registered — so the
-/// advertised set can neither name an executor a caller cannot use nor omit one
-/// it can.
-///
-/// WHY derived rather than hand-written: the tail used to be a hard-coded list
-/// of executor modules, which drifted from what a given build actually
-/// registered. A model was therefore told about an executor it could not use, or
-/// never told its own existed — the defect class python fixed on 2026-08-05,
-/// when opus-5 invented `handler_module:'local_runner.script'` because the real
-/// module was never named, and built nothing. Deriving the tail from the live
-/// registry makes that drift impossible.
-///
-/// The keys are the same strings the bundles export as `HANDLER_MODULE`. They are
-/// repeated as literals here (and only here) because bundles depend on the
-/// kernel, not the reverse — a const reference would be a dependency cycle. The
-/// registries themselves must use the consts.
-const EXECUTORS: &[(&str, &str)] = &[(
-    "exec_bridge.tools",
-    "its script takes turns through a CALLBACK it registers - kernel.on_message(cb) - and must keep running; the leg's reflect advertises its interpreter allowlist and shims",
-)];
-
-/// [`EXECUTORS`] ∩ the bundles this build actually registered, in table order.
-fn registered_executors(kernel: &Arc<Kernel>) -> Vec<(&'static str, &'static str)> {
-    // Reuse the same introspection the `bundles` flag renders from — one truth
-    // about what is installed, so the pointer cannot drift from the catalog.
-    let installed: Vec<String> = available_bundles(kernel)
-        .iter()
-        .filter_map(|b| b.get("handler_module").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect();
-    EXECUTORS
-        .iter()
-        .copied()
-        .filter(|(module, _)| installed.iter().any(|hm| hm == module))
-        .collect()
-}
-
-/// The module to SHOW in the `create_agent` example: the first executor this
-/// build registered, else the first known one.
-///
-/// The slot used to hold the literal `'<an executor below>'`, which left the
-/// example uncopyable — a model had to join it to the tail sentence to learn
-/// the real name. Python interpolates the module here (`_executor_for_example`)
-/// and that is the string a weak model actually reads: measured 2026-08-05,
-/// given a name it could not use, claude-opus-5 authored
-/// `handler_module:"local_runner.script"` and built nothing.
-fn executor_for_example(kernel: &Arc<Kernel>) -> &'static str {
-    // NO EXECUTOR REGISTERED → name NOTHING. Falling back to the first table
-    // entry would advertise a module this build cannot run, which is the exact
-    // defect the derivation exists to prevent; the tail then says the build
-    // ships none. The placeholder is honest here and only here.
-    registered_executors(kernel)
-        .first()
-        .map(|(m, _)| *m)
-        .unwrap_or("<an executor below>")
-}
-
-/// The root `self_extension`'s closing clause. Empty intersection → say the
-/// build ships no script executor; naming an absent module is the failure this
-/// whole derivation exists to prevent.
-fn executor_clause(kernel: &Arc<Kernel>) -> String {
-    let found = registered_executors(kernel);
-    if found.is_empty() {
-        return "NOTE - this build registers NO script executor, so there is no \
-                handler_module here that can run authored `code`: self-extension is \
-                unavailable until one is installed."
-            .to_string();
-    }
-    let listed: Vec<String> = found
-        .iter()
-        .map(|(module, receive)| format!("{module} ({receive})"))
-        .collect();
-    format!("Executors here: {}.", listed.join("; "))
 }
 
 #[cfg(test)]

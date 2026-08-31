@@ -169,33 +169,6 @@ pub(crate) async fn read_via_store(
     }
 }
 
-/// Fold `main.py` back onto the record as `code`. Absent file ⇒ the field simply
-/// isn't there, exactly as if it had never been set.
-fn join_code(dir: &std::path::Path, mut rec: AgentRecord) -> AgentRecord {
-    let cf = dir.join(CODE_FILE);
-    if let Ok(code) = fs::read_to_string(&cf) {
-        rec.meta.insert(CODE_FIELD.to_string(), Value::String(code));
-    }
-    rec
-}
-
-/// A record field that is PROGRAM TEXT, not metadata. It round-trips through its
-/// own file beside `agent.json` instead of being embedded as an escaped JSON
-/// string:
-///
-/// ```text
-/// agents/<id>/agent.json      the record
-/// agents/<id>/main.py         the program
-/// ```
-///
-/// Nothing about the in-memory record changes — a bundle still sets `code` in meta
-/// and still reads it back. This is purely how the loader lays it down, which is
-/// the loader's own business, so a storeless kernel behaves exactly as before.
-/// Mirrors python's `kernel_state` split.
-pub const CODE_FIELD: &str = "code";
-/// The program's filename inside the agent's own directory.
-pub const CODE_FILE: &str = "main.py";
-
 /// Persist an agent's record onto its per-agent `agent.json` ("dirty binding"):
 /// the in-RAM agent and the on-disk file aren't strictly coupled; this brings the
 /// file up to date for the kernel-managed fields, leaving every other field
@@ -240,12 +213,10 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
             on_disk.insert(k, v);
         }
     }
-    // The program is a FILE, not a JSON string. Take it out of the record before
-    // the record is written, and lay it down beside.
-    let code = match on_disk.remove(CODE_FIELD) {
-        Some(Value::String(c)) if !c.is_empty() => Some(c),
-        _ => None,
-    };
+    // Records persist AS-IS — a single write of the merged JSON. There is no
+    // `code` field to lift out to a `main.py` sidecar any more: a durable program
+    // is a FILE some process (or a `write_stream`) put on disk, not a record field
+    // (mirrors python's `kernel_state`, which no longer splits code).
     let json = serde_json::to_string_pretty(&Value::Object(on_disk))
         .expect("merged record is JSON-serializable");
     // Operator authority: the loader persisting a record to its own store.
@@ -255,19 +226,6 @@ pub async fn persist(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
         json.into_bytes(),
     )))
     .await;
-    if let Some(code) = code {
-        let cf = if reldir.is_empty() {
-            CODE_FILE.to_string()
-        } else {
-            format!("{reldir}/{CODE_FILE}")
-        };
-        Box::pin(crate::send::with_operator(kernel.send_with_binary(
-            &store_id,
-            serde_json::json!({"type": "write_stream", "path": cf, "truncate": true}),
-            code.into_bytes(),
-        )))
-        .await;
-    }
     Ok(())
 }
 
@@ -383,7 +341,7 @@ pub fn load_children(
             }
         };
         let rec: AgentRecord = match serde_json::from_str(&raw) {
-            Ok(r) => join_code(&entry, r),
+            Ok(r) => r,
             Err(e) => {
                 // Mirrors Python's behaviour: corrupt agent.json is a
                 // skip-with-warning, not a hard error.

@@ -172,7 +172,7 @@ public struct StaticLoaderBundle: AgentBundle {
         ])
     }
 
-    // MARK: - Yams Any → JSON (mirror of yaml_state's converter)
+    // MARK: - Yams Any → JSON (mirror of durable_memory's converter)
 
     private func anyToJSON(_ v: Any) -> JSON {
         if v is NSNull { return .null }

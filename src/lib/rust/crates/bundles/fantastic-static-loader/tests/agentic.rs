@@ -8,10 +8,10 @@
 //! `kernel_state` in python. Parity asserts the per-runtime value, never
 //! equality.
 
+use fantastic_durable_memory::DurableMemoryBundle;
 use fantastic_file::FileBundle;
 use fantastic_kernel::{with_operator, with_sender, Agent, AgentId, Item, Kernel};
 use fantastic_static_loader::{StaticLoaderBundle, HANDLER_MODULE};
-use fantastic_yaml_state::YamlStateBundle;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -138,7 +138,9 @@ fn mk_kernel() -> Arc<Kernel> {
         .bundles
         .register("lifecycle_probe.tools", LifecycleProbe);
     kernel.bundles.register("file_bridge.tools", FileBundle);
-    kernel.bundles.register("yaml_state.tools", YamlStateBundle);
+    kernel
+        .bundles
+        .register("durable_memory.tools", DurableMemoryBundle);
     kernel
         .bundles
         .register("exec_bridge.tools", fantastic_exec_bridge::ExecBridgeBundle);
@@ -240,10 +242,7 @@ async fn reach(kernel: &Arc<Kernel>, sender: &str, target: &str, payload: Value)
     let k = Arc::clone(kernel);
     let t = target.to_string();
     with_sender(AgentId::from(sender), async move {
-        k.send(vec![Item::new(AgentId::from(t.as_str()), payload)])
-            .await
-            .remove(0)
-            .result
+        dispatch(&k, &t, payload).await
     })
     .await
 }
@@ -251,13 +250,46 @@ async fn reach(kernel: &Arc<Kernel>, sender: &str, target: &str, payload: Value)
 async fn operator(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = Arc::clone(kernel);
     let t = target.to_string();
-    with_operator(async move {
-        k.send(vec![Item::new(AgentId::from(t.as_str()), payload)])
+    with_operator(async move { dispatch(&k, &t, payload).await }).await
+}
+
+/// One dispatch, CHANNEL CHOSEN BY VERB. The stream verbs
+/// (`read_stream`/`write_stream`) carry RAW BYTES a JSON envelope cannot hold,
+/// so they ride the kernel's BINARY channel; everything else is a plain send.
+/// `bytes_utf8` in a write spec becomes the outbound blob; a read reply folds
+/// its returned blob back into `bytes` (utf-8) so the `contains:{bytes:…}`
+/// matcher sees streamed content — the mirror of python `_engine`'s
+/// `_decode_bytes_fields` + its bytes-path decode. Runs under whatever
+/// sender/operator context the caller set, so `send_with_binary`'s gate applies.
+async fn dispatch(k: &Arc<Kernel>, target: &str, mut payload: Value) -> Value {
+    let is_stream = matches!(
+        payload.get("type").and_then(Value::as_str),
+        Some("read_stream" | "write_stream")
+    );
+    if !is_stream {
+        return k
+            .send(vec![Item::new(AgentId::from(target), payload)])
             .await
             .remove(0)
-            .result
-    })
-    .await
+            .result;
+    }
+    let blob = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("bytes_utf8"))
+        .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
+        .unwrap_or_default();
+    let (mut reply, body) = k
+        .send_with_binary(&AgentId::from(target), payload, blob)
+        .await;
+    if !body.is_empty() {
+        if let Some(o) = reply.as_object_mut() {
+            o.insert(
+                "bytes".into(),
+                Value::String(String::from_utf8_lossy(&body).into_owned()),
+            );
+        }
+    }
+    reply
 }
 
 /// The ONE machine-readable question about a reply. Never `"error" in r`: a
@@ -322,6 +354,23 @@ fn resolve(v: &Value, bound: &BTreeMap<String, Value>) -> Value {
     }
 }
 
+/// Python-parity value equality for the corpus matchers. JSON separates bool
+/// from number, but the specs are authored against python, where `True == 1`
+/// and `False == 0`. A spec that expects `written: true` means "a truthy count
+/// came back" and passes in python via that equivalence; mirror it (true↔1,
+/// false↔0) so the shared DATA reads identically here. Otherwise plain `==`.
+fn py_eq(g: &Value, want: &Value) -> bool {
+    if g == want {
+        return true;
+    }
+    match (g, want) {
+        (Value::Number(n), Value::Bool(b)) | (Value::Bool(b), Value::Number(n)) => {
+            n.as_i64() == Some(i64::from(*b))
+        }
+        _ => false,
+    }
+}
+
 /// Apply one step's matchers. Panics naming the step, the matcher and the reply
 /// — a spec failure has to be readable without opening the runner.
 fn match_step(name: &str, expect: &Value, reply: &Value) {
@@ -371,14 +420,14 @@ fn match_step(name: &str, expect: &Value, reply: &Value) {
     }
     if let Some(m) = expect.get("contains").and_then(Value::as_object) {
         for (path, want) in m {
-            if !dig(reply, path).into_iter().any(|g| g == want) {
+            if !dig(reply, path).into_iter().any(|g| py_eq(g, want)) {
                 fail(format!("{path} does not contain {want}"));
             }
         }
     }
     if let Some(m) = expect.get("not_contains").and_then(Value::as_object) {
         for (path, unwanted) in m {
-            if dig(reply, path).into_iter().any(|g| g == unwanted) {
+            if dig(reply, path).into_iter().any(|g| py_eq(g, unwanted)) {
                 fail(format!("{path} contains {unwanted} and must not"));
             }
         }

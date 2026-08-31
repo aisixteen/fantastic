@@ -582,33 +582,5 @@ struct AIBackendTests {
     }
 }
 
-// ─── the `author` verb — the SELF-CORRECT loop (py-canonical) ───
-
-@Suite("author self-correct loop")
-struct AuthorVerbTests {
-    @Test func authorRequiresAGoal() async throws {
-        let (kernel, backend) = try await freshMockKernel(
-            config: scriptedConfig(["mock": ProviderScript([])]))
-        let r = await kernel.send([Item(backend, ["type": "author"])])[0].result
-        #expect(r["error"].asString?.contains("goal") == true, "\(r.serialize())")
-    }
-
-    @Test func unparseableReplyEarnsANudgeAndTheLoopSurvives() async throws {
-        let (kernel, backend) = try await freshMockKernel(
-            config: scriptedConfig([
-                "mock": ProviderScript([
-                    ["Let me think about this first..."],  // no JSON
-                    [#"{"final": "nothing built"}"#],
-                ])
-            ]))
-        let r = await kernel.send([Item(backend, ["type": "author", "goal": "echo", "steps": .integer(2)])])[0].result
-        #expect(r["error"].asString?.contains("gave up") == true, "\(r.serialize())")
-    }
-
-    @Test func firstJSONTakesFirstCompleteObjectAndNeverRepairs() {
-        #expect(authorFirstJSON(#"noise {"final": "done"} tail"#)?["final"].asString == "done")
-        #expect(authorFirstJSON(#"{"a": {"b": 1}} {"c": 2}"#)?["a"]["b"].asInt == 1)
-        #expect(authorFirstJSON(#"{"act": {"target": "x""#) == nil)
-        #expect(authorFirstJSON("no json") == nil)
-    }
-}
+// The `author` verb + its SELF-CORRECT loop were DELETED — python has no `author`
+// subsystem (a coder AND its loop emerge from base abstractions + genesis readmes).

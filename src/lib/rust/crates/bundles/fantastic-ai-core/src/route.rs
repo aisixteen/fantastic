@@ -288,6 +288,39 @@ pub async fn route_reply(
                 .and_then(Value::as_str)
                 .unwrap_or("?")
                 .to_string();
+
+            // send_binary: ONE named payload field is a file's CONTENTS, and a
+            // JSON payload has no bytes type — so a stream sink (`write_stream`)
+            // that wants raw bytes is otherwise unreachable. The model wrote the
+            // program as an ordinary string in `into` (default `bytes`); lift that
+            // field out of the header and dispatch it over the kernel's BINARY
+            // carrier (the same `send_with_binary` persistence rides), instead of
+            // the plain JSON `Item`. Mirrors python `core.py`'s send_binary branch,
+            // routed through rust's separate binary channel. Dispatched inline (the
+            // carrier is single-target, no ledger id/timeout); the batch path below
+            // handles ordinary sends.
+            if call.name == "send_binary" {
+                let field = args
+                    .get("into")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bytes")
+                    .to_string();
+                if let Some(Value::String(prog)) = payload.get(&field) {
+                    let blob = prog.clone().into_bytes();
+                    let mut header = payload.clone();
+                    header.remove(&field); // rides as the blob, not the JSON header
+                    let (reply, _body) = kernel
+                        .send_with_binary(&AgentId::from(target), Value::Object(header), blob)
+                        .await;
+                    if let Some(rt) = reply_to {
+                        blocks.push((rt, format!("[reply to - · {target} {verb}]\n{reply}")));
+                    }
+                    continue;
+                }
+                // A non-string `into` field can't binary-carry; fall through and
+                // dispatch it as an ordinary JSON send (python leaves it as-is too).
+            }
+
             let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
             // The model may NAME the execution (dedup/join across retries) and may
             // bound its own call. The kernel validates both; a bad value settles

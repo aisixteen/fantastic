@@ -222,7 +222,6 @@ impl Bundle for MockBundle {
             }
             "history" => verbs::history(agent_id, payload, kernel, "mock_backend").await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
-            "author" => crate::author::author(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
             other => json!({"error": format!("mock_backend: unknown type {other:?}")}),
@@ -504,10 +503,13 @@ async fn send_streams_tokens_and_emits_done() {
 async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "think").await;
-    let probe = tmp.path().join(".fantastic").join("mid_thought.txt");
+    // The mid-thought call proves DISPATCH by a real filesystem side effect via
+    // the file_bridge. String `write` is gone (stream-only now), so probe with a
+    // surviving verb that needs no bytes: `mkdir` creates a dir we can stat.
+    let probe = tmp.path().join(".fantastic").join("mid_thought");
     let mid_thought_call = call_envelope(
         &format!("ff_{backend}"),
-        json!({"type": "write", "path": "mid_thought.txt", "content": "dispatched"}),
+        json!({"type": "mkdir", "path": "mid_thought"}),
         Some("null"),
     );
     script(
@@ -585,7 +587,7 @@ async fn thinking_is_streamed_and_parsed_raw_but_persisted_stripped() {
     // of the reply that is about to arrive — a record that hides it makes the
     // model read an effect it never caused.
     assert!(
-        content.contains("mid_thought.txt"),
+        content.contains("mid_thought"),
         "the mid-thought call was erased from history: {content:?}"
     );
 }
@@ -1734,152 +1736,4 @@ async fn routing_is_its_own_ps_row() {
             .any(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send")),
         "the generation is finished — nothing may still be labelled `send`: {tasks:#?}"
     );
-}
-
-// ─── the `author` verb — the SELF-CORRECT loop (py-canonical) ───
-
-/// A real interpreter to allowlist, or None ⇒ skip. The TEST is the operator.
-fn author_python() -> Option<String> {
-    which::which("python3")
-        .or_else(|_| which::which("python"))
-        .ok()
-        .map(|p| p.to_string_lossy().to_string())
-}
-
-fn author_act(tool_id: &str, code: &str) -> String {
-    let py = author_python().expect("caller must have skipped without python");
-    json!({"act": {"target": "core", "payload": {
-        // Placement is explicit now: the act names the OWNER of the new agent.
-        "type": "create_agent", "parent_id": "core",
-        "handler_module": "exec_bridge.tools",
-        "id": tool_id, "code": code,
-        "interpreters": [py], "shim": "python", "ingress_rule": "allow_all_ingress",
-    }}})
-    .to_string()
-}
-
-const AUTHOR_GOOD_PY: &str = "def cb(m):\n    if m.get('type') == 'send':\n        kernel.emit({'type':'say','text':m['text'],'client_id':m.get('client_id')})\n        kernel.emit({'type':'done','client_id':m.get('client_id')})\nkernel.on_message(cb)\nimport threading\nthreading.Event().wait()\n";
-
-const AUTHOR_DEAF_PY: &str =
-    "kernel.on_message(lambda m: None)\nimport threading\nthreading.Event().wait()\n";
-
-/// One kernel with the mock backend AND exec_bridge, for author runs — the
-/// standard `mk_kernel` flow plus the executor the loop authors on.
-async fn mk_author_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
-    let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, MockBundle);
-    kernel
-        .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
-    kernel
-        .bundles
-        .register("exec_bridge.tools", fantastic_exec_bridge::ExecBridgeBundle);
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("core"),
-        None,
-        None,
-        Map::new(),
-        tmp.path().join(".fantastic"),
-        false,
-    );
-    let _rx = kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    let backend_id = id_for(tmp, tag);
-    let file_id = format!("ff_{}", backend_id);
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
-                "id": file_id,
-                "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let backend = add_backend(&kernel, &backend_id, &file_id).await;
-    (kernel, backend)
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn author_refuses_final_until_the_tool_is_observed_answering() {
-    let Some(_py) = author_python() else {
-        eprintln!("skipping: no python");
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, ai) = mk_author_kernel(&tmp, "author").await;
-    let s = script(
-        &ai,
-        vec![
-            pass(r#"{"final": "done (it is not)"}"#),
-            pass(author_act("author_echo", AUTHOR_GOOD_PY)),
-            pass(r#"{"final": "built it"}"#),
-        ],
-        Duration::ZERO,
-    );
-    let r = kernel
-        .send(vec![Item::new(
-            ai.clone(),
-            json!({"type": "author", "goal": "echo the text back", "steps": 5}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert_eq!(r["id"], "author_echo", "{r}");
-    assert!(
-        r["code"].as_str().unwrap_or("").contains("on_message"),
-        "{r}"
-    );
-    // The premature final earned the create-one-NOW pushback.
-    assert!(
-        s.request(1).contains("not created any") || s.request(1).contains("have not created"),
-        "{}",
-        s.request(1)
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn author_gives_up_on_a_deaf_tool_and_says_deaf() {
-    let Some(_py) = author_python() else {
-        eprintln!("skipping: no python");
-        return;
-    };
-    let tmp = TempDir::new().unwrap();
-    let (kernel, ai) = mk_author_kernel(&tmp, "author").await;
-    let _s = script(
-        &ai,
-        vec![
-            pass(author_act("author_deaf", AUTHOR_DEAF_PY)),
-            pass(r#"{"final": "shipped"}"#),
-            pass(r#"{"final": "shipped"}"#),
-        ],
-        Duration::ZERO,
-    );
-    let r = kernel
-        .send(vec![Item::new(
-            ai.clone(),
-            json!({"type": "author", "goal": "echo the text back", "steps": 3}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    let err = r["error"].as_str().unwrap_or("");
-    assert!(err.contains("gave up"), "{r}");
-}
-
-#[tokio::test]
-async fn author_requires_a_goal() {
-    let tmp = TempDir::new().unwrap();
-    let (kernel, ai) = mk_author_kernel(&tmp, "author").await;
-    let r = kernel
-        .send(vec![Item::new(ai.clone(), json!({"type": "author"}))])
-        .await
-        .remove(0)
-        .result;
-    assert!(r["error"].as_str().unwrap_or("").contains("goal"), "{r}");
 }

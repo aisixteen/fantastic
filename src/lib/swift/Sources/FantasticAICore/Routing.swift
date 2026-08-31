@@ -284,6 +284,32 @@ func routeReply(
             continue
         }
 
+        let verb = payload["type"]?.asString ?? "?"
+
+        // send_binary: ONE named payload field is a file's CONTENTS, and a JSON
+        // payload has no bytes type — so a stream sink (`write_stream`) that wants
+        // raw bytes is otherwise unreachable. The model wrote the program as an
+        // ordinary string in `into` (default `bytes`); lift that field out of the
+        // header and dispatch it over the kernel's BINARY carrier (the same
+        // `sendWithBinary` persistence rides), not the plain JSON send. Mirrors
+        // python `core.py`'s send_binary branch, routed through swift's separate
+        // binary channel. A non-string `into` field falls through to an ordinary
+        // send (python leaves it as-is too).
+        if call.name == "send_binary" {
+            let field = args["into"]?.asString ?? "bytes"
+            if case .string(let prog)? = payload[field] {
+                var header = payload
+                header[field] = nil  // rides as the blob, not the JSON header
+                let (reply, _) = await kernel.sendWithBinary(
+                    AgentId(target), .object(header), Data(prog.utf8))
+                if let replyTo = replyTo {
+                    blocks.append(
+                        (replyTo, "[reply to - · \(target) \(verb)]\n" + reply.serialize()))
+                }
+                continue
+            }
+        }
+
         // A handler that RAISES must not take the chain down with it. Python ran
         // bare here until 2026-08-02, when a `file_bridge` whose ingress rule
         // could not be resolved raised out of its handler: the exception escaped
@@ -325,7 +351,6 @@ func routeReply(
         // delivery" about its own retries) and again 2026-08-20 (the model: "the reply queue
         // is running ahead of me", then re-polled forever). The PID is the same id
         // `ps`/`cancel` use, so a reply names a row the model can act on.
-        let verb = payload["type"]?.asString ?? "?"
         let pid = outcome.pid?.value ?? "-"
         blocks.append(
             (replyTo, "[reply to \(pid) · \(target) \(verb)]\n" + result.serialize()))

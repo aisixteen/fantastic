@@ -125,7 +125,10 @@ impl KeyEnv {
             Some(k) => std::env::set_var("NVIDIA_API_KEY", k),
             None => std::env::remove_var("NVIDIA_API_KEY"),
         }
-        Self { prev, _guard: guard }
+        Self {
+            prev,
+            _guard: guard,
+        }
     }
 }
 
@@ -470,7 +473,7 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
     // proof the dispatch happened and not just that nothing crashed.
     let whole = format!(
         "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"{fid}\",\
-         \"payload\":{{\"type\":\"write\",\"path\":\"routed.txt\",\"content\":\"ok\"}},\
+         \"payload\":{{\"type\":\"mkdir\",\"path\":\"routed\"}},\
          \"reply_to\":null}}}}</tool_call>"
     );
     let split = whole.len() / 2;
@@ -501,7 +504,7 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
         .result;
     assert_eq!(reply["response"], whole, "verbatim text: {reply:#?}");
 
-    let routed = tmp.path().join(".fantastic").join("routed.txt");
+    let routed = tmp.path().join(".fantastic").join("routed");
     for _ in 0..250 {
         if routed.exists() {
             break;
@@ -512,7 +515,6 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
         routed.exists(),
         "the chunk-split envelope never dispatched: {routed:?} missing"
     );
-    assert_eq!(std::fs::read_to_string(&routed).unwrap(), "ok");
 }
 
 /// The in-flight HTTP request is killed by the SUBSTRATE (`ps` → `cancel`), not

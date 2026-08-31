@@ -2,14 +2,14 @@
 
 # Durable state: wire a persistence provider (or stay in RAM)
 
-The root (`kernel_state`) auto-persists records ONLY through a stream
+The root (`core`) auto-persists records ONLY through a stream
 provider it **discovers**: the first `file_bridge` child of the root whose
 `root` resolves to `.fantastic`. **No provider ⇒ no persistence — the tree
 lives in RAM** (lost on restart). There is no direct-write fallback (this is
 a kernel, not a SaaS — one path, no hidden second route). Wire one to make
 the kernel durable:
 
-    fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools \
+    fantastic kernel create_agent parent_id=core handler_module=file_bridge.tools \
         id=store root=.fantastic ingress_rule=allow_all_ingress   # the persistence sink
 
 Once it exists, every record auto-persists through its `write_stream`/`delete`
@@ -23,7 +23,7 @@ and persistence stops** — that's your choice, with no fallback to soften it.)
 `null` = RAM); each tree node carries its posture inline (`ingress_rule` —
 absent on an io leg ⇒ sealed; `root`; `file_bridge_id`). One `reflect
 tree=all` shows every leg's lock + the live provider. And **one store serves
-both**: bundles that need a sidecar (`yaml_state`, `scheduler`, the ai
+both**: bundles that need a sidecar (`durable_memory`, `scheduler`, the ai
 backends) point their `file_bridge_id` at this same `.fantastic` store and
 write store-relative `agents/<id>/<file>`, so their state lands next to their
 own `agent.json` — one bridge, records + sidecars together.

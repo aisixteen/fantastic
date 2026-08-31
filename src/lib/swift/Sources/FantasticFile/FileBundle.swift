@@ -132,10 +132,6 @@ public struct FileBundle: AgentBundle {
             switch verb {
             case "list":
                 return listFiles(root: root, payload: payload)
-            case "read":
-                return readFile(root: root, agent: agent, payload: payload)
-            case "write":
-                return writeFile(root: root, agent: agent, payload: payload)
             case "delete":
                 return deleteFile(root: root, agent: agent, payload: payload)
             case "rename":
@@ -213,8 +209,8 @@ public struct FileBundle: AgentBundle {
             "readonly": .bool(readonly),
             "verbs": [
                 "list": "args: path?. Returns {path, files}.",
-                "read": "args: path. Returns {path, content} or {path, image_base64, mime}.",
-                "write": "args: path, content. Returns {path, written: true}.",
+                "read_stream": "args: path, offset?, length?. SOURCE — one raw chunk; reply {bytes, next_offset, eof, size} on the binary channel.",
+                "write_stream": "args: path, bytes, offset?, truncate?. SINK — one raw chunk; reply {written, offset, size}. Refuses non-bytes.",
                 "delete": "args: path. Returns {path, deleted: true}.",
                 "rename": "args: old_path, new_path. Returns {old_path, new_path}.",
                 "mkdir": "args: path. Returns {path, created: true}.",
@@ -263,108 +259,6 @@ public struct FileBundle: AgentBundle {
             "path": .string(relative),
             "files": .array(files),
         ])
-    }
-
-    /// Default text-read window (chars). Py parity: `DEFAULT_MAX_READ_CHARS`.
-    private static let defaultMaxReadChars = 16384
-
-    /// `(slice, reply-extras)` — `offset`/`limit` page a large file explicitly.
-    /// Py parity: `_window_text` (field-for-field, hint included). Measured
-    /// 2026-08-07 on py: an unbounded 86 KB read drove an LLM's context to 21k
-    /// tokens and the next turn was cancelled mid-prefill.
-    private func windowText(agent: Agent, payload: JSON, text: String) -> (
-        String, [(String, JSON)]
-    ) {
-        let chars = Array(text)
-        let total = chars.count
-        let capMeta = agent.metaValue(forKey: "max_read_chars")?.asInt.map(Int.init)
-        let cap = (capMeta ?? 0) > 0 ? capMeta! : Self.defaultMaxReadChars
-        let offset = max(0, payload["offset"].asInt.map(Int.init) ?? 0)
-        let limit = min(max(1, payload["limit"].asInt.map(Int.init) ?? cap), cap)
-        let end = min(offset + limit, total)
-        let chunk = String(chars[min(offset, total)..<end])
-        if offset == 0 && end >= total { return (chunk, []) }
-        var extras: [(String, JSON)] = [
-            ("total_chars", .integer(Int64(total))),
-            ("offset", .integer(Int64(offset))),
-            ("returned_chars", .integer(Int64(chunk.count))),
-            ("truncated", .bool(end < total)),
-        ]
-        if end < total {
-            extras.append(("next_offset", .integer(Int64(end))))
-            extras.append(
-                (
-                    "hint",
-                    .string(
-                        "\(total - end) of \(total) chars unread — continue with "
-                            + "{type:'read', path:…, offset:\(end)} (max \(cap) per call, "
-                            + "raise the leg's `max_read_chars` to widen it)")
-                ))
-        }
-        return (chunk, extras)
-    }
-
-    private func readFile(root: URL, agent: Agent, payload: JSON) -> JSON {
-        guard let relative = payload["path"].asString else {
-            return .object(["error": .string("read requires path")])
-        }
-        guard let target = resolve(root: root, path: relative) else {
-            return .object(["error": .string("path escapes root")])
-        }
-        let ext = target.pathExtension.lowercased()
-        if IMAGE_EXTENSIONS.contains(ext) {
-            guard let data = try? Data(contentsOf: target) else {
-                return .object([
-                    "error": .string("cannot read \(relative)"),
-                    "path": .string(relative),
-                ])
-            }
-            return .object([
-                "path": .string(relative),
-                "image_base64": .string(data.base64EncodedString()),
-                "mime": .string("image/\(ext)"),
-            ])
-        }
-        guard let content = try? String(contentsOf: target, encoding: .utf8) else {
-            return .object([
-                "error": .string("cannot read \(relative) as utf-8"),
-                "path": .string(relative),
-            ])
-        }
-        let (chunk, extras) = windowText(agent: agent, payload: payload, text: content)
-        var reply: OrderedDictionary<String, JSON> = [
-            "path": .string(relative),
-            "content": .string(chunk),
-        ]
-        for (k, v) in extras { reply[k] = v }
-        return .object(reply)
-    }
-
-    private func writeFile(root: URL, agent: Agent, payload: JSON) -> JSON {
-        if let ro = readonlyError(agent: agent) { return ro }
-        guard let relative = payload["path"].asString,
-            // A LIST of lines is accepted and joined with newlines.
-            let content = linesOrString(payload["content"])
-        else {
-            return .object([
-                "error": .string("write requires path + content (str, or a list of lines)")
-            ])
-        }
-        guard let target = resolve(root: root, path: relative) else {
-            return .object(["error": .string("path escapes root")])
-        }
-        try? FileManager.default.createDirectory(
-            at: target.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        do {
-            try content.write(to: target, atomically: true, encoding: .utf8)
-            return .object([
-                "path": .string(relative),
-                "written": .bool(true),
-            ])
-        } catch {
-            return .object(["error": .string("write failed: \(error)")])
-        }
     }
 
     private func deleteFile(root: URL, agent: Agent, payload: JSON) -> JSON {

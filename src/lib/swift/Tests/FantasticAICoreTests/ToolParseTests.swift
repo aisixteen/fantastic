@@ -43,6 +43,53 @@ struct ToolParseTests {
         #expect(c.arguments["target_id"].asString == "x")
     }
 
+    // ── send_binary: the `bytes` field is a RAW program, never JSON-escaped ──
+
+    /// A send_binary tool_call with `program` written RAW as the ABSOLUTE last
+    /// field: metadata first, then `"bytes":"<program verbatim>"` with nothing but
+    /// closing braces after it. Mirrors python's `_binary_text` fixture.
+    private func binaryText(target: String, meta: String, program: String) -> String {
+        let prefix = meta.isEmpty ? "" : meta + ","
+        return "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\""
+            + target + "\",\"reply_to\":\"self\",\"payload\":{" + prefix
+            + "\"bytes\":\"" + program + "\"}}}</tool_call>"
+    }
+
+    @Test func sendBinaryProgramParsesVerbatim() {
+        // real newlines + quotes + a lone backslash — the stuff that breaks a JSON
+        // parser, lifted out raw and NOT unescaped.
+        let prog = "import os\nx = \"a \\ b\"\nprint(\"IMPORT_OK\", os.listdir(\".\"))\n"
+        let text = binaryText(
+            target: "store",
+            meta: "\"type\":\"write_stream\",\"path\":\"main.py\",\"truncate\":true",
+            program: prog)
+        let calls = extractToolCalls(text)
+        #expect(calls.count == 1)
+        #expect(calls.first?.name == "send_binary")
+        let p = calls.first!.arguments["payload"]
+        #expect(p["bytes"].asString == prog, "the program must be taken verbatim")
+        #expect(p["path"].asString == "main.py")
+        #expect(p["truncate"].asBool == true)
+    }
+
+    @Test func sendBinaryProgramWithJsonMetacharsSurvives() {
+        let prog = "d = {\"k\": \"v\"}\nprint(f\"{d}\")\npath = \"C:\\\\tmp\"\n"
+        let text = binaryText(
+            target: "store", meta: "\"type\":\"write_stream\",\"path\":\"x.py\"",
+            program: prog)
+        let calls = extractToolCalls(text)
+        #expect(calls.count == 1)
+        #expect(calls.first?.arguments["payload"]["bytes"].asString == prog)
+    }
+
+    @Test func nonSendBinaryIsUntouched() {
+        let plain =
+            "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"log\",\"payload\":{\"type\":\"note\",\"text\":\"hi\"}}}</tool_call>"
+        let calls = extractToolCalls(plain)
+        #expect(calls.count == 1 && calls.first?.name == "send")
+        #expect(calls.first?.arguments["payload"]["text"].asString == "hi")
+    }
+
     @Test func parseOneMalformedReturnsNil() {
         #expect(parseOne("{not json") == nil)
         #expect(parseOne("[1,2,3]") == nil)

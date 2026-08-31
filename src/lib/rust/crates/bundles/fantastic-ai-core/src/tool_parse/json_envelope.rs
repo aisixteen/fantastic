@@ -9,6 +9,79 @@ pub const OPEN: &str = "<tool_call>";
 /// Closing tag of the taught tool-call envelope.
 pub const CLOSE: &str = "</tool_call>";
 
+/// The position immediately AFTER a `"bytes"\s*:\s*"` opener, if `inner` holds
+/// one — the byte offset of the RAW program's first char. Hand-written because
+/// there is no `regex` dependency in this workspace (see `invoke_envelope`).
+/// Whitespace-tolerant around the `:` exactly as python's `_SB_BYTES` regex is.
+fn bytes_value_start(inner: &str) -> Option<usize> {
+    let bytes = inner.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = inner[from..].find("\"bytes\"") {
+        let mut i = from + rel + "\"bytes\"".len();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b':' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'"' {
+                return Some(i + 1); // first char of the raw program
+            }
+        }
+        from += rel + "\"bytes\"".len();
+    }
+    None
+}
+
+/// `send_binary` whose `bytes` field is a program that must NOT be JSON-escaped.
+/// Ported from python `tool_parse.py::_send_binary_raw`.
+///
+/// The whole reason a program-in-JSON fails is that a strict parse demands every
+/// quote, newline and backslash be escaped, which a model cannot do reliably on a
+/// big program. But the PROGRAM is not data we need parsed — it is a string we
+/// read. So for `send_binary` we lift `bytes` out RAW: everything from `"bytes":"`
+/// to the FINAL `"` in the envelope is the program, verbatim (no unescaping), and
+/// only the STRUCTURE around it is JSON-parsed. `bytes` must be the LAST field
+/// (nothing but closing braces after its value) so its end is unambiguous — that
+/// is the whole contract.
+fn send_binary_raw(inner: &str) -> Option<ToolCall> {
+    if !inner.contains("\"send_binary\"") {
+        return None;
+    }
+    let val_start = bytes_value_start(inner)?;
+    let val_end = inner.rfind('"')?; // bytes is last → its closing quote is the last quote
+    if val_end <= val_start {
+        return None;
+    }
+    let raw = &inner[val_start..val_end]; // the program, exactly as written
+                                          // Re-close the JSON with an EMPTY bytes value → a well-formed object we can
+                                          // parse for the STRUCTURE (name, target_id, payload metadata) without touching
+                                          // `raw`.
+    let skeleton = format!("{}{}", &inner[..val_start], &inner[val_end..]);
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&skeleton) else {
+        return None;
+    };
+    if obj.get("name").and_then(Value::as_str) != Some("send_binary") {
+        return None;
+    }
+    let Some(Value::Object(mut args)) = obj.get("arguments").cloned() else {
+        return None;
+    };
+    // Reinsert the RAW program string. Prefer the payload sub-object (where a
+    // `write_stream` carries it); fall back to the args themselves.
+    match args.get_mut("payload") {
+        Some(Value::Object(payload)) => {
+            payload.insert("bytes".to_string(), Value::String(raw.to_string()));
+        }
+        _ => {
+            args.insert("bytes".to_string(), Value::String(raw.to_string()));
+        }
+    }
+    Some(ToolCall::new("send_binary", args))
+}
+
 /// Parse the JSON between one tag pair into a [`ToolCall`].
 ///
 /// Lenient (tiny models drift): accepts `{"name","arguments"}`, a `tool` alias
@@ -16,6 +89,11 @@ pub const CLOSE: &str = "</tool_call>";
 /// double-encoded (stringified) arguments. `None` on unparseable JSON.
 pub fn parse_one(inner: &str) -> Option<ToolCall> {
     let inner = inner.trim();
+    // send_binary carries a RAW program in `bytes` (no escaping) — read it as a
+    // string rather than forcing it through the strict parse. MUST run first.
+    if let Some(sb) = send_binary_raw(inner) {
+        return Some(sb);
+    }
     let (obj, rest) = parse_prefix(inner)?;
     let Value::Object(obj) = obj else {
         return None;

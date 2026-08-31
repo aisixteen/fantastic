@@ -150,9 +150,6 @@ public final class AIBackend: @unchecked Sendable {
             return await historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
             return await recallVerb(agent: agent, payload: payload, kernel: kernel)
-        case "author":
-            // The SELF-CORRECT loop (py-canonical `ai_core/author.py`).
-            return await authorVerb(agent: agent, payload: payload, kernel: kernel)
         case "context_status":
             return await contextStatusVerb(agent: agent, kernel: kernel)
         case "status":

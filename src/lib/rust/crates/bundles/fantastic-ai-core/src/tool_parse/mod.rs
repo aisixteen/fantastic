@@ -46,6 +46,8 @@ mod tests_json;
 mod tests_malformed;
 #[cfg(test)]
 mod tests_scan;
+#[cfg(test)]
+mod tests_send_binary;
 
 use hints::{defang, CHANNEL_HINT, JSON_HINT};
 use scan::{scan, Envelope};

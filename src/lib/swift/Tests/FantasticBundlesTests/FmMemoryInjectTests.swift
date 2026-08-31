@@ -1,7 +1,7 @@
-// FM backend memory: idempotent self-mount of mem/data yaml_state memory agents
-// at boot, and the load-bearing inject — each agent's `state_yaml` spliced
-// into the model's instructions. Grounded on tool output (state_yaml →
-// fullInstructions), so it runs without the actual on-device model.
+// FM backend memory: idempotent self-mount of mem/data durable_memory agents at
+// boot, and the load-bearing inject — each agent's keys/values spliced into the
+// model's instructions. Grounded on tool output (keys+read → fullInstructions),
+// so it runs without the actual on-device model.
 
 import FantasticJSON
 import FantasticKernel
@@ -69,7 +69,7 @@ struct FmMemoryInjectTests {
         #expect(memAgent != nil)
         _ = await kernel.send([Item(memAgent!, ["type": "set", "key": "user.name", "value": "Ada_Lovelace_42"])])[0].result
 
-        // The inject hook must splice the agent's state_yaml into the
+        // The inject hook must splice the agent's keys/values into the
         // instructions — distinctive token present grounds the test on
         // real tool output, not a prompt marker.
         let fmAgent = kernel.agent(fmId)!

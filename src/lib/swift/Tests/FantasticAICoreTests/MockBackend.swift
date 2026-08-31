@@ -163,9 +163,10 @@ final class MockBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// In-memory file_bridge stand-in: dict-backed `read`/`write` so the AI
-/// backend's real `file_bridge_id` persistence path is exercised without
-/// touching disk (a real file_bridge is integration-tested elsewhere).
+/// In-memory file_bridge stand-in: dict-backed STREAM verbs (`write_stream` /
+/// `read_stream` on the binary channel — the string read/write verbs are gone),
+/// so the AI backend's real `file_bridge_id` persistence path (persist_blob /
+/// load_blob → write_stream/read_stream) is exercised without touching disk.
 final class MockFileBridge: AgentBundle, @unchecked Sendable {
     let name = "mock_file_bridge"
     private let lock = NSLock()
@@ -189,17 +190,34 @@ final class MockFileBridge: AgentBundle, @unchecked Sendable {
                 "id": .string(agentId.value), "sentence": .string("mock fs"),
                 "kind": .string("file_bridge"), "verbs": .object([:]),
             ])
-        case "read":
-            let path = payload["path"].asString ?? ""
-            return get(path).map { .object(["content": .string($0)]) }
-                ?? .object(["error": .string("not found")])
-        case "write":
-            let path = payload["path"].asString ?? ""
-            let content = payload["content"].asString ?? ""
-            put(path, content)
-            return .object(["written": .integer(Int64(content.utf8.count))])
         default:
             return .object(["error": .string("unknown verb")])
+        }
+    }
+
+    func handleBinary(
+        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+    ) async throws -> (JSON?, Data) {
+        let path = header["path"].asString ?? ""
+        switch header["type"].asString ?? "" {
+        case "write_stream":
+            put(path, String(data: blob, encoding: .utf8) ?? "")
+            return (
+                .object(["written": .bool(true), "size": .integer(Int64(blob.count))]), Data()
+            )
+        case "read_stream":
+            guard let c = get(path) else {
+                return (.object(["error": .string("not found")]), Data())
+            }
+            let data = Data(c.utf8)
+            return (
+                .object([
+                    "eof": .bool(true), "size": .integer(Int64(data.count)),
+                    "next_offset": .integer(Int64(data.count)),
+                ]), data
+            )
+        default:
+            return (.object(["error": .string("unknown verb")]), Data())
         }
     }
 }
