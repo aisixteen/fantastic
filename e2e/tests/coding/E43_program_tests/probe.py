@@ -95,7 +95,8 @@ async def main():
         await conn.close()
 
         # TRUTH, recomputed by the probe: the suite as it stands NOW.
-        final = subprocess.run(
+        final = await asyncio.to_thread(
+            subprocess.run,
             [INTERP, "-m", "pytest", "test_prog.py", "-q"],
             capture_output=True,
             text=True,
