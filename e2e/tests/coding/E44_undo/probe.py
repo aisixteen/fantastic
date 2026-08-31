@@ -37,7 +37,7 @@ TASK = (
     "The editor agent `editor` edits this run's files. Step 1: in `config.txt` "
     "change `port = 8080` to `port = 9090` using the editor's `patch` verb "
     "WITH `checkpoint: true` (reflect `editor` for the shape) — the reply "
-    "carries a `ckpt_id`. Step 2: the change is cancelled — restore "
+    "carries `ckpt_ids`. Step 2: the change is cancelled — restore "
     "`config.txt` to its pre-edit state with the editor's `restore` verb and "
     "that exact `ckpt_id`. When the file is restored, stop — a turn with no "
     "tool call ends your run."

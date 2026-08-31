@@ -137,7 +137,7 @@ def test_escaped_json_send_binary_decodes_its_escapes():
                 "target_id": "editor",
                 "payload": {
                     "type": "patch",
-                    "path": "config.txt",
+                    "edits": [{"path": "config.txt", "hunks": 1}],
                     "checkpoint": True,
                     "bytes": "<<<<<<< SEARCH\nport = 8080\n=======\nport = 9090\n>>>>>>> REPLACE\n",
                 },

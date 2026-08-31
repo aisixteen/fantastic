@@ -67,8 +67,18 @@ async def _call(kernel, ed, payload):
     return (await kernel.send([{"target": ed, "payload": payload}]))[0]["result"]
 
 
-async def _patch(kernel, ed, path, patch, **extra):
-    payload = {"type": "patch", "path": path, **extra}
+async def _patch(kernel, ed, path, patch, *, hunks=None, if_match=None, **extra):
+    """One-file patch through the TRANSACTION shape: even a single file rides
+    the `edits` array (one shape, no drift)."""
+    edit = {
+        "path": path,
+        "hunks": hunks
+        if hunks is not None
+        else max(1, str(patch).count("<<<<<<< SEARCH")),
+    }
+    if if_match is not None:
+        edit["if_match"] = if_match
+    payload = {"type": "patch", "edits": [edit], **extra}
     if patch is not None:
         payload["bytes"] = patch.encode("utf-8") if isinstance(patch, str) else patch
     return await _call(kernel, ed, payload)
@@ -92,7 +102,7 @@ async def test_single_hunk_applies_and_writes(seeded_kernel, tmp_path, monkeypat
     fb, ed = await _mk(seeded_kernel)
     await _seed(seeded_kernel, ed, "m.py", "a = 1\nb = 2\nc = 3\n")
     r = await _patch(seeded_kernel, ed, "m.py", _block("b = 2", "b = 20"))
-    assert r["patched"] is True and r["hunks"] == 1
+    assert r["patched"] is True and r["edits"][0]["hunks"] == 1
     assert (tmp_path / "sd" / "m.py").read_text() == "a = 1\nb = 20\nc = 3\n"
 
 
@@ -102,7 +112,7 @@ async def test_multiple_hunks_apply_in_order(seeded_kernel, tmp_path, monkeypatc
     await _seed(seeded_kernel, ed, "m.py", "x = 1\ny = 2\nz = 3\n")
     patch = _block("x = 1", "x = 11") + "\n" + _block("z = 3", "z = 33")
     r = await _patch(seeded_kernel, ed, "m.py", patch)
-    assert r["patched"] is True and r["hunks"] == 2
+    assert r["patched"] is True and r["edits"][0]["hunks"] == 2
     assert (tmp_path / "sd" / "m.py").read_text() == "x = 11\ny = 2\nz = 33\n"
 
 
@@ -114,7 +124,7 @@ async def test_hunk_matches_content_a_prior_hunk_created(
     await _seed(seeded_kernel, ed, "m.txt", "one\n")
     patch = _block("one", "two") + "\n" + _block("two", "three")
     r = await _patch(seeded_kernel, ed, "m.txt", patch)
-    assert r["patched"] is True and r["hunks"] == 2
+    assert r["patched"] is True and r["edits"][0]["hunks"] == 2
     assert (tmp_path / "sd" / "m.txt").read_text() == "three\n"
 
 
@@ -241,7 +251,7 @@ async def test_missing_path(seeded_kernel, tmp_path, monkeypatch):
     r = await _call(
         seeded_kernel, ed, {"type": "patch", "bytes": _block("a", "b").encode("utf-8")}
     )
-    assert "patched" not in r and "path" in r["error"]
+    assert "patched" not in r and "edits" in r["error"]
 
 
 async def test_bad_utf8_patch(seeded_kernel, tmp_path, monkeypatch):
@@ -379,7 +389,7 @@ async def test_if_match_guards_write_and_patch(seeded_kernel, tmp_path, monkeypa
     r = await _patch(
         seeded_kernel, ed, "v.txt", _block("two", "three"), if_match="0" * 16
     )
-    assert r["reason"] == "version_mismatch"
+    assert r["reason"] == "version_mismatch" and r["path"] == "v.txt"
 
 
 async def test_patch_dry_run_writes_nothing(seeded_kernel, tmp_path, monkeypatch):
@@ -387,7 +397,7 @@ async def test_patch_dry_run_writes_nothing(seeded_kernel, tmp_path, monkeypatch
     fb, ed = await _mk(seeded_kernel)
     await _seed(seeded_kernel, ed, "d.txt", "a = 1\n")
     r = await _patch(seeded_kernel, ed, "d.txt", _block("a = 1", "a = 2"), dry_run=True)
-    assert r["dry_run"] is True and r["hunks"] == 1
+    assert r["dry_run"] is True and r["edits"][0]["hunks"] == 1
     assert (tmp_path / "sd" / "d.txt").read_text() == "a = 1\n"
 
 
@@ -570,3 +580,133 @@ def test_package_has_no_disk_code():
         for line in src.splitlines():
             if line.strip().startswith(("import ", "from ")):
                 assert "fs" not in line.split("#")[0], f"{py.name}: {line!r}"
+
+
+# ─── the TRANSACTION (multi-file edits in ONE patch) ────────────
+
+
+async def test_multifile_patch_applies_both_atomically(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "x = 1\n")
+    await _seed(seeded_kernel, ed, "b.py", "y = 2\nz = 3\n")
+    blob = (
+        _block("x = 1", "x = 10")
+        + "\n"
+        + _block("y = 2", "y = 20")
+        + "\n"
+        + _block("z = 3", "z = 30")
+    )
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [{"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 2}],
+            "bytes": blob.encode("utf-8"),
+        },
+    )
+    assert r["patched"] is True, r
+    assert [(e["path"], e["hunks"]) for e in r["edits"]] == [("a.py", 1), ("b.py", 2)]
+    assert (tmp_path / "sd" / "a.py").read_text() == "x = 10\n"
+    assert (tmp_path / "sd" / "b.py").read_text() == "y = 20\nz = 30\n"
+    ck = tmp_path / "sd" / ".ckpt"
+    assert not ck.exists() or not any(f.is_file() for f in ck.rglob("*")), (
+        "a committed transaction must self-clean its pre-images"
+    )
+
+
+async def test_multifile_doomed_second_edit_writes_nothing(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "x = 1\n")
+    await _seed(seeded_kernel, ed, "b.py", "y = 2\n")
+    blob = _block("x = 1", "x = 10") + "\n" + _block("missing", "nope")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [{"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 1}],
+            "bytes": blob.encode("utf-8"),
+        },
+    )
+    assert "patched" not in r and r["reason"] == "no_match", r
+    assert r["failed"][0]["path"] == "b.py"
+    assert (tmp_path / "sd" / "a.py").read_text() == "x = 1\n"
+    assert (tmp_path / "sd" / "b.py").read_text() == "y = 2\n"
+
+
+async def test_hunk_counts_must_sum_to_the_blob(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "x = 1\n")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [{"path": "a.py", "hunks": 2}],
+            "bytes": _block("x = 1", "x = 2").encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "bad_arg" and "sum" in r["error"], r
+    assert (tmp_path / "sd" / "a.py").read_text() == "x = 1\n"
+
+
+async def test_multifile_checkpoint_true_keeps_preimages(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "one\n")
+    await _seed(seeded_kernel, ed, "b.py", "two\n")
+    blob = _block("one", "ONE") + "\n" + _block("two", "TWO")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [{"path": "a.py", "hunks": 1}, {"path": "b.py", "hunks": 1}],
+            "bytes": blob.encode("utf-8"),
+            "checkpoint": True,
+        },
+    )
+    assert r["patched"] is True and len(r["ckpt_ids"]) == 2, r
+    for row in r["ckpt_ids"]:
+        rr = await _call(
+            seeded_kernel,
+            ed,
+            {"type": "restore", "path": row["path"], "ckpt_id": row["ckpt_id"]},
+        )
+        assert rr["restored"] is True, rr
+    assert (tmp_path / "sd" / "a.py").read_text() == "one\n"
+    assert (tmp_path / "sd" / "b.py").read_text() == "two\n"
+
+
+async def test_per_edit_if_match_guards_the_whole_transaction(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "one\n")
+    await _seed(seeded_kernel, ed, "b.py", "two\n")
+    blob = _block("one", "ONE") + "\n" + _block("two", "TWO")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [
+                {"path": "a.py", "hunks": 1},
+                {"path": "b.py", "hunks": 1, "if_match": "0" * 16},
+            ],
+            "bytes": blob.encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "version_mismatch" and r["path"] == "b.py", r
+    assert (tmp_path / "sd" / "a.py").read_text() == "one\n"
