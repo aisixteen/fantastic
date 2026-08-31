@@ -261,7 +261,7 @@ impl Bundle for OllamaBackendBundle {
             }
             "send" => send_reply(agent_id, payload, kernel).await,
             "list_models" => list_models_reply(agent_id, payload, kernel).await,
-            "history" => verbs::history(agent_id, payload, kernel, "ollama_backend").await,
+            "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
@@ -294,9 +294,6 @@ impl Bundle for OllamaBackendBundle {
 }
 
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": "ollama_backend: file_bridge_id required"});
-    }
     let meta = helpers::agent_meta(agent_id, kernel);
     let temperature = meta
         .get("temperature")

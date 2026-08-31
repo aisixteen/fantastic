@@ -1,14 +1,3 @@
-# The agent tree this test builds.
-#
-# `<expr>` marks a value the probe computes at run time (a store id minted by
-# the fixture); a bare string is literal. Grants are shown as written: this
-# substrate is DENY-ALL, so the `can_call` / `callable_by` maps below are not
-# decoration — they are the difference between a graph and a pile of agents.
-# Read them in PAIRS: an egress grant with no matching ingress is a wire that
-# carries nothing, which is exactly how one probe's push-back went missing.
-#
-# GENERATED from probe.py by helpers/roster.py, and re-checked against it by
-# run.py before every run. Edit the probe, not this file.
 roster:
 - id: <agent_id>
   handler_module: exec_bridge.tools
@@ -17,22 +6,28 @@ roster:
     totals: '*'
   callable_by:
     ai: '*'
+    rest: '*'
+    web: '*'
 - id: kernel_store
   handler_module: file_bridge.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
+    rest: '*'
+    web: '*'
 - id: readings
   handler_module: file_bridge.tools
   parent_id: <root.id>
   callable_by:
     ai: '*'
+    rest: '*'
+    web: '*'
 - id: totals
   handler_module: durable_memory.tools
   parent_id: <root.id>
-  callable_by: '<{''ai'': ''*'', EXECUTOR_LEG: ''*''}>'
+  callable_by: '<{''ai'': ''*'', EXECUTOR_LEG: ''*'', ''rest'': ''*'', ''web'': ''*''}>'
 - id: ai
   created_by: helpers.ai.connect
-  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id: [''*'', ''create_agent'',
-    ''update_agent'', ''delete_agent''], ''cli'': ''*'', ''readings'': ''*'', ''totals'': ''*'', EXECUTOR_LEG:
-    ''*'', store[''id'']: ''*''}>'
+  can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
+    [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
+    ''readings'': ''*'', ''totals'': ''*'', EXECUTOR_LEG: ''*'', store[''id'']: ''*''}>'

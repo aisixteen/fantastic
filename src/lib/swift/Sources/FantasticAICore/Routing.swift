@@ -136,17 +136,6 @@ func deliverTurn(
 /// Honour where this pass's output goes. Runs in its own task, after the FIFO
 /// guard is released. Mirrors python's `_route_reply` step for step — the ORDER
 /// below is load-bearing throughout.
-/// The runtime reminder a CHAIN turn gets when it emitted no call.
-///
-/// Model-facing PROMPT text, byte-identical across runtimes. Says BOTH halves —
-/// act if unfinished, and stopping is normal — because an earlier version that
-/// only pushed toward acting produced paralysis (a 47k-char turn re-reading the
-/// rule, then four consecutive no-call turns after the task was already done).
-let NO_CALL_NUDGE =
-    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
-    + "NOTHING ran — a call decided in thinking does not execute unless the "
-    + "envelope is written out. If the task is unfinished, emit that call now. "
-    + "If it is finished, say so — a turn without a call ends the chain normally."
 
 func routeReply(
     selfId: AgentId,
@@ -154,10 +143,7 @@ func routeReply(
     text: String,
     clientId: String,
     sendTo: String?,
-    systemPrompt: String?,
-    /// The turn's INCOMING text, so routing can tell a CHAIN turn (answering a
-    /// delivered reply) from a chat turn — only the former is ever nudged.
-    incoming: String = ""
+    systemPrompt: String?
 ) async {
     let calls = extractToolCalls(text)
     // An envelope that OPENED and did not parse gets an error, exactly like a
@@ -189,22 +175,6 @@ func routeReply(
             return
         }
 
-        // THE NO-CALL NUDGE. A CHAIN turn (its incoming text was a delivered
-        // reply) that emits no call gets ONE runtime reminder.
-        //
-        // Measured 2026-08-25 twice: the model wrote its next action INSIDE
-        // thinking — "Let me send {type:'list_agents'} to kernel" — and ended
-        // the completion without the envelope. A no-call turn ends the chain, so
-        // one lapse killed runs whose gate, premise and delivery were clean.
-        //
-        // The cap is STRUCTURAL, not a counter: the nudge IS the next incoming
-        // text, and a turn answering a nudge is not a reply turn, so it is never
-        // nudged again. A chat turn is never nudged at all — stopping is normal.
-        if incoming.trimmingCharacters(in: .whitespaces).hasPrefix("[reply to ") {
-            await deliverTurn(
-                kernel: kernel, target: selfId.value, text: NO_CALL_NUDGE,
-                clientId: clientId, systemPrompt: systemPrompt)
-        }
         return
     }
 

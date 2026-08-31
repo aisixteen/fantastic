@@ -16,6 +16,9 @@ futures-util = { workspace = true }
 [dev-dependencies]
 fantastic-file = { path = "../fantastic-file" }
 fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
+# Chat history lives in a `<self>_chat` durable_memory child, so the harness has
+# to register the REAL bundle — a stub store would test the stub, not the wiring.
+fantastic-durable-memory = { path = "../fantastic-durable-memory" }
 # The author tests allowlist a REAL interpreter — the test acting as operator.
 which = "6"
 tempfile = "3"

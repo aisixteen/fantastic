@@ -775,34 +775,6 @@ _REFLECT_NUDGE = (
 )
 
 
-# THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched nothing.
-#
-# Measured 2026-08-25 (`live_subai` / `live_subai_graph`, the model, twice each):
-# mid-task, the model wrote its next action INSIDE its thinking — "Let me send
-# {type:'list_agents'} to kernel" — closed the thought, and ended the completion
-# without the envelope. A no-call turn ends the chain, so a single lapse killed
-# runs whose gate, premise and delivery were all clean. Every agent harness treats
-# "no action emitted" as a control decision (continue / retry / finalize), not as
-# an ending; interactively a human says "continue" — an unattended chain has
-# nobody, so the runtime says it, ONCE.
-#
-# Why once: the nudge is itself a chain turn, so a second consecutive no-call turn
-# arrives with the nudge as its incoming text — and is NOT nudged again. A model
-# that is genuinely done answers the nudge with prose and the chain ends exactly
-# as before; the cap needs no counter and no per-chain state.
-#
-# This is a RUNTIME reaction to a lapse that actually happened — not a prompt
-# rule. The prompt-rule version was tried twice and measured harmful (see
-# `tmp/pychanges.md` Reverted 21a/21b: models argued with the rule for 47-53k
-# chars instead of working).
-_NO_CALL_NUDGE = (
-    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
-    "NOTHING ran — a call decided in thinking does not execute unless the "
-    "envelope is written out. If the task is unfinished, emit that call now. "
-    "If it is finished, say so — a turn without a call ends the chain normally."
-)
-
-
 def drop_answered_reflects(history: list[dict]) -> list[dict]:
     """Replace the body of every reflect reply the model has already responded to.
 
@@ -1090,15 +1062,6 @@ async def _route_reply(
             )
         # fire-and-forget: dispatched, counted nowhere, nobody awaits the answer
     outcomes = await kernel.send(items) if items else []
-    if not units and not calls:
-        # A CHAIN turn (its incoming text was a delivered reply) that dispatched
-        # nothing gets ONE reminder — see `_NO_CALL_NUDGE`. A chat turn is not a
-        # chain (prose to a person is the product), and a turn already answering
-        # the nudge is never nudged again.
-        chained = isinstance(incoming, str) and incoming.startswith("[reply to ")
-        if chained and not incoming.startswith("[no call was dispatched]"):
-            _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
-            return
     if units:
         # A STABLE TOKEN PER TURN — two batches are distinguishable at a
         # glance (measured 2026-08-24: bare "1 of 3" labels collided across

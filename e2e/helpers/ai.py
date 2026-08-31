@@ -32,7 +32,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from helpers.proxy import Limits, distinct_calls
+from helpers.proxy import (
+    DEFAULT_QUESTION_ANSWER,
+    Limits,
+    distinct_calls,
+    find_question,
+)
 
 
 BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
@@ -221,12 +226,19 @@ async def _live_tasks(root, aid) -> list[dict]:
     return [t for t in rows if t.get("agent") == aid and t.get("verb") != "ps"]
 
 
-async def drive(conn: Connected, task: str, *, client_id: str = "probe") -> str:
+async def drive(
+    conn: Connected, task: str, *, client_id: str = "probe", on_question=None
+) -> str:
     """Send the task and run until the chain ends, stalls, or trips.
 
-    Returns "" on a clean end, or the reason the run was cut.
+    Returns "" on a clean end, or the reason the run was cut. When the model asks
+    the human (`{"type":"question"}` on a line of its output), the harness ANSWERS
+    it so the chain resumes — `on_question(q) -> text`, or `DEFAULT_QUESTION_ANSWER`
+    ("do your best judgement") when unset. Options are ignored on purpose: a run is
+    never blocked on a decision that is the model's own to make.
     """
     root, aid, L = conn.root, conn.id, conn.limits
+    answered: set = set()
 
     # SURFACE A FAILED SEND — ai_core returns errors, it does not raise.
     first = (await root.send([{
@@ -240,6 +252,17 @@ async def drive(conn: Connected, task: str, *, client_id: str = "probe") -> str:
     while idle < L.idle:
         await asyncio.sleep(2.0)
         calls = distinct_calls(conn.proxy.transcript)
+        # The model asked the human — answer so the chain RESUMES (once per
+        # question). Options ignored: the answer is the model's call to make.
+        q = find_question("".join(conn.proxy.transcript))
+        if q is not None:
+            rid = str(q.get("request_id") or q.get("question") or "q")
+            if rid not in answered:
+                answered.add(rid)
+                ans = on_question(q) if on_question else DEFAULT_QUESTION_ANSWER
+                await root.send([{"target": aid, "payload": {
+                    "type": "send", "text": ans, "client_id": client_id}}])
+                last, idle = conn.proxy.n, 0.0
         if calls != seen_calls:
             seen_calls, stale = calls, 0
         elif conn.proxy.n != last:

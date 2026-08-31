@@ -211,16 +211,12 @@ impl Bundle for MockBundle {
             }
             "boot" => Value::Null,
             "send" => {
-                if helpers::file_bridge_id(agent_id, kernel).is_none() {
-                    json!({"error": "mock_backend: file_bridge_id required"})
-                } else {
-                    let provider: Arc<dyn Provider> = Arc::new(MockProvider {
-                        script: script_for(agent_id),
-                    });
-                    verbs::send(provider, agent_id, payload, kernel, CFG).await
-                }
+                let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+                    script: script_for(agent_id),
+                });
+                verbs::send(provider, agent_id, payload, kernel, CFG).await
             }
-            "history" => verbs::history(agent_id, payload, kernel, "mock_backend").await,
+            "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
@@ -261,6 +257,13 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    // Chat history is a `<self>_chat` durable_memory child, so the REAL store
+    // bundle has to be registered — otherwise the create lands a record that
+    // never dispatches and every history assertion tests nothing.
+    kernel.bundles.register(
+        "durable_memory.tools",
+        fantastic_durable_memory::DurableMemoryBundle,
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -275,6 +278,26 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
 
     let backend_id = id_for(tmp, tag);
     let file_id = format!("ff_{}", backend_id);
+    // Rooted at the loader's own dir so this leg is ALSO the discovered
+    // persistence provider (`find_store` matches on the root path).
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+    (kernel, backend)
+}
+
+/// Create a `file_bridge` leg rooted at `root`, opened, and accepting the agent
+/// that persists through it.
+///
+/// Each AI gets its OWN leg: its `<self>_chat` store writes `state.yaml` at the
+/// LEG's root (durable_memory owns no path of its own), so two AIs sharing one
+/// leg would share one chat file and one set of per-client keys.
+async fn add_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, owner: &str) {
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("core"),
@@ -282,19 +305,33 @@ async fn mk_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
                 "type": "create_agent",
                 "parent_id": "kernel",
                 "handler_module": "file_bridge.tools",
-                "id": file_id,
-                "root": tmp.path().join(".fantastic").to_string_lossy(),
+                "id": id,
+                "root": root.to_string_lossy(),
                 // the fs edge seals by default — open it so history persists through it
                 "ingress_rule": "allow_all_ingress",
                 // Two-sided deny-all: accept the backend that persists through it.
-                "callable_by": { backend_id.clone(): "*" },
+                "callable_by": { owner: "*" },
             }),
         )])
         .await
         .remove(0)
         .result;
-    let backend = add_backend(&kernel, &backend_id, &file_id).await;
-    (kernel, backend)
+}
+
+/// A SECOND backend in the same kernel — routing needs a peer to hand a reply
+/// to — with its own leg (see [`add_file_bridge`]) so the two chat stores stay
+/// separate files.
+async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> AgentId {
+    let id = format!("{primary}_peer");
+    let file_id = format!("ff_{id}");
+    add_file_bridge(
+        kernel,
+        &file_id,
+        &tmp.path().join(".fantastic").join(&id),
+        &id,
+    )
+    .await;
+    add_backend(kernel, &id, &file_id).await
 }
 
 /// Create one backend agent bound to `file_id`. Separate from [`mk_kernel`]
@@ -317,9 +354,11 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
                 "file_bridge_id": file_id,
                 "model": "test-model",
                 "context_window": 32768,
-                // Deny-all: the backend persists history to its store directly and
-                // streams its turn to `cli` — both explicit grants (wiring pairs
-                // with granting).
+                // Deny-all: the backend streams its turn to `cli` and its
+                // api-key/blob-era wiring named the leg — both explicit grants
+                // (wiring pairs with granting). The CHAT store needs no grant
+                // here: it is a `<self>_chat` CHILD, reached through the
+                // `$children` baseline, and it talks to the leg from ABOVE.
                 "can_call": { file_id: "*", "cli": "*" },
             }),
         )])
@@ -391,41 +430,6 @@ async fn boot_is_noop() {
     assert!(
         r.is_null(),
         "boot should be a noop returning null, got {r:?}"
-    );
-}
-
-#[tokio::test]
-async fn send_without_file_bridge_id_returns_error() {
-    let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, MockBundle);
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("core"),
-        None,
-        None,
-        Map::new(),
-        tmp.path().join(".fantastic"),
-        false,
-    );
-    let _rx = kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": "mb_nofile"}))])
-            .await
-            .remove(0)
-            .result;
-    let r = kernel
-        .send(vec![Item::new(
-            AgentId::from("mb_nofile"),
-            json!({"type": "send", "text": "hi"}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    assert!(
-        r["error"].as_str().unwrap_or("").contains("file_bridge_id"),
-        "expected file_bridge_id error, got {r:?}",
     );
 }
 
@@ -822,14 +826,147 @@ async fn history_persists_and_round_trips() {
     let last = messages.last().unwrap();
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["content"], "ack");
-    let expected_path = tmp.path().join(format!(
+
+    // WHERE it lives: the AI's OWN `<self>_chat` durable_memory child, one key
+    // per client — NOT a loader blob sidecar. The blob channel routed through
+    // whatever provider the LOADER discovered, so a kernel with none wired
+    // dropped every chat write while `send` still reported success.
+    let chat_id = format!("{backend}_chat");
+    let refl = kernel
+        .send(vec![Item::new(
+            AgentId::from(chat_id.as_str()),
+            json!({"type": "reflect"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(refl["id"], chat_id, "the chat store must exist: {refl:#?}");
+    assert_eq!(
+        refl["file_bridge_id"],
+        json!(format!("ff_{backend}")),
+        "the store persists through the AI's OWN leg: {refl:#?}"
+    );
+    assert!(
+        refl["keys"]
+            .as_array()
+            .expect("keys")
+            .contains(&json!(safe_client(client_id))),
+        "one key per client_id: {refl:#?}"
+    );
+
+    // WHAT it holds: the turns themselves, appended ONE PER TURN (appending the
+    // whole list would nest them as [[user, assistant]] and read back empty).
+    let stored = kernel
+        .send(vec![Item::new(
+            AgentId::from(chat_id.as_str()),
+            json!({"type": "read", "key": safe_client(client_id)}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let turns = stored["value"].as_array().expect("stored turns");
+    assert_eq!(turns.len(), 2, "one append per message: {turns:#?}");
+    assert_eq!(turns[0]["role"], "user");
+    assert_eq!(turns[0]["content"], "ping");
+    assert_eq!(turns[1]["role"], "assistant");
+    assert_eq!(turns[1]["content"], "ack");
+
+    // …and it reached DISK through that leg — `state.yaml` at the leg's root.
+    let state_yaml = tmp.path().join(".fantastic").join("state.yaml");
+    assert!(
+        state_yaml.exists(),
+        "chat store never persisted through the file leg: {state_yaml:?}"
+    );
+    // The old blob sidecar is gone for good — no second, silent disk path.
+    let blob = tmp.path().join(format!(
         ".fantastic/agents/{}/chat_{}.json",
         backend,
         safe_client(client_id)
     ));
     assert!(
-        expected_path.exists(),
-        "chat file not on disk: {expected_path:?}"
+        !blob.exists(),
+        "chat must not ride the loader blob channel any more: {blob:?}"
+    );
+}
+
+/// THE REGRESSION THIS PORT EXISTS FOR: chat persists through the AI's OWN
+/// `file_bridge_id`, never through whatever provider the LOADER discovered.
+///
+/// Wired here so the loader has NO provider at all — the root's dir is
+/// `<tmp>/.fantastic` and the only `file_bridge` is rooted at `<tmp>/elsewhere`,
+/// which `find_store` (it matches on the root path) cannot match. That is a
+/// spawned kernel with no `.fantastic`-rooted store, and it is exactly where
+/// the old blob channel failed silently: `persist_blob` had nowhere to land, so
+/// every chat write vanished, `history` stayed empty forever, and `send` still
+/// reported success — which blinded any harness reading transcripts back out of
+/// `history`.
+#[tokio::test]
+async fn chat_persists_with_no_loader_provider_wired() {
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, MockBundle);
+    kernel
+        .bundles
+        .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        "durable_memory.tools",
+        fantastic_durable_memory::DurableMemoryBundle,
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let backend_id = id_for(&tmp, "noprov");
+    let file_id = format!("ff_{backend_id}");
+    // NOT the loader's dir — no persistence provider is discoverable.
+    let leg_root = tmp.path().join("elsewhere");
+    add_file_bridge(&kernel, &file_id, &leg_root, &backend_id).await;
+    assert!(
+        fantastic_kernel::persistence::find_store(&kernel).is_none(),
+        "the loader must have NO provider for this test to mean anything"
+    );
+    let backend = add_backend(&kernel, &backend_id, &file_id).await;
+
+    script(&backend, vec![pass("ack")], Duration::ZERO);
+    let _rx2 = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "ping", "client_id": "cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+
+    let h = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "history", "client_id": "cli"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let messages = h["messages"].as_array().expect("messages array");
+    assert_eq!(
+        messages.len(),
+        2,
+        "history came back empty with no loader provider: {h:#?}"
+    );
+    assert_eq!(messages[0]["content"], "ping");
+    assert_eq!(messages[1]["content"], "ack");
+    // …and it is REALLY on disk, in the leg the AI named.
+    let state_yaml = leg_root.join("state.yaml");
+    assert!(
+        state_yaml.exists(),
+        "nothing was written through the AI's own leg: {state_yaml:?}"
     );
 }
 
@@ -1156,12 +1293,7 @@ async fn an_inbound_cycle_is_refused_before_the_lock() {
 async fn reply_to_omitted_defaults_to_self() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_dflt").await;
-    let peer = add_backend(
-        &kernel,
-        &format!("{backend}_peer"),
-        &format!("ff_{backend}"),
-    )
-    .await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
     let fo = script(&peer, vec![pass("peer answered")], Duration::ZERO);
     let s = script(
         &backend,
@@ -1205,12 +1337,7 @@ async fn reply_to_omitted_defaults_to_self() {
 async fn discarding_a_reply_must_be_said_explicitly() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_null").await;
-    let peer = add_backend(
-        &kernel,
-        &format!("{backend}_peer"),
-        &format!("ff_{backend}"),
-    )
-    .await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
     let fo = script(&peer, vec![pass("peer answered")], Duration::ZERO);
     let s = script(
         &backend,
@@ -1426,7 +1553,7 @@ async fn a_verb_named_tool_reaches_the_agent() {
 async fn a_caller_send_to_hands_off_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "rt_hand").await;
-    let b = add_backend(&kernel, &format!("{a}_peer"), &format!("ff_{a}")).await;
+    let b = add_peer(&kernel, &tmp, &a).await;
     let fa = script(
         &a,
         vec![pass("the answer from a"), pass("a must not run again")],
@@ -1531,6 +1658,10 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
     kernel.bundles.register("raiser.tools", Raiser);
+    kernel.bundles.register(
+        "durable_memory.tools",
+        fantastic_durable_memory::DurableMemoryBundle,
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -1544,20 +1675,13 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     kernel.set_root(Arc::clone(&root));
     let backend_id = id_for(&tmp, "rt_raise");
     let file_id = format!("ff_{backend_id}");
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({
-                "type": "create_agent", "parent_id": "kernel",
-                "handler_module": "file_bridge.tools",
-                "id": file_id,
-                "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
     let raiser = format!("{backend_id}_raiser");
     let _ = kernel
@@ -1688,12 +1812,7 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
 async fn routing_is_its_own_ps_row() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_ps").await;
-    let peer = add_backend(
-        &kernel,
-        &format!("{backend}_peer"),
-        &format!("ff_{backend}"),
-    )
-    .await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
     let fo = script(&peer, vec![pass("slow peer")], Duration::from_millis(500));
     script(
         &backend,

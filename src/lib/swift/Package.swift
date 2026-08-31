@@ -371,6 +371,11 @@ let package = Package(
             name: "FantasticAICoreTests",
             dependencies: [
                 "FantasticAICore", "FantasticKernel", "FantasticJSON",
+                // The chat store's handler. The AI core binds it by
+                // handler_module STRING (weak binding — `FantasticAICore`
+                // itself must never depend on it); the harness has to register
+                // the real bundle for `<agent>_chat` to answer.
+                "FantasticDurableMemory",
             ]
         ),
 

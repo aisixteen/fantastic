@@ -24,7 +24,7 @@ import time
 from typing import Any
 
 #: Turn text the kernel itself wrote (a routed reply's header), not the model.
-_ROUTED = re.compile(r"^\[(reply to|no call was dispatched|context-notice)")
+_ROUTED = re.compile(r"^\[(reply to|context-notice)")
 
 
 class WireRoot:

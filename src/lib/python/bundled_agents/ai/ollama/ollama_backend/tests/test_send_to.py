@@ -145,15 +145,14 @@ async def test_model_call_is_dispatched_and_the_result_returns(
     """The model emits a send; it really runs; its REPLY comes back as the next turn,
     tagged so the model can tell it from a human's message.
 
-    THREE passes since the no-call nudge: the prose answer to a chain turn gets
-    one runtime "nothing was dispatched" reminder, and answering THAT with prose
-    ends the chain (a nudge is never nudged)."""
+    A no-call follow-up ENDS the chain — stopping IS the done signal, nothing
+    nudges it to continue — so this is TWO passes: the call, then its no-call
+    answer."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider(
         [
             [_call("kernel_state", {"type": "list_agents"})],
             ["done looking"],
-            ["still done"],
         ]
     )
     ot._providers[oid] = fp
@@ -163,9 +162,9 @@ async def test_model_call_is_dispatched_and_the_result_returns(
                 [{"target": oid, "payload": {"type": "send", "text": "what is here?"}}]
             )
         )[0]["result"]
-        assert await _until_calls(fp, 3), "the call's reply never came back"
+        assert await _until_calls(fp, 2), "the call's reply never came back"
         await asyncio.sleep(0.2)
-        assert fp.calls == 3, "call turn + nudged turn, then it stopped"
+        assert fp.calls == 2, "the no-call follow-up ended the chain"
         turn2 = str(fp.requests[1])
         assert "· kernel_state list_agents]" in turn2, f"untagged reply: {turn2[-400:]}"
         assert "agents" in turn2, "the real list_agents result must be in the turn"
@@ -183,7 +182,6 @@ async def test_self_chain_does_not_deadlock(seeded_kernel, store_agent):
             [_call("kernel_state", {"type": "list_agents"})],
             [_call("kernel_state", {"type": "list_agents"})],
             ["enough"],
-            ["really enough"],  # answers the no-call nudge; ends the chain
         ]
     )
     ot._providers[oid] = fp
@@ -193,9 +191,9 @@ async def test_self_chain_does_not_deadlock(seeded_kernel, store_agent):
                 [{"target": oid, "payload": {"type": "send", "text": "go"}}]
             )
         )[0]["result"]
-        assert await _until_calls(fp, 4), f"chain stalled at {fp.calls} passes"
+        assert await _until_calls(fp, 3), f"chain stalled at {fp.calls} passes"
         await asyncio.sleep(0.3)
-        assert fp.calls == 4, f"expected 4 passes (incl. the nudge), got {fp.calls}"
+        assert fp.calls == 3, f"expected 3 passes, got {fp.calls}"
     finally:
         ot._providers.pop(oid, None)
 

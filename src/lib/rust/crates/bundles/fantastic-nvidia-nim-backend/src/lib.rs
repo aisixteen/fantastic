@@ -365,7 +365,7 @@ impl Bundle for NvidiaNimBundle {
             "reflect" => reflect_reply(agent_id, kernel).await,
             "boot" | "shutdown" => Value::Null,
             "send" => send_reply(agent_id, payload, kernel).await,
-            "history" => verbs::history(agent_id, payload, kernel, "nvidia_nim_backend").await,
+            "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,
             "context_status" => verbs::context_status(agent_id, kernel).await,
             "status" => verbs::status(agent_id, payload),
@@ -399,9 +399,6 @@ impl Bundle for NvidiaNimBundle {
 }
 
 async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if helpers::file_bridge_id(agent_id, kernel).is_none() {
-        return json!({"error": "nvidia_nim_backend: file_bridge_id required"});
-    }
     if read_api_key().is_none() {
         return json!({ "error": no_key_error() });
     }
