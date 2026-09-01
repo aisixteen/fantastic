@@ -251,6 +251,8 @@ pub async fn send(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // captured for routing before any shadowing below
+    let incoming_text = text.clone();
     // Optional caller-supplied system block (a caller teaches its own tool convention).
     let system_prompt = payload
         .get("system_prompt")
@@ -456,6 +458,9 @@ pub async fn send(
         let route_kernel = Arc::clone(kernel);
         let route_self = agent_id.clone();
         let route_client = client_id.clone();
+        // What this turn ANSWERED — tells routing whether it was a chain turn
+        // (a delivered reply) and so whether a silent turn earns the nudge.
+        let route_incoming = incoming_text.clone();
         kernel.spawn_task(agent_id, "route_reply", async move {
             crate::route::route_reply(
                 route_self,
@@ -464,6 +469,7 @@ pub async fn send(
                 route_client,
                 send_to,
                 system_prompt_for_route,
+                route_incoming,
             )
             .await;
         });

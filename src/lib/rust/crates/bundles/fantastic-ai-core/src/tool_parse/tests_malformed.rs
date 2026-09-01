@@ -13,10 +13,11 @@ use super::{extract_tool_calls, malformed_calls, CHANNEL_OPEN, OPEN};
 fn the_two_hints_are_verbatim() {
     assert_eq!(
         JSON_HINT,
-        "If you are putting a program in `code`, it rides inside a JSON string: \
-         every \" in it must be written \\\", every newline \\n, every \\ as \\\\ — \
-         and the value must then be CLOSED by one unescaped \" before the braces \
-         that end the object."
+        "Your program broke its own JSON envelope. Do NOT debug the escaping — \
+         switch to the unbreakable form: re-send the SAME call as `send_binary` \
+         with the program in `bytes` written RAW, as the LAST field — real \
+         newlines, real quotes, nothing escaped; everything from `\"bytes\":\"` \
+         to the final `\"` before the closing braces is taken verbatim."
     );
     assert_eq!(
         CHANNEL_HINT,
@@ -56,8 +57,8 @@ fn the_unclosed_code_string_that_ended_the_gemma_run_is_reported() {
         bad[0].error
     );
     assert!(
-        bad[0].error.contains("CLOSED by one unescaped"),
-        "name the fix: {}",
+        bad[0].error.contains("send_binary"),
+        "name the RECOVERY (go raw), not more escaping: {}",
         bad[0].error
     );
     assert!(

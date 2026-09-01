@@ -39,8 +39,7 @@ TASK = (
     "`lib.py` and both uses in `app.py`. A half-renamed state is a broken "
     "program, so make ALL the changes with ONE `patch` call — the patch verb "
     "is a TRANSACTION over an `edits` array (reflect `editor` for the exact "
-    "shape). Change nothing else. When the patch is applied, stop — a turn "
-    "with no tool call ends your run."
+    "shape). Change nothing else. When the patch is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

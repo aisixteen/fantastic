@@ -137,15 +137,30 @@ func deliverTurn(
 /// guard is released. Mirrors python's `_route_reply` step for step — the ORDER
 /// below is load-bearing throughout.
 
+// THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched
+// nothing. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a chain
+// silently and is never nudged. Why once: the nudge is itself a chain turn, so
+// a second consecutive no-call turn arrives with the nudge as its incoming
+// text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
+// reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
+let noCallNudge =
+    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
+    + "NOTHING ran — a call decided in thinking does not execute unless the "
+    + "envelope is written out. If the task is unfinished, emit that call now. "
+    + "If it is finished, end the chain explicitly: <tool_call>{\"name\":\"done\"}"
+    + "</tool_call>"
+
 func routeReply(
     selfId: AgentId,
     kernel: Kernel,
     text: String,
     clientId: String,
     sendTo: String?,
-    systemPrompt: String?
+    systemPrompt: String?,
+    incoming: String
 ) async {
     let calls = extractToolCalls(text)
+    let doneCalled = calls.contains { $0.name == "done" }
     // An envelope that OPENED and did not parse gets an error, exactly like a
     // call missing its `target_id` does. Reported even when other calls in the
     // same pass parsed fine — a partially-read turn dispatched half the model's
@@ -165,6 +180,21 @@ func routeReply(
                 systemPrompt: systemPrompt)
             return
         }
+        // A CHAIN turn (its incoming text was a delivered reply) that dispatched
+        // nothing gets ONE reminder — see `noCallNudge`. A chat turn is not a
+        // chain, and a turn already answering the nudge is never nudged again.
+        // A question turn is the OTHER legitimate silent end (ask + stop; the
+        // human's answer resumes the chain) — nudging it would stomp the wait.
+        let asked = text.contains("\"type\"") && text.contains("\"question\"")
+        if incoming.hasPrefix("[reply to "),
+            !asked,
+            !incoming.hasPrefix("[no call was dispatched]")
+        {
+            await deliverTurn(
+                kernel: kernel, target: selfId.value, text: noCallNudge,
+                clientId: clientId, systemPrompt: systemPrompt)
+            return
+        }
         // No call of the model's own, so the CALLER's one-shot handoff applies:
         // hand this pass's TEXT to `send_to`, once. It must not propagate — a
         // caller cannot spend the model's turns for it.
@@ -179,6 +209,10 @@ func routeReply(
     }
 
     for call in calls {
+        if call.name == "done" {
+            // The EXPLICIT end — not a dispatch, not an error, never nudged.
+            continue
+        }
         let args = call.arguments.asObject ?? [:]
         // `target_id` OR `target`. python's `or` skips a FALSY `target_id`, so a
         // model that wrote the key and left it empty still gets its `target`
@@ -336,6 +370,9 @@ func routeReply(
     // run died with nothing built. The stamp is for CORRELATION and
     // COMPLETENESS — a model that made 2 calls and got 1 back could not tell
     // "still running" from "answered the wrong one".
+    if doneCalled && blocks.isEmpty {
+        return  // explicitly finished — nothing more runs, nothing reminds
+    }
     await deliverGrouped(
         kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt)
 }

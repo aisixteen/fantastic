@@ -37,8 +37,7 @@ TASK = (
     "The editor agent `editor` edits this run's files. In `config.txt`, change "
     "`port = 8080` to `port = 9090` — and change NOTHING else. Use the "
     "editor's `patch` verb (reflect `editor` to learn its exact shape); do "
-    "NOT rewrite the whole file. When the patch is applied, stop — a turn "
-    "with no tool call ends your run."
+    "NOT rewrite the whole file. When the patch is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

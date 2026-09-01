@@ -84,7 +84,7 @@ struct RoutingTests {
         // turn, tagged so the model can tell it from a human's message.
         let script = ProviderScript([
             [callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))],
-            ["done looking"],
+            ["done looking " + doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -92,8 +92,8 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("what is here?"),
                 "client_id": .string("c"),
             ]))])[0].result
-        // One call = one follow-up turn. That turn emits NO call, which ENDS the
-        // chain — stopping IS the done signal; nothing nudges it to continue.
+        // One call = one follow-up turn. That turn ends the chain EXPLICITLY
+        // with the `done` call — a silent turn would draw the nudge now.
         #expect(await script.waitForCalls(2), "the call's reply never came back")
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(script.calls == 2, "the no-call follow-up ended the chain")
@@ -113,7 +113,7 @@ struct RoutingTests {
         let script = ProviderScript([
             ["PASS-ONE-SPEAKING " + reflect],
             ["PASS-TWO-SPEAKING " + reflect],
-            ["enough"],
+            ["enough " + doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -121,8 +121,8 @@ struct RoutingTests {
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
-        // Three scripted passes; the last emits no call and ENDS the chain — no
-        // nudge, three passes in total.
+        // Three scripted passes; the last ends the chain with the explicit
+        // `done` call — three passes in total, no nudge.
         #expect(await script.waitForCalls(3), "chain stalled at \(script.calls) passes")
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(script.calls == 3, "expected 3 passes, got \(script.calls)")
@@ -602,4 +602,57 @@ struct RoutingTests {
         let leaked = banned.filter { sysBlock.contains($0) }
         #expect(leaked.isEmpty, "system prompt leaks strategy \(leaked) — voids the test")
     }
+
+    // ─── the end-of-chain contract: DONE is explicit; silence is nudged ───
+    // Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
+
+    @Test func aSilentChainTurnIsNudgedOnceThenEnds() async throws {
+        let script = ProviderScript([
+            [callEnvelope(target: "core", payload: cheapReflect)],
+            ["thinking out loud, no envelope"],
+            ["still just prose"],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(3), "the nudge never arrived")
+        #expect(
+            script.requestText(2).contains("[no call was dispatched] Your turn emitted no"),
+            "pass 3 must be the nudge")
+        // the nudged-silent turn ended the chain — no fourth pass
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(script.calls == 3)
+    }
+
+    @Test func aDoneCallEndsTheChainWithoutANudge() async throws {
+        let script = ProviderScript([
+            [callEnvelope(target: "core", payload: cheapReflect)],
+            ["finished. " + doneEnvelope],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(script.calls == 2, "done must end the chain silently")
+    }
+
+    @Test func aChatTurnIsNeverNudged() async throws {
+        let script = ProviderScript([["just an answer, no calls"]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("hi"),
+                "client_id": .string("c"),
+            ]))])[0].result
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(script.calls == 1, "prose to a person is the product")
+    }
 }
+

@@ -56,17 +56,28 @@ for _n in os.listdir("readings"):
                 _t += int(_f.read().strip())
         except (ValueError, OSError):
             pass
-kernel.send("totals", {"type": "set", "key": "total", "value": _t})
+with open("computed_total.txt", "w") as _out:
+    _out.write(str(_t))
 """
 
 
 async def find_value(root, mem_id, want):
-    entries = ((await root.send([{"target": mem_id, "payload": {"type": "keys"}}]))[0]["result"]).get("keys") or []
-    keys = [e["key"] if isinstance(e, dict) else e for e in entries]
-    for k in keys:
-        v = ((await root.send([{"target": mem_id, "payload": {"type": "read", "key": k}}]))[0]["result"]).get("value")
-        if v is not None and str(v).strip() == str(want):
-            return k, str(v).strip(), True
+    """Memory is FILES: word-bounded scan of the workdir (E20 scorer's twin)."""
+    _ = mem_id
+    import re as _re
+    pat = _re.compile(rf"\b{want}\b")
+    for dirpath, dirnames, filenames in os.walk("."):
+        dirnames[:] = [d for d in dirnames if d not in ("readings", ".fantastic", ".ckpt", "__pycache__")]
+        for name in sorted(filenames):
+            if name.endswith((".py", ".jsonl")) or ".tmp." in name:
+                continue
+            fp = os.path.join(dirpath, name)
+            try:
+                text = open(fp, errors="ignore").read()
+            except OSError:
+                continue
+            if pat.search(text):
+                return fp, text.strip()[:120], True
     return None, None, False
 
 

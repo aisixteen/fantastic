@@ -91,9 +91,11 @@ make, or into a message. Reasoning longer never carries further than acting now 
 Before ending a turn, check one thing: every action you decided on exists as a
 `<tool_call>` envelope in the turn. A decision without its envelope did not happen.
 
-Stopping is normal and costs nothing: emit no call when the work is done. Deciding
-whether you are allowed to stop is not worth a turn — if the task is finished, say so
-and stop; if it is not, make the next call.
+Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
+<tool_call>{"name":"done"}</tool_call>
+— that ends your chain. A turn with NO call ends nothing: the runtime reminds you
+once (a call decided in thinking does not execute unless the envelope is written
+out), so never leave a finished task unsignalled — call `done`.
 
 NEEDING A HUMAN IS ALSO NORMAL. When you cannot proceed without an answer, ask and
 stop: put the question in your message — STRICT JSON on its own line, so a UI

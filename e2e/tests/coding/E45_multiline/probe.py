@@ -64,7 +64,7 @@ TASK = (
     "2) in `farewell`, change `\"Bye, \"` to `\"Goodbye, \"`.\n"
     "Change NOTHING else. Use the editor's `patch` verb (reflect `editor` for "
     "the shape); do NOT rewrite the whole file with `write`. When the patch "
-    "is applied, stop — a turn with no tool call ends your run."
+    "is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

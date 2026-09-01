@@ -51,9 +51,10 @@ for _f in _files:
         pass
 # A RICH result: the harness must accept a total nested in a result dict, not only a
 # bare number (matching what opus-5 actually stored on 2026-08-05).
-kernel.send("totals", {"type": "set", "key": "reading_total", "value": {
-    "total": _total, "count": len(_files), "source": "readings", "skipped": [],
-}})
+# A RICH result stays rich — a JSON document, stored as a FILE.
+import json as _json
+with open("reading_total.json", "w") as _out:
+    _json.dump({"total": _total, "count": len(_files), "source": "readings", "skipped": []}, _out)
 """
 
 

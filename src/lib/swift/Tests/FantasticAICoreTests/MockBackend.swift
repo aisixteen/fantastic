@@ -588,3 +588,6 @@ func historyRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
     let h = await kernel.send([Item(id, .object(["type": .string("history"), "client_id": .string(client)]))])[0].result
     return h["messages"].asArray ?? []
 }
+
+/// The explicit end-of-chain call, as the model writes it.
+let doneEnvelope = "<tool_call>{\"name\":\"done\"}</tool_call>"

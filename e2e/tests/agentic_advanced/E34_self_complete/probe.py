@@ -1,9 +1,8 @@
 """agentic_advanced/self_complete — done means STOPPING, unassisted.
 
-The runtime reminder for a no-call turn (the nudge) is deleted from every
-runtime: a turn that emits no tool call ENDS the chain, and that is the taught
-contract — "emit no call when the work is done". This probe measures that a
-model under that contract (1) does a small task and (2) then stops on its own.
+The taught contract: a chain ends on an explicit `{"name":"done"}` call; a
+silent turn is nudged ONCE by the runtime. This probe measures that a model
+under that contract (1) does a small task and (2) then ends its own chain.
 
 Memory is FILES now: the task's artifact is a text file written through the
 `text_file` editor onto a gated file leg. Scored on the FILE plus HOW the run
@@ -35,7 +34,7 @@ TASK = (
     "One small task: using the text editor agent `notes` (reflect it for its "
     "verbs), write a file `status.md` whose entire content is the single line "
     "`status: done`. Verify nothing, build nothing else. When it is written, "
-    "stop — a turn with no tool call ends your run, and that is the correct "
+    "end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>, and that is the correct "
     "way to finish."
 )
 

@@ -259,29 +259,46 @@ def _last_successful_job(jobs: list[dict]) -> dict | None:
 async def find_value(
     root, mem_id: str, want: int
 ) -> tuple[str | None, str | None, bool]:
-    """Scan EVERY key for `want`. The task never dictates a key name — doing so would
-    be dictation — so the check is "does the memory hold this number anywhere",
-    not "is it under the name I picked". Returns (key, value, matched); on no match,
-    reports the first key it saw so a wrong answer is still visible."""
-    # `keys` is a table of contents — [{key, size}] — NOT a list of strings.
-    entries = ((await root.send([{"target": mem_id, "payload": {"type": "keys"}}]))[0]["result"]).get("keys") or []
-    keys = [e["key"] if isinstance(e, dict) else e for e in entries]
+    """Memory is FILES: scan the run's tree for `want` — the task never dictates
+    a path or a format (doing so would be dictation), so the check is "does any
+    document hold this number", word-bounded so 14567 never matches 114567.
+
+    The SKIP LIST is what keeps the scan honest — places where the number
+    appears without having been STORED by the model:
+      dirs: `readings/` (the inputs the number is derived from), `.fantastic/`
+      (kernel records + chat sidecars — the number appears in conversation),
+      `.ckpt/` (pre-images), `__pycache__`;
+      files: `*.py` (the model's program may embed constants), `*.jsonl`
+      (transcripts), `*.tmp.*` (in-flight commit debris).
+    `.json` is deliberately NOT skipped — models legitimately store results as
+    JSON documents (measured 2026-09-01: `sensor_total.json` held the right
+    total and a scorer draft that skipped .json scored it None).
+
+    Returns (path, snippet, matched); on no match, the first candidate seen so
+    a wrong answer is still visible. `mem_id` is unused — kept for call-site
+    stability."""
+    _ = mem_id
+    skip_dirs = {"readings", ".fantastic", ".ckpt", "__pycache__", "repo"}
     first: tuple[str | None, str | None] = (None, None)
-    for k in keys:
-        v = ((await root.send([{"target": mem_id, "payload": {"type": "read", "key": k}}]))[0]["result"]).get("value")
-        if v is None:
-            continue
-        sv = str(v).strip()
-        if first == (None, None):
-            first = (k, sv)
-        # A RICH result counts. Measured 2026-08-05 (opus-5) and again 2026-08-25
-        # (the model, batch kernel): the model stored
-        # {'details': {...}, 'files': 3, 'total': 14567} — the right number,
-        # nested. `live_subai_selftest` recorded this scar; this scorer never got
-        # the fix, so a correct answer scored NO. The number anywhere in the
-        # value matches — word-bounded, so 14567 never matches 114567.
-        if sv == str(want) or re.search(rf"\b{want}\b", sv):
-            return k, sv, True
+    pat = re.compile(rf"\b{want}\b")
+    for dirpath, dirnames, filenames in os.walk("."):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for name in sorted(filenames):
+            if name.endswith((".py", ".jsonl")) or ".tmp." in name:
+                continue
+            fp = Path(dirpath) / name
+            try:
+                if fp.stat().st_size > 20480:
+                    continue
+                text = fp.read_text(errors="ignore")
+            except OSError:
+                continue
+            rel = str(fp).removeprefix("./")
+            snippet = text.strip()[:120]
+            if first == (None, None) and snippet:
+                first = (rel, snippet)
+            if pat.search(text):
+                return rel, snippet, True
     return first[0], first[1], False
 
 
@@ -598,25 +615,18 @@ async def run(
                         # silently ignore, which is exactly the invisible case.
                         f"stdout={( _j.get('stdout') or '')[:400]!r}"
                     )
-            # DUMP THE STORE. Twice now (2026-08-25) a canary NO left no way to
-            # tell "the set never arrived" from "it stored the wrong value" —
-            # the kernel is gone by the time anyone asks.
-            _keys = (
-                await root.send([{"target": mem["id"], "payload": {"type": "keys"}}])
-            )[0]["result"]
-            for _e in (_keys or {}).get("keys") or []:
-                _kk = _e["key"] if isinstance(_e, dict) else _e
-                _vv = (
-                    await root.send(
-                        [
-                            {
-                                "target": mem["id"],
-                                "payload": {"type": "read", "key": _kk},
-                            }
-                        ]
-                    )
-                )[0]["result"]
-                print(f"       store[{_kk!r}] = {str((_vv or {}).get('value'))[:200]}")
+            # DUMP THE MEMORY — files now: list every candidate document the
+            # scorer's scan can see, so a canary NO says what was actually there.
+            for _dp, _dn, _fn in os.walk('.'):
+                _dn[:] = [d for d in _dn if d not in ('readings', '.fantastic', '.ckpt', '__pycache__')]
+                for _n in sorted(_fn):
+                    if _n.endswith(('.py', '.jsonl')) or '.tmp.' in _n:
+                        continue
+                    _fp = Path(_dp) / _n
+                    try:
+                        print(f"       file[{_fp}] = {_fp.read_text(errors='ignore').strip()[:200]!r}")
+                    except OSError:
+                        pass
     print(
         f"    3. it RUNS (canary)         {'OK' if canary_ok else 'NO'} "
         f"new file={CANARY_VALUE} expected={new_total}"
