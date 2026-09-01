@@ -329,6 +329,16 @@ async def drive(
                     f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
                     f" · ps={[(t.get('agent'), t.get('verb')) for t in rows]}"
                 )
+            else:
+                # A generation IS in flight — that is activity, not idleness.
+                # Without this hold, a single long turn (a big write after a big
+                # read) outlived L.idle and the while-condition exited SILENTLY
+                # mid-generation (measured 2026-09-01, gym bowling×3 + java: the
+                # chain died at turn 3-4, stub never written, no cap printed).
+                # Held at 28 so the in-flight check re-runs every tick; a truly
+                # hung task still ends via the provider/kernel timeout, after
+                # which the cap above fires normally.
+                idle = 28.0
 
         if conn.trips:
             capped = "RUNAWAY TURN — " + conn.trips[-1]

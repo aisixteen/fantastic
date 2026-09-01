@@ -342,6 +342,26 @@ async fn route_reply_gated(
                     .unwrap_or("bytes")
                     .to_string();
                 if let Some(Value::String(prog)) = payload.get(&field) {
+                    if prog == "@body" {
+                        // A LITERAL "@body" is the fence placeholder with NO
+                        // fenced block — valid JSON, so it parses and would be
+                        // WRITTEN AS THE FILE (measured 2026-09-01, gym:
+                        // `illegal character '@'`). Refuse loud instead.
+                        if let Some(rt) = reply_to {
+                            let err = serde_json::json!({
+                                "error": "send_binary NOT dispatched: `bytes` is the \
+                                          literal placeholder \"@body\" but no fenced \
+                                          block followed. Re-send the SAME call with \
+                                          the program between column-0 marker lines \
+                                          inside the same <tool_call>: the JSON line, \
+                                          then `*** Begin Bytes`, the program verbatim, \
+                                          then `*** End Bytes`.",
+                                "target": target,
+                            });
+                            blocks.push((rt, format!("[reply to - · {target} {verb}]\n{err}")));
+                        }
+                        continue;
+                    }
                     let blob = prog.clone().into_bytes();
                     let mut header = payload.clone();
                     header.remove(&field); // rides as the blob, not the JSON header

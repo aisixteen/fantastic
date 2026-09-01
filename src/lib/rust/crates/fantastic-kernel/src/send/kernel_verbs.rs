@@ -261,6 +261,14 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
             changed.push(k.clone());
         }
     }
+    // Grant-map SHAPE, judged here at write time — the gate only judges edges
+    // (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare string left
+    // a silently-dead grant; refuse loud at the point of the mistake).
+    if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+        let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
+        crate::refusal::with(&mut r, "id", json!(id));
+        return r;
+    }
     // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
     // patch before anything changes — a refusal names the bad field at the point of
     // the mistake instead of surfacing calls later. Mirrors python's duck-typed

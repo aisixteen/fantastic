@@ -158,7 +158,29 @@ pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
         let body = found.block.trim();
         let mut reason = "the body did not parse".to_string();
         if found.envelope.open == OPEN {
-            if let Err(exc) = serde_json::from_str::<Value>(body) {
+            // Diagnose the grammar the model ACTUALLY used — the strict-JSON
+            // error for a raw/fenced attempt sends it debugging the wrong thing
+            // (measured 2026-09-01, python: a raw-form call one brace short was
+            // told "Invalid control character" and reasoned about newlines for
+            // four turns while the write never landed).
+            if body.starts_with("*** Begin Bytes") || body.contains("\n*** Begin Bytes") {
+                let meta = body.split("*** Begin Bytes").next().unwrap_or("");
+                reason = match serde_json::from_str::<Value>(meta.trim()) {
+                    Ok(_) => "the fenced call did not resolve".to_string(),
+                    Err(exc) => format!(
+                        "the metadata JSON above `*** Begin Bytes` did not parse — {exc}. \
+                         It must be ONE complete, small JSON call object (every brace \
+                         closed) with \"@body\" where the program goes; the program \
+                         itself is fine, it rides verbatim between the markers"
+                    ),
+                };
+            } else if body.contains("\"send_binary\"") && body.contains("\"bytes\"") {
+                reason = "the send_binary raw lift failed — the JSON metadata around \
+                          `bytes` must be valid and after the program's closing quote \
+                          nothing may follow but the braces that close that metadata \
+                          EXACTLY (count them)"
+                    .to_string();
+            } else if let Err(exc) = serde_json::from_str::<Value>(body) {
                 reason = format!("invalid JSON — {exc}");
             }
         }

@@ -82,12 +82,132 @@ fn send_binary_raw(inner: &str) -> Option<ToolCall> {
     Some(ToolCall::new("send_binary", args))
 }
 
+// ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────────
+//
+// Ported from python `tool_parse.py` (fence machinery). Measured 2026-09-01
+// (exercism gym, rust/word-count): the model followed the raw-tail contract
+// exactly — real newlines, real apostrophes — and still lost the call to ONE
+// missing closing brace, because the raw tail keeps the payload inside JSON
+// syntax. The general fix removes closing syntax from the payload path: small
+// flat metadata JSON with "@body" where the program goes, and the program
+// verbatim between two column-0 marker lines. A marker at column 0 is never
+// valid code at that position in any language — nothing to escape or count.
+
+/// Column-0 opening marker of the fenced form.
+pub const FENCE_OPEN: &str = "*** Begin Bytes";
+/// Column-0 closing marker of the fenced form.
+pub const FENCE_CLOSE: &str = "*** End Bytes";
+
+/// If `marker` at byte `at` sits alone on its line (column 0, only whitespace
+/// after), the byte index just past that line's newline (or `inner.len()`).
+fn marker_line_end(inner: &str, at: usize, marker: &str) -> Option<usize> {
+    if at != 0 && inner.as_bytes()[at - 1] != b'\n' {
+        return None;
+    }
+    let rest = &inner[at + marker.len()..];
+    let (line, next) = match rest.find('\n') {
+        Some(n) => (&rest[..n], at + marker.len() + n + 1),
+        None => (rest, inner.len()),
+    };
+    if line
+        .trim_matches(|c: char| c == '\r' || c == ' ' || c == '\t')
+        .is_empty()
+    {
+        Some(next)
+    } else {
+        None
+    }
+}
+
+/// First line-anchored `FENCE_OPEN`: `(marker_start, body_start)`.
+fn fence_open(inner: &str) -> Option<(usize, usize)> {
+    let mut from = 0;
+    while let Some(rel) = inner[from..].find(FENCE_OPEN) {
+        let at = from + rel;
+        if let Some(body_start) = marker_line_end(inner, at, FENCE_OPEN) {
+            return Some((at, body_start));
+        }
+        from = at + FENCE_OPEN.len();
+    }
+    None
+}
+
+/// Start of the LAST line-anchored `FENCE_CLOSE` at/after `from` — last, so a
+/// program that somehow contains the closer is still taken whole. `None` means
+/// no closer: the caller takes the rest of the block (the envelope's own
+/// closing tag already bounds it; dropping an unterminated program loses an
+/// unambiguous instruction — same stance as the scanner's unterminated
+/// envelope tolerance).
+fn fence_close_last(inner: &str, from: usize) -> Option<usize> {
+    let mut best = None;
+    let mut cur = from;
+    while let Some(rel) = inner[cur..].find(FENCE_CLOSE) {
+        let at = cur + rel;
+        if marker_line_end(inner, at, FENCE_CLOSE).is_some() {
+            best = Some(at);
+        }
+        cur = at + FENCE_CLOSE.len();
+    }
+    best
+}
+
+/// Replace the first `"@body"` placeholder anywhere in the value with the raw
+/// program. Returns whether one was found.
+fn plant_body(node: &mut Value, raw: &str) -> bool {
+    match node {
+        Value::Object(map) => {
+            for (_k, v) in map.iter_mut() {
+                if v.as_str() == Some("@body") {
+                    *v = Value::String(raw.to_string());
+                    return true;
+                }
+                if plant_body(v, raw) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(items) => items.iter_mut().any(|v| plant_body(v, raw)),
+        _ => false,
+    }
+}
+
 /// Parse the JSON between one tag pair into a [`ToolCall`].
 ///
 /// Lenient (tiny models drift): accepts `{"name","arguments"}`, a `tool` alias
 /// for `name`, a flattened object (remaining keys become arguments), and
 /// double-encoded (stringified) arguments. `None` on unparseable JSON.
 pub fn parse_one(inner: &str) -> Option<ToolCall> {
+    // FENCED form first (on the UNTRIMMED block — a trim would eat the
+    // program's trailing newline when the close marker was omitted): the JSON
+    // part is ONLY what sits above the markers. Parsing the whole block would
+    // either choke on the raw program or silently keep the "@body" placeholder
+    // as the written contents.
+    if let Some((open_at, body_start)) = fence_open(inner) {
+        let raw = match fence_close_last(inner, body_start) {
+            Some(close_at) => &inner[body_start..close_at],
+            None => &inner[body_start..],
+        };
+        let mut call = parse_one(&inner[..open_at])?;
+        let mut args = Value::Object(std::mem::take(&mut call.arguments));
+        if !plant_body(&mut args, raw) {
+            // No placeholder written — the program still has exactly one home.
+            if let Value::Object(map) = &mut args {
+                match map.get_mut("payload") {
+                    Some(Value::Object(p)) => {
+                        p.insert("bytes".to_string(), Value::String(raw.to_string()));
+                    }
+                    _ => {
+                        map.insert("bytes".to_string(), Value::String(raw.to_string()));
+                    }
+                }
+            }
+        }
+        if let Value::Object(map) = args {
+            call.arguments = map;
+        }
+        return Some(call);
+    }
     let inner = inner.trim();
     // send_binary carrying a RAW program in `bytes` (real newlines, real
     // quotes) is not valid JSON, so the raw-tail lift applies ONLY when the

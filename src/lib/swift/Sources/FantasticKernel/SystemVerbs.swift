@@ -222,6 +222,30 @@ extension Kernel {
 
     // ── create_agent ────────────────────────────────────────────
 
+    /// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
+    /// `{id|token: "*" | [verbs]}`; anything else is refused so a record can
+    /// never carry a grant the gate silently denies on (py-canonical, 2026-09-01).
+    private func badGrantShape(_ meta: OrderedDictionary<String, JSON>) -> String? {
+        for field in ["can_call", "callable_by"] {
+            guard let g = meta[field] else { continue }
+            guard case .object(let map) = g else {
+                return "\(field) must be a grant MAP {\"<id|$token>\": \"*\" | "
+                    + "[\"<verb>\", …]} — to open wide, grant per key "
+                    + "(e.g. {\"$self\": \"*\", \"ai\": \"*\"}), never a bare value"
+            }
+            for (k, v) in map {
+                let ok: Bool
+                switch v {
+                case .string(let s): ok = s == "*"
+                case .array(let items): ok = items.allSatisfy { $0.asString != nil }
+                default: ok = false
+                }
+                if !ok { return "\(field)[\"\(k)\"] must be \"*\" or a list of verb strings" }
+            }
+        }
+        return nil
+    }
+
     func createFromPayload(parent root: Agent, payload: JSON) async -> JSON {
         guard let hm = payload["handler_module"].asString else {
             return Refusal.missing("create_agent", "handler_module")
@@ -287,6 +311,9 @@ extension Kernel {
         // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
         // used to bypass it, so a record could be born with meta its own bundle
         // refuses). Record is empty at create: the merged view IS the patch.
+        if let why = badGrantShape(meta) {
+            return Refusal.make(Refusal.invalidMeta, why)
+        }
         if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
             // THE ONE REFUSAL SHAPE (#27) — the create-side twin of the
             // `updated: false` flag on update_agent. Both were ad-hoc booleans
@@ -455,6 +482,12 @@ extension Kernel {
                 patch[k] = v
                 changed.append(k)
             }
+        }
+        // Grant-map SHAPE, judged here at write time — the gate only judges
+        // edges (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare
+        // string left a silently-dead grant; refuse loud at the mistake).
+        if let why = badGrantShape(patch) {
+            return Refusal.make(Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
         // WRITE-TIME VALIDATION. Ask the target's bundle whether it can honour this
         // patch before anything changes — a refusal names the bad field at the point

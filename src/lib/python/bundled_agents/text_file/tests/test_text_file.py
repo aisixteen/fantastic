@@ -710,3 +710,16 @@ async def test_per_edit_if_match_guards_the_whole_transaction(
     )
     assert r["reason"] == "version_mismatch" and r["path"] == "b.py", r
     assert (tmp_path / "sd" / "a.py").read_text() == "one\n"
+
+
+async def test_write_accepts_str_and_utf8_encodes(seeded_kernel, tmp_path, monkeypatch):
+    """Text courtesy: ai_core encodes for the MODEL; a spawned program's ctrl-fd
+    wire is JSON (no bytes type) — a str document must land verbatim utf-8
+    (measured 2026-09-01, E20: the refusal drove a model to improvise base64)."""
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    r = await _call(
+        seeded_kernel, ed, {"type": "write", "path": "t.txt", "bytes": "h\u00e9llo\n"}
+    )
+    assert r.get("size") == len("h\u00e9llo\n".encode()), r
+    assert (tmp_path / "sd" / "t.txt").read_text() == "h\u00e9llo\n"

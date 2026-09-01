@@ -1869,6 +1869,34 @@ class Agent:
             return None
         return validate(meta, record or {})
 
+    @staticmethod
+    def _bad_grant_shape(meta: dict) -> str | None:
+        """A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
+
+        `{id|token: "*" | [verbs]}` — anything else is refused here, so a record
+        can never carry a grant the gate would have to crash or guess on.
+        Measured 2026-09-01 (E21_plan): `update_agent` accepted `can_call:"*"`
+        (a bare string), answered `{"updated": true}`, and the gate raised
+        `.items()` out of a web serve — a correctly-opened leg answered 500."""
+        for field in ("can_call", "callable_by"):
+            if field not in meta:
+                continue
+            g = meta[field]
+            if not isinstance(g, dict):
+                return (
+                    f'{field} must be a grant MAP {{"<id|$token>": "*" | '
+                    f'["<verb>", …]}} — got {type(g).__name__}. To open wide, '
+                    f'grant per key (e.g. {{"$self": "*", "ai": "*"}}), never a '
+                    f"bare value"
+                )
+            for k, v in g.items():
+                if not isinstance(k, str) or not (
+                    v == "*"
+                    or (isinstance(v, list) and all(isinstance(x, str) for x in v))
+                ):
+                    return f'{field}[{k!r}] must be "*" or a list of verb strings'
+        return None
+
     async def _verb_create_agent(self, payload: dict) -> dict:
         """args: handler_module, parent_id (REQUIRED), id?, **meta.
 
@@ -1917,6 +1945,8 @@ class Agent:
         # that boots, half-works, and fails three calls later somewhere else.
         # No record exists yet, so the merged view IS the patch — a create that
         # omits a field its handler requires genuinely cannot run and is refused here.
+        if why := self._bad_grant_shape(meta):
+            return refusal(INVALID_META, why)
         if why := self._refuse_meta(handler_module, meta, {}):
             return refusal(INVALID_META, why)
         rec = parent.create(handler_module, id=payload.get("id"), **meta)
@@ -1991,6 +2021,8 @@ class Agent:
         # that agent failed. Accepting a value you cannot honour, and reporting
         # success, is the worst of both — the caller believes a security control is
         # in place that is not. Same discovery + optionality as `on_delete`.
+        if why := self._bad_grant_shape(meta):
+            return refusal(INVALID_META, why, id=target_id)
         if why := self._refuse_meta(target.handler_module, meta, target.record):
             return refusal(INVALID_META, why, id=target_id)
         rec = self.update(target_id, **meta)

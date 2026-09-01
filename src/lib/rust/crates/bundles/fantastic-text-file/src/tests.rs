@@ -519,13 +519,18 @@ async fn reflect_names_surface_and_grammar_and_byte_verbs_redirect_on_text() {
     ] {
         assert!(r["verbs"].get(v).is_some(), "verb {v} missing: {r}");
     }
-    // byte verbs on the TEXT channel redirect to the binary carrier
+    // A str `bytes` on the TEXT channel is the text courtesy (py-canonical,
+    // 2026-09-01): the document, utf-8-encoded — a spawned program's ctrl-fd
+    // wire is JSON and has no bytes type, so this is its one write path.
     let r = call(
         &k,
         &ed,
-        json!({"type": "write", "path": "x", "bytes": "nope"}),
+        json!({"type": "write", "path": "x", "bytes": "hi\n"}),
     )
     .await;
+    assert_eq!(r["size"], 3, "{r}");
+    // With NO usable document the byte verbs still redirect to the binary carrier.
+    let r = call(&k, &ed, json!({"type": "write", "path": "x"})).await;
     assert!(
         r["error"].as_str().unwrap().contains("binary channel"),
         "{r}"

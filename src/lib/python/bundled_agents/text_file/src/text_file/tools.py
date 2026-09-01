@@ -228,12 +228,19 @@ async def _reflect(id, payload, kernel):
         "patch_grammar": (
             "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
             "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
-            "document EXACTLY ONCE; the patch rides as RAW bytes (real newlines, "
-            "nothing escaped — use send_binary with `bytes` LAST). `patch` is a "
-            "TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one "
-            "file rides the array; the blob holds every edit's hunks "
-            "concatenated in `edits` order, split by the per-edit `hunks` "
-            "count; any failure anywhere writes nothing"
+            "document EXACTLY ONCE. `patch` is a TRANSACTION over "
+            "`edits:[{path, hunks, if_match?}]` — even one file rides the "
+            "array; the blob holds every edit's hunks concatenated in `edits` "
+            "order, split by the per-edit `hunks` count; any failure anywhere "
+            "writes nothing"
+        ),
+        "compose": (
+            "every content-carrying verb (`write`, `patch`, `append`) takes its "
+            "document in `bytes` — send it with `send_binary` in the FENCED "
+            'form: the call\'s JSON stays small with `"bytes":"@body"`, and '
+            "the document rides VERBATIM between two column-0 marker lines "
+            "inside the same tool_call — `*** Begin Bytes`, the content (real "
+            "newlines, real quotes, nothing escaped), `*** End Bytes`"
         ),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()
@@ -281,7 +288,7 @@ async def _read(id, payload, kernel):
 
 
 async def _write(id, payload, kernel):
-    """args: path:str (req), bytes:bytes (req — the whole document, raw), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."""
+    """args: path:str (req), bytes (req — the whole document; str is utf-8-encoded), on:str?, if_match:str?, checkpoint:bool? — atomic tmp+rename; {path, size, version, ckpt_id?}."""
     fb = _target(id, payload, kernel)
     if not fb:
         return _unwired("write")
@@ -289,8 +296,14 @@ async def _write(id, payload, kernel):
     if not path:
         return missing("write", "path")
     data = payload.get("bytes")
+    if isinstance(data, str):
+        # TEXT agent, text courtesy: ai_core utf-8-encodes for the MODEL, but a
+        # spawned program's ctrl-fd wire is JSON (no bytes type) — encode here
+        # so every caller gets the same treatment (measured 2026-09-01, E20:
+        # a program's write was refused and the model improvised base64).
+        data = data.encode("utf-8")
     if not isinstance(data, (bytes, bytearray)):
-        return missing("write", "bytes (the document, raw bytes)")
+        return missing("write", "bytes (the document — str is utf-8-encoded)")
     data = bytes(data)
     if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
         return err
@@ -308,7 +321,7 @@ async def _write(id, payload, kernel):
 
 
 async def _append(id, payload, kernel):
-    """args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}."""
+    """args: path:str (req), bytes (req — one chunk; str is utf-8-encoded), on:str? — appends (creates if absent); {path, size, version}."""
     fb = _target(id, payload, kernel)
     if not fb:
         return _unwired("append")
@@ -316,8 +329,10 @@ async def _append(id, payload, kernel):
     if not path:
         return missing("append", "path")
     data = payload.get("bytes")
+    if isinstance(data, str):
+        data = data.encode("utf-8")  # text courtesy — same as `write`
     if not isinstance(data, (bytes, bytearray)):
-        return missing("append", "bytes (one raw chunk)")
+        return missing("append", "bytes (one chunk — str is utf-8-encoded)")
     r = (
         await kernel.send(
             [
@@ -380,7 +395,7 @@ def _parse_hunks(text: str) -> list[tuple[str, str]]:
 
 
 async def _patch(id, payload, kernel):
-    """args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes:bytes (req — ALL hunks concatenated, raw utf-8), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."""
+    """args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), on:str?, dry_run:bool?, checkpoint:bool? — a TRANSACTION: verify every hunk of every edit, checkpoint all, apply all, drop the pre-images; any failure writes nothing (or restores what was written); {patched:true, edits:[{path,hunks,size,version}], ckpt_ids?}."""
     fb = _target(id, payload, kernel)
     if not fb:
         return _unwired("patch")
@@ -388,6 +403,8 @@ async def _patch(id, payload, kernel):
     if not isinstance(edits, list) or not edits:
         return missing("patch", "edits (a list of {path, hunks, if_match?})")
     data = payload.get("bytes")
+    if isinstance(data, str):
+        data = data.encode("utf-8")  # text courtesy — same as `write`
     if not isinstance(data, (bytes, bytearray)) or not data:
         return missing("patch", "bytes (the utf-8 patch — all hunks, in edits order)")
     try:

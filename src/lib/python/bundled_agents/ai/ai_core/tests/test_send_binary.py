@@ -163,3 +163,130 @@ def test_raw_unescaped_send_binary_still_rides_verbatim():
     calls = extract_tool_calls("<tool_call>" + inner + "</tool_call>")
     assert len(calls) == 1
     assert calls[0]["arguments"]["payload"]["bytes"] == 'line "one"\nline two'
+
+
+# ── the FENCED form: the program rides OUTSIDE the JSON ─────────────────────
+
+
+RUST = (
+    "use std::collections::HashMap;\n\n"
+    "pub fn word_count(words: &str) -> HashMap<String, u32> {\n"
+    "    let mut counts: HashMap<String, u32> = HashMap::new();\n"
+    "    for token in words.split(|c: char| !c.is_alphanumeric() && c != ''') {\n"
+    "        let word = token.trim_matches(''');\n"
+    "        if !word.is_empty() {\n"
+    "            *counts.entry(word.to_lowercase()).or_insert(0) += 1;\n"
+    "        }\n"
+    "    }\n"
+    "    counts\n"
+    "}\n"
+)
+
+
+def _fenced_text(meta_json: str, program: str, close: bool = True) -> str:
+    tail = "*** End Bytes\n" if close else ""
+    return (
+        "<tool_call>"
+        + meta_json
+        + "\n*** Begin Bytes\n"
+        + program
+        + tail
+        + "</tool_call>"
+    )
+
+
+def test_fenced_program_rides_verbatim():
+    """The gym's killer case: quote-heavy rust with apostrophes and braces —
+    verbatim through the fence, no escaping, no skeleton to balance."""
+    meta = (
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"write","path":"src/lib.rs","truncate":true,"bytes":"@body"}}}'
+    )
+    calls = extract_tool_calls(_fenced_text(meta, RUST))
+    assert len(calls) == 1
+    p = calls[0]["arguments"]["payload"]
+    assert p["bytes"] == RUST
+    assert p["path"] == "src/lib.rs" and p["truncate"] is True
+
+
+def test_fenced_without_placeholder_lands_in_payload_bytes():
+    meta = (
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"write","path":"m.py"}}}'
+    )
+    calls = extract_tool_calls(_fenced_text(meta, "x = 1\n"))
+    assert len(calls) == 1
+    assert calls[0]["arguments"]["payload"]["bytes"] == "x = 1\n"
+
+
+def test_fenced_missing_close_marker_takes_rest_of_block():
+    meta = (
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"write","path":"m.py","bytes":"@body"}}}'
+    )
+    calls = extract_tool_calls(_fenced_text(meta, "a = 1\nb = 2\n", close=False))
+    assert len(calls) == 1
+    assert calls[0]["arguments"]["payload"]["bytes"] == "a = 1\nb = 2\n"
+
+
+def test_fenced_bad_metadata_gets_a_fence_error_not_a_json_red_herring():
+    from ai_core.tool_parse import malformed_calls
+
+    meta = (  # one closing brace SHORT — the measured live failure
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"write","path":"m.py","bytes":"@body"}}'
+    )
+    text = _fenced_text(meta, "x = 1\n")
+    assert extract_tool_calls(text) == []
+    errs = malformed_calls(text)
+    assert len(errs) == 1
+    assert "Begin Bytes" in errs[0]["error"], "advice names the fence grammar"
+    assert "Invalid control character" not in errs[0]["error"]
+
+
+def test_raw_form_one_brace_short_gets_truthful_advice():
+    """The exact turn-5 failure from the gym: raw form, skeleton one `}` short.
+    The error must name the raw-lift fault, never the strict-JSON red herring."""
+    from ai_core.tool_parse import malformed_calls
+
+    inner = (
+        '{"name":"send_binary","arguments":{"target_id":"editor","payload":'
+        '{"type":"write","path":"src/lib.rs","truncate":true,"bytes":"' + RUST + '"}}'
+    )  # two closes after the quote; three needed
+    text = "<tool_call>" + inner + "</tool_call>"
+    assert extract_tool_calls(text) == []
+    errs = malformed_calls(text)
+    assert len(errs) == 1
+    assert "raw lift" in errs[0]["error"]
+    assert "Invalid control character" not in errs[0]["error"]
+
+
+async def test_fenced_dispatch_encodes_to_bytes():
+    k = _Kernel()
+    meta = (
+        '{"name":"send_binary","arguments":{"target_id":"store","payload":'
+        '{"type":"write_stream","path":"main.py","truncate":true,"bytes":"@body"}}}'
+    )
+    await _route_reply(
+        "ai", k, _fenced_text(meta, 'print("hi")\n'), "probe", None, None, 180.0, ""
+    )
+    await _settle(k, 1)
+    sent = [it for it in k.dispatched if it["payload"].get("type") == "write_stream"]
+    assert len(sent) == 1
+    assert sent[0]["payload"]["bytes"] == b'print("hi")\n'
+
+
+async def test_literal_body_placeholder_is_refused_not_written():
+    """`bytes:"@body"` with NO fenced block is valid JSON — without the guard the
+    literal placeholder became the file (measured 2026-09-01, gym: `illegal
+    character '@'`). It must be refused loud, nothing dispatched."""
+    k = _Kernel()
+    text = (
+        '<tool_call>{"name":"send_binary","arguments":{"target_id":"store",'
+        '"reply_to":"self","payload":{"type":"write_stream","path":"main.py",'
+        '"truncate":true,"bytes":"@body"}}}</tool_call>'
+    )
+    await _route_reply("ai", k, text, "probe", None, None, 180.0, "")
+    await asyncio.sleep(0.05)
+    sent = [it for it in k.dispatched if it["payload"].get("type") == "write_stream"]
+    assert sent == [], "the placeholder must never reach the sink"

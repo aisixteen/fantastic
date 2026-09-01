@@ -69,6 +69,37 @@ pub fn mint_guid() -> String {
 /// {"type":"create_agent","handler_module":"file_bridge.tools","id":"opt"}
 /// ```
 /// Any extra fields become the new agent's meta.
+/// A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
+///
+/// `{id|token: "*" | [verbs]}` — anything else is refused here, so a record can
+/// never carry a grant the gate would have to guess on. Ported from python
+/// (measured 2026-09-01, E21_plan: `update_agent` accepted `can_call:"*"`, and
+/// the py gate crashed out of a web serve; the rust gate denies instead of
+/// crashing, but a silently-dead grant is still the wrong answer — refuse loud).
+pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
+    for field in ["can_call", "callable_by"] {
+        let Some(g) = meta.get(field) else { continue };
+        let Some(map) = g.as_object() else {
+            return Some(format!(
+                "{field} must be a grant MAP {{\"<id|$token>\": \"*\" | \
+                 [\"<verb>\", …]}} — to open wide, grant per key \
+                 (e.g. {{\"$self\": \"*\", \"ai\": \"*\"}}), never a bare value"
+            ));
+        };
+        for (k, v) in map {
+            let ok = v.as_str() == Some("*")
+                || v.as_array()
+                    .is_some_and(|a| a.iter().all(|x| x.is_string()));
+            if !ok {
+                return Some(format!(
+                    "{field}[{k:?}] must be \"*\" or a list of verb strings"
+                ));
+            }
+        }
+    }
+    None
+}
+
 pub(crate) async fn create_from_payload(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
@@ -150,6 +181,9 @@ pub(crate) async fn create_from_payload(
     // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
     // and REFUSED one update later — two answers for one field). Record is empty
     // at create: the merged view IS the patch.
+    if let Some(why) = bad_grant_shape(&meta) {
+        return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
+    }
     if let Some(bundle) = kernel.bundles.get(hm) {
         if let Some(why) = bundle.validate_meta(&meta, &Map::new()) {
             return crate::refusal::refusal(crate::refusal::INVALID_META, why);
