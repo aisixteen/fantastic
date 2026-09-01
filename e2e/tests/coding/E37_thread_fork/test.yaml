@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: thread_fork
+group: coding
+title: a forked agent inherits the pre-fork thread via a sidecar copy
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+limits:
+  max_tokens: 8192
+  idle_seconds: 60
+  max_turns: 18
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}
