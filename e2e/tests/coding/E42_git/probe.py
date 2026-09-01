@@ -34,7 +34,7 @@ TASK = (
     "{type:'status', job_id} for stdout) to: see what changed, stage it, and "
     "commit it with the exact message 'update readings'. The repo's committer "
     "identity is already configured. When `git status` shows a clean tree, "
-    "stop — a turn with no tool call ends your run."
+    "end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

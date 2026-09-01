@@ -24,10 +24,11 @@ use super::json_envelope::{CLOSE, OPEN};
 /// cheaper than letting it rediscover it, and this is advice, not a repair: we do
 /// not re-quote the body and retry.
 pub const JSON_HINT: &str = concat!(
-    "If you are putting a program in `code`, it rides inside a JSON string: ",
-    r#"every " in it must be written \", every newline \n, every \ as \\ — "#,
-    r#"and the value must then be CLOSED by one unescaped " before the braces "#,
-    "that end the object."
+    "Your program broke its own JSON envelope. Do NOT debug the escaping — ",
+    "switch to the unbreakable form: re-send the SAME call as `send_binary` ",
+    "with the program in `bytes` written RAW, as the LAST field — real ",
+    r#"newlines, real quotes, nothing escaped; everything from `"bytes":"` "#,
+    r#"to the final `"` before the closing braces is taken verbatim."#
 );
 
 /// The `<|tool_call>` body is NOT JSON, so [`JSON_HINT`] would be actively

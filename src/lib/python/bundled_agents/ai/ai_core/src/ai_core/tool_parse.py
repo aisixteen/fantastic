@@ -571,10 +571,11 @@ def extract_tool_calls(text: str) -> list[dict]:
 # cheaper than letting it rediscover it, and this is advice, not a repair: we do
 # not re-quote the body and retry.
 _JSON_HINT = (
-    "If you are putting a program in `code`, it rides inside a JSON string: "
-    'every " in it must be written \\", every newline \\n, every \\ as \\\\ — '
-    'and the value must then be CLOSED by one unescaped " before the braces '
-    "that end the object."
+    "Your program broke its own JSON envelope. Do NOT debug the escaping — "
+    "switch to the unbreakable form: re-send the SAME call as `send_binary` "
+    "with the program in `bytes` written RAW, as the LAST field — real "
+    "newlines, real quotes, nothing escaped; everything from `\"bytes\":\"` "
+    "to the final `\"` before the closing braces is taken verbatim."
 )
 
 # The `<|tool_call>` body is NOT JSON, so the advice above would be actively

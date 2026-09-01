@@ -264,28 +264,34 @@ def true_total() -> int:
 
 
 async def find_value(root, mem_id: str, want: int):
-    """Does the memory hold `want` anywhere? The task never dictates a key name, so
-    the check must not either."""
-    entries = ((await root.send([{"target": mem_id, "payload": {"type": "keys"}}]))[0]["result"]).get("keys") or []
-    keys = [e["key"] if isinstance(e, dict) else e for e in entries]
-    seen = {}
-    for k in keys:
-        v = ((await root.send([{"target": mem_id, "payload": {"type": "read", "key": k}}]))[0]["result"]).get("value")
-        if v is None:
-            continue
-        seen[k] = str(v).strip()
-        # The total may be the value itself OR a field inside a richer result. opus
-        # stored {total, count, readings[], skipped[], updated_at} — strictly more
-        # useful than a bare number, and it must not score as wrong.
-        if str(v).strip() == str(want):
-            return k, seen[k], True
-        if isinstance(v, dict) and any(str(x).strip() == str(want) for x in v.values()):
-            return k, seen[k], True
-    # NOTHING MATCHED. Report the WHOLE store, not an arbitrary first key: on
-    # 2026-08-24 this returned `key='_probe_ai' val='ok'` — a scratch key the model
-    # had written while testing a verb — and the failure line read as though that
-    # were the agent's answer. A miss should say what was actually there.
-    return None, (seen or None), False
+    """Memory is FILES: does any document in the run's tree hold `want`?
+    The task never dictates a path or format, so the check must not either —
+    word-bounded scan, same skip list as E20's scorer (inputs, kernel state,
+    pre-images, programs, transcripts). `mem_id` unused; kept for call sites."""
+    _ = mem_id
+    import os as _os
+    import re as _re
+
+    skip_dirs = {"readings", ".fantastic", ".ckpt", "__pycache__"}
+    pat = _re.compile(rf"\b{want}\b")
+    first = None
+    for dirpath, dirnames, filenames in _os.walk("."):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for name in sorted(filenames):
+            if name.endswith((".py", ".jsonl")) or ".tmp." in name:
+                continue
+            fp = Path(dirpath) / name
+            try:
+                if fp.stat().st_size > 20480:
+                    continue
+                text = fp.read_text(errors="ignore")
+            except OSError:
+                continue
+            if first is None and text.strip():
+                first = (str(fp), text.strip()[:120])
+            if pat.search(text):
+                return str(fp), text.strip()[:120], True
+    return (first[0], first[1], False) if first else (None, None, False)
 
 
 async def wait_for(root, mem_id: str, want: int, secs: float) -> bool:

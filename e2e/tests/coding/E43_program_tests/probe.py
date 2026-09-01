@@ -42,7 +42,7 @@ TASK = (
     "currently FAILS. Run it, read the failure, then fix the bug IN `prog.py` "
     "— never touch `test_prog.py` — using the editor agent `editor`'s "
     "`patch` verb (reflect it for the shape). Rerun the suite until "
-    "it passes. When it is green, stop — a turn with no tool call ends your run."
+    "it passes. When it is green, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

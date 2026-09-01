@@ -517,9 +517,11 @@ make, or into a message. Reasoning longer never carries further than acting now 
 Before ending a turn, check one thing: every action you decided on exists as a
 `<tool_call>` envelope in the turn. A decision without its envelope did not happen.
 
-Stopping is normal and costs nothing: emit no call when the work is done. Deciding
-whether you are allowed to stop is not worth a turn — if the task is finished, say so
-and stop; if it is not, make the next call.
+Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
+<tool_call>{"name":"done"}</tool_call>
+— that ends your chain. A turn with NO call ends nothing: the runtime reminds you
+once (a call decided in thinking does not execute unless the envelope is written
+out), so never leave a finished task unsignalled — call `done`.
 
 NEEDING A HUMAN IS ALSO NORMAL. When you cannot proceed without an answer, ask and
 stop: put the question in your message — STRICT JSON on its own line, so a UI
@@ -884,6 +886,29 @@ def without_thinking(text: str) -> str:
 # because the model can debug the first and cannot even see the second.
 
 
+# THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched nothing.
+#
+# Measured 2026-08-25 (`live_subai`, twice) and re-confirmed 2026-09-01
+# (`repo_map:swift`, twice): mid-task the model decides its next action INSIDE
+# its thinking, closes the thought, and ends the completion without any
+# envelope — or stops early believing itself finished. Every agent harness
+# treats "no action emitted" as a control decision, not an ending;
+# interactively a human says "continue" — an unattended chain has nobody, so
+# the runtime says it, ONCE. DONE is EXPLICIT now: the `done` tool call ends a
+# chain silently and is never nudged.
+#
+# Why once: the nudge is itself a chain turn, so a second consecutive no-call
+# turn arrives with the nudge as its incoming text — and is NOT nudged again.
+# No counter, no per-chain state.
+_NO_CALL_NUDGE = (
+    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
+    "NOTHING ran — a call decided in thinking does not execute unless the "
+    "envelope is written out. If the task is unfinished, emit that call now. "
+    'If it is finished, end the chain explicitly: <tool_call>{"name":"done"}'
+    "</tool_call>"
+)
+
+
 async def _route_reply(
     self_id, kernel, text, client_id, send_to, system_prompt, send_timeout, incoming
 ):
@@ -925,7 +950,11 @@ async def _route_reply(
     # absent `reply_to` is self anyway.
     for bad in malformed_calls(text or ""):
         units.append((self_id, "-", "-", None, json.dumps(bad)))
+    done_called = any(c.get("name") == "done" for c in calls)
     for call in calls:
+        if call.get("name") == "done":
+            # The EXPLICIT end — not a dispatch, not an error, never nudged.
+            continue
         args = call.get("arguments") or {}
         target = args.get("target_id") or args.get("target")
         # `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
@@ -1067,6 +1096,20 @@ async def _route_reply(
             _deliver_soon(
                 kernel, dest, "\n\n".join(groups[dest]), client_id, system_prompt
             )
+    if done_called:
+        return  # explicitly finished — nothing more runs, nothing reminds
+    if not calls and not units:
+        # A CHAIN turn (its incoming text was a delivered reply) that dispatched
+        # nothing gets ONE reminder — see `_NO_CALL_NUDGE`. A chat turn is not a
+        # chain (prose to a person is the product), and a turn already answering
+        # the nudge is never nudged again.
+        chained = isinstance(incoming, str) and incoming.startswith("[reply to ")
+        # A question turn is the OTHER legitimate silent end (ask + stop; the
+        # human's answer resumes the chain) — nudging it would stomp the wait.
+        asked = bool(re.search(r'"type"\s*:\s*"question"', text or ""))
+        if chained and not asked and not incoming.startswith("[no call was dispatched]"):
+            _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
+            return
     if calls:
         return
     if send_to is not None:

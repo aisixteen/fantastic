@@ -127,7 +127,7 @@ struct AIBackendTests {
         // `deliverTurn` carries the prompt along.
         let envelope =
             #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect","tree":"none"}}}</tool_call>"#
-        let script = ProviderScript([[envelope], ["seen it"]])
+        let script = ProviderScript([[envelope], ["seen it " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
@@ -149,7 +149,7 @@ struct AIBackendTests {
         #expect(turn2.contains(" · core "))
 
         // Four rows: the envelope turn and the reply turn it caused
-        // (user+assistant each). The reply's no-call answer ends the chain.
+        // (user+assistant each). The reply's done-signalled answer ends the chain.
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
         #expect(msgs.count == 4)
         #expect(msgs[1]["content"].asString == envelope)  // persisted verbatim

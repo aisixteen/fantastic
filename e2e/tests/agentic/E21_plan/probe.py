@@ -28,7 +28,6 @@ SCORING is split, deliberately:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import secrets
 import socket
@@ -443,12 +442,15 @@ async def main():
         )
 
     # ─── SOFT: observed, never asserted ───
-    keys = (await root.send([{"target": mem["id"], "payload": {"type": "keys"}}]))[0]["result"]
+    docs = sorted(
+        f for f in os.listdir(".")
+        if os.path.isfile(f) and not f.endswith((".py", ".jsonl")) and ".tmp." not in f
+    )
     last_turn = transcript[-1] if transcript else ""
     plan_words = sum(
         w in " ".join(transcript).lower() for w in ("plan", "step", "first", "then")
     )
-    print(f"\n  observed — yaml_store keys after the run : {json.dumps(keys, default=str)[:160]}")
+    print(f"\n  observed — memory documents after the run : {docs[:8]}")
     print(f"  observed — planning language in run : {plan_words}/4 markers")
     print(f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<tool_call>')}")
     print(f"  observed — final turn length        : {len(last_turn)} chars")

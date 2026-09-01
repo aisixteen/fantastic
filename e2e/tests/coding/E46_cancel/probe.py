@@ -46,8 +46,8 @@ TASK = (
     "{type:'start', command, args}). The job must then be ABORTED: work is "
     "IN FLIGHT as a kernel task — list tasks with kernel `ps`, find the "
     "runner's job, and kill it with kernel `cancel` (task_id). When the "
-    "cancel reply confirms the kill, stop — a turn with no tool call ends "
-    "your run."
+    "cancel reply confirms the kill, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>"
+    "."
 )
 
 

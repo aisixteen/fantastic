@@ -398,7 +398,8 @@ enum AIPassOutcome {
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
-                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt)
+                    clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
+                    incoming: text)
             }
         }
         return reply

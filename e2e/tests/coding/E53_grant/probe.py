@@ -36,7 +36,7 @@ TASK = (
     "retry blindly and do not give up: ask the user to open access for you "
     "(emit the question JSON on its own line, then stop; the answer arrives "
     "as your next message). After access is granted, retry the write. When "
-    "the file is written, stop — a turn with no tool call ends your run."
+    "the file is written, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
 

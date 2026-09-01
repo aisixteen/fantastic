@@ -159,6 +159,22 @@ fn you_sent(args: &Map<String, Value>) -> Value {
 /// ONE TURN, ONE BATCH, ONE MESSAGE PER DESTINATION: every call the model
 /// emitted is dispatched together, and everything owed to a destination —
 /// results, parse errors, shape errors — arrives as ONE delivered turn.
+/// THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched
+/// nothing. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a chain
+/// silently and is never nudged. Why once: the nudge is itself a chain turn,
+/// so a second consecutive no-call turn arrives with the nudge as its incoming
+/// text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
+/// reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
+const NO_CALL_NUDGE: &str =
+    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so \
+NOTHING ran — a call decided in thinking does not execute unless the envelope is \
+written out. If the task is unfinished, emit that call now. If it is finished, end \
+the chain explicitly: <tool_call>{\"name\":\"done\"}</tool_call>";
+
+/// Honour where this pass's output goes — the DETACHED routing task. The
+/// model's calls are the agent's calls (gated via `with_sender`); `incoming`
+/// is the text this turn answered, which decides whether a silent chain turn
+/// earns the one no-call nudge.
 pub async fn route_reply(
     self_id: AgentId,
     kernel: Arc<Kernel>,
@@ -166,6 +182,7 @@ pub async fn route_reply(
     client_id: String,
     send_to: Option<String>,
     system_prompt: Option<String>,
+    incoming: String,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
     // detached, and a tokio spawn does NOT inherit the task-local sender
@@ -176,11 +193,21 @@ pub async fn route_reply(
     // carrier, and reply deliveries all attribute to the AI agent.
     let sid = self_id.clone();
     fantastic_kernel::send::with_sender(sid, async move {
-        route_reply_gated(self_id, kernel, text, client_id, send_to, system_prompt).await
+        route_reply_gated(
+            self_id,
+            kernel,
+            text,
+            client_id,
+            send_to,
+            system_prompt,
+            incoming,
+        )
+        .await
     })
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route_reply_gated(
     self_id: AgentId,
     kernel: Arc<Kernel>,
@@ -188,6 +215,7 @@ async fn route_reply_gated(
     client_id: String,
     send_to: Option<String>,
     system_prompt: Option<String>,
+    incoming: String,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
@@ -207,6 +235,7 @@ async fn route_reply_gated(
         blocks.push((self_id.as_str().to_string(), bad.report().to_string()));
     }
 
+    let done_called = calls.iter().any(|c| c.name == "done");
     if !calls.is_empty() {
         // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
         // SINGLE `kernel.send([...])` — concurrent, side-effect order across
@@ -228,6 +257,10 @@ async fn route_reply_gated(
         let mut routes: Vec<(Option<String>, String, String)> = Vec::new();
 
         for call in calls {
+            if call.name == "done" {
+                // The EXPLICIT end — not a dispatch, not an error, never nudged.
+                continue;
+            }
             let args = &call.arguments;
             let chosen: Option<&Value> = match args.get("target_id") {
                 Some(v) if !is_falsy(v) => Some(v),
@@ -374,6 +407,22 @@ async fn route_reply_gated(
 
     if !blocks.is_empty() {
         deliver_grouped(&kernel, blocks, &client_id, sp).await;
+        return;
+    }
+    if done_called {
+        return; // explicitly finished — nothing more runs, nothing reminds
+    }
+    // A CHAIN turn (its incoming text was a delivered reply) that dispatched
+    // nothing gets ONE reminder — see `NO_CALL_NUDGE`. A chat turn is not a
+    // chain, and a turn already answering the nudge is never nudged again.
+    // A question turn is the OTHER legitimate silent end (ask + stop; the
+    // human's answer resumes the chain) — nudging it would stomp the wait.
+    let asked = text.contains("\"type\"") && text.contains("\"question\"");
+    if incoming.starts_with("[reply to ")
+        && !asked
+        && !incoming.starts_with("[no call was dispatched]")
+    {
+        deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
         return;
     }
 

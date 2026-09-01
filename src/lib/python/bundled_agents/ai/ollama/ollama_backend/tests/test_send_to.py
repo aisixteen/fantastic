@@ -145,14 +145,13 @@ async def test_model_call_is_dispatched_and_the_result_returns(
     """The model emits a send; it really runs; its REPLY comes back as the next turn,
     tagged so the model can tell it from a human's message.
 
-    A no-call follow-up ENDS the chain — stopping IS the done signal, nothing
-    nudges it to continue — so this is TWO passes: the call, then its no-call
-    answer."""
+    The follow-up ends the chain EXPLICITLY with the `done` call — so this is
+    TWO passes: the call, then its done-signalled answer."""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider(
         [
             [_call("kernel_state", {"type": "list_agents"})],
-            ["done looking"],
+            ['done looking <tool_call>{"name":"done"}</tool_call>'],
         ]
     )
     ot._providers[oid] = fp
@@ -164,7 +163,7 @@ async def test_model_call_is_dispatched_and_the_result_returns(
         )[0]["result"]
         assert await _until_calls(fp, 2), "the call's reply never came back"
         await asyncio.sleep(0.2)
-        assert fp.calls == 2, "the no-call follow-up ended the chain"
+        assert fp.calls == 2, "the done-signalled follow-up ended the chain"
         turn2 = str(fp.requests[1])
         assert "· kernel_state list_agents]" in turn2, f"untagged reply: {turn2[-400:]}"
         assert "agents" in turn2, "the real list_agents result must be in the turn"
@@ -181,7 +180,8 @@ async def test_self_chain_does_not_deadlock(seeded_kernel, store_agent):
         [
             [_call("kernel_state", {"type": "list_agents"})],
             [_call("kernel_state", {"type": "list_agents"})],
-            ["enough"],
+            # the chain ends EXPLICITLY — prose alone would draw the nudge now
+            ['enough <tool_call>{"name":"done"}</tool_call>'],
         ]
     )
     ot._providers[oid] = fp
@@ -205,7 +205,7 @@ async def test_reply_to_omitted_defaults_to_self(seeded_kernel, store_agent):
     cannot debug: gemma4:12b left the key out of an otherwise perfect call, the
     send ran, its result was dropped, and the chain died at pass 1 with no reply
     and no error. Indistinguishable, from inside the model, from being finished.
-    Stopping is still free — it is emitting NO call."""
+    Stopping is explicit — the `done` call ends a chain."""
     other = await _make_ollama(seeded_kernel)
     oid = await _make_ollama(seeded_kernel, grants={other: ["send"]})
     fo = _FakeProvider([["peer answered"]])

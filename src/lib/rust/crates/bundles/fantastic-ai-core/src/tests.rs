@@ -1134,7 +1134,7 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
         &backend,
         vec![
             pass(call_envelope("core", json!({"type": "list_agents"}), None)),
-            pass("done looking"),
+            pass(r#"done looking <tool_call>{"name":"done"}</tool_call>"#),
         ],
         Duration::ZERO,
     );
@@ -1180,7 +1180,11 @@ async fn a_self_chain_does_not_deadlock() {
     let hop = call_envelope("core", json!({"type": "list_agents"}), Some("self"));
     let s = script(
         &backend,
-        vec![pass(hop.clone()), pass(hop), pass("enough")],
+        vec![
+            pass(hop.clone()),
+            pass(hop),
+            pass(r#"enough <tool_call>{"name":"done"}</tool_call>"#),
+        ],
         Duration::ZERO,
     );
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1852,4 +1856,94 @@ async fn routing_is_its_own_ps_row() {
             .any(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send")),
         "the generation is finished — nothing may still be labelled `send`: {tasks:#?}"
     );
+}
+
+// ─── the end-of-chain contract: DONE is explicit; silence is nudged ─────
+// Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_chain_turn_is_nudged_once_then_ends() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ndg").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(call_envelope(
+                "kernel",
+                json!({"type": "reflect", "tree": "none"}),
+                None,
+            )),
+            pass("thinking out loud, no envelope"),
+            pass("still just prose"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 3).await, "the nudge never arrived");
+    // request(n) is the WHOLE messages json; the nudge must be its final turn.
+    assert!(
+        s.request(2)
+            .contains("[no call was dispatched] Your turn emitted no"),
+        "pass 3 must be the nudge"
+    );
+    // the nudged-silent turn ended the chain — no fourth pass
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_done_call_ends_the_chain_without_a_nudge() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ndg2").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(call_envelope(
+                "kernel",
+                json!({"type": "reflect", "tree": "none"}),
+                None,
+            )),
+            pass(r#"finished. <tool_call>{"name":"done"}</tool_call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 2, "done must end the chain silently");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_turn_is_never_nudged() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ndg3").await;
+    let s = script(
+        &backend,
+        vec![pass("just an answer, no calls")],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.passes_served(), 1, "prose to a person is the product");
 }
