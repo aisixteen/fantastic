@@ -42,7 +42,8 @@ struct MalformedCallsTests {
         let error = bad[0]["error"].asString ?? ""
         #expect(error.contains("NOT dispatched"))
         #expect(error.contains("unterminated string"), "name the JSON fault")
-        #expect(error.contains("CLOSED by one unescaped"), "name the fix")
+        #expect(error.contains("FENCED form"), "name the fix")
+        #expect(error.contains("Begin Bytes"), "teach the fence grammar")
         #expect(
             bad[0]["your_block"].asString?.contains("reading_aggregator") == true,
             "show its own text back")

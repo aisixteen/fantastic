@@ -72,6 +72,63 @@ struct ToolParseTests {
         #expect(p["truncate"].asBool == true)
     }
 
+    // ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────
+    // Ported from python `test_send_binary.py` (fence tests, 2026-09-01).
+
+    /// The gym's killer case: quote-heavy source with apostrophes and braces —
+    /// verbatim through the fence, no escaping, no skeleton to balance.
+    @Test func fencedProgramRidesVerbatim() {
+        let prog = "use std::collections::HashMap;\n\nfn f() { let c = '\\''; }\n"
+        let text =
+            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
+            + "\"payload\":{\"type\":\"write\",\"path\":\"src/lib.rs\",\"truncate\":true,"
+            + "\"bytes\":\"@body\"}}}\n*** Begin Bytes\n" + prog + "*** End Bytes\n</tool_call>"
+        let calls = extractToolCalls(text)
+        #expect(calls.count == 1)
+        let p = calls.first!.arguments["payload"]
+        #expect(p["bytes"].asString == prog, "the program must be taken verbatim")
+        #expect(p["path"].asString == "src/lib.rs")
+    }
+
+    /// No placeholder written — the program still has exactly one home.
+    @Test func fencedWithoutPlaceholderLandsInPayloadBytes() {
+        let text =
+            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
+            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\"}}}\n"
+            + "*** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>"
+        let calls = extractToolCalls(text)
+        #expect(calls.count == 1)
+        #expect(calls.first!.arguments["payload"]["bytes"].asString == "x = 1\n")
+    }
+
+    /// A missing close marker takes the rest of the block — the envelope's own
+    /// closing tag already bounds it.
+    @Test func fencedMissingCloseMarkerTakesRestOfBlock() {
+        let text =
+            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
+            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}}\n"
+            + "*** Begin Bytes\na = 1\nb = 2\n</tool_call>"
+        let calls = extractToolCalls(text)
+        #expect(calls.count == 1)
+        #expect(calls.first!.arguments["payload"]["bytes"].asString == "a = 1\nb = 2\n")
+    }
+
+    /// Broken metadata above the fence earns the fence-grammar error, never the
+    /// strict-JSON red herring about the program's newlines.
+    @Test func fencedBadMetadataGetsAFenceError() {
+        // one closing brace SHORT — the measured live failure class
+        let text =
+            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
+            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}\n"
+            + "*** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>"
+        #expect(extractToolCalls(text).isEmpty)
+        let errs = malformedCalls(text)
+        #expect(errs.count == 1)
+        let error = errs.first!["error"].asString ?? ""
+        #expect(error.contains("Begin Bytes"), "advice names the fence grammar")
+        #expect(!error.contains("control character"))
+    }
+
     @Test func sendBinaryProgramWithJsonMetacharsSurvives() {
         let prog = "d = {\"k\": \"v\"}\nprint(f\"{d}\")\npath = \"C:\\\\tmp\"\n"
         let text = binaryText(

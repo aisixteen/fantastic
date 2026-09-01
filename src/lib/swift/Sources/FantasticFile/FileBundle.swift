@@ -212,7 +212,7 @@ public struct FileBundle: AgentBundle {
             "verbs": [
                 "list": "args: path?. Returns {path, files}.",
                 "read_stream": "args: path, offset?, length?. SOURCE — one raw chunk; reply {bytes, next_offset, eof, size} on the binary channel.",
-                "write_stream": "args: path, bytes, offset?, truncate?. SINK — one raw chunk; reply {written, offset, size}. Refuses non-bytes.",
+                "write_stream": "args: path, bytes, offset?, truncate?. SINK — one raw chunk (a model composes it via send_binary's fenced form); reply {written, offset, size}. Refuses non-bytes.",
                 "delete": "args: path. Returns {path, deleted: true}.",
                 "rename": "args: old_path, new_path. Returns {old_path, new_path}.",
                 "mkdir": "args: path. Returns {path, created: true}.",

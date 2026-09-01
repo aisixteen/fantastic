@@ -329,3 +329,46 @@ async def test_operator_conferral_is_unbounded(seeded_kernel):
         )
     )[0]["result"]
     assert "id" in rec
+
+
+# ─── grant SHAPE is refused at WRITE time ───────────────────────
+
+
+async def test_update_agent_refuses_a_non_dict_grant(kernel):
+    """`can_call:"*"` (a bare string) used to be accepted — `{"updated": true}` —
+    and the gate then raised `.items()` out of a later dispatch (measured
+    2026-09-01, E21_plan: a correctly-opened web leg answered 500). The shape is
+    the WRITER's to refuse, at the point of the mistake."""
+    aid = await _mk(kernel)
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": kernel.id,
+                    "payload": {"type": "update_agent", "id": aid, "can_call": "*"},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert r.get("error") and "grant MAP" in r["error"], r
+    # the record is untouched — still a dict (the stamped baseline)
+    assert isinstance(kernel.ctx.agents[aid].record.get("can_call"), dict)
+
+
+async def test_create_agent_refuses_a_non_dict_grant(kernel):
+    r = (
+        await kernel.send(
+            [
+                {
+                    "target": kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "file_bridge.tools",
+                        "callable_by": ["*"],
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert r.get("error") and "grant MAP" in r["error"], r

@@ -420,6 +420,55 @@ def _send_binary_raw(inner: str) -> dict | None:
     return {"id": _mint_id(), "name": "send_binary", "arguments": args}
 
 
+# ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────────
+#
+# Measured 2026-09-01 (exercism gym, rust/word-count): the model followed the
+# raw-tail contract exactly — real newlines, real apostrophes — and still lost
+# the call to ONE missing closing brace, because the raw tail keeps the payload
+# inside JSON syntax, so the model must still balance the skeleton by hand. The
+# general fix removes closing syntax from the payload path entirely: the JSON
+# stays small flat metadata (models don't break short JSON) with "@body" where
+# the program goes, and the program rides verbatim between two column-0 marker
+# lines. A marker at column 0 is never valid code at that position in any
+# language, so there is nothing to escape, quote, or count — the design every
+# surviving harness converged on (codex `*** Begin Patch`, aider fences).
+FENCE_OPEN = "*** Begin Bytes"
+FENCE_CLOSE = "*** End Bytes"
+_FENCE_OPEN_RE = re.compile(r"^\*\*\* Begin Bytes[ \t]*\r?\n", re.M)
+_FENCE_CLOSE_RE = re.compile(r"^\*\*\* End Bytes[ \t]*$", re.M)
+
+
+def _split_fence(inner: str, m: re.Match) -> tuple[str, str]:
+    """(metadata-JSON, raw program). The program runs from the line after
+    `*** Begin Bytes` to the LAST column-0 `*** End Bytes` — last, so a program
+    that somehow contains the closer is still taken whole. A missing closer
+    takes the rest of the block: the envelope's own closing tag already bounds
+    it, and dropping an unterminated program loses an unambiguous instruction
+    (same stance as `_scan`'s unterminated-envelope tolerance)."""
+    meta = inner[: m.start()]
+    body_start = m.end()
+    closes = list(_FENCE_CLOSE_RE.finditer(inner, body_start))
+    raw = inner[body_start : closes[-1].start()] if closes else inner[body_start:]
+    return meta, raw
+
+
+def _plant_body(node, raw: str) -> bool:
+    """Replace the first `"@body"` placeholder anywhere in the parsed call with
+    the raw program. Returns whether one was found."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if v == "@body":
+                node[k] = raw
+                return True
+            if _plant_body(v, raw):
+                return True
+    elif isinstance(node, list):
+        for v in node:
+            if _plant_body(v, raw):
+                return True
+    return False
+
+
 def parse_one(inner: str) -> dict | None:
     """Parse the JSON between one tag pair into `{id, name, arguments}`.
 
@@ -427,6 +476,23 @@ def parse_one(inner: str) -> dict | None:
     `name`, a flattened object (remaining keys become arguments), and double-encoded
     (stringified) arguments. Returns None on unparseable JSON.
     """
+    # FENCED form first (on the UNSTRIPPED block — a strip would eat the
+    # program's trailing newline when the close marker was omitted): if the
+    # markers are present, the JSON part is ONLY what sits above them — parsing
+    # the whole block would either choke on the raw program or (when the program
+    # happens to be valid JSON-adjacent) silently keep the "@body" placeholder
+    # as the written contents.
+    if (fm := _FENCE_OPEN_RE.search(inner)) is not None:
+        meta, raw = _split_fence(inner, fm)
+        call = parse_one(meta)
+        if call is None:
+            return None
+        args = call.get("arguments")
+        if isinstance(args, dict) and not _plant_body(args, raw):
+            # No placeholder written — the program still has exactly one home.
+            payload = args.get("payload")
+            (payload if isinstance(payload, dict) else args)["bytes"] = raw
+        return call
     inner = inner.strip()
     try:
         obj = json.loads(inner)
@@ -572,10 +638,15 @@ def extract_tool_calls(text: str) -> list[dict]:
 # not re-quote the body and retry.
 _JSON_HINT = (
     "Your program broke its own JSON envelope. Do NOT debug the escaping — "
-    "switch to the unbreakable form: re-send the SAME call as `send_binary` "
-    "with the program in `bytes` written RAW, as the LAST field — real "
-    "newlines, real quotes, nothing escaped; everything from `\"bytes\":\"` "
-    "to the final `\"` before the closing braces is taken verbatim."
+    "switch to the unbreakable FENCED form: keep the call's JSON small and "
+    'complete with "@body" where the contents go, then write the program '
+    "verbatim between two column-0 marker lines, still inside the same "
+    "<tool_call>:\n"
+    '{"name":"send_binary","arguments":{"target_id":"<id>","payload":'
+    '{…,"bytes":"@body"}}}\n'
+    "*** Begin Bytes\n"
+    "<the program, verbatim — real newlines, real quotes, nothing escaped>\n"
+    "*** End Bytes"
 )
 
 # The `<|tool_call>` body is NOT JSON, so the advice above would be actively
@@ -656,10 +727,36 @@ def malformed_calls(text: str) -> list[dict]:
             continue
         reason = "the body did not parse"
         if envelope == OPEN:
-            try:
-                json.loads(block.strip())
-            except (json.JSONDecodeError, ValueError) as exc:
-                reason = f"invalid JSON — {exc}"
+            stripped = block.strip()
+            # Diagnose the grammar the model ACTUALLY used — the strict-JSON
+            # error for a raw/fenced attempt sends it debugging the wrong thing
+            # (measured 2026-09-01: a raw-form call one brace short was told
+            # "Invalid control character", reasoned about newlines for four
+            # turns, and the write never landed).
+            if (fm := _FENCE_OPEN_RE.search(stripped)) is not None:
+                try:
+                    json.loads(stripped[: fm.start()].strip())
+                    reason = "the fenced call did not resolve"
+                except (json.JSONDecodeError, ValueError) as exc:
+                    reason = (
+                        f"the metadata JSON above `{FENCE_OPEN}` did not parse — "
+                        f"{exc}. It must be ONE complete, small JSON call object "
+                        '(every brace closed) with "@body" where the program goes; '
+                        "the program itself is fine, it rides verbatim between the "
+                        "markers"
+                    )
+            elif '"send_binary"' in stripped and _SB_BYTES.search(stripped):
+                reason = (
+                    "the send_binary raw lift failed — the JSON metadata around "
+                    "`bytes` must be valid and after the program's closing quote "
+                    "nothing may follow but the braces that close that metadata "
+                    "EXACTLY (count them)"
+                )
+            else:
+                try:
+                    json.loads(stripped)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    reason = f"invalid JSON — {exc}"
         out.append(
             {
                 # The whole reply body, composed HERE so the wording has one

@@ -12,10 +12,32 @@ import OrderedCollections
 /// for `name`, a flattened object (remaining keys become arguments), and
 /// double-encoded (stringified) arguments. Returns nil on unparseable JSON.
 func parseOne(_ inner: String) -> ToolCall? {
+    // FENCED form first (on the UNTRIMMED block — a trim would eat the
+    // program's trailing newline when the close marker was omitted): the JSON
+    // part is ONLY what sits above the markers. Parsing the whole block would
+    // either choke on the raw program or silently keep the "@body" placeholder
+    // as the written contents. Ported from python `tool_parse.py` (fence).
+    let nsAll = inner as NSString
+    if let (openAt, bodyStart) = fenceOpen(nsAll) {
+        let closeAt = fenceCloseLast(nsAll, from: bodyStart) ?? nsAll.length
+        let raw = nsAll.substring(with: NSRange(location: bodyStart, length: closeAt - bodyStart))
+        guard let call = parseOne(nsAll.substring(to: openAt)) else { return nil }
+        var args = call.arguments
+        if !plantBody(&args, raw) {
+            // No placeholder written — the program still has exactly one home.
+            if case .object(var map) = args {
+                if case .object(var payload)? = map["payload"] {
+                    payload["bytes"] = .string(raw)
+                    map["payload"] = .object(payload)
+                } else {
+                    map["bytes"] = .string(raw)
+                }
+                args = .object(map)
+            }
+        }
+        return ToolCall(id: call.id, name: call.name, arguments: args)
+    }
     let trimmed = inner.trimmingCharacters(in: .whitespacesAndNewlines)
-    // send_binary carries a RAW program in `bytes` (no escaping) — read it as a
-    // string rather than forcing it through the JSON parser. See `sendBinaryRaw`.
-    if let sb = sendBinaryRaw(trimmed) { return sb }
     let bytes = Data(trimmed.utf8)
     // ONE parse, not two. Python tries `json.loads` first and only then
     // `JSONDecoder().raw_decode`; `parsePrefix` IS `raw_decode` and subsumes
@@ -27,7 +49,15 @@ func parseOne(_ inner: String) -> ToolCall? {
     // below rather than thrown away, because the model's real intent is usually
     // in it.
     guard let (value, consumed) = try? JSON.parsePrefix(bytes), let obj = value.asObject
-    else { return nil }
+    else {
+        // send_binary carrying a RAW program in `bytes` (real newlines, real
+        // quotes) is not valid JSON, so the raw lift applies ONLY when the
+        // strict parse fails — a model that escaped its whole call correctly
+        // parses strictly and gets its escapes DECODED (python E44,
+        // 2026-08-31; this was raw-FIRST here, a drift from the canonical
+        // order, fixed with the fence port).
+        return sendBinaryRaw(trimmed)
+    }
     // `consumed` is the only place a BYTE offset appears in this module; the tail
     // becomes text again immediately.
     let rest = String(decoding: bytes.dropFirst(consumed), as: UTF8.self)
@@ -130,6 +160,98 @@ private func recoverStrayTail(_ rest: String) -> OrderedDictionary<String, JSON>
     while body.hasPrefix(",") { body.removeFirst() }
     while body.hasSuffix("}") { body.removeLast() }
     return (try? JSON.parse("{" + body + "}"))?.asObject
+}
+
+// ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────────
+//
+// Measured 2026-09-01 (exercism gym): the model followed the raw-tail contract
+// exactly and still lost the call to ONE missing closing brace, because the
+// raw tail keeps the payload inside JSON syntax. The fence removes closing
+// syntax from the payload path entirely: small flat metadata JSON with
+// "@body" where the program goes, the program verbatim between two column-0
+// marker lines — never valid code at that position in any language.
+
+/// Column-0 opening marker of the fenced form.
+let FENCE_OPEN = "*** Begin Bytes"
+/// Column-0 closing marker of the fenced form.
+let FENCE_CLOSE = "*** End Bytes"
+
+/// If `marker` at `at` sits alone on its line (column 0, only whitespace
+/// after), the index just past that line's newline (or the string's end).
+private func markerLineEnd(_ ns: NSString, _ at: Int, _ marker: String) -> Int? {
+    if at != 0 && ns.character(at: at - 1) != 0x0A { return nil }
+    var i = at + (marker as NSString).length
+    while i < ns.length {
+        let c = ns.character(at: i)
+        if c == 0x0A { return i + 1 }
+        if c == 0x20 || c == 0x09 || c == 0x0D { i += 1; continue }
+        return nil
+    }
+    return ns.length
+}
+
+/// First line-anchored `FENCE_OPEN`: `(markerStart, bodyStart)`.
+private func fenceOpen(_ ns: NSString) -> (Int, Int)? {
+    var from = 0
+    while from < ns.length {
+        let r = ns.range(of: FENCE_OPEN, options: [], range: NSRange(location: from, length: ns.length - from))
+        if r.location == NSNotFound { return nil }
+        if let bodyStart = markerLineEnd(ns, r.location, FENCE_OPEN) {
+            return (r.location, bodyStart)
+        }
+        from = r.location + r.length
+    }
+    return nil
+}
+
+/// Start of the LAST line-anchored `FENCE_CLOSE` at/after `from` — last, so a
+/// program that somehow contains the closer is still taken whole. `nil` means
+/// no closer: the caller takes the rest of the block (the envelope's own
+/// closing tag already bounds it).
+private func fenceCloseLast(_ ns: NSString, from: Int) -> Int? {
+    var best: Int? = nil
+    var cur = from
+    while cur < ns.length {
+        let r = ns.range(of: FENCE_CLOSE, options: [], range: NSRange(location: cur, length: ns.length - cur))
+        if r.location == NSNotFound { return best }
+        if markerLineEnd(ns, r.location, FENCE_CLOSE) != nil { best = r.location }
+        cur = r.location + r.length
+    }
+    return best
+}
+
+/// Replace the first `"@body"` placeholder anywhere in the value with the raw
+/// program. Returns whether one was found.
+private func plantBody(_ node: inout JSON, _ raw: String) -> Bool {
+    switch node {
+    case .object(var map):
+        for (k, v) in map {
+            if v.asString == "@body" {
+                map[k] = .string(raw)
+                node = .object(map)
+                return true
+            }
+            var child = v
+            if plantBody(&child, raw) {
+                map[k] = child
+                node = .object(map)
+                return true
+            }
+        }
+        return false
+    case .array(var items):
+        for i in items.indices {
+            var child = items[i]
+            if plantBody(&child, raw) {
+                items[i] = child
+                node = .array(items)
+                return true
+            }
+        }
+        return false
+    default:
+        return false
+    }
 }
 
 /// The `"bytes":"` opener — the raw-program field of a `send_binary` envelope.

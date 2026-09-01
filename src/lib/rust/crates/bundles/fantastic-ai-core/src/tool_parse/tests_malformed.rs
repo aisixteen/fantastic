@@ -14,10 +14,15 @@ fn the_two_hints_are_verbatim() {
     assert_eq!(
         JSON_HINT,
         "Your program broke its own JSON envelope. Do NOT debug the escaping — \
-         switch to the unbreakable form: re-send the SAME call as `send_binary` \
-         with the program in `bytes` written RAW, as the LAST field — real \
-         newlines, real quotes, nothing escaped; everything from `\"bytes\":\"` \
-         to the final `\"` before the closing braces is taken verbatim."
+         switch to the unbreakable FENCED form: keep the call's JSON small and \
+         complete with \"@body\" where the contents go, then write the program \
+         verbatim between two column-0 marker lines, still inside the same \
+         <tool_call>:\n\
+         {\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"<id>\",\"payload\":\
+         {…,\"bytes\":\"@body\"}}}\n\
+         *** Begin Bytes\n\
+         <the program, verbatim — real newlines, real quotes, nothing escaped>\n\
+         *** End Bytes"
     );
     assert_eq!(
         CHANNEL_HINT,

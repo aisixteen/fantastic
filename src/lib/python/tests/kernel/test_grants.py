@@ -132,3 +132,16 @@ def test_per_verb_list_grants_exactly_those_verbs():
 
 def test_verb_wildcard_inside_list():
     assert _auth({"memory": ["*"]}, "anything", "memory").allowed
+
+
+# ─── malformed grant SHAPE: deny, never crash ───────────────────
+
+
+def test_non_dict_grant_denies_without_raising():
+    """A bare-string grant (`can_call:"*"`) reached records before write-time
+    validation existed; the gate must judge it DENY, never raise `.items()`
+    out of a dispatch (measured 2026-09-01, E21_plan: a correctly-opened web
+    leg answered 500)."""
+    for bad in ("*", ["*"], 7):
+        d = _auth(bad, "send", "peer")
+        assert isinstance(d, Decision) and not d.allowed

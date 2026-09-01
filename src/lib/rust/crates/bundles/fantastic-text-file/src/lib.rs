@@ -332,12 +332,17 @@ async fn reflect_reply(agent: &Agent) -> Value {
         "target_id": target_id,
         "patch_grammar": "one or more blocks: `<<<<<<< SEARCH` / <old lines> / \
             `=======` / <new lines> / `>>>>>>> REPLACE`; each SEARCH must match \
-            its document EXACTLY ONCE; the patch rides as RAW bytes (real \
-            newlines, nothing escaped — use send_binary with `bytes` LAST). \
+            its document EXACTLY ONCE. \
             `patch` is a TRANSACTION over `edits:[{path, hunks, if_match?}]` — \
             even one file rides the array; the blob holds every edit's hunks \
             concatenated in `edits` order, split by the per-edit `hunks` count; \
             any failure anywhere writes nothing",
+        "compose": "every content-carrying verb (`write`, `patch`, `append`) \
+            takes its document in `bytes` — send it with `send_binary` in the \
+            FENCED form: the call's JSON stays small with `\"bytes\":\"@body\"`, \
+            and the document rides VERBATIM between two column-0 marker lines \
+            inside the same tool_call — `*** Begin Bytes`, the content (real \
+            newlines, real quotes, nothing escaped), `*** End Bytes`",
         "verbs": {
             "reflect": "no args — identity, verb guide, and the wired default surface.",
             "boot": "no args — no-op; this agent holds no state to hydrate.",
@@ -397,7 +402,21 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     })
 }
 
+/// Text courtesy (py-canonical, 2026-09-01): ai_core encodes for the MODEL, but
+/// a spawned program's ctrl-fd wire is JSON (no bytes type) — a str `bytes` in
+/// the payload IS the document, utf-8. Without this an empty binary blob plus a
+/// JSON-string `bytes` wrote an EMPTY file silently.
+fn effective_blob<'a>(payload: &'a Value, blob: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+    if blob.is_empty() {
+        if let Some(s) = payload.get("bytes").and_then(Value::as_str) {
+            return std::borrow::Cow::Owned(s.as_bytes().to_vec());
+        }
+    }
+    std::borrow::Cow::Borrowed(blob)
+}
+
 async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+    let blob = &*effective_blob(payload, blob);
     let path = match path_of(payload, "write") {
         Ok(p) => p,
         Err(e) => return e,
@@ -426,6 +445,7 @@ async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
 }
 
 async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+    let blob = &*effective_blob(payload, blob);
     let path = match path_of(payload, "append") {
         Ok(p) => p,
         Err(e) => return e,
@@ -455,6 +475,7 @@ async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u
 }
 
 async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8]) -> Value {
+    let blob = &*effective_blob(payload, blob);
     // A TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file
     // rides the array (one shape, no single/multi drift; user decision
     // 2026-09-01). ONE raw hunk blob, split by the per-edit counts; verify
@@ -859,15 +880,22 @@ impl Bundle for TextFileBundle {
             return Ok(Some(json!({"error": format!("no agent {agent_id}")})));
         };
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        // The byte verbs carry RAW BYTES — binary channel only (mirrors the
-        // file_bridge redirect for its stream verbs).
+        // The byte verbs carry RAW BYTES — binary channel, OR the text courtesy
+        // (py-canonical, 2026-09-01): a str `bytes` in the payload IS the
+        // document, utf-8. ai_core encodes for the MODEL; a spawned program's
+        // ctrl-fd wire is JSON (no bytes type), so the str form is its one path
+        // (measured live: E20's program was refused here and stored nothing).
         if matches!(verb, "write" | "patch" | "append") {
-            return Ok(Some(json!({
-                "error": format!(
-                    "{verb} carries raw bytes — call it on the binary channel \
-                     (send_binary), not text send"
-                ),
-            })));
+            if payload.get("bytes").and_then(Value::as_str).is_none() {
+                return Ok(Some(json!({
+                    "error": format!(
+                        "{verb} carries raw bytes — call it on the binary channel \
+                         (send_binary), or pass the document as a str in `bytes` \
+                         (utf-8-encoded for you)"
+                    ),
+                })));
+            }
+            // effective_blob in the reply fns lifts the str out of the payload.
         }
         Ok(Some(dispatch(&agent, payload, &[], kernel).await))
     }

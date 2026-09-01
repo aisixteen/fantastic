@@ -271,12 +271,18 @@ public struct TextFileBundle: AgentBundle {
             "patch_grammar": .string(
                 "one or more blocks: `<<<<<<< SEARCH` / <old lines> / `=======` / "
                     + "<new lines> / `>>>>>>> REPLACE`; each SEARCH must match its "
-                    + "document EXACTLY ONCE; the patch rides as RAW bytes (real newlines, "
-                    + "nothing escaped — use send_binary with `bytes` LAST). `patch` is a "
+                    + "document EXACTLY ONCE. `patch` is a "
                     + "TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file "
                     + "rides the array; the blob holds every edit's hunks concatenated in "
                     + "`edits` order, split by the per-edit `hunks` count; any failure "
                     + "anywhere writes nothing"),
+            "compose": .string(
+                "every content-carrying verb (`write`, `patch`, `append`) takes its "
+                    + "document in `bytes` — send it with `send_binary` in the FENCED "
+                    + "form: the call's JSON stays small with `\"bytes\":\"@body\"`, and "
+                    + "the document rides VERBATIM between two column-0 marker lines "
+                    + "inside the same tool_call — `*** Begin Bytes`, the content (real "
+                    + "newlines, real quotes, nothing escaped), `*** End Bytes`"),
             "verbs": .object([
                 "reflect": .string("no args — identity, verb guide, and the wired default surface."),
                 "boot": .string("no args — no-op; this agent holds no state to hydrate."),
@@ -733,13 +739,20 @@ public struct TextFileBundle: AgentBundle {
             return .object(["error": .string("no agent \(agentId)")])
         }
         let verb = payload["type"].asString ?? ""
-        // The byte verbs carry RAW BYTES — binary channel only (mirrors the
-        // file_bridge redirect for its stream verbs).
+        // The byte verbs carry RAW BYTES — binary channel, OR the text courtesy
+        // (py-canonical, 2026-09-01): a str `bytes` in the payload IS the
+        // document, utf-8. ai_core encodes for the MODEL; a spawned program's
+        // ctrl-fd wire is JSON (no bytes type), so the str form is its one path.
         if verb == "write" || verb == "patch" || verb == "append" {
+            if let text = payload["bytes"].asString {
+                return await dispatch(
+                    agent: agent, payload: payload, blob: Data(text.utf8), kernel: kernel)
+            }
             return .object([
                 "error": .string(
                     "\(verb) carries raw bytes — call it on the binary channel "
-                        + "(send_binary), not text send")
+                        + "(send_binary), or pass the document as a str in `bytes` "
+                        + "(utf-8-encoded for you)")
             ])
         }
         return await dispatch(agent: agent, payload: payload, blob: Data(), kernel: kernel)

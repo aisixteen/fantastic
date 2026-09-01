@@ -131,6 +131,13 @@ def authorize_call(
     accepts a privileged verb; the gate passes `enforce_privileged=False` there.
     """
     grant = grant or {}
+    if not isinstance(grant, dict):
+        # A malformed grant (a bare "*" string reached a record before write-time
+        # validation existed) is DENY, never a crash: on 2026-09-01 a str grant
+        # raised `.items()` out of the gate mid-serve and a correctly-opened web
+        # leg answered 500. The gate judges what is there; refusing shape is the
+        # writer's job.
+        return Decision(False)
     kids = holder_children or frozenset()
     # Privileged verbs lose wildcard cover UNLESS the other end is the holder
     # itself (acting on your own subtree is baseline, not escalation) — egress only.

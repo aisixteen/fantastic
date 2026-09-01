@@ -490,21 +490,21 @@ them instead, or `null` to discard it. Text outside the tag is your message to w
 asked. Interpret instructions literally — act on what is asked, not on inferred
 intent. Keep prose brief: the work happens in calls, not in explanation.
 
-## Writing file contents — `send_binary`
-A stream sink like `write_stream` wants raw BYTES, but a `send` payload is JSON and
-JSON has no bytes type. So when a payload field IS a file's contents — source you are
-writing — use `send_binary`. It is `send`, one self-contained call, with ONE special
-rule: the `bytes` field is read RAW and must be the LAST field. Put the program there
-LITERALLY — do NOT escape anything, no `\\n`, no `\\"`; write real newlines and real
-quotes. Everything from `"bytes":"` to the final `"` before the closing braces is
-taken verbatim as the file's bytes:
-<tool_call>{"name":"send_binary","arguments":{"target_id":"<store id>","payload":{"type":"write_stream","path":"main.py","truncate":true,"bytes":"def main():
-    print("hi")   # real newlines, real quotes — nothing escaped
-"}}}</tool_call>
-`bytes` LAST, written raw — that is the whole trick, and it is why a large program
-never breaks the call. The metadata around it (`target_id`, `path`, `truncate`) is
-ordinary JSON. Everything else is `send` — `reply_to`, `id`, `timeout`, `retries` —
-but put those BEFORE `payload`: nothing may come after the program but closing braces.
+## Sending verbatim content — `send_binary`
+When a payload field's VALUE is a body of text you are authoring (source, a document,
+a patch), a JSON string breaks on escaping — use `send_binary` with the FENCED form:
+keep the JSON small and complete, put `"@body"` where that value goes, and write the
+body OUTSIDE the JSON between two marker lines, still inside the same tool_call:
+<tool_call>{"name":"send_binary","arguments":{"target_id":"<id>","payload":{…,"bytes":"@body"}}}
+*** Begin Bytes
+<the body, verbatim — real newlines, real quotes, nothing escaped>
+*** End Bytes
+</tool_call>
+Both markers start at column 0. Everything between them rides VERBATIM — no escaping,
+any content, any size; nothing to quote, balance or count. The JSON line above them
+is ordinary and small (`target_id`, `reply_to`, `id`, `timeout`, `retries` live
+there). Which verbs take a body, and in which field, is each agent's own story —
+reflect the agent to learn its composition; `into` names a field other than `bytes`.
 
 A `<tool_call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
 thinking. The envelope is parsed out of everything you emit and dispatched the
@@ -1041,6 +1041,35 @@ async def _route_reply(
         if call.get("name") == "send_binary" and isinstance(payload, dict):
             field = str(args.get("into") or "bytes")
             val = payload.get(field)
+            # A LITERAL "@body" is the fence placeholder with NO fenced block —
+            # valid JSON, so it parses and would be WRITTEN AS THE FILE (measured
+            # 2026-09-01, gym go/bowling + go/connect: `illegal character '@'`).
+            # Refuse loud instead of dispatching the placeholder as content.
+            if val == "@body":
+                if reply_to:
+                    units.append(
+                        (
+                            reply_to,
+                            target,
+                            payload.get("type", "?"),
+                            None,
+                            json.dumps(
+                                {
+                                    "error": (
+                                        "send_binary NOT dispatched: `bytes` is the "
+                                        'literal placeholder "@body" but no fenced '
+                                        "block followed. Re-send the SAME call with "
+                                        "the program between column-0 marker lines "
+                                        "inside the same <tool_call>: the JSON line, "
+                                        "then `*** Begin Bytes`, the program verbatim, "
+                                        "then `*** End Bytes`."
+                                    ),
+                                    "target": target,
+                                }
+                            ),
+                        )
+                    )
+                continue
             if isinstance(val, str):
                 payload[field] = val.encode("utf-8")
         # The model's own `timeout` overrides the layer default; the kernel
@@ -1107,7 +1136,11 @@ async def _route_reply(
         # A question turn is the OTHER legitimate silent end (ask + stop; the
         # human's answer resumes the chain) — nudging it would stomp the wait.
         asked = bool(re.search(r'"type"\s*:\s*"question"', text or ""))
-        if chained and not asked and not incoming.startswith("[no call was dispatched]"):
+        if (
+            chained
+            and not asked
+            and not incoming.startswith("[no call was dispatched]")
+        ):
             _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
             return
     if calls:

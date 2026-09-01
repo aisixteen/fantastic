@@ -86,10 +86,15 @@ let CHANNEL_CLOSE = "<tool_call|>"
 // not re-quote the body and retry.
 let JSON_HINT =
     "Your program broke its own JSON envelope. Do NOT debug the escaping — "
-    + "switch to the unbreakable form: re-send the SAME call as `send_binary` "
-    + "with the program in `bytes` written RAW, as the LAST field — real "
-    + #"newlines, real quotes, nothing escaped; everything from `"bytes":"` "#
-    + #"to the final `"` before the closing braces is taken verbatim."#
+    + "switch to the unbreakable FENCED form: keep the call's JSON small and "
+    + #"complete with "@body" where the contents go, then write the program "#
+    + "verbatim between two column-0 marker lines, still inside the same "
+    + "<tool_call>:\n"
+    + #"{"name":"send_binary","arguments":{"target_id":"<id>","payload":"#
+    + #"{…,"bytes":"@body"}}}"#
+    + "\n*** Begin Bytes\n"
+    + "<the program, verbatim — real newlines, real quotes, nothing escaped>\n"
+    + "*** End Bytes"
 
 // The `<|tool_call>` body is NOT JSON, so the advice above would be actively
 // misleading there — it was, on 2026-08-06, when a single-quoted channel call was

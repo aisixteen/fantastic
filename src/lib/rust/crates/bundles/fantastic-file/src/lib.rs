@@ -632,7 +632,7 @@ fn reflect_reply(agent_id: &AgentId, root: &Path, readonly: bool, hidden: &[Stri
             "rename": "args: old_path:str (req), new_path:str (req).",
             "mkdir": "args: path:str (req).",
             "read_stream": "BINARY channel. args: path:str (req), offset:int=0, length:int=65536. Reply body = one raw chunk.",
-            "write_stream": "BINARY channel. args: path:str (req), offset:int? (default append), truncate:bool=false; request body = one raw chunk.",
+            "write_stream": "BINARY channel. args: path:str (req), offset:int? (default append), truncate:bool=false; request body = one raw chunk (a model composes it via send_binary's fenced form).",
             "pump": "args: source:str? + source_path:str (req) + sink:str? + sink_path:str? + chunk:int=65536. Server-side SOURCE→SINK copy.",
         }
     })

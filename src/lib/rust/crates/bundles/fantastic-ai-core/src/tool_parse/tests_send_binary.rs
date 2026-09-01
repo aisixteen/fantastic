@@ -125,3 +125,69 @@ fn escaped_json_send_binary_decodes_its_escapes() {
     assert!(b.contains('\n') && !b.contains("\\n"), "{b:?}");
     assert!(b.starts_with("<<<<<<< SEARCH\nport = 8080"));
 }
+
+// ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────────
+// Ported from python `test_send_binary.py` (fence tests, 2026-09-01).
+
+/// The gym's killer case: quote-heavy rust with apostrophes and braces —
+/// verbatim through the fence, no escaping, no skeleton to balance.
+#[test]
+fn fenced_program_rides_verbatim() {
+    let prog = "use std::collections::HashMap;\n\nfn f() { let c = '\\''; }\n";
+    let text = format!(
+        "<tool_call>{{\"name\":\"send_binary\",\"arguments\":{{\"target_id\":\"editor\",\
+         \"payload\":{{\"type\":\"write\",\"path\":\"src/lib.rs\",\"truncate\":true,\
+         \"bytes\":\"@body\"}}}}}}\n*** Begin Bytes\n{prog}*** End Bytes\n</tool_call>"
+    );
+    let calls = extract_tool_calls(&text);
+    assert_eq!(calls.len(), 1);
+    let p = &calls[0].arguments["payload"];
+    assert_eq!(p["bytes"], json!(prog));
+    assert_eq!(p["path"], json!("src/lib.rs"));
+}
+
+/// No placeholder written — the program still has exactly one home.
+#[test]
+fn fenced_without_placeholder_lands_in_payload_bytes() {
+    let text = "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\",\
+                \"payload\":{\"type\":\"write\",\"path\":\"m.py\"}}}\n\
+                *** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>";
+    let calls = extract_tool_calls(text);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].arguments["payload"]["bytes"], json!("x = 1\n"));
+}
+
+/// A missing close marker takes the rest of the block — the envelope's own
+/// closing tag already bounds it (same stance as the unterminated envelope).
+#[test]
+fn fenced_missing_close_marker_takes_rest_of_block() {
+    let text = "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\",\
+                \"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}}\n\
+                *** Begin Bytes\na = 1\nb = 2\n</tool_call>";
+    let calls = extract_tool_calls(text);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].arguments["payload"]["bytes"],
+        json!("a = 1\nb = 2\n")
+    );
+}
+
+/// Broken metadata above the fence earns the fence-grammar error, never the
+/// strict-JSON red herring about the program's newlines.
+#[test]
+fn fenced_bad_metadata_gets_a_fence_error() {
+    use crate::tool_parse::malformed_calls;
+    // one closing brace SHORT — the measured live failure class
+    let text = "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\",\
+                \"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}\n\
+                *** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>";
+    assert!(extract_tool_calls(text).is_empty());
+    let errs = malformed_calls(text);
+    assert_eq!(errs.len(), 1);
+    let error = &errs[0].error;
+    assert!(
+        error.contains("Begin Bytes"),
+        "advice names the fence grammar: {error}"
+    );
+    assert!(!error.contains("control character"));
+}
