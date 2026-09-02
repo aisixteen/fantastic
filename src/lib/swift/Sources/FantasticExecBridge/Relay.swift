@@ -1,4 +1,5 @@
 #if os(macOS)
+    import FantasticIoBridge
     import FantasticJSON
     import FantasticKernel
     import Foundation
@@ -6,10 +7,13 @@
     /// The PARENT half of the child's control socket — the swift port of python's
     /// `_serve_ctrl`, op for op.
     ///
-    /// Wire: `[4-byte BE length | JSON body]`, both directions. Deliberately NOT
-    /// `FantasticIoBridge`'s codec, which is a THREE-part binary frame
-    /// (`[len | JSON header | raw body]`) for carrying bytes without base64. They share
-    /// only the length prefix; wiring them together would be a silent interop bug.
+    /// Wire: `[4-byte BE length | kind | rest]`, both directions. Kind `T`: a JSON
+    /// envelope. Kind `B`: `FantasticIoBridge.Codec`'s binary frame
+    /// (`[len | JSON header | raw body]`, the header's `_binary_path` naming where the
+    /// body belongs) — how a `read_stream` chunk or a `write_stream` payload crosses
+    /// the fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the
+    /// byte. A kind-B `send` rides the kernel's binary channel (`sendWithBinary`), a
+    /// kind-T one the text channel — the same split a WS transport makes.
     ///
     /// | child → parent | parent → child |
     /// |---|---|
@@ -99,20 +103,51 @@
                 guard buf.count >= 4 + len else { return }
                 let body = buf.subdata(in: 4..<(4 + len))
                 buf.removeSubrange(0..<(4 + len))
-                if let v = try? JSON.parse(body) { handle(v) }
+                if let f = Self.unframe(body) { handle(f.env, f.body) }
                 // A malformed body skips the frame, never the connection.
             }
         }
 
+        /// Decode one child frame → (envelope, raw body). Kind `T`: JSON, empty body.
+        /// Kind `B`: the io_bridge binary frame — the envelope keeps `_binary_path`
+        /// (null there) and the body rides alongside, since `JSON` cannot hold bytes.
+        /// `nil` for a malformed frame or an unknown kind.
+        private static func unframe(_ body: Data) -> (env: JSON, body: Data)? {
+            guard let kind = body.first else { return nil }
+            let rest = Data(body.dropFirst())
+            switch kind {
+            case UInt8(ascii: "T"):
+                guard let v = try? JSON.parse(rest) else { return nil }
+                return (v, Data())
+            case UInt8(ascii: "B"):
+                guard let f = Codec.decodeBinaryFrame(rest) else { return nil }
+                return (f.header, f.body)
+            default:
+                return nil
+            }
+        }
+
+        /// Frame one JSON value onto the socket (kind `T`).
         private func push(_ v: JSON) {
-            let body = Data(v.serialize().utf8)
+            writeFrame(kind: UInt8(ascii: "T"), Data(v.serialize().utf8))
+        }
+
+        /// Frame a header + raw body onto the socket (kind `B`). `header` already
+        /// carries `_binary_path` with null at that spot.
+        private func pushBinary(header: JSON, body: Data) {
+            writeFrame(kind: UInt8(ascii: "B"), Codec.encodeBinaryFrame(header: header, body: body))
+        }
+
+        /// Write one frame: `[4-byte BE len | kind | rest]`.
+        private func writeFrame(kind: UInt8, _ rest: Data) {
             var frame = Data()
-            let n = UInt32(body.count)
+            let n = UInt32(rest.count + 1)
             frame.append(contentsOf: [
                 UInt8((n >> 24) & 0xFF), UInt8((n >> 16) & 0xFF),
                 UInt8((n >> 8) & 0xFF), UInt8(n & 0xFF),
             ])
-            frame.append(body)
+            frame.append(kind)
+            frame.append(rest)
             frame.withUnsafeBytes { raw in
                 var off = 0
                 while off < raw.count {
@@ -125,17 +160,45 @@
 
         // MARK: - ops
 
-        private func handle(_ m: JSON) {
+        private func handle(_ m: JSON, _ blob: Data) {
             guard let op = m["op"].asString, let kernel else { return }
             switch op {
             case "send":
                 let target = m["target"].asString ?? ""
                 let payload = m["payload"]
                 let rid = m["rid"]
+                // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
+                // is the BINARY channel — `sendWithBinary`, as a WS binary frame would
+                // be. Kind T is the text channel. `JSON` cannot carry bytes, so this
+                // split is the only way a program's `write_stream` payload reaches the
+                // bundle, or a `read_stream` chunk comes back.
+                let binary = m["_binary_path"] != .null
                 Task { [weak self] in
-                    let data = await kernel.send([Item(AgentId(target), payload)])[0].result
+                    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS. The relay runs off
+                    // a DispatchQueue, outside the handler's task-local sender, so
+                    // this forwarded send used to carry NO sender — the OPERATOR,
+                    // ungated (measured live 2026-09-01: a spawned program reached
+                    // any agent). Python's relay inherits the handler's context and
+                    // is gated as the owner; re-enter that identity here for parity.
+                    let owner = self?.owner
+                    let (data, body): (JSON, Data) = await KernelTaskLocals.$currentSender
+                        .withValue(owner) {
+                            if binary {
+                                return await kernel.sendWithBinary(AgentId(target), payload, blob)
+                            }
+                            return (await kernel.send([Item(AgentId(target), payload)])[0].result, Data())
+                        }
                     self?.queue.async {
-                        self?.push(.object(["op": .string("reply"), "rid": rid, "data": data]))
+                        var env: JSON = .object(["op": .string("reply"), "rid": rid, "data": data])
+                        if body.isEmpty {
+                            self?.push(env)
+                        } else {
+                            // A `read_stream` chunk: the reply body rides raw at
+                            // `data.bytes` (python's reply dict holds it there natively).
+                            env["data"]["bytes"] = .null
+                            env["_binary_path"] = .string("data.bytes")
+                            self?.pushBinary(header: env, body: body)
+                        }
                     }
                 }
             case "emit":

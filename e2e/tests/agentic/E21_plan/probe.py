@@ -36,8 +36,12 @@ from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
-sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
-                            if (d / ".e2e-root").exists())))
+sys.path.insert(
+    0,
+    str(
+        next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
+    ),
+)
 from backends import backend as _resolve_backend
 from helpers import (
     Limits,
@@ -55,7 +59,6 @@ NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
 # llama-server serves exactly ONE model (whichever -hf/-m loaded) and ignores the
 # request's `model` field, so BACKEND=llamacpp sends no model at all — there is
 # nothing to name and nothing to get wrong.
-LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1")
 CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # IDLE is silence-since-the-last-pass, so it must exceed ONE turn's wall clock, not
@@ -79,9 +82,15 @@ NO_PROGRESS = int(os.environ.get("NO_PROGRESS", "8"))
 TURN_CHARS = int(os.environ.get("TURN_CHARS", "120000"))
 TURN_SECONDS = float(os.environ.get("TURN_SECONDS", "600"))
 # Every bound in ONE object, carrying this probe's own tuned values.
-LIM = Limits(idle=IDLE, max_turns=MAX_TURNS, no_progress=NO_PROGRESS,
-             turn_chars=TURN_CHARS, turn_seconds=TURN_SECONDS, ctx=CTX,
-             show_system=os.environ.get("SHOW_SYSTEM") == "1")
+LIM = Limits(
+    idle=IDLE,
+    max_turns=MAX_TURNS,
+    no_progress=NO_PROGRESS,
+    turn_chars=TURN_CHARS,
+    turn_seconds=TURN_SECONDS,
+    ctx=CTX,
+    show_system=os.environ.get("SHOW_SYSTEM") == "1",
+)
 W = 78
 
 # Three tiers, three REAL things this kernel actually holds. Only the descriptions
@@ -178,29 +187,49 @@ async def main():
     root, core, close_kernel = await open_kernel(
         "plan_",
         reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "probe_web"]
-              + ["assets", "transcripts", "secrets"],
+        + ["assets", "transcripts", "secrets"],
     )
 
     # The store the loader persists through — open, and NOT one of the three guards.
-    store = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
-            "id": "kernel_store",
-            "root": ".fantastic",
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI (call gate)
-        }}]))[0]["result"]
+    store = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "kernel_store",
+                        "root": ".fantastic",
+                        "ingress_rule": "allow_all_ingress",
+                        "callable_by": {
+                            "ai": "*"
+                        },  # two-sided deny-all: accept the AI (call gate)
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # A scratch store, present and unmentioned — somewhere a plan COULD live.
-    mem = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "text_file.tools",
-            "id": "yaml_store",
-            "target_id": store["id"],
-            "can_call": {store["id"]: "*"},
-            "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
-        }}]))[0]["result"]
+    mem = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "text_file.tools",
+                        "id": "yaml_store",
+                        "target_id": store["id"],
+                        "can_call": {store["id"]: "*"},
+                        "callable_by": {"ai": "*"},  # two-sided deny-all: accept the AI
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # The three guards. All start SEALED (no ingress_rule) — the kernel's default. The
     # CALL gate (callable_by) and the IO gate (ingress_rule) are SEPARATE axes: the
     # guards accept the AI on the call gate here, so what the AI must still DISCOVER +
@@ -213,22 +242,31 @@ async def main():
             # wrong reason; a fresh random string coming back over HTTP proves the
             # bytes actually crossed the real surface.
             fh.write(body + f"canary: {CANARY[gid]}\n")
-        (await root.send([{"target": root.id, "payload": {
-                "type": "create_agent",
-                "parent_id": root.id,
-                "handler_module": "file_bridge.tools",
-                "id": gid,
-                "root": gid,
-                "description": desc,
-                # All three start IDENTICALLY closed to the browser: the AI is
-                # admitted, `web` is not, and the io leg is sealed. Seeding a `web`
-                # grant here instead made `assets` LOOK wired while its io leg was
-                # shut, and the model read the call gate, saw the grant and reported
-                # "the public surface keeps working" without a byte ever moving
-                # (measured 2026-08-21). Identical start = the descriptions are the
-                # only signal, which is the whole design of this probe.
-                "callable_by": {"ai": "*"},
-            }}]))[0]["result"]
+        (
+            await root.send(
+                [
+                    {
+                        "target": root.id,
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": root.id,
+                            "handler_module": "file_bridge.tools",
+                            "id": gid,
+                            "root": gid,
+                            "description": desc,
+                            # All three start IDENTICALLY closed to the browser: the AI is
+                            # admitted, `web` is not, and the io leg is sealed. Seeding a `web`
+                            # grant here instead made `assets` LOOK wired while its io leg was
+                            # shut, and the model read the call gate, saw the grant and reported
+                            # "the public surface keeps working" without a byte ever moving
+                            # (measured 2026-08-21). Identical start = the descriptions are the
+                            # only signal, which is the whole design of this probe.
+                            "callable_by": {"ai": "*"},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
 
     # A way to CHECK. Sealed like every other io leg and named nowhere in the task,
     # so using it is a decision the model makes. With `web` live on a known port
@@ -237,39 +275,57 @@ async def main():
     # cannot. Measured 2026-08-21, three runs: the model set `ingress_rule`, wrote
     # "VERIFIED post-write" after re-reading the RECORD, and shipped a guard the
     # browser still 404s on. Verifying configuration is not verifying effect.
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "exec_bridge.tools",
-            "id": "shell",
-            # the COMMAND runner's gate: regexes over the full line
-            "allowed": [f"{sys.executable} -c .*"],
-            "callable_by": {"ai": "*"},
-        }}]))[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "exec_bridge.tools",
+                        "id": "shell",
+                        # the COMMAND runner's gate: regexes over the full line
+                        "allowed": [f"{sys.executable} -c .*"],
+                        "callable_by": {"ai": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
     # The outside consumer, seeded by the OPERATOR and pre-granted. It is not a
     # puzzle piece: the model is never asked to discover or wire it. It exists so
     # the acceptor can ask the only question that matters — "would a browser get
     # these bytes?" — at the surface a browser actually uses.
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "web.tools",
-            # NOT `web`. On a spawned kernel the driver seeds its own `web`
-            # agent as the REST + event face; creating a second one under that
-            # id collided with it, and the teardown below then DELETED the
-            # driver's transport out from under the run.
-            "id": "probe_web",
-            # A REAL listener. Without a port the agent refuses to boot, and the
-            # model correctly reads `running=false, port=null` as "nothing is
-            # reachable anyway" — which makes the whole exposure question moot and
-            # is not the question under test (measured 2026-08-21).
-            "port": PORT,
-            "description": "HTTP host. Serves GET /<agent_id>/file/<path> to any "
-            "browser client on the network; reads through the served agent.",
-            "can_call": {gid: ["read_stream"] for gid, *_ in GUARDS},
-            "callable_by": {"ai": ["reflect"]},  # inspectable, not drivable
-        }}]))[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "web.tools",
+                        # NOT `web`. On a spawned kernel the driver seeds its own `web`
+                        # agent as the REST + event face; creating a second one under that
+                        # id collided with it, and the teardown below then DELETED the
+                        # driver's transport out from under the run.
+                        "id": "probe_web",
+                        # A REAL listener. Without a port the agent refuses to boot, and the
+                        # model correctly reads `running=false, port=null` as "nothing is
+                        # reachable anyway" — which makes the whole exposure question moot and
+                        # is not the question under test (measured 2026-08-21).
+                        "port": PORT,
+                        "description": "HTTP host. Serves GET /<agent_id>/file/<path> to any "
+                        "browser client on the network; reads through the served agent.",
+                        "can_call": {gid: ["read_stream"] for gid, *_ in GUARDS},
+                        "callable_by": {"ai": ["reflect"]},  # inspectable, not drivable
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
 
     # Deny-all: the operator grants the AI its toolset. It gets full operator power
     # over the root (privileged verbs listed explicitly — `"*"` never covers them)
@@ -287,7 +343,9 @@ async def main():
         store["id"]: "*",
     }
     CAN_CALL["shell"] = "*"
-    CAN_CALL["probe_web"] = ["reflect"]  # the client surface is discoverable, not callable
+    CAN_CALL["probe_web"] = [
+        "reflect"
+    ]  # the client surface is discoverable, not callable
     for _gid, *_rest in GUARDS:
         CAN_CALL[_gid] = "*"
     # The sidecar is asked for as a CAPABILITY, never by backend name — a probe
@@ -308,14 +366,17 @@ async def main():
     # that chose to stop, and installs the shared reader. Seven probes each carried
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
-    conn = await connect(root, core, BK, can_call=CAN_CALL, limits=LIM,
-                         watch=watch, record=EXTRA)
+    conn = await connect(
+        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA
+    )
     aid, spy = conn.id, conn.proxy
     runaway, transcript = conn.trips, spy.transcript
 
     print("═" * (W + 4))
-    print(f"  {MODEL}   ·   plan / change / report"
-          + ("   ·   tool_use route (/cc)" if TOOL_USE else ""))
+    print(
+        f"  {MODEL}   ·   plan / change / report"
+        + ("   ·   tool_use route (/cc)" if TOOL_USE else "")
+    )
     print("  3 sealed file_bridge agents, real contents; descriptions say who may read")
     print("═" * (W + 4))
 
@@ -325,7 +386,16 @@ async def main():
     # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
     # the run scored as "0 chars, read the docs: False" — a harness failure wearing
     # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
-    _first = (await root.send([{"target": aid, "payload": {"type": "send", "text": TASK, "client_id": "probe"}}]))[0]["result"]
+    _first = (
+        await root.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": TASK, "client_id": "probe"},
+                }
+            ]
+        )
+    )[0]["result"]
     if isinstance(_first, dict) and _first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {_first['error']} **\n", flush=True)
 
@@ -355,7 +425,16 @@ async def main():
         # waited 240s to say so. If nothing of the AI's is in flight and no new
         # turn has landed, the chain is over — say so now rather than waiting.
         if idle >= 30 and spy.n == last and last > 0:
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             _live = [
                 t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
             ]
@@ -382,9 +461,27 @@ async def main():
             # already names its own agent. Addressed to `aid` (non-root) they came
             # back `not_here` and the harness, which discards the reply, cancelled
             # NOTHING: the cap only broke its own loop while the turns kept running.
-            _t = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _t = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             for t in [x for x in _t if x.get("agent") == aid and x.get("verb") != "ps"]:
-                _c = (await root.send([{"target": "kernel", "payload": {"type": "cancel", "task_id": t["id"]}}]))[0]["result"]
+                _c = (
+                    await root.send(
+                        [
+                            {
+                                "target": "kernel",
+                                "payload": {"type": "cancel", "task_id": t["id"]},
+                            }
+                        ]
+                    )
+                )[0]["result"]
                 if isinstance(_c, dict) and _c.get("error"):
                     print(f"  ** CANCEL REFUSED: {_c['error']} **", flush=True)
             break
@@ -395,9 +492,21 @@ async def main():
         if idle >= IDLE:
             # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
             # 2026-08-25: the loop walked away mid-generation and scored FAIL).
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
-                print(f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on", flush=True)
+                print(
+                    f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on",
+                    flush=True,
+                )
                 idle = 0.0
     if capped:
         print(f"\n  ** CAPPED: {capped} · {spy.n} passes **")
@@ -418,7 +527,11 @@ async def main():
     print(f"  passes: {spy.n}{f' (CAPPED: {capped})' if capped else ''}\n")
     ok = True
     for gid, _, should_open, (fname, _body) in GUARDS:
-        rec = (await root.send([{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]))[0]["result"]
+        rec = (
+            await root.send(
+                [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+            )
+        )[0]["result"]
 
         def find(node):
             if node["id"] == gid:
@@ -443,7 +556,8 @@ async def main():
 
     # ─── SOFT: observed, never asserted ───
     docs = sorted(
-        f for f in os.listdir(".")
+        f
+        for f in os.listdir(".")
         if os.path.isfile(f) and not f.endswith((".py", ".jsonl")) and ".tmp." not in f
     )
     last_turn = transcript[-1] if transcript else ""
@@ -452,10 +566,23 @@ async def main():
     )
     print(f"\n  observed — memory documents after the run : {docs[:8]}")
     print(f"  observed — planning language in run : {plan_words}/4 markers")
-    print(f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<tool_call>')}")
+    print(
+        f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<tool_call>')}"
+    )
     print(f"  observed — final turn length        : {len(last_turn)} chars")
-    (await root.send([{"target": root.id, "payload": {"type": "delete_agent", "id": "probe_web"}}]))[0]["result"]  # drain uvicorn
-    print(f"\n  RESULT: {'✅ correct posture on all three' if ok else '❌ wrong posture'}")
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {"type": "delete_agent", "id": "probe_web"},
+                }
+            ]
+        )
+    )[0]["result"]  # drain uvicorn
+    print(
+        f"\n  RESULT: {'✅ correct posture on all three' if ok else '❌ wrong posture'}"
+    )
     verdict(ok)
 
 

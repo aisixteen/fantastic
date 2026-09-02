@@ -4,10 +4,13 @@
 //! `_serve_ctrl`, op for op, so a program authored against either kernel behaves the
 //! same.
 //!
-//! Wire: `[4-byte BE length | JSON body]`, both directions. That is deliberately NOT
-//! `fantastic_io_bridge::codec`, which is a THREE-part binary frame
-//! (`[len | JSON header | raw body]`) for carrying bytes without base64. The two share
-//! only the length prefix; wiring them together would be a silent interop bug.
+//! Wire: `[4-byte BE length | kind | rest]`, both directions. Kind `T`: a JSON
+//! envelope. Kind `B`: `fantastic_io_bridge::codec`'s binary frame
+//! (`[len | JSON header | raw body]`, the header's `_binary_path` naming where the
+//! body belongs) — how a `read_stream` chunk or a `write_stream` payload crosses the
+//! fd raw, never base64. A raw fd has no WS text/binary frame kind, hence the byte.
+//! A kind-B `send` rides the kernel's binary channel (`send_with_binary`), a kind-T
+//! one the text channel — the same split a WS transport makes.
 //!
 //! | child → parent | parent → child |
 //! |---|---|
@@ -19,6 +22,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame, set_path};
 use fantastic_kernel::call_guard::guard_call_stack;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
@@ -51,15 +55,41 @@ struct Sub {
     drain: JoinHandle<()>,
 }
 
-/// Frame one JSON value onto the socket.
-async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
-    let body = serde_json::to_vec(v).unwrap_or_else(|_| b"{}".to_vec());
-    let mut buf = Vec::with_capacity(4 + body.len());
-    buf.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    buf.extend_from_slice(&body);
+/// Write one frame: `[4-byte BE len | kind | rest]`.
+async fn write_frame(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, kind: u8, rest: &[u8]) {
+    let mut buf = Vec::with_capacity(5 + rest.len());
+    buf.extend_from_slice(&((rest.len() + 1) as u32).to_be_bytes());
+    buf.push(kind);
+    buf.extend_from_slice(rest);
     let mut g = wr.lock().await;
     let _ = g.write_all(&buf).await;
     let _ = g.flush().await;
+}
+
+/// Frame one JSON value onto the socket (kind `T`).
+async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
+    let body = serde_json::to_vec(v).unwrap_or_else(|_| b"{}".to_vec());
+    write_frame(wr, b'T', &body).await;
+}
+
+/// Frame a header + raw body onto the socket (kind `B`). `header` already carries
+/// `_binary_path` with null at that spot.
+async fn push_binary(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, header: &Value, body: &[u8]) {
+    write_frame(wr, b'B', &encode_binary_frame(header, body)).await;
+}
+
+/// Decode one child frame → `(envelope, raw body)`. Kind `T`: JSON, empty body. Kind
+/// `B`: the io_bridge binary frame — the envelope keeps `_binary_path` (null there)
+/// and the body rides alongside, since a `Value` cannot hold bytes. `None` for a
+/// malformed frame or an unknown kind.
+fn unframe(body: &[u8]) -> Option<(Value, Vec<u8>)> {
+    match body.first()? {
+        b'T' => serde_json::from_slice::<Value>(&body[1..])
+            .ok()
+            .map(|v| (v, Vec::new())),
+        b'B' => decode_binary_frame(&body[1..]).ok(),
+        _ => None,
+    }
 }
 
 /// Make a proxy inbox, then watch through it.
@@ -117,7 +147,7 @@ pub async fn serve(
         if rd.read_exact(&mut body).await.is_err() {
             break;
         }
-        let Ok(m) = serde_json::from_slice::<Value>(&body) else {
+        let Some((m, blob)) = unframe(&body) else {
             continue; // malformed body → skip the frame, never the connection
         };
 
@@ -129,21 +159,38 @@ pub async fn serve(
                 // `Kernel::send` does not, so the guard is explicit here. Behavioural
                 // parity, not code parity. On refusal the reply still goes out, or the
                 // child's blocking `q.get()` would hang forever.
-                let data = match guard_call_stack(owner.as_str(), &mut payload) {
-                    Err(e) => json!({ "error": e }),
-                    Ok(()) => {
+                // A kind-B frame (bytes alongside, `_binary_path` = `payload.<field>`)
+                // is the BINARY channel — `send_with_binary`, as a WS binary frame
+                // would be. Kind T is the text channel. Rust's `Value` cannot carry
+                // bytes, so this split is the only way a program's `write_stream`
+                // payload reaches the bundle, or a `read_stream` chunk comes back.
+                let binary = m.get("_binary_path").is_some();
+                let (data, body) = match guard_call_stack(owner.as_str(), &mut payload) {
+                    Err(e) => (json!({ "error": e }), Vec::new()),
+                    Ok(()) if binary => {
+                        kernel
+                            .send_with_binary(&AgentId::from(target), payload, blob)
+                            .await
+                    }
+                    Ok(()) => (
                         kernel
                             .send(vec![Item::new(AgentId::from(target), payload)])
                             .await
                             .remove(0)
-                            .result
-                    }
+                            .result,
+                        Vec::new(),
+                    ),
                 };
-                push(
-                    &wr,
-                    &json!({"op": "reply", "rid": m.get("rid"), "data": data}),
-                )
-                .await;
+                let mut env = json!({"op": "reply", "rid": m.get("rid"), "data": data});
+                if body.is_empty() {
+                    push(&wr, &env).await;
+                } else {
+                    // A `read_stream` chunk: the reply body rides raw at `data.bytes`
+                    // (python's reply dict holds it there natively).
+                    set_path(&mut env, "data.bytes", Value::Null);
+                    env["_binary_path"] = json!("data.bytes");
+                    push_binary(&wr, &env, &body).await;
+                }
             }
             Some("emit") => {
                 let tgt = m

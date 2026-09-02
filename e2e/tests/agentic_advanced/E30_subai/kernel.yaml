@@ -21,6 +21,7 @@ roster:
     brain: '*'
     rest: '*'
     web: '*'
+    totals: '*'
 - id: readings
   handler_module: file_bridge.tools
   parent_id: <root.id>

@@ -32,7 +32,7 @@ INTERP = sys.executable
 DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
 
 # A minimal fantastic-aware worker: raw control-fd reader, blocks for ONE inbox
-# frame ([4-byte BE len | json], op=='inbox'), writes its `token`, exits.
+# frame ([4-byte BE len | kind 'T' | json], op=='inbox'), writes its `token`, exits.
 WORKER = '''
 import os, json, struct, socket
 _s = socket.socket(fileno=int(os.environ["FANTASTIC_CTRL_FD"]))
@@ -44,7 +44,7 @@ def _rn(n):
             return None
         b += c
     return b
-_sub = b'{"op":"onmessage"}'
+_sub = b'T{"op":"onmessage"}'
 _s.sendall(struct.pack(">I", len(_sub)) + _sub)
 while True:
     h = _rn(4)
@@ -54,7 +54,9 @@ while True:
     body = _rn(n)
     if body is None:
         break
-    m = json.loads(body.decode("utf-8"))
+    if body[:1] != b"T":
+        continue
+    m = json.loads(body[1:].decode("utf-8"))
     if m.get("op") == "inbox":
         tok = (m.get("payload") or {}).get("token")
         if tok:

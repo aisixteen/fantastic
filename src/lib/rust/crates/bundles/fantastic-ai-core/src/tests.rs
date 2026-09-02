@@ -1696,7 +1696,8 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         &backend,
         vec![
             pass(call_envelope(&raiser, json!({"type": "reflect"}), None)),
-            pass("saw it"),
+            // ends the chain explicitly — a silent turn is now nudged again
+            pass("saw it <tool_call>{\"name\":\"done\"}</tool_call>"),
         ],
         Duration::ZERO,
     );
@@ -1724,7 +1725,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         &backend,
         vec![
             pass(call_envelope(&raiser, json!({"type": "panic"}), None)),
-            pass("saw the panic too"),
+            pass("saw the panic too <tool_call>{\"name\":\"done\"}</tool_call>"),
         ],
         Duration::ZERO,
     );
@@ -1862,7 +1863,9 @@ async fn routing_is_its_own_ps_row() {
 // Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_silent_chain_turn_is_nudged_once_then_ends() {
+async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
+    // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
+    // second silent turn used to end the chain silently.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ndg").await;
     let s = script(
@@ -1875,6 +1878,8 @@ async fn a_silent_chain_turn_is_nudged_once_then_ends() {
             )),
             pass("thinking out loud, no envelope"),
             pass("still just prose"),
+            pass("ok, finishing"),
+            pass("<tool_call>{\"name\":\"done\"}</tool_call>"),
         ],
         Duration::ZERO,
     );
@@ -1886,16 +1891,57 @@ async fn a_silent_chain_turn_is_nudged_once_then_ends() {
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 3).await, "the nudge never arrived");
-    // request(n) is the WHOLE messages json; the nudge must be its final turn.
-    assert!(
-        s.request(2)
-            .contains("[no call was dispatched] Your turn emitted no"),
-        "pass 3 must be the nudge"
-    );
-    // the nudged-silent turn ended the chain — no fourth pass
+    assert!(until_passes(&s, 5).await, "the chain did not reach done");
+    for n in [2, 3, 4] {
+        assert!(
+            s.request(n)
+                .contains("[no call was dispatched] Your turn emitted no"),
+            "pass {} must be a nudge",
+            n + 1
+        );
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 3);
+    assert_eq!(s.passes_served(), 5, "done ended it; nothing reminds after");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nudge_limit_bounds_a_never_calling_chain() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "ndl").await;
+    // record meta `nudge_limit` = 2 consecutive silent turns
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": backend.as_str(), "nudge_limit": 2}),
+        )])
+        .await;
+    let s = script(
+        &backend,
+        vec![
+            pass(call_envelope(
+                "kernel",
+                json!({"type": "reflect", "tree": "none"}),
+                None,
+            )),
+            pass("prose 1"),
+            pass("prose 2"),
+            pass("prose 3"),
+            pass("prose 4 — would be nudged without the limit"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 4).await, "two nudges must arrive");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // call, silent→nudge 1, silent→nudge 2, silent→over the limit: 4, never 5
+    assert_eq!(s.passes_served(), 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

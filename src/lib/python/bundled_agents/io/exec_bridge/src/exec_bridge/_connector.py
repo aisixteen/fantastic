@@ -3,10 +3,13 @@
 `CONNECTOR_SRC` is a plain-Python IIFE-ish preamble (no imports leaking past
 `_`-names) prepended to a job's code. It wraps the inherited control fd, spawns a
 daemon reader thread to demux inbound frames (reply/event/inbox), and exposes a
-kernel-mirroring `kernel` global. Frames are length-prefixed JSON (4-byte BE
-length + body) — same convention as the WS binary frame header. If the channel
-can't be set up, `kernel` degrades to a stub that raises a clear error, so a job
-that doesn't touch the kernel still runs.
+kernel-mirroring `kernel` global. Frames are `[4-byte BE length | kind | rest]`:
+kind `T` = a UTF-8 JSON envelope; kind `B` = the io_bridge binary frame
+`[4-byte BE H | H-byte JSON header | raw body]`, the header naming in
+`_binary_path` where the body belongs (a `read_stream` chunk, a `write_stream`
+payload) — raw bytes ride the fd raw, never base64. If the channel can't be set
+up, `kernel` degrades to a stub that raises a clear error, so a job that
+doesn't touch the kernel still runs.
 
 Kept as a string in its own module (imported by `tools.py`, read once at import)
 rather than inline — it is exec'd in the JOB subprocess, never imported here.
@@ -15,7 +18,7 @@ rather than inline — it is exec'd in the JOB subprocess, never imported here.
 CONNECTOR_SRC = r"""# --- fantastic kernel connector (injected; talks to spawner over control fd) ---
 try:
     import os as _o, json as _j, socket as _sk, struct as _st, threading as _th, queue as _q
-    import sys as _sys
+    import sys as _sys, copy as _cp
     _ctrl = _sk.socket(fileno=int(_o.environ["FANTASTIC_CTRL_FD"]))
     _wlock = _th.Lock()
     _pending = {}
@@ -23,10 +26,58 @@ try:
     _inbox_cbs = set()
     _rid = [0]
 
+    def _bytes_at(obj, prefix=""):
+        # The first bytes value, depth-first: (dotted path, value) or None.
+        if isinstance(obj, (bytes, bytearray)):
+            return (prefix, bytes(obj))
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                r = _bytes_at(v, prefix + "." + k if prefix else k)
+                if r is not None:
+                    return r
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                r = _bytes_at(v, prefix + "." + str(i) if prefix else str(i))
+                if r is not None:
+                    return r
+        return None
+
+    def _set_at(obj, path, value):
+        parts = path.split(".")
+        for p in parts[:-1]:
+            obj = obj[int(p)] if isinstance(obj, list) else obj[p]
+        if isinstance(obj, list):
+            obj[int(parts[-1])] = value
+        else:
+            obj[parts[-1]] = value
+
     def _frame(obj):
-        d = _j.dumps(obj).encode("utf-8")
+        # Kind T: JSON. Kind B: a payload carrying bytes rides as the io_bridge
+        # binary frame — header with null at `_binary_path`, raw body after it.
+        hit = _bytes_at(obj)
+        if hit is None:
+            d = b"T" + _j.dumps(obj).encode("utf-8")
+        else:
+            path, body = hit
+            head = _cp.deepcopy(obj)
+            _set_at(head, path, None)
+            head["_binary_path"] = path
+            h = _j.dumps(head).encode("utf-8")
+            d = b"B" + _st.pack(">I", len(h)) + h + body
         with _wlock:
             _ctrl.sendall(_st.pack(">I", len(d)) + d)
+
+    def _unframe(body):
+        if body[:1] == b"B":
+            (hl,) = _st.unpack(">I", body[1:5])
+            m = _j.loads(body[5:5 + hl].decode("utf-8"))
+            p = m.pop("_binary_path", None)
+            if p is not None:
+                _set_at(m, p, body[5 + hl:])
+            return m
+        if body[:1] == b"T":
+            return _j.loads(body[1:].decode("utf-8"))
+        raise ValueError("unknown frame kind")
 
     def _recvn(n):
         b = b""
@@ -72,14 +123,14 @@ try:
             if body is None:
                 break
             try:
-                m = _j.loads(body.decode("utf-8"))
+                m = _unframe(body)
             except Exception:
                 continue
             op = m.get("op")
             if op == "reply":
                 q = _pending.pop(m.get("rid"), None)
                 if q is not None:
-                    q.put(m.get("data"))
+                    q.put(m)
             elif op == "event":
                 _dispatch_q.put((list(_watchers.get(m.get("src"), ())), m.get("payload")))
             elif op == "inbox":
@@ -115,7 +166,15 @@ try:
             q = _q.Queue()
             _pending[r] = q
             _frame({"op": "send", "rid": r, "target": target, "payload": payload or {}})
-            return q.get()
+            m = q.get()
+            if "error" in m:
+                # The RELAY could not deliver the reply (as opposed to the target
+                # answering with its own {error} — that is data, returned as-is).
+                # A silent None here cost a builder 50 turns (measured 2026-09-02).
+                raise RuntimeError(
+                    "fantastic: send(%r) failed in transit: %s" % (target, m["error"])
+                )
+            return m.get("data")
 
         def emit(self, payload_or_target, payload=None):
             # One-arg `emit(payload)` emits on the OWNER agent (the common form,

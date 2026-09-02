@@ -171,7 +171,7 @@ extension Kernel {
             if payload["detail"].asString == "full" {
                 obj["self_extension"] = .string(
                     "A DURABLE PROGRAM is a FILE you write plus a command that runs it — not a `code`-carrying agent. There is no `code` field: a program used to be embedded as a JSON string, which is exactly how a call gets lost to escaping. Assemble these THREE pieces and you have built something that persists and re-runs, with no `code` field at all:\n"
-                        + "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. Use the file leg's STREAM verbs — {type:'write_stream', path, bytes, truncate:true} to write, {type:'read_stream', path, offset} to read, one raw chunk at a time — or `send_binary` (same call, but write the program RAW in the LAST `bytes` field, nothing escaped). That is the only byte path; the string read/write verbs are gone.\n"
+                        + "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON string. Use the file leg's STREAM verbs — {type:'write_stream', path, bytes, truncate:true} to write, {type:'read_stream', path, offset} to read, one raw chunk at a time — or `send_binary` (same call, but write the program VERBATIM in a fenced block: `\"bytes\":\"@body\"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). That is the only byte path; the string read/write verbs are gone.\n"
                         + "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect it, read its `allowed` regexes, then send {type:'start', command:'<path>', args:[...]}; poll {type:'status'}. It runs commands, not inline programs.\n"
                         + "3. RE-RUN: the file is durable on disk, so the SAME `start` command run again later re-executes the SAME program against whatever the inputs hold THEN — that is how a thing 'keeps itself up to date'.\n"
                         + "A WORKER THAT COMPUTES is an `exec_bridge.tools` agent (the EXISTING command runner) that owns a program file — you never author a new handler_module (you cannot add modules to the catalog and do not need to). 'A specialist with child workers' = a parent agent whose children are exec_bridge runners, each with its own program file.\n"
@@ -187,7 +187,7 @@ extension Kernel {
                 )
             } else {
                 obj["self_extension"] = .string(
-                    "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE it to a file: {write_stream, path, bytes, truncate:true}, or `send_binary` (program RAW in the LAST `bytes` field, nothing escaped). (2) RUN it on the COMMAND runner: `start {command, args}`, gated by its `allowed` regexes (reflect it). (3) Re-run the same command to keep it current. A COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new handler_module (you can't add modules). To wire your worker to a SIBLING (`totals`): grant it `can_call:{totals}` AND `update_agent id='totals'` to add it to `totals.callable_by` — you may open ANY agent's ingress if you hold `update_agent`; only editing your OWN grants is refused. Read {type:'reflect', readme:'self-extension'} for the fd wire + detail."
+                    "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE it to a file: {write_stream, path, bytes, truncate:true}, or `send_binary` (program VERBATIM in a fenced block: `\"bytes\":\"@body\"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). (2) RUN it on the COMMAND runner: `start {command, args}`, gated by its `allowed` regexes (reflect it). (3) Re-run the same command to keep it current. A COMPUTE worker is an `exec_bridge.tools` agent + a program file — NOT a new handler_module (you can't add modules). To wire your worker to a SIBLING (`totals`): grant it `can_call:{totals}` AND `update_agent id='totals'` to add it to `totals.callable_by` — you may open ANY agent's ingress if you hold `update_agent`; only editing your OWN grants is refused. Read {type:'reflect', readme:'self-extension'} — send it to 'kernel' (the manual lives on the ROOT, not on any other agent) — for the fd wire + detail."
                 )
             }
         }
@@ -703,11 +703,36 @@ extension Kernel {
                         parentId: sParent, childIds: sKids, loaderId: loaderId
                     ).allowed
                     if !ok {
+                        // Name the TRUE reason. A target that is not an agent at all
+                        // is almost always one created in the SAME batch — items
+                        // launch concurrently, so it is not there yet when this gate
+                        // runs. "you don't hold it" sent a builder into a 382-second
+                        // deliberation (measured 2026-09-02).
+                        if agent(AgentId(key)) == nil {
+                            return .object([
+                                "error": .string(
+                                    "\(sender.value) cannot delegate '\(v)' on \(key): no such "
+                                        + "agent — calls of one turn run concurrently, so an "
+                                        + "agent created in this batch does not exist yet; "
+                                        + "create in one turn, grant in the next"),
+                                "reason": .string("unauthorized"), "side": .string("delegation"),
+                                "missing": .string(key),
+                                "hint": .string(fromAbove),
+                            ])
+                        }
+                        // The target exists but the granter does not hold it. Say WHY
+                        // in one line — the usual cause is a specialist created under
+                        // the root instead of under the granter, and "you don't hold
+                        // it" hid that for twenty turns (2026-09-02).
+                        let pid = agent(AgentId(key))?.parentId?.value
                         return .object([
                             "error": .string(
-                                "\(sender.value) cannot delegate '\(v)' on \(key) — you may "
-                                    + "only confer can_call you already hold"),
+                                "\(sender.value) cannot delegate '\(v)' on \(key): \(key) is not "
+                                    + "your child (its parent is \(pid ?? "none")) and not in your "
+                                    + "can_call — you may only confer can_call you already hold; "
+                                    + "create the agents you will wire as YOUR children"),
                             "reason": .string("unauthorized"), "side": .string("delegation"),
+                            "parent": pid.map { .string($0) } ?? .null,
                             "hint": .string(fromAbove),
                         ])
                     }

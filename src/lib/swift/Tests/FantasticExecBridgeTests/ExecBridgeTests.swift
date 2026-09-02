@@ -432,6 +432,39 @@
                 "connector send did not round-trip: \(done?.serialize() ?? "none")")
         }
 
+        /// `connector` hands over the reference wire client — a model pastes it instead
+        /// of re-deriving the socket framing (measured 2026-09-01: ten turns lost).
+        @Test func theConnectorVerbHandsOverTheReferenceClient() async {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "dur_conn")
+            let r = await kernel.send([Item(a, .object(["type": .string("connector")]))])[0].result
+            let src = r["source"].asString ?? ""
+            #expect(src.contains("FANTASTIC_CTRL_FD") && src.contains("def send("), "\(r.serialize())")
+            #expect(r["howto"].asString?.contains("can_call") == true)
+        }
+
+        /// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
+        /// gated by its grants — a sibling the runner holds no `can_call` for refuses
+        /// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
+        /// operator, ungated — and a spawned program could reach any agent
+        /// (measured live: E30 subai, "privileged as the root").
+        @Test func theProgramIsGatedAsItsRunnerNotAsTheOperator() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "dur_gate")
+            _ = await createPy(kernel, id: "sib")  // sibling: no edge from `a`
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(
+                py,
+                "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n"
+                    + "r2 = kernel.send('core', {'type': 'reflect'})\nprint('CORE', r2.get('id'))",
+                connector: true))])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("SIB unauthorized"), "the sibling must refuse: \(out)")
+            #expect(out.contains("CORE core"), "the parent (baseline edge) still answers: \(out)")
+        }
+
         /// No running job ⇒ a loud error, never a silent drop.
         @Test func anUnknownVerbWithoutAJobErrorsLoudly() async throws {
             let kernel = freshKernel()
@@ -465,6 +498,71 @@
             #expect(text.contains("sock True"), "control fd is not a socket: \(text)")
             #expect(text.contains("self owner_agent"), "self_id not delivered: \(text)")
             #expect(text.contains("env hello"), "per-call env not delivered: \(text)")
+        }
+    }
+
+    // MARK: - raw bytes on the wire
+
+    /// A stream-speaking stand-in for `file_bridge`: `write_stream` keeps the blob,
+    /// `read_stream` hands it back as the reply BODY — the binary channel only.
+    private final class BlobStore: AgentBundle, @unchecked Sendable {
+        let name = "blob"
+        private let lock = NSLock()
+        private var blob = Data()
+        func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+            .object(["error": .string("text channel: \(payload["type"].asString ?? "")")])
+        }
+        func handleBinary(
+            agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        ) async throws -> (JSON?, Data) {
+            switch header["type"].asString ?? "" {
+            case "write_stream":
+                lock.withLock { self.blob = blob }
+                return (.object(["written": .integer(Int64(blob.count))]), Data())
+            case "read_stream":
+                let b = lock.withLock { self.blob }
+                return (.object(["eof": .bool(true), "size": .integer(Int64(b.count))]), b)
+            default:
+                return (.object(["error": .string(header["type"].asString ?? "")]), Data())
+            }
+        }
+    }
+
+    @Suite("exec_bridge wire bytes")
+    struct ExecBridgeWireBytesTests {
+
+        /// `write_stream`/`read_stream` from a program: the bytes ride the fd as the
+        /// io_bridge binary frame (kind B) both ways — never base64, never None
+        /// (measured 2026-09-02, E30 subai:python: a `read_stream` reply was
+        /// unserializable on this wire and the worker got None).
+        @Test func aStreamChunkCrossesTheWireRaw() async throws {
+            guard let py = py3() else { return }
+            let registry = BundleRegistry()
+            registry.register("exec_bridge.tools", ExecBridgeBundle())
+            registry.register("blob.tools", BlobStore())
+            let kernel = Kernel(storage: .inMemory, bundles: registry)
+            let root = Agent(id: AgentId("core"), handlerModule: nil, parentId: nil)
+            kernel.register(root)
+            kernel.setRoot(root)
+            let a = await createPy(
+                kernel, id: "dur_bytes", meta: ["can_call": .object(["blob": .string("*")])])
+            _ = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("create_agent"), "parent_id": .string("core"),
+                "id": .string("blob"), "handler_module": .string("blob.tools"),
+                "callable_by": .object([a.value: .string("*")]),
+            ]))])[0].result
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(
+                py,
+                "raw = bytes(range(256)) * 3\n"
+                    + "w = kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n"
+                    + "r = kernel.send('blob', {'type': 'read_stream', 'path': 'b', 'bytes': b''})\n"
+                    + "print('WROTE', w['written'], 'READ', len(r['bytes']), r['bytes'] == raw, "
+                    + "type(r['bytes']).__name__)",
+                connector: true))])[0].result
+            let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
+            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            #expect(out.contains("WROTE 768 READ 768 True bytes"), "bytes did not round-trip raw: \(out)")
         }
     }
 

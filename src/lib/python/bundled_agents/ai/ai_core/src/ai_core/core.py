@@ -744,7 +744,9 @@ _DISTILLED = re.compile(r"\bSEEN\b", re.I)
 _REFLECT_NUDGE = (
     "\n[this body is TRANSIENT — after your next message it is replaced by a stub. "
     "Open that message with the facts you will need, one compact line per agent:\n"
-    "SEEN <id> — <what it is for>; verbs: <the ones you intend to use>]"
+    "SEEN <id> — <what it is for>; verbs: <the ones you intend to use>. "
+    "One reflect per agent is complete — reflecting it again yields nothing new; "
+    "the next useful call is an action.]"
 )
 
 
@@ -900,6 +902,13 @@ def without_thinking(text: str) -> str:
 # Why once: the nudge is itself a chain turn, so a second consecutive no-call
 # turn arrives with the nudge as its incoming text — and is NOT nudged again.
 # No counter, no per-chain state.
+#: Consecutive silent chain turns the reminder tolerates before the chain is
+#: let go (record meta `nudge_limit` overrides). A safety bound on an unattended
+#: kernel, not a budget — the harness's max_turns is the outer backstop.
+_NUDGE_LIMIT = 24
+#: (kernel instance, agent id, client id) → consecutive silent chain turns so far.
+_silent: dict[tuple[int, str, str], int] = {}
+
 _NO_CALL_NUDGE = (
     "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
     "NOTHING ran — a call decided in thinking does not execute unless the "
@@ -1126,23 +1135,41 @@ async def _route_reply(
                 kernel, dest, "\n\n".join(groups[dest]), client_id, system_prompt
             )
     if done_called:
+        _silent.pop((id(kernel), self_id, client_id), None)
         return  # explicitly finished — nothing more runs, nothing reminds
     if not calls and not units:
-        # A CHAIN turn (its incoming text was a delivered reply) that dispatched
-        # nothing gets ONE reminder — see `_NO_CALL_NUDGE`. A chat turn is not a
-        # chain (prose to a person is the product), and a turn already answering
-        # the nudge is never nudged again.
-        chained = isinstance(incoming, str) and incoming.startswith("[reply to ")
+        # A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
+        # dispatched nothing is REMINDED AGAIN — the model is queried until it
+        # emits a call, `done`, or a question. Until 2026-09-01 the reminder fired
+        # ONCE and a second silent turn ended the chain silently; a planning-heavy
+        # model (E30 subai) wrote prose for two turns and the run read as
+        # finished with the task untouched. A chat turn is not a chain (prose to
+        # a person is the product). Bounded by `nudge_limit` on the record
+        # (default 24 consecutive silent turns) so an unattended kernel cannot
+        # spin forever on a model that never calls; the harness's max_turns is
+        # the outer backstop.
+        chained = isinstance(incoming, str) and (
+            incoming.startswith("[reply to ")
+            or incoming.startswith("[no call was dispatched]")
+        )
         # A question turn is the OTHER legitimate silent end (ask + stop; the
         # human's answer resumes the chain) — nudging it would stomp the wait.
         asked = bool(re.search(r'"type"\s*:\s*"question"', text or ""))
-        if (
-            chained
-            and not asked
-            and not incoming.startswith("[no call was dispatched]")
-        ):
-            _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
+        if chained and not asked:
+            # Scoped to the KERNEL instance, not the process: two kernels in one
+            # process (the test suite, an app embedding several) may carry the
+            # same agent/client ids.
+            key = (id(kernel), self_id, client_id)
+            streak = _silent.get(key, 0) + 1
+            _silent[key] = streak
+            rec = kernel.get(self_id) or {}
+            limit = int(rec.get("nudge_limit") or _NUDGE_LIMIT)
+            if streak <= limit:
+                _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
+            else:
+                _silent.pop(key, None)
             return
+    _silent.pop((id(kernel), self_id, client_id), None)
     if calls:
         return
     if send_to is not None:

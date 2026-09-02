@@ -197,6 +197,15 @@ def _llamacpp() -> Backend:
         # sending a field the server would discard.
         model=os.environ.get("FANTASTIC_AI_MODEL", ""),
         supports_think=True,
+        # The server's URL is the operator's to name. It used to default to a
+        # loopback host here — the one guessed endpoint left in the plug that
+        # says "NO DEFAULTS THAT REACH A NETWORK" (removed 2026-09-02).
+        requires=(
+            (
+                "FANTASTIC_LLAMACPP_ENDPOINT",
+                "the llama-server /v1 URL; no host is guessed",
+            ),
+        ),
         # `think` is a llama.cpp-specific record field and is NOT defaulted here.
         # gemma-4 gates thinking behind `enable_thinking` (its chat template
         # defaults it false) and emits `<|channel>thought` rather than `<think>`
@@ -204,8 +213,10 @@ def _llamacpp() -> Backend:
         # text present, `content` EMPTY. Which way that should go is the operator's
         # call per model, so it is sent only when `THINK` is explicitly set.
         extra={
-            "endpoint": os.environ.get(
-                "FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1"
+            **(
+                {"endpoint": ep}
+                if (ep := os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT"))
+                else {}
             ),
             **({"think": os.environ["THINK"] == "1"} if "THINK" in os.environ else {}),
         },
@@ -228,9 +239,7 @@ def backend(name: str | None = None) -> Backend:
     """
     name = name or os.environ.get("BACKEND")
     if not name:
-        raise SystemExit(
-            "BACKEND is unset. Name it: " + " | ".join(sorted(REGISTRY))
-        )
+        raise SystemExit("BACKEND is unset. Name it: " + " | ".join(sorted(REGISTRY)))
     if name not in REGISTRY:
         raise SystemExit(
             f"unknown BACKEND {name!r}; known: {' | '.join(sorted(REGISTRY))}"

@@ -30,12 +30,25 @@ def _call(payload: dict) -> str:
 
     return (
         "<tool_call>"
-        + json.dumps({"name": "send", "arguments": {"target_id": "echo", "payload": payload, "reply_to": "self"}})
+        + json.dumps(
+            {
+                "name": "send",
+                "arguments": {
+                    "target_id": "echo",
+                    "payload": payload,
+                    "reply_to": "self",
+                },
+            }
+        )
         + "</tool_call>"
     )
 
 
 DONE = '<tool_call>{"name":"done"}</tool_call>'
+
+
+def _done() -> str:
+    return '<tool_call>{"name":"done"}</tool_call>'
 
 
 async def _settle(fp, want, timeout=5.0):
@@ -48,34 +61,73 @@ async def _settle(fp, want, timeout=5.0):
     await asyncio.sleep(0.15)
 
 
-async def test_silent_chain_turn_is_nudged_once_then_ends(seeded_kernel):
+async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel):
+    """The model is QUERIED UNTIL IT CALLS. A second silent turn used to end the
+    chain silently (measured 2026-09-01, E30 subai: two prose turns and the run
+    read as finished with the task untouched)."""
     fp = _Script(
         [
             _call({"type": "reflect"}),  # turn 1: a real call → chain
-            "thinking out loud, no envelope",  # turn 2: SILENT chain turn → nudge
-            "still just prose",  # turn 3: answers the nudge silently → chain ends
+            "thinking out loud, no envelope",  # turn 2: SILENT → nudge
+            "still just prose",  # turn 3: STILL silent → nudged AGAIN
+            "ok, finishing",  # turn 4: silent → nudged again
+            _done(),  # turn 5: done → chain ends
         ]
     )
     aid = "nd_a"
     seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768,
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
         can_call={"cli": "*"},
     )
     core._providers[aid] = fp
     try:
-        # target `cli` exists in seeded_kernel and accepts $parent? cli is root's
-        # child; grant both ends explicitly instead: reflect the KERNEL (always
-        # reachable — kernel verbs are the root's).
         fp.turns[0] = _call({"type": "reflect"}).replace('"echo"', '"kernel"')
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "go"}}]
         )
-        await _settle(fp, 3)
-        assert fp.calls == 3, fp.incoming
-        assert fp.incoming[2].startswith("[no call was dispatched]"), fp.incoming[2]
-        # the nudged-silent turn ended the chain — no fourth pass
+        await _settle(fp, 5)
+        assert fp.calls == 5, fp.incoming
+        for i in (2, 3, 4):
+            assert fp.incoming[i].startswith("[no call was dispatched]"), fp.incoming[i]
         await asyncio.sleep(0.3)
-        assert fp.calls == 3
+        assert fp.calls == 5  # done ended it; nothing reminds after done
+    finally:
+        core._providers.pop(aid, None)
+
+
+async def test_nudge_limit_bounds_a_never_calling_chain(seeded_kernel):
+    """`nudge_limit` on the record caps consecutive silent turns — an unattended
+    kernel must not spin forever on a model that never calls."""
+    fp = _Script(
+        [
+            _call({"type": "reflect"}),
+            "prose 1",
+            "prose 2",
+            "prose 3",
+            "prose 4 — would be nudged without the limit",
+        ]
+    )
+    aid = "nd_lim"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        can_call={"cli": "*"},
+        nudge_limit=2,
+    )
+    core._providers[aid] = fp
+    try:
+        fp.turns[0] = _call({"type": "reflect"}).replace('"echo"', '"kernel"')
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 4)
+        await asyncio.sleep(0.3)
+        # turn 1 call, turn 2 silent → nudge 1, turn 3 silent → nudge 2, turn 4
+        # silent → over the limit, chain let go: exactly 4 passes, never 5.
+        assert fp.calls == 4, fp.incoming
     finally:
         core._providers.pop(aid, None)
 
@@ -99,9 +151,9 @@ async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
         await _settle(fp, 2)
         await asyncio.sleep(0.3)
         assert fp.calls == 2, fp.incoming
-        assert not any(
-            m.startswith("[no call was dispatched]") for m in fp.incoming
-        ), fp.incoming
+        assert not any(m.startswith("[no call was dispatched]") for m in fp.incoming), (
+            fp.incoming
+        )
     finally:
         core._providers.pop(aid, None)
 
@@ -144,8 +196,8 @@ async def test_a_question_turn_is_never_nudged(seeded_kernel):
         await _settle(fp, 2)
         await asyncio.sleep(0.4)
         assert fp.calls == 2, fp.incoming
-        assert not any(
-            m.startswith("[no call was dispatched]") for m in fp.incoming
-        ), fp.incoming
+        assert not any(m.startswith("[no call was dispatched]") for m in fp.incoming), (
+            fp.incoming
+        )
     finally:
         core._providers.pop(aid, None)

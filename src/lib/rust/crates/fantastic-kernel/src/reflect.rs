@@ -285,7 +285,7 @@ pub fn apply_reflect_flags(
                  string. Use the file leg's STREAM verbs — {type:'write_stream', path, \
                  bytes, truncate:true} to write, {type:'read_stream', path, offset} to \
                  read, one raw chunk at a time — or `send_binary` (same call, but write \
-                 the program RAW in the LAST `bytes` field, nothing escaped). That is \
+                 the program VERBATIM in a fenced block: `\"bytes\":\"@body\"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). That is \
                  the only byte path; the string read/write verbs are gone.\n\
                  2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect \
                  it, read its `allowed` regexes, then send \
@@ -311,7 +311,10 @@ pub fn apply_reflect_flags(
                  — read frames until one carries your `rid`, skipping event/inbox frames.\n\
                  COMPOSE the agents you were given for everything else (`list_agents`, \
                  reflect each, send). CREATE/DELETE plain agents (create_agent with a \
-                 handler_module and grants, delete_agent) work as before."
+                 handler_module and grants, delete_agent) work as before. Read \
+                 {type:'reflect', readme:'self-extension'} — send it to 'kernel' (the \
+                 manual lives on the ROOT, not on any other agent) — for the fd wire + \
+                 detail."
             ),
         );
         // Always-on doc-tree FRAME: `readmes` (the top-level token-annotated topic

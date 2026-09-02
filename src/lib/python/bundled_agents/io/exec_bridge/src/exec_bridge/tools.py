@@ -52,7 +52,7 @@ import struct
 import time
 
 from exec_bridge import proc
-from io_bridge import describe as _describe
+from io_bridge import decode_frame, describe as _describe, encode_frame
 from io_bridge import gate_inbound, resolve_ingress
 from kernel._refusal import NOT_FOUND, TRANSPORT_ERROR, bad, refusal
 
@@ -177,12 +177,28 @@ def _inbox_framer(payload):
     return {"op": "inbox", "payload": payload}
 
 
+def _unframe(body: bytes) -> dict:
+    """Decode one child frame: kind T = JSON; kind B = the io_bridge binary frame with
+    the raw body restored at `_binary_path` (a `write_stream` payload's bytes)."""
+    kind = body[:1]
+    if kind == b"B":
+        return decode_frame(body[1:])
+    if kind == b"T":
+        return json.loads(body[1:].decode("utf-8"))
+    raise ValueError(f"unknown frame kind {kind!r}")
+
+
 async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
     """Relay a job's wire calls into the real kernel (child → spawner → kernel).
 
     `send` = request/reply; `emit` = one-way; `watch`/`onmessage` subscribe via
     kernel.watch into a per-sub PROXY INBOX this relay drains, pushing each event down
     the control fd. Ends when the child closes the socket (job exit).
+
+    Wire: `[4-byte BE length | kind | rest]`, both directions — kind T a JSON
+    envelope, kind B the shared io_bridge binary frame for a payload or reply that
+    carries raw bytes (`read_stream`/`write_stream`). A bytes reply used to be
+    unserializable here and reached the program as None (measured 2026-09-02).
 
     The proxy ids carry this bundle's prefix (`_xb…`): two spawner bundles in one kernel
     must not collide on a synthetic inbox id."""
@@ -199,12 +215,12 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
     self_sub: list = [None]  # on_message: (proxy_id, drain_task) | None
 
     def push(obj):
-        try:
-            data = json.dumps(obj).encode("utf-8")
-        except (TypeError, ValueError):
-            data = json.dumps(
-                {"op": obj.get("op"), "rid": obj.get("rid"), "error": "unserializable"}
-            ).encode("utf-8")
+        # `[4-byte BE len | kind | rest]` — kind T = JSON, kind B = the io_bridge
+        # binary frame (a reply carrying a `read_stream` chunk, a watched event with
+        # bytes). Raw bytes ride the fd raw, never base64 — the same codec every
+        # other transport uses.
+        wire, binary = encode_frame(obj)
+        data = (b"B" if binary else b"T") + wire
         writer.write(struct.pack(">I", len(data)) + data)
 
     async def drain(proxy_id, framer):
@@ -230,9 +246,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             except (asyncio.IncompleteReadError, ConnectionError, OSError):
                 break
             try:
-                m = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                continue
+                m = _unframe(body)
+            except (UnicodeDecodeError, ValueError, KeyError, IndexError, struct.error):
+                continue  # a malformed frame skips the frame, never the connection
             op = m.get("op")
             if op == "send":
                 # A target fault settles as a failed outcome (error in result);
@@ -564,7 +580,10 @@ async def _reflect(id, payload, kernel):
         "wire": (
             "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, "
             "a BIDIRECTIONAL socket (one end of a socketpair): frame is "
-            "[4-byte BE length | JSON], both directions. To CALL another agent: "
+            "[4-byte BE length | kind | rest], both directions — kind T: a JSON "
+            "envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the "
+            "header's `_binary_path` naming where the body belongs (a stream chunk "
+            "rides raw, never base64). To CALL another agent: "
             "write {op:'send', rid:<your id>, target, payload} and the reply COMES "
             "BACK on the SAME fd as {op:'reply', rid:<same id>, data} — the fd is "
             "not one-way. It is not inline, though: read frames in a loop and skip "
@@ -598,17 +617,40 @@ async def _boot(id, payload, kernel):
     return None
 
 
+async def _connector(id, payload, kernel):
+    """no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."""
+    from ._connector import CONNECTOR_SRC
+
+    return {
+        "source": CONNECTOR_SRC,
+        "howto": (
+            "Write `source` verbatim as the first lines of your program file, then "
+            "your code below it. It opens FANTASTIC_CTRL_FD (a socket, length-prefixed "
+            "frames; a payload carrying a bytes value rides the binary channel raw: "
+            "`write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` "
+            "and gets its chunk back raw in the reply's `bytes`) and "
+            "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
+            "not deliver), "
+            "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
+            "`kernel.self_id`, `kernel.args`. Your sends carry THIS runner's identity "
+            "and grants (its `can_call`; a target must list this runner in "
+            "`callable_by`). Do not rewrite the wire by hand."
+        ),
+    }
+
+
 VERBS = {
     "start": _start,
     "status": _status,
     "stop": _stop,
     "interrupt": _interrupt,
     "clear": _clear,
+    "connector": _connector,
     "reflect": _reflect,
     "boot": _boot,
 }
 
-UNGATED = {"reflect"}  # discovery must work on a sealed bridge
+UNGATED = {"reflect", "connector"}  # discovery must work on a sealed bridge
 
 
 def validate_meta(meta: dict, record: dict) -> str | None:

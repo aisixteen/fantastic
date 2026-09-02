@@ -17,7 +17,8 @@
 // relay / fd passing / task-table rows / mail contract are all language-blind.
 //
 // The bridge publishes a WIRE — the inherited `FANTASTIC_CTRL_FD`, framed
-// `[4-byte BE length | JSON]` — and nothing else. A program that wants a `kernel`
+// `[4-byte BE length | kind | rest]` (T = JSON, B = raw bytes) — and nothing else. A
+// program that wants a `kernel`
 // global includes the reference wire client (`CONNECTOR_SRC`) in its own source;
 // the bridge prepends nothing. `start` spawns in the BACKGROUND and returns
 // `{job_id, status:"running"}` at once, streaming `progress`/`job_done`; `boot`
@@ -149,9 +150,13 @@
             a final job_done. NOT a code runner: there is no `code`, no \
             `interpreter`, no shim — a program is a FILE some process put on disk, \
             run as `command` + `args` like anything else. The bridge publishes a \
-            WIRE: the inherited FANTASTIC_CTRL_FD, framed [4-byte BE length | JSON]. \
+            WIRE: the inherited FANTASTIC_CTRL_FD, framed [4-byte BE length | kind | rest] \
+            (T = JSON, B = raw bytes). \
             A program that wants a `kernel` global includes the reference wire \
-            client in its own source; the bridge prepends nothing. Any verb this \
+            client in its own source; the bridge prepends nothing — send this agent \
+            {type:'connector'} and paste the reply's `source` verbatim at the top of \
+            your program. A program's sends carry THIS runner's identity and grants \
+            (its can_call; a target must list the runner in callable_by). Any verb this \
             bundle does not own is MAIL for the running program ({queued:true}); \
             jobs are kernel TASKS (ps/cancel reap the real OS process). Not a \
             sandbox: an allowlisted command is a NAMED command with all of that \
@@ -201,6 +206,26 @@
                 return statusReply(agentId, payload: payload)
             case "clear":
                 return clearReply(agentId, payload: payload)
+            case "connector":
+                // The reference wire client SOURCE — a model pastes it at the top of
+                // its program instead of re-deriving the socket framing (measured
+                // 2026-09-01, E30 subai: ten turns lost before the first working
+                // frame). Ungated like reflect.
+                return .object([
+                    "source": .string(CONNECTOR_SRC),
+                    "howto": .string(
+                        "Write `source` verbatim as the first lines of your program file, then "
+                            + "your code below it. It opens FANTASTIC_CTRL_FD (a socket, length-prefixed "
+                            + "frames; a payload carrying a bytes value rides the binary channel raw: "
+                            + "`write_stream` puts its chunk in `bytes`, `read_stream` passes `bytes: b''` "
+                            + "and gets its chunk back raw in the reply's `bytes`) and "
+                            + "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
+                            + "not deliver), "
+                            + "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
+                            + "`kernel.self_id`, `kernel.args`. Your sends carry THIS runner's identity "
+                            + "and grants (its `can_call`; a target must list this runner in "
+                            + "`callable_by`). Do not rewrite the wire by hand."),
+                ])
             case "interrupt":
                 return .object(["interrupted": .integer(Int64(signalJobs(agentId, payload, SIGINT)))])
             case "stop":
@@ -587,6 +612,8 @@
                         "args: job_id:str?. One job (with full output) or all of this agent's jobs."
                     ),
                     "clear": .string("args: job_id:str?. Drop finished rows of this agent."),
+                    "connector": .string(
+                        "no args — the reference wire client SOURCE (python): paste `source` verbatim at the top of your program and it gets a `kernel` global (send/emit/watch/on_message); returns {source, howto}."),
                     "interrupt": .string(
                         "args: job_id:str?. SIGINT in-flight subprocesses. Returns {interrupted:int}."
                     ),
@@ -605,7 +632,7 @@
                         "{type:'job_done', job_id, exit_code, ok, stdout, stderr}"),
                 ]),
                 "wire": .string(
-                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | JSON], both directions. To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
+                    "A program speaks the kernel over the inherited fd FANTASTIC_CTRL_FD, a BIDIRECTIONAL socket (one end of a socketpair): frame is [4-byte BE length | kind | rest], both directions — kind T: a JSON envelope; kind B: [4-byte BE H | H-byte JSON header | raw body], the header's `_binary_path` naming where the body belongs (a stream chunk rides raw, never base64). To CALL another agent: write {op:'send', rid:<your id>, target, payload} and the reply COMES BACK on the SAME fd as {op:'reply', rid:<same id>, data}. ops: send/emit/reflect/watch/on_message. A command that never reads the fd runs exactly like any OS process."
                 ),
                 "inbox": .string(
                     "Any verb NOT listed in `verbs` is MAIL for the running program, delivered to its on_message and ACKed {queued:true}. With no live job it is an error."

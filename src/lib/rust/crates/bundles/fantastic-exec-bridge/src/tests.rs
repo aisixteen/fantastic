@@ -687,3 +687,194 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
         "{r}"
     );
 }
+
+/// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
+/// gated by its grants. A sibling the runner holds no `can_call` for must refuse
+/// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
+/// operator, ungated — and a spawned program could reach any agent (measured
+/// live: E30 subai:rust, "privileged as the root").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    // a SIBLING runner under core — no edge from `a` to it (baseline only)
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "core", "id": "sib",
+                   "handler_module": "exec_bridge.tools",
+                   "ingress_rule": "allow_all_ingress"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "r = kernel.send('sib', {'type': 'reflect'})\nprint('SIB', r.get('reason'))\n\
+                 r2 = kernel.send('core', {'type': 'reflect'})\nprint('CORE', r2.get('id'))\n",
+                true,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
+        .await
+        .expect("no job_done");
+    let out = done["stdout"].as_str().unwrap();
+    assert!(
+        out.contains("SIB unauthorized"),
+        "the sibling must refuse: {done}"
+    );
+    assert!(
+        out.contains("CORE core"),
+        "the parent (baseline edge) still answers: {done}"
+    );
+}
+
+/// `connector` hands over the reference wire client — a model pastes it instead of
+/// re-deriving the socket framing (measured 2026-09-01: ten turns lost). Ungated
+/// like reflect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_connector_verb_hands_over_the_reference_client() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "connector"}))])
+        .await
+        .remove(0)
+        .result;
+    let src = r["source"].as_str().expect("source");
+    assert!(
+        src.contains("FANTASTIC_CTRL_FD") && src.contains("def send("),
+        "{r}"
+    );
+    assert!(r["howto"].as_str().unwrap().contains("can_call"));
+}
+
+/// A stream-speaking stand-in for `file_bridge`: `write_stream` keeps the blob,
+/// `read_stream` hands it back as the reply BODY — the binary channel only.
+struct BlobStore(std::sync::Mutex<Vec<u8>>);
+
+#[async_trait::async_trait]
+impl fantastic_kernel::bundle::Bundle for BlobStore {
+    fn name(&self) -> &'static str {
+        "blob"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+        Ok(Some(
+            json!({"error": format!("text channel: {}", payload["type"])}),
+        ))
+    }
+    async fn handle_binary(
+        &self,
+        _id: &AgentId,
+        header: Value,
+        blob: Vec<u8>,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(fantastic_kernel::bundle::Reply, Vec<u8>), fantastic_kernel::bundle::BundleError>
+    {
+        match header["type"].as_str() {
+            Some("write_stream") => {
+                let n = blob.len();
+                *self.0.lock().unwrap() = blob;
+                Ok((Some(json!({"written": n})), Vec::new()))
+            }
+            Some("read_stream") => {
+                let b = self.0.lock().unwrap().clone();
+                Ok((Some(json!({"eof": true, "size": b.len()})), b))
+            }
+            other => Ok((Some(json!({"error": format!("{other:?}")})), Vec::new())),
+        }
+    }
+}
+
+/// `write_stream`/`read_stream` from a program: the bytes ride the fd as the
+/// io_bridge binary frame (kind B) both ways — the program's payload bytes reach the
+/// bundle's blob, the reply body comes back raw at `bytes`. Never base64, never
+/// None (measured 2026-09-02, E30 subai:python: a `read_stream` reply was
+/// unserializable on this wire and the worker got None).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_chunk_crosses_the_wire_raw() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, ExecBridgeBundle);
+    kernel
+        .bundles
+        .register("blob.tools", BlobStore(std::sync::Mutex::new(Vec::new())));
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let a = AgentId::from(agent_id_for(&tmp).as_str());
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel", "id": a.as_str(),
+                   "handler_module": HANDLER_MODULE,
+                   "ingress_rule": "allow_all_ingress", "allowed": [".*"],
+                   "can_call": {"blob": "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "core", "id": "blob",
+                   "handler_module": "blob.tools",
+                   "callable_by": {a.as_str(): "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let mut rx = inbox(&kernel, &a);
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "raw = bytes(range(256)) * 3\n\
+                 w = kernel.send('blob', {'type': 'write_stream', 'path': 'b', 'bytes': raw})\n\
+                 r = kernel.send('blob', {'type': 'read_stream', 'path': 'b', 'bytes': b''})\n\
+                 print('WROTE', w['written'], 'READ', len(r['bytes']), r['bytes'] == raw, \
+                 type(r['bytes']).__name__)\n",
+                true,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let done = until(&mut rx, |v| v["type"] == "job_done", 25)
+        .await
+        .expect("no job_done");
+    assert!(
+        done["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("WROTE 768 READ 768 True bytes"),
+        "bytes did not round-trip raw: {done}"
+    );
+}

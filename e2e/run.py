@@ -90,13 +90,22 @@ HOST_RUNTIMES = ("python", "rust", "swift")
 
 SCENARIO_RUNNERS = {
     # ABSOLUTE path: cwd is the python tree, where `runners/` does not exist.
-    "python": {"cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
-               "cwd": "pyroot", "env": {"KERNEL": "python"}},
+    "python": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
+        "cwd": "pyroot",
+        "env": {"KERNEL": "python"},
+    },
     "js": {"cmd": ["node", "runners/inproc_js.mjs"], "cwd": "e2e"},
-    "rust": {"cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
-             "cwd": "pyroot", "env": {"KERNEL": "rust"}},
-    "swift": {"cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
-              "cwd": "pyroot", "env": {"KERNEL": "swift"}},
+    "rust": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
+        "cwd": "pyroot",
+        "env": {"KERNEL": "rust"},
+    },
+    "swift": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
+        "cwd": "pyroot",
+        "env": {"KERNEL": "swift"},
+    },
 }
 
 
@@ -113,9 +122,11 @@ def load_suite() -> list[dict]:
     # each runtime's runner. This is the cross-product that used to be four
     # copied probe files per scenario — the copies drifted, and drifted results
     # are not comparable, which is the only reason to run a scenario four times.
-    runtimes = [r.strip() for r in
-                os.environ.get("RUNTIMES", "python,js,rust,swift").split(",")
-                if r.strip()]
+    runtimes = [
+        r.strip()
+        for r in os.environ.get("RUNTIMES", "python,js,rust,swift").split(",")
+        if r.strip()
+    ]
     for sf in sorted(E2E.glob("tests/scenario/*/scenario.yaml")):
         doc = yaml.safe_load(sf.read_text()) or {}
         for rt in runtimes:
@@ -139,15 +150,23 @@ def load_suite() -> list[dict]:
             )
             sel = spec.get("select")
             args = [sel.format(id=doc["id"], camel=camel)] if sel else [doc["id"]]
-            out.append({
-                **doc, "id": f"{code}_{doc['id']}:{rt}", "group": "scenario",
-                "dir": sf.parent, "cmd": spec["cmd"], "cwd_key": spec["cwd"],
-                "extra_env": spec.get("env", {}),
-                "args": args, "runtime": rt, "costs": "turns",
-                "limits": limits,
-                "env": {**(doc.get("env") or {}), **(over.get("env") or {})},
-                "title": f"{doc.get('title','')} [{rt}]",
-            })
+            out.append(
+                {
+                    **doc,
+                    "id": f"{code}_{doc['id']}:{rt}",
+                    "group": "scenario",
+                    "dir": sf.parent,
+                    "cmd": spec["cmd"],
+                    "cwd_key": spec["cwd"],
+                    "extra_env": spec.get("env", {}),
+                    "args": args,
+                    "runtime": rt,
+                    "costs": "turns",
+                    "limits": limits,
+                    "env": {**(doc.get("env") or {}), **(over.get("env") or {})},
+                    "title": f"{doc.get('title', '')} [{rt}]",
+                }
+            )
 
     for f in sorted(E2E.glob("tests/*/*/test.yaml")):
         doc = yaml.safe_load(f.read_text()) or {}
@@ -160,20 +179,58 @@ def load_suite() -> list[dict]:
         rts = doc.get("runtimes")
         if rts:
             for rt in rts:
-                out.append({
-                    **doc, "id": f"{doc['id']}:{rt}", "dir": d,
-                    "module": d / doc.get("runner", "probe.py"),
-                    "costs": doc.get("costs", "turns"), "runtime": rt,
-                    "env": {**(doc.get("env") or {}), "RUNTIME": rt},
-                    "title": f"{doc.get('title','')} [{rt}]",
-                })
+                out.append(
+                    {
+                        **doc,
+                        "id": f"{doc['id']}:{rt}",
+                        "dir": d,
+                        "module": d / doc.get("runner", "probe.py"),
+                        "costs": doc.get("costs", "turns"),
+                        "runtime": rt,
+                        "env": {**(doc.get("env") or {}), "RUNTIME": rt},
+                        "title": f"{doc.get('title', '')} [{rt}]",
+                    }
+                )
         else:
-            out.append({**doc, "dir": d, "module": d / doc.get("runner", "probe.py"),
-                        "costs": doc.get("costs", "turns")})
+            out.append(
+                {
+                    **doc,
+                    "dir": d,
+                    "module": d / doc.get("runner", "probe.py"),
+                    "costs": doc.get("costs", "turns"),
+                }
+            )
         if st := doc.get("selftest"):
-            out.append({**doc, **st, "dir": d, "id": f"{doc['id']}_selftest",
-                        "module": d / st.get("runner", "selftest.py"),
-                        "costs": st.get("costs", "free")})
+            out.append(
+                {
+                    **doc,
+                    **st,
+                    "dir": d,
+                    "id": f"{doc['id']}_selftest",
+                    "module": d / st.get("runner", "selftest.py"),
+                    "costs": st.get("costs", "free"),
+                }
+            )
+    return out
+
+
+_GUESSED_ENDPOINT = re.compile(
+    r"""os\.environ\.get\(\s*["'][A-Z_]+["']\s*,\s*["']https?://"""
+)
+
+
+def check_no_guessed_endpoints() -> list[str]:
+    """No `os.environ.get(VAR, "http://…")` anywhere in the harness. A loopback
+    llama-server default survived in four files for weeks because it only fired in
+    a branch nobody ran — until a probe copied it and every runtime failed on a
+    server nobody wired (measured 2026-09-02). Loopback for the harness's OWN
+    spawned kernel is fine; a guessed EXTERNAL endpoint is not."""
+    out: list[str] = []
+    for sub in ("tests", "backends", "helpers", "runners"):
+        for f in (E2E / sub).rglob("*.py"):
+            for n, line in enumerate(f.read_text().splitlines(), 1):
+                if _GUESSED_ENDPOINT.search(line):
+                    out.append(f"{f.relative_to(E2E)}:{n}: {line.strip()[:90]}")
     return out
 
 
@@ -203,10 +260,12 @@ def check_rosters(tests) -> list[str]:
         declared = (yaml.safe_load(kf.read_text()) or {}).get("roster") or []
         actual = roster(pf)
         if declared != actual:
-            drift.append(f"{t['group']}/{t['id']}: kernel.yaml declares "
-                         f"{len(declared)} agents, probe.py builds {len(actual)}"
-                         if len(declared) != len(actual) else
-                         f"{t['group']}/{t['id']}: kernel.yaml no longer matches probe.py")
+            drift.append(
+                f"{t['group']}/{t['id']}: kernel.yaml declares "
+                f"{len(declared)} agents, probe.py builds {len(actual)}"
+                if len(declared) != len(actual)
+                else f"{t['group']}/{t['id']}: kernel.yaml no longer matches probe.py"
+            )
     return drift
 
 
@@ -248,15 +307,16 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
         log = logdir / f"{name}.log"
         # The knobs a test owns, rendered into the env its runner already reads.
         lim = t.get("limits") or {}
-        env = {**os.environ,
-               **{k: str(v) for k, v in (t.get("env") or {}).items()}}
+        env = {**os.environ, **{k: str(v) for k, v in (t.get("env") or {}).items()}}
         for src_key, env_key in LIMIT_ENV:
             if src_key in lim:
                 env[env_key] = str(lim[src_key])
         began = time.monotonic()
         results[name] = {"state": "running", "since": began}
         with log.open("w") as fh:
-            fh.write(f"# {name} · {t['title']}\n# backend={bk.name} model={bk.model}\n\n")
+            fh.write(
+                f"# {name} · {t['title']}\n# backend={bk.name} model={bk.model}\n\n"
+            )
             fh.flush()
             # The runner's EXTENSION picks the interpreter. A js probe drives
             # the browser kernel under node (no build step — node strips the
@@ -269,14 +329,20 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
                 cmd = [*t["cmd"], *args]
                 cwd = str(CWDS[t["cwd_key"]])
                 env.update({k: str(v) for k, v in (t.get("extra_env") or {}).items()})
-                for var in ("ANTHROPIC_ENDPOINT", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"):
+                for var in (
+                    "ANTHROPIC_ENDPOINT",
+                    "ANTHROPIC_MODEL",
+                    "ANTHROPIC_API_KEY",
+                ):
                     # The native suites read these names; the launcher is given
                     # the python-side ones. Bridge them rather than making the
                     # caller export both spellings.
                     if var not in env:
-                        src = {"ANTHROPIC_ENDPOINT": "ENDPOINT",
-                               "ANTHROPIC_MODEL": "FANTASTIC_AI_MODEL",
-                               "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY"}[var]
+                        src = {
+                            "ANTHROPIC_ENDPOINT": "ENDPOINT",
+                            "ANTHROPIC_MODEL": "FANTASTIC_AI_MODEL",
+                            "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
+                        }[var]
                         if val := os.environ.get(src):
                             env[var] = val.replace("/messages", "")
             elif t["module"].suffix in (".js", ".mjs"):
@@ -286,7 +352,10 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
                 cmd = ["uv", "run", "python", "-u", str(t["module"]), *args]
                 cwd = str(PYROOT)
             proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=cwd, env=env, stdout=fh,
+                *cmd,
+                cwd=cwd,
+                env=env,
+                stdout=fh,
                 stderr=asyncio.subprocess.STDOUT,
             )
             rc = await proc.wait()
@@ -309,28 +378,48 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
                 detail = "filter matched NO tests — nothing ran"
             else:
                 state = "pass" if rc == 0 else "fail"
-            results[name] = {"state": state, "note": detail, "took": took,
-                             "rc": rc, "log": log}
-            print(f"  {'PASS' if rc == 0 else 'FAIL'}  {name:<34} {took:6.0f}s  {detail}",
-                  flush=True)
+            results[name] = {
+                "state": state,
+                "note": detail,
+                "took": took,
+                "rc": rc,
+                "log": log,
+            }
+            print(
+                f"  {'PASS' if rc == 0 else 'FAIL'}  {name:<34} {took:6.0f}s  {detail}",
+                flush=True,
+            )
             return
 
         if skip := re.search(r"^E2E-SKIP:\s*(.+)$", body, re.M):
             # A scenario a runtime CANNOT play is skipped by name. Reporting it
             # as a pass would inflate the table; as a fail would blame the run
             # for a boundary that was declared up front.
-            results[name] = {"state": "skip", "note": skip.group(1)[:120],
-                             "took": took, "rc": rc, "log": log}
+            results[name] = {
+                "state": "skip",
+                "note": skip.group(1)[:120],
+                "took": took,
+                "rc": rc,
+                "log": log,
+            }
             print(f"  SKIP  {name:<34} {took:6.0f}s  {skip.group(1)[:80]}", flush=True)
             return
-        hits = re.findall(rf"^{re.escape(MARKER)}\s*(PASS|FAIL)(?:\s+—\s+(.*))?$", body, re.M)
+        hits = re.findall(
+            rf"^{re.escape(MARKER)}\s*(PASS|FAIL)(?:\s+—\s+(.*))?$", body, re.M
+        )
         if hits:
             state, note = ("pass" if hits[-1][0] == "PASS" else "fail"), hits[-1][1]
         else:
             # NOT a fail. "The probe never said" and "the probe said no" are
             # different facts and collapsing them invents a result.
             state, note = "no verdict", f"exit={rc}"
-        results[name] = {"state": state, "note": note, "took": took, "rc": rc, "log": log}
+        results[name] = {
+            "state": state,
+            "note": note,
+            "took": took,
+            "rc": rc,
+            "log": log,
+        }
         mark = {"pass": "PASS", "fail": "FAIL", "no verdict": "????"}[state]
         print(f"  {mark}  {name:<34} {took:6.0f}s  {note or ''}", flush=True)
 
@@ -338,21 +427,37 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lanes", type=int, default=int(os.environ.get("LANES", "6")))
-    ap.add_argument("--group", action="append", default=[],
-                    help="scenario | agentic | agentic_advanced | contract | backend")
-    ap.add_argument("--id", action="append", default=[],
-                    help="a test id; a bare scenario name selects every runtime of it")
-    ap.add_argument("--runtime", action="append", default=[],
-                    help="python | js | rust | swift — narrow the cross-product")
-    ap.add_argument("--free", action="store_true", help="include the free harness self-tests")
+    ap.add_argument(
+        "--group",
+        action="append",
+        default=[],
+        help="scenario | agentic | agentic_advanced | contract | backend",
+    )
+    ap.add_argument(
+        "--id",
+        action="append",
+        default=[],
+        help="a test id; a bare scenario name selects every runtime of it",
+    )
+    ap.add_argument(
+        "--runtime",
+        action="append",
+        default=[],
+        help="python | js | rust | swift — narrow the cross-product",
+    )
+    ap.add_argument(
+        "--free", action="store_true", help="include the free harness self-tests"
+    )
     ap.add_argument("--only-free", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="VIRTUAL RUN — resolve everything and print the exact command, env "
-             "overrides and log path for each test, then spend nothing. These "
-             "tests cost real model turns, so being able to see the whole plan "
-             "before paying for it is not a convenience.")
+        "overrides and log path for each test, then spend nothing. These "
+        "tests cost real model turns, so being able to see the whole plan "
+        "before paying for it is not a convenience.",
+    )
     a = ap.parse_args()
 
     bk = resolve_backend()
@@ -371,16 +476,27 @@ async def main() -> int:
     # A probe with no `verdict(...)` call scores `no verdict` FOREVER and nobody
     # notices, because "the launcher never said" reads like "still working". One
     # probe shipped that way for a whole run; catching it costs a grep.
-    if mute := [f"{t['group']}/{t['id']}: {t['module'].name} never calls verdict()"
-                for t in picked
-                if t["group"] != "scenario"
-                and t.get("module") is not None
-                and "verdict(" not in t["module"].read_text()]:
+    if mute := [
+        f"{t['group']}/{t['id']}: {t['module'].name} never calls verdict()"
+        for t in picked
+        if t["group"] != "scenario"
+        and t.get("module") is not None
+        and "verdict(" not in t["module"].read_text()
+    ]:
         print("REFUSING TO RUN — these probes emit no machine verdict:")
         for m in mute:
             print("  · " + m)
         return 1
 
+    if guessed := check_no_guessed_endpoints():
+        print("REFUSING TO RUN — a guessed network endpoint is coded into the harness:")
+        for g in guessed:
+            print(f"  · {g}")
+        print("  the operator names hosts (connection env); a default that reaches a")
+        print(
+            "  network measures the wrong thing. Remove the default, require the var."
+        )
+        return 1
     if drift := check_rosters(picked):
         print("REFUSING TO RUN — a test's kernel.yaml no longer matches its probe:")
         for d in drift:
@@ -389,16 +505,21 @@ async def main() -> int:
         return 1
 
     if blockers := bk.blockers():
-        print("REFUSING TO RUN — these would fail for a reason that is not the substrate:")
+        print(
+            "REFUSING TO RUN — these would fail for a reason that is not the substrate:"
+        )
         for b in blockers:
             print("  · " + b)
         return 1
     if not picked:
-        print("nothing selected"); return 1
+        print("nothing selected")
+        return 1
 
     if a.dry_run:
-        print(f"═══ VIRTUAL RUN · {len(picked)} tests · {a.lanes} lanes "
-              f"· {bk.name}/{bk.model}\n")
+        print(
+            f"═══ VIRTUAL RUN · {len(picked)} tests · {a.lanes} lanes "
+            f"· {bk.name}/{bk.model}\n"
+        )
         for t in picked:
             env_over = dict(t.get("env") or {})
             for src_key, env_key in LIMIT_ENV:
@@ -411,11 +532,18 @@ async def main() -> int:
                 print(f"  {t['group']}.{t['id']}")
                 print(f"      [{where}] {' '.join(t['cmd'])} {args}".rstrip())
             else:
-                runner = "node" if t["module"].suffix in (".js", ".mjs") else "uv run python -u"
+                runner = (
+                    "node"
+                    if t["module"].suffix in (".js", ".mjs")
+                    else "uv run python -u"
+                )
                 print(f"  {t['group']}.{t['id']}")
                 print(f"      {runner} {t['module'].relative_to(E2E)} {args}".rstrip())
             if env_over:
-                print("      env: " + " ".join(f"{k}={v}" for k, v in sorted(env_over.items())))
+                print(
+                    "      env: "
+                    + " ".join(f"{k}={v}" for k, v in sorted(env_over.items()))
+                )
             print(f"      log: runs/<stamp>/{t['group']}.{t['id']}.log")
         print(f"\n  nothing was run · {len(picked)} tests would spend model turns")
         return 0
@@ -436,7 +564,9 @@ async def main() -> int:
     # rust when its per-turn latency is in fact the same (1.15s vs 1.02s
     # against the live endpoint) — and why the longest swift scenarios failed
     # under 6 lanes but passed alone.
-    prebuilt = sorted({t["runtime"] for t in picked if t.get("runtime") in HOST_RUNTIMES})
+    prebuilt = sorted(
+        {t["runtime"] for t in picked if t.get("runtime") in HOST_RUNTIMES}
+    )
     for rt in prebuilt:
         t0 = time.monotonic()
         ensure_runtime(REPO, rt)
@@ -460,13 +590,22 @@ async def main() -> int:
     print("\n" + "═" * 72)
     for name in sorted(results):
         r = results[name]
-        print(f"  {r['state']:<10} {name:<34} {r.get('took', 0):6.0f}s  {r.get('note') or ''}")
+        print(
+            f"  {r['state']:<10} {name:<34} {r.get('took', 0):6.0f}s  {r.get('note') or ''}"
+        )
     print("═" * 72)
-    print("  " + " · ".join(f"{k}={v}" for k, v in sorted(counts.items()))
-          + f"  ·  {time.monotonic() - began:.0f}s wall")
+    print(
+        "  "
+        + " · ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        + f"  ·  {time.monotonic() - began:.0f}s wall"
+    )
     (logdir / "SUMMARY.txt").write_text(
-        "\n".join(f"{results[n]['state']}\t{n}\t{results[n].get('note') or ''}"
-                  for n in sorted(results)) + "\n")
+        "\n".join(
+            f"{results[n]['state']}\t{n}\t{results[n].get('note') or ''}"
+            for n in sorted(results)
+        )
+        + "\n"
+    )
     # A SKIP is a declared boundary, not a failure: a runtime that cannot play
     # a role says so up front. Counting it against the run would push toward
     # approximating the role with something that behaves differently, which is

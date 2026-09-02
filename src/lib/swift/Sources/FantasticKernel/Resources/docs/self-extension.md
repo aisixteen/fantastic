@@ -73,7 +73,7 @@ names the fix.
 
 The one thing you CANNOT do is raise your OWN authority: editing your own
 `can_call`/`callable_by` is refused. But you are NOT limited to your children —
-if you hold `update_agent` (for example on the root/`core`, a common
+if you hold `update_agent` (for example on the root/`kernel_state`, a common
 grant), you can **open ANY agent's `callable_by`** to accept a caller, including a
 SIBLING that is not your child (`totals`, `readings`, `clock`). Opening ingress
 grants no reach, so it is freely conferrable this way. So to let a worker you made
@@ -85,3 +85,19 @@ reach for YOURSELF still comes only from your creator or the operator.
 Reach everything by id. A denied send's `hint` and `side` are
 discovery-through-denial — the same way a sealed io leg's denial teaches
 `ingress_rule`.
+
+## Two facts that save turns
+
+- **Do not write the wire client yourself.** Send the command runner `{type:'connector'}`
+  and paste its `source` verbatim at the top of your program — it gives the program a
+  `kernel` object (`send`/`emit`/`watch`/`on_message`). Hand-rolling the socket framing
+  costs ten turns and gets the buffering wrong.
+- **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that
+  started it. Its reach is that runner's `can_call`; a target must list the runner in
+  its `callable_by`. Grant the runner, not the program. Persist results THROUGH the
+  agent the task names (e.g. `totals`), never around it into the store underneath.
+- **Create the agents you will grant reach on as YOUR children** (`parent_id: <your
+  id>`). `$children` then covers them, so wiring `clock → your specialist` needs no
+  lateral grant. A specialist created under the root is NOT yours: you cannot confer
+  reach on it (refused: not your child, not in your can_call), and repairing that
+  costs a delete + recreate (measured 2026-09-02: twenty turns).

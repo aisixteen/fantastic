@@ -47,14 +47,17 @@ Everything else. Fixture, readings, canary, clock tick, unattended window, idle 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
-sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
-                            if (d / ".e2e-root").exists())))
+sys.path.insert(
+    0,
+    str(
+        next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
+    ),
+)
 from helpers import (
     verdict,
 )
@@ -62,10 +65,12 @@ from helpers import (
 _ARGV = sys.argv[:]
 sys.argv = [sys.argv[0]]
 
-from tests.agentic_advanced.E30_subai import probe as P  # noqa: E402
+from tests.agentic_advanced.E30_subai import probe as P
 
-# `brain` stays LOCAL even when the builder is a paid API. Override to compare.
-BRAIN_BACKEND = os.environ.get("BRAIN_BACKEND", "llamacpp")
+# `brain` rides the SAME backend as the builder — the one the run's connection env
+# wires (helpers read it; nothing here names a host). A local-llamacpp default here
+# reached for a server nobody wired and failed every runtime (measured 2026-09-02).
+BRAIN_BACKEND = P.BACKEND
 
 EXTRA = (
     "\n\nThree more constraints on HOW you build it. "

@@ -48,8 +48,12 @@ from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
-sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
-                            if (d / ".e2e-root").exists())))
+sys.path.insert(
+    0,
+    str(
+        next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
+    ),
+)
 from backends import backend as _resolve_backend
 from helpers import (
     Limits,
@@ -64,9 +68,7 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
 NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
-LLAMACPP_ENDPOINT = os.environ.get(
-    "FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1"
-)
+LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")  # no guessed host
 CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 IDLE = float(os.environ.get("IDLE", "60" if BACKEND == "anthropic" else "240"))
@@ -78,9 +80,15 @@ TURN_CHARS = int(os.environ.get("TURN_CHARS", "120000"))
 TURN_SECONDS = float(os.environ.get("TURN_SECONDS", "600"))
 # How long the CANARY waits for the authored program to react to the new file.
 # Every bound in ONE object, carrying this probe's own tuned values.
-LIM = Limits(idle=IDLE, max_turns=MAX_TURNS, no_progress=NO_PROGRESS,
-             turn_chars=TURN_CHARS, turn_seconds=TURN_SECONDS, ctx=CTX,
-             show_system=os.environ.get("SHOW_SYSTEM") == "1")
+LIM = Limits(
+    idle=IDLE,
+    max_turns=MAX_TURNS,
+    no_progress=NO_PROGRESS,
+    turn_chars=TURN_CHARS,
+    turn_seconds=TURN_SECONDS,
+    ctx=CTX,
+    show_system=os.environ.get("SHOW_SYSTEM") == "1",
+)
 CANARY_WAIT = float(os.environ.get("CANARY_WAIT", "180"))
 W = 78
 
@@ -139,6 +147,8 @@ def _served_model() -> str:
     import urllib.error
     import urllib.request
 
+    if not LLAMACPP_ENDPOINT:
+        return "<FANTASTIC_LLAMACPP_ENDPOINT unset>"
     try:
         with urllib.request.urlopen(f"{LLAMACPP_ENDPOINT}/models", timeout=5) as r:
             data = json.loads(r.read())
@@ -160,9 +170,20 @@ async def discover_command_runner(root) -> tuple[str, list[str]]:
     `allowed` IS the runner — no naming convention, no handler_module sniff (that was
     the harness-asserts-the-wrong-surface scar the emergence README records).
     """
-    listing = ((await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]).get("agents") or []
+    listing = (
+        (
+            (
+                await root.send(
+                    [{"target": "kernel", "payload": {"type": "list_agents"}}]
+                )
+            )[0]["result"]
+        ).get("agents")
+        or []
+    )
     for rec in listing:
-        r = (await root.send([{"target": rec["id"], "payload": {"type": "reflect"}}]))[0]["result"]
+        r = (await root.send([{"target": rec["id"], "payload": {"type": "reflect"}}]))[
+            0
+        ]["result"]
         allowed = r.get("allowed") or []
         if allowed:
             return rec["id"], list(allowed)
@@ -197,25 +218,34 @@ async def wire_executor_leg(
     of `live_graph_shape`).
     """
     interp = interpreter or sys.executable
-    r = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "exec_bridge.tools",
-            "id": agent_id,
-            "cwd": os.getcwd(),
-            "ingress_rule": "allow_all_ingress",
-            # Two-sided deny-all: the AI reflects + starts on this leg. The wire
-            # surfaces too — the harness DISCOVERS the leg the same way the model
-            # does (reflect), and over REST that reflect arrives as `rest`.
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
-            # THE GATE: run THIS interpreter against a file argument. A model reflects
-            # the leg, reads the exact interpreter path here, and runs `<interp> <file>`.
-            "allowed": [rf"{re.escape(interp)} \S+"],
-            # The running program reaches the memory agent over its control wire; that
-            # send lands FROM this leg (its owner), so the leg needs egress to totals.
-            "can_call": {"totals": "*"},
-            "description": "Process edge: the command(s) this kernel may spawn.",
-        }}]))[0]["result"]
+    r = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "exec_bridge.tools",
+                        "id": agent_id,
+                        "cwd": os.getcwd(),
+                        "ingress_rule": "allow_all_ingress",
+                        # Two-sided deny-all: the AI reflects + starts on this leg. The wire
+                        # surfaces too — the harness DISCOVERS the leg the same way the model
+                        # does (reflect), and over REST that reflect arrives as `rest`.
+                        "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                        # THE GATE: run THIS interpreter against a file argument. A model reflects
+                        # the leg, reads the exact interpreter path here, and runs `<interp> <file>`.
+                        "allowed": [rf"{re.escape(interp)} \S+"],
+                        # The running program reaches the memory agent over its control wire; that
+                        # send lands FROM this leg (its owner), so the leg needs egress to totals.
+                        "can_call": {"totals": "*"},
+                        "description": "Process edge: the command(s) this kernel may spawn.",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert not r.get("error"), f"could not wire the command runner: {r}"
     return r["id"]
 
@@ -249,10 +279,7 @@ def _last_successful_job(jobs: list[dict]) -> dict | None:
     each job's exact invocation (`status` reports `command`/`args`); the LAST one
     that succeeded is what the model most recently demonstrated, and it is what the
     canary re-issues verbatim — no filename heuristic, no interpreter assumption."""
-    done = [
-        j for j in jobs
-        if j.get("exit_code") == 0 and j.get("command")
-    ]
+    done = [j for j in jobs if j.get("exit_code") == 0 and j.get("command")]
     return max(done, key=lambda j: j.get("started_at", 0), default=None)
 
 
@@ -340,52 +367,89 @@ async def run(
         reach=["kernel_store", "readings", "totals", EXECUTOR_LEG, "ai", "cli"],
     )
 
-    store = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
-            "id": "kernel_store",
-            # The RUN DIR itself: a program written here lands beside readings/ and in
-            # the command runner's cwd, so `<interp> <file>` and open('readings/..') both
-            # resolve by relative name. (The store also holds the AI's chat sidecars.)
-            "root": ".",
-            "ingress_rule": "allow_all_ingress",
-            # Two-sided deny-all: the AI (and its authored tools, which it opens via
-            # its own update_agent grant) reach this store — accept the AI directly.
-            # The wire surfaces too: over REST/WS the harness's own reads arrive AS
-            # `rest`/`web`, and ingress is two-sided (inert in-process — no such ids).
-            "callable_by": {"ai": "*", "totals": "*", "rest": "*", "web": "*"},
-        }}]))[0]["result"]
+    store = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "kernel_store",
+                        # The RUN DIR itself: a program written here lands beside readings/ and in
+                        # the command runner's cwd, so `<interp> <file>` and open('readings/..') both
+                        # resolve by relative name. (The store also holds the AI's chat sidecars.)
+                        "root": ".",
+                        "ingress_rule": "allow_all_ingress",
+                        # Two-sided deny-all: the AI (and its authored tools, which it opens via
+                        # its own update_agent grant) reach this store — accept the AI directly.
+                        # The wire surfaces too: over REST/WS the harness's own reads arrive AS
+                        # `rest`/`web`, and ingress is two-sided (inert in-process — no such ids).
+                        "callable_by": {
+                            "ai": "*",
+                            "totals": "*",
+                            "rest": "*",
+                            "web": "*",
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # The readings live behind an OPEN file agent — this probe is about building a
     # program, not about guessing an auth posture (that is `live_plan.py`'s job).
     os.makedirs("readings", exist_ok=True)
     for name, val in READINGS.items():
         with open(os.path.join("readings", name), "w") as fh:
             fh.write(f"{val}\n")
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
-            "id": "readings",
-            "root": "readings",
-            "ingress_rule": "allow_all_ingress",
-            "description": "Sensor readings — one integer per file.",
-            # Two-sided deny-all: accept the AI + the wire surfaces (harness reads
-            # arrive as `rest`/`web` on a spawned kernel; inert in-process).
-            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
-        }}]))[0]["result"]
-    mem = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "text_file.tools",
-            "id": "totals",
-            "target_id": store["id"],
-            "can_call": {store["id"]: "*"},
-            "description": "Durable store for computed results.",
-            # Two-sided deny-all: accept the AI directly, AND the command runner — the
-            # program's `set` lands from the runner leg (its owner) over the control wire.
-            "callable_by": {"ai": "*", EXECUTOR_LEG: "*", "rest": "*", "web": "*"},
-        }}]))[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "readings",
+                        "root": "readings",
+                        "ingress_rule": "allow_all_ingress",
+                        "description": "Sensor readings — one integer per file.",
+                        # Two-sided deny-all: accept the AI + the wire surfaces (harness reads
+                        # arrive as `rest`/`web` on a spawned kernel; inert in-process).
+                        "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    mem = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "text_file.tools",
+                        "id": "totals",
+                        "target_id": store["id"],
+                        "can_call": {store["id"]: "*"},
+                        "description": "Durable store for computed results.",
+                        # Two-sided deny-all: accept the AI directly, AND the command runner — the
+                        # program's `set` lands from the runner leg (its owner) over the control wire.
+                        "callable_by": {
+                            "ai": "*",
+                            EXECUTOR_LEG: "*",
+                            "rest": "*",
+                            "web": "*",
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # The executor leg, open, with an interpreter allowlist. Without it there is no
     # allowlisted interpreter anywhere in the kernel and NOTHING can be authored — the
     # spawner has no default and refuses rather than guessing a path.
@@ -435,8 +499,9 @@ async def run(
     # that chose to stop, and installs the shared reader. Seven probes each carried
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
-    conn = await connect(root, core, BK, can_call=CAN_CALL, limits=LIM,
-                         watch=watch, record=EXTRA)
+    conn = await connect(
+        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA
+    )
     aid, spy = conn.id, conn.proxy
     runaway, transcript = conn.trips, spy.transcript
 
@@ -452,7 +517,16 @@ async def run(
     # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
     # the run scored as "0 chars, read the docs: False" — a harness failure wearing
     # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
-    _first = (await root.send([{"target": aid, "payload": {"type": "send", "text": task, "client_id": "probe"}}]))[0]["result"]
+    _first = (
+        await root.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": task, "client_id": "probe"},
+                }
+            ]
+        )
+    )[0]["result"]
     if isinstance(_first, dict) and _first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {_first['error']} **\n", flush=True)
 
@@ -484,7 +558,16 @@ async def run(
         # waited 240s to say so. If nothing of the AI's is in flight and no new
         # turn has landed, the chain is over — say so now rather than waiting.
         if idle >= 30 and spy.n == last and last > 0:
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             _live = [
                 t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
             ]
@@ -513,9 +596,27 @@ async def run(
             # NOTHING: the cap only broke its own loop while the turns kept running.
             # Measured 2026-08-25 — "capped" runs were not killed, they were
             # abandoned, and their pending replies died with the process.
-            _t = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _t = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             for t in [x for x in _t if x.get("agent") == aid and x.get("verb") != "ps"]:
-                _c = (await root.send([{"target": "kernel", "payload": {"type": "cancel", "task_id": t["id"]}}]))[0]["result"]
+                _c = (
+                    await root.send(
+                        [
+                            {
+                                "target": "kernel",
+                                "payload": {"type": "cancel", "task_id": t["id"]},
+                            }
+                        ]
+                    )
+                )[0]["result"]
                 if isinstance(_c, dict) and _c.get("error"):
                     print(f"  ** CANCEL REFUSED: {_c['error']} **", flush=True)
             break
@@ -526,9 +627,21 @@ async def run(
         if idle >= IDLE:
             # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
             # 2026-08-25: the loop walked away mid-generation and scored FAIL).
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
-                print(f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on", flush=True)
+                print(
+                    f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on",
+                    flush=True,
+                )
                 idle = 0.0
     if capped:
         print(f"\n  ** CAPPED: {capped} · {spy.n} passes **")
@@ -542,11 +655,15 @@ async def run(
     # actually completed successfully, WHOSE COMMAND it records: that command IS the
     # artifact, and the canary re-issues it verbatim.
     runner_id, _pats = await discover_command_runner(root)
-    st = (await root.send([{"target": runner_id, "payload": {"type": "status"}}]))[0]["result"]
+    st = (await root.send([{"target": runner_id, "payload": {"type": "status"}}]))[0][
+        "result"
+    ]
     jobs = (st or {}).get("jobs") or []
     job = _last_successful_job(jobs)
     has_artifact = job is not None
-    program = None if job is None else shlex.join([job["command"], *(job.get("args") or [])])
+    program = (
+        None if job is None else shlex.join([job["command"], *(job.get("args") or [])])
+    )
     print(
         f"    1. artifact exists          {'OK' if has_artifact else 'NO'} "
         f"ran={program!r} runner={runner_id!r} jobs={len(jobs)}"
@@ -579,11 +696,20 @@ async def run(
         # new file and does NOT require a live service: the task asked for a program,
         # not a daemon, and demanding one would be the harness inventing a requirement
         # and grading against it.
-        _cs = (await root.send([{"target": runner_id, "payload": {
-            "type": "start",
-            "command": job["command"],
-            "args": job.get("args") or [],
-        }}]))[0]["result"]
+        _cs = (
+            await root.send(
+                [
+                    {
+                        "target": runner_id,
+                        "payload": {
+                            "type": "start",
+                            "command": job["command"],
+                            "args": job.get("args") or [],
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
         waited = 0.0
         while waited < CANARY_WAIT and not canary_ok:
             await asyncio.sleep(3.0)
@@ -609,22 +735,28 @@ async def run(
                     print(
                         f"       canary job: status={_j.get('status')!r} "
                         f"exit={_j.get('exit_code')!r} "
-                        f"stderr={( _j.get('stderr') or '')[:400]!r} "
+                        f"stderr={(_j.get('stderr') or '')[:400]!r} "
                         # stdout carries the guest's OWN prints — and nothing
                         # else: a refused send returns an error DICT the code may
                         # silently ignore, which is exactly the invisible case.
-                        f"stdout={( _j.get('stdout') or '')[:400]!r}"
+                        f"stdout={(_j.get('stdout') or '')[:400]!r}"
                     )
             # DUMP THE MEMORY — files now: list every candidate document the
             # scorer's scan can see, so a canary NO says what was actually there.
-            for _dp, _dn, _fn in os.walk('.'):
-                _dn[:] = [d for d in _dn if d not in ('readings', '.fantastic', '.ckpt', '__pycache__')]
+            for _dp, _dn, _fn in os.walk("."):
+                _dn[:] = [
+                    d
+                    for d in _dn
+                    if d not in ("readings", ".fantastic", ".ckpt", "__pycache__")
+                ]
                 for _n in sorted(_fn):
-                    if _n.endswith(('.py', '.jsonl')) or '.tmp.' in _n:
+                    if _n.endswith((".py", ".jsonl")) or ".tmp." in _n:
                         continue
                     _fp = Path(_dp) / _n
                     try:
-                        print(f"       file[{_fp}] = {_fp.read_text(errors='ignore').strip()[:200]!r}")
+                        print(
+                            f"       file[{_fp}] = {_fp.read_text(errors='ignore').strip()[:200]!r}"
+                        )
                     except OSError:
                         pass
     print(

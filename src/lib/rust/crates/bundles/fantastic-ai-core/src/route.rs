@@ -33,7 +33,47 @@
 use crate::tool_parse::{extract_tool_calls, malformed_calls};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Consecutive silent chain turns the reminder tolerates before the chain is
+/// let go (record meta `nudge_limit` overrides). A safety bound on an
+/// unattended kernel, not a budget — the harness's max_turns is the outer
+/// backstop. Mirrors python `_NUDGE_LIMIT`.
+const NUDGE_LIMIT: u64 = 24;
+
+/// (kernel instance, agent id, client id) → consecutive silent chain turns so
+/// far. Scoped to the KERNEL, not the process: two kernels in one process (the
+/// test suite, an app embedding several) may carry the same agent/client ids.
+type StreakKey = (usize, String, String);
+
+fn silent_streaks() -> &'static Mutex<HashMap<StreakKey, u64>> {
+    static S: OnceLock<Mutex<HashMap<StreakKey, u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn streak_key(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) -> StreakKey {
+    (
+        Arc::as_ptr(kernel) as usize,
+        self_id.to_string(),
+        client_id.to_string(),
+    )
+}
+
+fn silent_reset(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) {
+    silent_streaks()
+        .lock()
+        .expect("silent streaks poisoned")
+        .remove(&streak_key(kernel, self_id, client_id));
+}
+
+/// Bump and return this chain's silent streak.
+fn silent_bump(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) -> u64 {
+    let mut m = silent_streaks().lock().expect("silent streaks poisoned");
+    let e = m.entry(streak_key(kernel, self_id, client_id)).or_insert(0);
+    *e += 1;
+    *e
+}
 
 /// What a call that named a VERB but no agent gets told.
 ///
@@ -426,25 +466,47 @@ async fn route_reply_gated(
     }
 
     if !blocks.is_empty() {
+        silent_reset(&kernel, self_id.as_str(), &client_id);
         deliver_grouped(&kernel, blocks, &client_id, sp).await;
         return;
     }
     if done_called {
+        silent_reset(&kernel, self_id.as_str(), &client_id);
         return; // explicitly finished — nothing more runs, nothing reminds
     }
-    // A CHAIN turn (its incoming text was a delivered reply) that dispatched
-    // nothing gets ONE reminder — see `NO_CALL_NUDGE`. A chat turn is not a
-    // chain, and a turn already answering the nudge is never nudged again.
+    // A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
+    // dispatched nothing is REMINDED AGAIN — the model is queried until it emits
+    // a call, `done`, or a question. Until 2026-09-01 the reminder fired ONCE
+    // and a second silent turn ended the chain silently (python-canonical fix:
+    // a planning-heavy model wrote prose for two turns and the run read as
+    // finished with the task untouched). A chat turn is not a chain. Bounded by
+    // `nudge_limit` on the record (default `NUDGE_LIMIT`) so an unattended
+    // kernel cannot spin forever on a model that never calls.
     // A question turn is the OTHER legitimate silent end (ask + stop; the
     // human's answer resumes the chain) — nudging it would stomp the wait.
     let asked = text.contains("\"type\"") && text.contains("\"question\"");
-    if incoming.starts_with("[reply to ")
-        && !asked
-        && !incoming.starts_with("[no call was dispatched]")
-    {
-        deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
+    let chained =
+        incoming.starts_with("[reply to ") || incoming.starts_with("[no call was dispatched]");
+    if chained && !asked {
+        let streak = silent_bump(&kernel, self_id.as_str(), &client_id);
+        let limit = kernel
+            .agents
+            .get(&self_id)
+            .and_then(|a| {
+                a.meta
+                    .read()
+                    .ok()
+                    .and_then(|m| m.get("nudge_limit").and_then(Value::as_u64))
+            })
+            .unwrap_or(NUDGE_LIMIT);
+        if streak <= limit {
+            deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
+        } else {
+            silent_reset(&kernel, self_id.as_str(), &client_id);
+        }
         return;
     }
+    silent_reset(&kernel, self_id.as_str(), &client_id);
 
     if let Some(to) = send_to.as_deref() {
         deliver(&kernel, to, &text, &client_id, sp).await;
