@@ -285,6 +285,10 @@ async def test_parent_confers_only_a_subset_it_holds(seeded_kernel):
     assert ok.get("reason") != "unauthorized" and "id" in ok
     assert no.get("reason") == "unauthorized"
     assert no.get("side") == "delegation"
+    # The refusal names WHY the granter does not hold `peer`: not its child (and
+    # whose child it is), not in its can_call — the one-line diagnosis that used to
+    # cost twenty turns of delete+recreate (measured 2026-09-02).
+    assert "not your child" in no["error"] and no.get("parent") == seeded_kernel.id, no
 
 
 async def test_callable_by_is_freely_conferrable(seeded_kernel):
@@ -372,3 +376,65 @@ async def test_create_agent_refuses_a_non_dict_grant(kernel):
         )
     )[0]["result"]
     assert r.get("error") and "grant MAP" in r["error"], r
+
+
+async def test_delegating_on_an_agent_that_does_not_exist_names_that(seeded_kernel):
+    """THE BATCH TRAP: `[create X, grant peer→X]` in ONE send. Items launch
+    concurrently, so X is not an agent yet when the grant's gate runs. The refusal
+    must say "no such agent" and point at the next turn — "you don't hold X" is
+    false and sent a builder into a 382-second deliberation (measured 2026-09-02,
+    E30 subai:python). The same grant in the NEXT send passes."""
+    root = seeded_kernel.id
+    peer = await _mk(seeded_kernel, id="peer_dg")
+    await _mk(
+        seeded_kernel,
+        id="granter_dg",
+        can_call={
+            "$self": "*",
+            "$parent": "*",
+            "$children": "*",
+            root: ["*", "create_agent", "update_agent"],
+        },
+    )
+    with sender_context("granter_dg"):
+        batch = await seeded_kernel.send(
+            [
+                {
+                    "target": root,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "granter_dg",
+                        "id": "kid_dg",
+                        "handler_module": "file_bridge.tools",
+                    },
+                },
+                {
+                    "target": root,
+                    "payload": {
+                        "type": "update_agent",
+                        "id": peer,
+                        "can_call": {"kid_dg": "*"},
+                    },
+                },
+            ]
+        )
+        no = batch[1]["result"]
+        assert no.get("reason") == "unauthorized" and no.get("side") == "delegation"
+        assert no.get("missing") == "kid_dg", no
+        assert "no such agent" in no["error"] and "next" in no["error"], no
+        # Next turn: kid_dg exists and is the granter's child → the grant passes.
+        ok = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": root,
+                        "payload": {
+                            "type": "update_agent",
+                            "id": peer,
+                            "can_call": {"kid_dg": "*"},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert ok.get("updated") is True, ok

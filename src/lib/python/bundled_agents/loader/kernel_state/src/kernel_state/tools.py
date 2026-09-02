@@ -552,7 +552,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         base["self_extension"] = (
             "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE "
             "it to a file: {write_stream, path, bytes, truncate:true}, or "
-            "`send_binary` (program RAW in the LAST `bytes` field, nothing escaped). "
+            '`send_binary` (program VERBATIM in a fenced block: `"bytes":"@body"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). '
             "(2) RUN it on the COMMAND runner: `start {command, args}`, gated by its "
             "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
             "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
@@ -561,7 +561,8 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "`update_agent id='totals'` to add it to `totals.callable_by` — you may "
             "open ANY agent's ingress if you hold `update_agent`; only editing your "
             "OWN grants is refused. Read {type:'reflect', readme:'self-extension'} "
-            "for the fd wire + detail."
+            "— send it to 'kernel' (the manual lives on the ROOT, not on any other "
+            "agent) — for the fd wire + detail."
         )
         return base
     return {
@@ -586,7 +587,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "string. Use the file leg's STREAM verbs — {type:'write_stream', path, "
             "bytes, truncate:true} to write, {type:'read_stream', path, offset} to "
             "read, one raw chunk at a time — or `send_binary` (same call, but write "
-            "the program RAW in the LAST `bytes` field, nothing escaped). That is "
+            'the program VERBATIM in a fenced block: `"bytes":"@body"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). That is '
             "the only byte path; the string read/write verbs are gone.\n"
             "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect "
             "it, read its `allowed` regexes, then send "

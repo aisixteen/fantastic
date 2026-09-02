@@ -48,8 +48,12 @@ from pathlib import Path
 
 # e2e bootstrap — walk up to `.e2e-root`; no hard-coded depth, so moving this
 # file into a folder can never silently break its imports again.
-sys.path.insert(0, str(next(d for d in Path(__file__).resolve().parents
-                            if (d / ".e2e-root").exists())))
+sys.path.insert(
+    0,
+    str(
+        next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
+    ),
+)
 from backends import backend as _resolve_backend
 from helpers import (
     Watch,
@@ -73,9 +77,9 @@ if _ENV.exists():
 # The plug, resolved once (see e2e/backends): which model, reached how.
 BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
-LLAMACPP_ENDPOINT = os.environ.get(
-    "FANTASTIC_LLAMACPP_ENDPOINT", "http://127.0.0.1:8080/v1"
-)
+# No host is guessed here: a llamacpp plug needs FANTASTIC_LLAMACPP_ENDPOINT set,
+# and the plug (backends/) refuses to run without it. Read once, no default.
+LLAMACPP_ENDPOINT = os.environ.get("FANTASTIC_LLAMACPP_ENDPOINT")
 CTX = int(os.environ.get("CTX", "262144"))
 MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # The BUILDER's window, separately. `CTX` is sized for the LOCAL AI agent, whose window is
@@ -161,7 +165,9 @@ def box(title: str, body: str, mark: str = "|") -> None:
             print(f"  {mark} {raw[i : i + W]}")
 
 
-def _ai_meta(agent_id: str, *, think: bool, store, root, backend: str | None = None) -> dict:
+def _ai_meta(
+    agent_id: str, *, think: bool, store, root, backend: str | None = None
+) -> dict:
     """One record shape per backend. `brain` answers with thinking OFF — one completion
     per send, no loop; `ai` is the BUILDER.
 
@@ -203,7 +209,9 @@ def _ai_meta(agent_id: str, *, think: bool, store, root, backend: str | None = N
         # send and emits to a watcher that was never allowed to subscribe. In
         # process these ids do not exist and the grant is inert.
         "callable_by": {
-            "$self": "*", "$parent": "*", "$children": "*",
+            "$self": "*",
+            "$parent": "*",
+            "$children": "*",
             # THE OTHER HALF OF THE WIRE. `can_call` above grants the builder
             # `brain`, but the gate is TWO-SIDED and these two are SIBLINGS, so
             # there is no baseline edge: without this, `ai -> brain` is refused
@@ -211,8 +219,10 @@ def _ai_meta(agent_id: str, *, think: bool, store, root, backend: str | None = N
             # composition the probe is about cannot happen at all. Opening only
             # the egress half draws a wire that carries nothing — the same
             # defect E20's fixture comment records.
-            "ai": "*", "brain": "*",
-            "rest": "*", "web": "*",
+            "ai": "*",
+            "brain": "*",
+            "rest": "*",
+            "web": "*",
         },
     }
     if agent_id == "brain":
@@ -235,6 +245,10 @@ def _ai_meta(agent_id: str, *, think: bool, store, root, backend: str | None = N
         meta["model"] = MODEL
     else:
         meta["handler_module"] = "llamacpp_backend.tools"
+        if not LLAMACPP_ENDPOINT:
+            raise SystemExit(
+                "FANTASTIC_LLAMACPP_ENDPOINT is unset — name the llama-server URL"
+            )
         meta["endpoint"] = LLAMACPP_ENDPOINT
         meta["think"] = think
     return meta
@@ -272,13 +286,23 @@ async def find_value(root, mem_id: str, want: int):
     import os as _os
     import re as _re
 
-    skip_dirs = {"readings", ".fantastic", ".ckpt", "__pycache__"}
+    # NOT `.fantastic` wholesale: this fixture roots `kernel_store` — the store
+    # `totals` persists THROUGH — at `.fantastic`, so a total written the way the
+    # task intends lands at `.fantastic/total.txt`. Skipping the dir made check 3
+    # structurally unpassable via the fixture's own persist path (measured
+    # 2026-09-02: swift lane stored exactly the true total, scored `stored=None`).
+    # Skip the RECORDS instead: `agents/` subtrees and `agent.json` files.
+    skip_dirs = {"readings", "agents", ".ckpt", "__pycache__"}
     pat = _re.compile(rf"\b{want}\b")
     first = None
     for dirpath, dirnames, filenames in _os.walk("."):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs]
         for name in sorted(filenames):
-            if name.endswith((".py", ".jsonl")) or ".tmp." in name:
+            if (
+                name.endswith((".py", ".jsonl"))
+                or ".tmp." in name
+                or name == "agent.json"
+            ):
                 continue
             fp = Path(dirpath) / name
             try:
@@ -306,77 +330,137 @@ async def wait_for(root, mem_id: str, want: int, secs: float) -> bool:
 
 
 async def build_fixture(root, *, interpreter: str | None = None):
-    store = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
-            "id": "kernel_store",
-            "callable_by": {"ai": "*", "brain": "*",
+    store = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "kernel_store",
+                        "callable_by": {
+                            "ai": "*",
+                            "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
                             # wire it arrives as `rest` (and `web` for a
                             # watch), so without this the SCORING calls
                             # are refused and read as the model having
                             # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*", "web": "*"},
-            "root": ".fantastic",
-            "ingress_rule": "allow_all_ingress",
-        }}]))[0]["result"]
+                            "rest": "*",
+                            "web": "*",
+                            # THE OTHER HALF of totals' persist path. `totals`
+                            # is created below with `can_call:{kernel_store}` +
+                            # `target_id: kernel_store`; without this ingress
+                            # half every `write` it makes is refused ("does not
+                            # accept 'read_stream' from totals") and each lane
+                            # spent turns repairing a grant the task never
+                            # mentioned (measured 2026-09-02, all 6 lanes).
+                            "totals": "*",
+                        },
+                        "root": ".fantastic",
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     os.makedirs("readings", exist_ok=True)
     for name, val in READINGS.items():
         with open(os.path.join("readings", name), "w") as fh:
             fh.write(f"{val}\n")
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "file_bridge.tools",
-            "id": "readings",
-            "callable_by": {"ai": "*", "brain": "*",
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "id": "readings",
+                        "callable_by": {
+                            "ai": "*",
+                            "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
                             # wire it arrives as `rest` (and `web` for a
                             # watch), so without this the SCORING calls
                             # are refused and read as the model having
                             # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*", "web": "*"},
-            "root": "readings",
-            "ingress_rule": "allow_all_ingress",
-            "description": "Sensor readings — one integer per file.",
-        }}]))[0]["result"]
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "text_file.tools",
-            "id": "totals",
-            "target_id": store["id"],
-            "can_call": {store["id"]: "*"},
-            "callable_by": {"ai": "*", "brain": "*",
+                            "rest": "*",
+                            "web": "*",
+                        },
+                        "root": "readings",
+                        "ingress_rule": "allow_all_ingress",
+                        "description": "Sensor readings — one integer per file.",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "text_file.tools",
+                        "id": "totals",
+                        "target_id": store["id"],
+                        "can_call": {store["id"]: "*"},
+                        "callable_by": {
+                            "ai": "*",
+                            "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
                             # wire it arrives as `rest` (and `web` for a
                             # watch), so without this the SCORING calls
                             # are refused and read as the model having
                             # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*", "web": "*"},
-            "file_bridge_id": store["id"],
-            "description": "Durable store for computed results.",
-        }}]))[0]["result"]
-    (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": "scheduler.tools",
-            "id": "clock",
-            "callable_by": {"ai": "*", "brain": "*",
+                            "rest": "*",
+                            "web": "*",
+                        },
+                        "file_bridge_id": store["id"],
+                        "description": "Durable store for computed results.",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "scheduler.tools",
+                        "id": "clock",
+                        "callable_by": {
+                            "ai": "*",
+                            "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
                             # wire it arrives as `rest` (and `web` for a
                             # watch), so without this the SCORING calls
                             # are refused and read as the model having
                             # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*", "web": "*"},
-            "file_bridge_id": store["id"],
-            "description": "Fires a payload at a target on a recurrence.",
-        }}]))[0]["result"]
+                            "rest": "*",
+                            "web": "*",
+                        },
+                        "file_bridge_id": store["id"],
+                        "description": "Fires a payload at a target on a recurrence.",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     # The OPERATOR's half of self-extension: ONE open command-runner leg carrying a
     # regex command ALLOWLIST. The runner has no default and refuses to guess, so
     # without this leg nothing can run and the probe is unwinnable. Which interpreter
@@ -386,34 +470,53 @@ async def build_fixture(root, *, interpreter: str | None = None):
     # The model's job is to FIND that gate (reflect the leg) and author its own
     # compute child against the same interpreter.
     interp = interpreter or sys.executable
-    leg = (await root.send([{"target": root.id, "payload": {
-            "type": "create_agent",
-            "parent_id": root.id,
-            "handler_module": EXEC_MODULE,
-            "id": EXECUTOR_LEG,
-            "callable_by": {"ai": "*", "brain": "*",
+    leg = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": EXEC_MODULE,
+                        "id": EXECUTOR_LEG,
+                        "callable_by": {
+                            "ai": "*",
+                            "brain": "*",
                             # THE HARNESS reads these back to score. In
                             # process it is the ungated operator; over a
                             # wire it arrives as `rest` (and `web` for a
                             # watch), so without this the SCORING calls
                             # are refused and read as the model having
                             # built nothing — a false NO on checks 2 & 3.
-                            "rest": "*", "web": "*"},
-            "ingress_rule": "allow_all_ingress",
-            # the COMMAND runner's gate: run THIS interpreter against a file argument.
-            "allowed": [rf"{re.escape(interp)} \S+"],
-            "description": "Process edge: the command(s) this kernel may spawn.",
-        }}]))[0]["result"]
+                            "rest": "*",
+                            "web": "*",
+                        },
+                        "ingress_rule": "allow_all_ingress",
+                        # the COMMAND runner's gate: run THIS interpreter against a file argument.
+                        "allowed": [rf"{re.escape(interp)} \S+"],
+                        "description": "Process edge: the command(s) this kernel may spawn.",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     assert not leg.get("error"), f"could not wire the command runner: {leg}"
     return store
 
 
 async def score(root, store_id: str, total: int, new_total: int, transcript: list[str]):
     print("\n" + "=" * (W + 4))
-    rec = (await root.send([{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]))[0]["result"]
+    rec = (
+        await root.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
     nodes: list[dict] = []
     walk(rec["tree"], nodes)
-    listing = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]["result"]
+    listing = (
+        await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}])
+    )[0]["result"]
     records = {a["id"]: a for a in (listing.get("agents") or [])}
 
     def _fixture(node: dict) -> bool:
@@ -438,15 +541,13 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
     # A model's compute child is a command runner (`exec_bridge.tools`) — the same
     # module the fixture's own leg carries, a fixture fact, not a naming sniff.
     execs = {EXEC_MODULE}
-    # A "script" is an executor agent that has actually RUN something — `code`
-    # is not a record field any more; the evidence is the leg's own job table.
-    scripts = []
-    for n in made:
-        if n.get("handler_module") not in execs:
-            continue
-        st = (await root.send([{"target": n["id"], "payload": {"type": "status"}}]))[0]["result"]
-        if (st or {}).get("jobs"):
-            scripts.append(n)
+    # A "script" is an executor agent the model made. STRUCTURE from RECORDS
+    # only: the job-table read (`status`) that used to be the evidence is GATED
+    # — over a wire the scorer arrives as `rest`, and a model-made runner does
+    # not list `rest` in `callable_by`, so the read was refused and every
+    # rust/swift lane scored `scripts=[]` with the tool demonstrably built
+    # (measured 2026-09-02). Whether it RAN is what checks 3 and 4 measure.
+    scripts = [n for n in made if n.get("handler_module") in execs]
     # Parentage comes from the RECORDS: a distilled tree node does not carry
     # `parent_id`, so reading it off the node silently yields no parents at all.
     parents = {records.get(n["id"], {}).get("parent_id") for n in scripts}
@@ -460,7 +561,14 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
 
     # ── 2. WIRED to the clock ──
     # `list`, not `reflect` — the scheduler's reflect carries tick state, not entries.
-    scheds = ((await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0]["result"]).get("schedules") or []
+    scheds = (
+        (
+            (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0][
+                "result"
+            ]
+        ).get("schedules")
+        or []
+    )
     made_ids = {n["id"] for n in made}
     aimed = [s for s in scheds if s.get("target") in made_ids]
     c2 = bool(aimed)
@@ -544,15 +652,40 @@ async def run(
     # `MINE` is that same set (minus the root ids it also carries), so the two
     # cannot drift. Ignored in process, where the probe IS the operator.
     root, core, close_kernel = await open_kernel(
-        "subai_", reach=sorted(MINE - {"kernel_state", "core"}))
+        "subai_", reach=sorted(MINE - {"kernel_state", "core"})
+    )
     store = await build_fixture(root, interpreter=interpreter)
     if extra_agents is not None:
         await extra_agents(root)
 
     # The AI agent: one pass, no loop, no agency. Named `brain` so the model can find it.
-    (await root.send([{"target": root.id, "payload": _ai_meta("brain", think=False, store=store, root=root, backend=brain_backend)}]))[0]["result"]
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": _ai_meta(
+                        "brain",
+                        think=False,
+                        store=store,
+                        root=root,
+                        backend=brain_backend,
+                    ),
+                }
+            ]
+        )
+    )[0]["result"]
     # The BUILDER — the turn that walks away.
-    ai = (await root.send([{"target": root.id, "payload": _ai_meta("ai", think=True, store=store, root=root)}]))[0]["result"]
+    ai = (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": _ai_meta("ai", think=True, store=store, root=root),
+                }
+            ]
+        )
+    )[0]["result"]
     aid = ai["id"]
 
     transcript: list[str] = []
@@ -702,7 +835,16 @@ async def run(
     # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
     # the run scored as "0 chars, read the docs: False" — a harness failure wearing
     # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
-    _first = (await root.send([{"target": aid, "payload": {"type": "send", "text": task, "client_id": "probe"}}]))[0]["result"]
+    _first = (
+        await root.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": task, "client_id": "probe"},
+                }
+            ]
+        )
+    )[0]["result"]
     if isinstance(_first, dict) and _first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {_first['error']} **\n", flush=True)
 
@@ -732,7 +874,16 @@ async def run(
         # waited 240s to say so. If nothing of the AI's is in flight and no new
         # turn has landed, the chain is over — say so now rather than waiting.
         if idle >= 30 and spy.n == last and last > 0:
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             _live = [
                 t for t in _rows if t.get("agent") == aid and t.get("verb") != "ps"
             ]
@@ -744,6 +895,13 @@ async def run(
                     f"CHAIN ENDED — no turn and nothing in flight after {idle:.0f}s"
                     f" · ps={[(t.get('agent'), t.get('verb')) for t in _rows]}"
                 )
+            else:
+                # A generation IS in flight — activity, not idleness. Without this
+                # hold the `while idle < IDLE` exited SILENTLY mid-generation (same
+                # defect `helpers/ai.py` fixed 2026-09-01; measured here 2026-09-02:
+                # a 33k-char turn regenerating after a fence refusal died at 60s
+                # with no cap line). Held at 28 so the check re-runs each tick.
+                idle = 28.0
         if runaway:
             # A turn blew the per-turn bound: the model is looping INSIDE one pass
             # and no turn-counting cap can see it.
@@ -761,9 +919,27 @@ async def run(
             # NOTHING: the cap only broke its own loop while the turns kept running.
             # Measured 2026-08-25 — "capped" runs were not killed, they were
             # abandoned, and their pending replies died with the process.
-            _t = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _t = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             for t in [x for x in _t if x.get("agent") == aid and x.get("verb") != "ps"]:
-                _c = (await root.send([{"target": "kernel", "payload": {"type": "cancel", "task_id": t["id"]}}]))[0]["result"]
+                _c = (
+                    await root.send(
+                        [
+                            {
+                                "target": "kernel",
+                                "payload": {"type": "cancel", "task_id": t["id"]},
+                            }
+                        ]
+                    )
+                )[0]["result"]
                 if isinstance(_c, dict) and _c.get("error"):
                     print(f"  ** CANCEL REFUSED: {_c['error']} **", flush=True)
             break
@@ -778,9 +954,21 @@ async def run(
             # the run scored FAIL while the model was still working. The `_live`
             # check above only suppresses the CAPPED label; this one extends the
             # wait. A wedged turn is still bounded by FANTASTIC_AI_SEND_TIMEOUT.
-            _rows = ((await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]).get("tasks") or []
+            _rows = (
+                (
+                    (
+                        await root.send(
+                            [{"target": "kernel", "payload": {"type": "ps"}}]
+                        )
+                    )[0]["result"]
+                ).get("tasks")
+                or []
+            )
             if any(t.get("agent") == aid and t.get("verb") != "ps" for t in _rows):
-                print(f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on", flush=True)
+                print(
+                    f"  … idle {idle:.0f}s but a turn is STILL GENERATING — waiting on",
+                    flush=True,
+                )
                 idle = 0.0
     if capped:
         print(f"\n  ** CAPPED: {capped} · {spy.n} passes **")

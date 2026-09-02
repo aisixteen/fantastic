@@ -199,9 +199,9 @@ _WIRE_CHILD = (
     "fd=int(os.environ['FANTASTIC_CTRL_FD'])\n"
     "s=socket.socket(fileno=fd)\n"
     "def frame(o):\n"
-    "  b=json.dumps(o).encode(); s.sendall(struct.pack('>I',len(b))+b)\n"
+    "  b=b'T'+json.dumps(o).encode(); s.sendall(struct.pack('>I',len(b))+b)\n"
     "frame({'op':'onmessage'})\n"
-    "hdr=s.recv(4); n=struct.unpack('>I',hdr)[0]; m=json.loads(s.recv(n))\n"
+    "hdr=s.recv(4); n=struct.unpack('>I',hdr)[0]; m=json.loads(s.recv(n)[1:])\n"
     "print('got', m['payload']['type']); sys.stdout.flush()\n"
 )
 
@@ -228,3 +228,126 @@ async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
         0
     ]["result"]
     assert "error" in r
+
+
+async def test_connector_verb_hands_over_the_reference_client(seeded_kernel):
+    """A model pastes the client instead of re-deriving the socket framing
+    (measured 2026-09-01, E30: ten turns lost to int(fd)/buffering/not-seekable).
+    Ungated like reflect — discovery works on a sealed leg."""
+    await _mk(seeded_kernel, "runner_c", allowed=["x"])
+    r = (
+        await seeded_kernel.send(
+            [{"target": "runner_c", "payload": {"type": "connector"}}]
+        )
+    )[0]["result"]
+    assert "FANTASTIC_CTRL_FD" in r["source"] and "def send(" in r["source"]
+    assert "can_call" in r["howto"]
+    # sealed leg (no ingress_rule) still answers — it is discovery
+    await _mk(seeded_kernel, "sealed_c", ingress_rule=None)
+    r2 = (
+        await seeded_kernel.send(
+            [{"target": "sealed_c", "payload": {"type": "connector"}}]
+        )
+    )[0]["result"]
+    assert "source" in r2, r2
+
+
+# ─── raw bytes on the wire ──────────────────────────────────────
+
+
+_STREAM_CHILD = (
+    "import os\n"
+    "fb = os.environ['FB']\n"
+    "raw = bytes(range(256)) * 3\n"
+    "w = kernel.send(fb, {'type': 'write_stream', 'path': 'blob.bin', 'bytes': raw, "
+    "'truncate': True})\n"
+    "r = kernel.send(fb, {'type': 'read_stream', 'path': 'blob.bin', 'bytes': b''})\n"
+    "print('WROTE', w['written'], 'READ', len(r['bytes']), r['bytes'] == raw, "
+    "type(r['bytes']).__name__)\n"
+)
+
+
+async def test_a_stream_chunk_crosses_the_wire_raw(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    """`write_stream`/`read_stream` from a program: the bytes ride the fd as the
+    io_bridge binary frame (kind B), never base64 — and never None. A `read_stream`
+    reply was unserializable on this wire and reached the program as None
+    (measured 2026-09-02, E30 subai:python: 50 turns lost to a correct worker)."""
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    monkeypatch.chdir(tmp_path)
+    py = sys.executable
+    fb = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": "fb",
+                        "handler_module": "file_bridge.tools",
+                        "ingress_rule": "allow_all_ingress",
+                        "root": "sd",
+                        "callable_by": {"runner": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]["id"]
+    await _mk(seeded_kernel, allowed=[rf"{py} -c .*"], can_call={fb: "*"})
+    r = await _start(
+        seeded_kernel,
+        "runner",
+        py,
+        ["-c", CONNECTOR_SRC + _STREAM_CHILD],
+        env={"FB": fb},
+    )
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"], secs=15.0)
+    assert row["exit_code"] == 0, row
+    assert row["last_line"] == "WROTE 768 READ 768 True bytes", row
+    assert (tmp_path / "sd" / "blob.bin").read_bytes() == bytes(range(256)) * 3
+
+
+def test_the_connector_raises_when_the_relay_cannot_deliver():
+    """A relay-level failure frame (`{op:reply, rid, error}`) surfaces as an
+    exception in the program — never a None reply the author cannot diagnose."""
+    import json
+    import socket
+    import struct
+    import subprocess
+
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    code = CONNECTOR_SRC + (
+        "try:\n"
+        "    kernel.send('x', {'type': 'y'})\n"
+        "    print('RETURNED')\n"
+        "except RuntimeError as e:\n"
+        "    print('RAISED', e)\n"
+    )
+    parent, child_end = socket.socketpair()
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code],
+        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
+        pass_fds=[child_end.fileno()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_end.close()
+    parent.settimeout(10)
+    (n,) = struct.unpack(">I", parent.recv(4))
+    body = b""
+    while len(body) < n:
+        body += parent.recv(n - len(body))
+    assert body[:1] == b"T", body[:8]
+    m = json.loads(body[1:])
+    assert m["op"] == "send" and m["target"] == "x"
+    reply = (
+        b"T" + json.dumps({"op": "reply", "rid": m["rid"], "error": "boom"}).encode()
+    )
+    parent.sendall(struct.pack(">I", len(reply)) + reply)
+    out, err = proc.communicate(timeout=10)
+    parent.close()
+    assert b"RAISED fantastic: send('x') failed in transit: boom" in out, (out, err)

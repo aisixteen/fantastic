@@ -16,10 +16,10 @@ limits:
   # `stop_reason='max_tokens' blocks=['thinking','text']` at 16,815 chars.
   # Thought present, answer truncated. That is a budget problem wearing a model
   # failure's clothes, and it is a per-test knob for exactly this reason.
-  max_tokens: 16384
+  max_tokens: 32768   # a two-program authoring turn (~33k chars + thinking) truncated at 16384 — the fences never arrived (measured 2026-09-02)
   idle_seconds: 60
   max_turns: 50
-  no_progress_turns: 12
+  no_progress_turns: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_turns is the backstop
   turn_chars: 120000
   turn_seconds: 600
 env: {}

@@ -606,11 +606,15 @@ struct RoutingTests {
     // ─── the end-of-chain contract: DONE is explicit; silence is nudged ───
     // Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
 
-    @Test func aSilentChainTurnIsNudgedOnceThenEnds() async throws {
+    @Test func silentChainTurnsAreNudgedUntilACallOrDone() async throws {
+        // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
+        // second silent turn used to end the chain silently.
         let script = ProviderScript([
             [callEnvelope(target: "core", payload: cheapReflect)],
             ["thinking out loud, no envelope"],
             ["still just prose"],
+            ["ok, finishing"],
+            ["<tool_call>{\"name\":\"done\"}</tool_call>"],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -618,13 +622,38 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("go"),
                 "client_id": .string("c"),
             ]))])[0].result
-        #expect(await script.waitForCalls(3), "the nudge never arrived")
-        #expect(
-            script.requestText(2).contains("[no call was dispatched] Your turn emitted no"),
-            "pass 3 must be the nudge")
-        // the nudged-silent turn ended the chain — no fourth pass
+        #expect(await script.waitForCalls(5), "the chain did not reach done")
+        for n in [2, 3, 4] {
+            #expect(
+                script.requestText(n).contains("[no call was dispatched] Your turn emitted no"),
+                "pass \(n + 1) must be a nudge")
+        }
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(script.calls == 3)
+        #expect(script.calls == 5, "done ended it; nothing reminds after")
+    }
+
+    @Test func nudgeLimitBoundsANeverCallingChain() async throws {
+        let script = ProviderScript([
+            [callEnvelope(target: "core", payload: cheapReflect)],
+            ["prose 1"],
+            ["prose 2"],
+            ["prose 3"],
+            ["prose 4 — would be nudged without the limit"],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("update_agent"), "id": .string(ids["mock"]!.value),
+                "nudge_limit": .integer(2),
+            ]))])[0].result
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"),
+                "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(4), "two nudges must arrive")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        // call, silent→nudge 1, silent→nudge 2, silent→over the limit: 4, never 5
+        #expect(script.calls == 4)
     }
 
     @Test func aDoneCallEndsTheChainWithoutANudge() async throws {

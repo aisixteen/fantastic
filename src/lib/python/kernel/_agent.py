@@ -1056,13 +1056,41 @@ class Agent:
                         loader_id=root_id,
                     ).allowed
                     if not ok:
+                        # Name the TRUE reason. A target that is not an agent at
+                        # all is almost always one created in the SAME batch —
+                        # items launch concurrently, so it is not there yet when
+                        # this gate runs. "you don't hold it" sent a builder
+                        # into a 382-second deliberation (measured 2026-09-02).
+                        if self.ctx.agents.get(key) is None:
+                            return {
+                                "error": (
+                                    f"{sender_id} cannot delegate {v!r} on {key}: "
+                                    "no such agent — calls of one turn run "
+                                    "concurrently, so an agent created in this "
+                                    "batch does not exist yet; create in one turn, "
+                                    "grant in the next"
+                                ),
+                                "reason": "unauthorized",
+                                "side": "delegation",
+                                "missing": key,
+                                "hint": _FROM_ABOVE,
+                            }
+                        # The target exists but the granter does not hold it. Say
+                        # WHY in one line — the usual cause is a specialist created
+                        # under the root instead of under the granter, and "you
+                        # don't hold it" hid that for twenty turns (2026-09-02).
+                        held_parent = self.ctx.agents[key].parent
+                        pid = held_parent.id if held_parent is not None else None
                         return {
                             "error": (
-                                f"{sender_id} cannot delegate {v!r} on {key} — you "
-                                "may only confer can_call you already hold"
+                                f"{sender_id} cannot delegate {v!r} on {key}: {key} is "
+                                f"not your child (its parent is {pid}) and not in your "
+                                "can_call — you may only confer can_call you already "
+                                "hold; create the agents you will wire as YOUR children"
                             ),
                             "reason": "unauthorized",
                             "side": "delegation",
+                            "parent": pid,
                             "hint": _FROM_ABOVE,
                         }
         return None

@@ -221,12 +221,43 @@ impl Kernel {
                     )
                     .allowed;
                     if !ok {
+                        // Name the TRUE reason. A target that is not an agent at all
+                        // is almost always one created in the SAME batch — items
+                        // launch concurrently, so it is not there yet when this gate
+                        // runs. "you don't hold it" sent a builder into a 382-second
+                        // deliberation (measured 2026-09-02).
+                        if !self.agents.contains_key(&AgentId::from(key.as_str())) {
+                            return Some(json!({
+                                "error": format!(
+                                    "{sender_id} cannot delegate '{v}' on {key}: no such \
+                                     agent — calls of one turn run concurrently, so an \
+                                     agent created in this batch does not exist yet; \
+                                     create in one turn, grant in the next"
+                                ),
+                                "reason": "unauthorized", "side": "delegation",
+                                "missing": key,
+                                "hint": crate::authz::FROM_ABOVE,
+                            }));
+                        }
+                        // The target exists but the granter does not hold it. Say WHY
+                        // in one line — the usual cause is a specialist created under
+                        // the root instead of under the granter, and "you don't hold
+                        // it" hid that for twenty turns (2026-09-02).
+                        let pid = self
+                            .agents
+                            .get(&AgentId::from(key.as_str()))
+                            .and_then(|a| a.parent_id.clone());
+                        let pid_s = pid.as_ref().map(|p| p.to_string());
                         return Some(json!({
                             "error": format!(
-                                "{sender_id} cannot delegate {v:?} on {key} — you may only \
-                                 confer can_call you already hold"
+                                "{sender_id} cannot delegate '{v}' on {key}: {key} is not \
+                                 your child (its parent is {}) and not in your can_call — \
+                                 you may only confer can_call you already hold; create \
+                                 the agents you will wire as YOUR children",
+                                pid_s.as_deref().unwrap_or("none")
                             ),
                             "reason": "unauthorized", "side": "delegation",
+                            "parent": pid_s,
                             "hint": crate::authz::FROM_ABOVE,
                         }));
                     }

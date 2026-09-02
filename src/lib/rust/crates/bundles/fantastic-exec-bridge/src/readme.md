@@ -89,7 +89,10 @@ The published contract is the WIRE. The child inherits three env vars:
 - `FANTASTIC_SELF_ID` — the OWNER agent's id (the tool's public id, not the job id).
 - `FANTASTIC_ARGS` — this call's `args`, as JSON.
 
-Framing both directions: `[4-byte big-endian length | JSON body]`. Child → parent, the six
+Framing both directions: `[4-byte big-endian length | kind | rest]` — kind `T`: a JSON
+envelope; kind `B`: the io_bridge binary frame `[4-byte BE H | H-byte JSON header | raw
+body]`, the header's `_binary_path` naming where the body belongs, so a `read_stream`
+chunk or a `write_stream` payload crosses raw (never base64). Child → parent, the six
 ops: `{op:"send", rid, target, payload}` · `{op:"emit", target?, payload}` ·
 `{op:"watch", src}` · `{op:"unwatch", src}` · `{op:"onmessage"}` · `{op:"offmessage"}`.
 Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
@@ -124,3 +127,8 @@ commands may run instead of the kernel guessing, and that a program cannot pick 
 one. Anything stronger needs an OS mechanism (`sandbox-exec`, a separate uid, a container)
 and none of it is reachable in-process. Stated plainly rather than reassuringly: opening this
 leg grants local code execution to whoever can reach it.
+
+**Get the client instead of writing one:** send this agent `{type:'connector'}` — the
+reply's `source` IS the reference wire client; paste it verbatim at the top of your
+program file. A program's sends carry THIS runner's identity and grants (its `can_call`;
+a target must list the runner in `callable_by`).

@@ -150,6 +150,32 @@ let noCallNudge =
     + "If it is finished, end the chain explicitly: <tool_call>{\"name\":\"done\"}"
     + "</tool_call>"
 
+/// Consecutive silent chain turns the reminder tolerates before the chain is
+/// let go (record meta `nudge_limit` overrides). A safety bound on an
+/// unattended kernel, not a budget. Mirrors python `_NUDGE_LIMIT`.
+let nudgeLimit = 24
+
+/// (kernel instance, agent id, client id) → consecutive silent chain turns so
+/// far. Scoped to the KERNEL, not the process: two kernels in one process (the
+/// test suite, an app embedding several) may carry the same agent/client ids.
+actor SilentStreaks {
+    private var map: [String: Int] = [:]
+    private func key(_ kernel: Kernel, _ agent: String, _ client: String) -> String {
+        "\(ObjectIdentifier(kernel).hashValue)\u{1F}\(agent)\u{1F}\(client)"
+    }
+    func bump(_ kernel: Kernel, _ agent: String, _ client: String) -> Int {
+        let k = key(kernel, agent, client)
+        let n = (map[k] ?? 0) + 1
+        map[k] = n
+        return n
+    }
+    func reset(_ kernel: Kernel, _ agent: String, _ client: String) {
+        map[key(kernel, agent, client)] = nil
+    }
+}
+
+let silentStreaks = SilentStreaks()
+
 func routeReply(
     selfId: AgentId,
     kernel: Kernel,
@@ -175,26 +201,40 @@ func routeReply(
     if calls.isEmpty {
         // A malformed-only turn still owes its report.
         if !blocks.isEmpty {
+            await silentStreaks.reset(kernel, selfId.value, clientId)
             await deliverGrouped(
                 kernel: kernel, blocks: blocks, clientId: clientId,
                 systemPrompt: systemPrompt)
             return
         }
-        // A CHAIN turn (its incoming text was a delivered reply) that dispatched
-        // nothing gets ONE reminder — see `noCallNudge`. A chat turn is not a
-        // chain, and a turn already answering the nudge is never nudged again.
+        // A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
+        // dispatched nothing is REMINDED AGAIN — the model is queried until it
+        // emits a call, `done`, or a question. Until 2026-09-01 the reminder
+        // fired ONCE and a second silent turn ended the chain silently
+        // (python-canonical fix: a planning-heavy model wrote prose for two
+        // turns and the run read as finished with the task untouched). A chat
+        // turn is not a chain. Bounded by `nudge_limit` on the record (default
+        // `nudgeLimit`) so an unattended kernel cannot spin forever.
         // A question turn is the OTHER legitimate silent end (ask + stop; the
         // human's answer resumes the chain) — nudging it would stomp the wait.
         let asked = text.contains("\"type\"") && text.contains("\"question\"")
-        if incoming.hasPrefix("[reply to "),
-            !asked,
-            !incoming.hasPrefix("[no call was dispatched]")
-        {
-            await deliverTurn(
-                kernel: kernel, target: selfId.value, text: noCallNudge,
-                clientId: clientId, systemPrompt: systemPrompt)
+        let chained =
+            incoming.hasPrefix("[reply to ") || incoming.hasPrefix("[no call was dispatched]")
+        if chained, !asked {
+            let streak = await silentStreaks.bump(kernel, selfId.value, clientId)
+            let limit =
+                kernel.agent(selfId)?.metaValue(forKey: "nudge_limit")?.asInt.map { Int($0) }
+                ?? nudgeLimit
+            if streak <= limit {
+                await deliverTurn(
+                    kernel: kernel, target: selfId.value, text: noCallNudge,
+                    clientId: clientId, systemPrompt: systemPrompt)
+            } else {
+                await silentStreaks.reset(kernel, selfId.value, clientId)
+            }
             return
         }
+        await silentStreaks.reset(kernel, selfId.value, clientId)
         // No call of the model's own, so the CALLER's one-shot handoff applies:
         // hand this pass's TEXT to `send_to`, once. It must not propagate — a
         // caller cannot spend the model's turns for it.
@@ -392,6 +432,7 @@ func routeReply(
     // COMPLETENESS — a model that made 2 calls and got 1 back could not tell
     // "still running" from "answered the wrong one".
     if doneCalled && blocks.isEmpty {
+        await silentStreaks.reset(kernel, selfId.value, clientId)
         return  // explicitly finished — nothing more runs, nothing reminds
     }
     await deliverGrouped(
