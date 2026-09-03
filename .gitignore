@@ -27,3 +27,5 @@ src/lib/swift/fantastic-schedfire-*/
 src/lib/swift/fantastic-wsbrstream-*/
 e2e/backends/sampling.json
 e2e/backends/connection.local.env
+# Staged kernel artifacts — built from source on demand, never committed.
+e2e/dist/

@@ -82,9 +82,23 @@ function loadScenario(id) {
       continue;
     }
     if (block === "expect") {
-      if ((m = line.match(/^\s+-\s+read:\s*\{agent:\s*(\w+),\s*key:\s*(\w+)\}/))) {
-        sc.expect.push({ agent: m[1], key: m[2] });
+      // `path:` is the field the scenarios carry (memory became FILES with
+      // text_file; the old KV `key:` died with durable_memory). The ASSERTION
+      // below already reads `check.path` — only this parser still wrote `key`,
+      // so every `- read:` line silently failed to match, `expect` stayed empty,
+      // and the following `contains:` crashed on `expect[-1]`. `key:` is still
+      // accepted so an older scenario parses, and maps to the same field.
+      if ((m = line.match(/^\s+-\s+read:\s*\{agent:\s*(\w+),\s*(?:path|key):\s*([\w./-]+)\}/))) {
+        sc.expect.push({ agent: m[1], path: m[2] });
       } else if ((m = line.match(/^\s+contains:\s*"?([^"]+?)"?\s*$/))) {
+        // A `contains:` with nothing to attach to is a scenario this runner
+        // cannot express. Say so; do not crash with a TypeError on undefined.
+        if (sc.expect.length === 0) {
+          throw new Error(
+            `scenario ${id}: 'contains:' with no preceding '- read:' — the read ` +
+            `line did not parse (expected '- read: {agent: <id>, path: <path>}')`,
+          );
+        }
         sc.expect[sc.expect.length - 1].contains = m[1].trim();
       } else if ((m = line.match(/^\s+-\s+side_effects:\s*\{agent:\s*(\w+),\s*(exactly|at_least):\s*(\d+)\}/))) {
         sc.expect.push({ side_effects: { agent: m[1], [m[2]]: Number(m[3]) } });

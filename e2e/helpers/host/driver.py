@@ -36,6 +36,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import artifacts
+
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
 #: PRIVILEGED verbs lose their wildcard cover — named explicitly, as everywhere.
 ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"]
@@ -109,31 +111,28 @@ def runtime(repo, name: str | None = None) -> tuple[str, dict]:
 
 
 def ensure_runtime(repo, name: str) -> dict:
-    """Make the kernel runnable WITH its scenario fixtures, or fail loudly.
+    """Stage the kernel as a PACKAGED ARTIFACT and return the spec that runs it.
+
+    The build + packaging mirror `.github/workflows/release.yml` step for step —
+    same command, same product name, same working directory, same tarball
+    layout — with DEBUG in place of `--release`. See `artifacts.py`: running the
+    packaged thing is what makes a packaging bug (a bundle the tarball forgot, an
+    entry point that only resolved because the source tree was the cwd) fail
+    HERE instead of on a user's first boot.
 
     A stale binary without the probes reports `cannot play ['dispenser']` — a
-    skip that reads like a design boundary when it is really a build flag. Doing
-    the build here means the skip only ever means what it says. An interpreted
-    runtime has nothing to build; its fixtures ride the env instead.
+    skip that reads like a design boundary when it is really a build flag, so
+    the staging is done here and the skip only ever means what it says.
     """
     _, spec = runtime(repo, name)
-    # ALREADY BUILT BY THE LAUNCHER. `run.py` builds each kernel once before it
+    # ALREADY STAGED BY THE LAUNCHER. `run.py` stages each kernel once before it
     # dispatches any cell; without this the cells rebuilt concurrently and
     # serialised on the toolchain's build lock (swift: 4-6s per cell for a
     # NO-OP build, ~11s when the tree changed), time that was then charged to
-    # the test. The binary is still checked below, so a missing one fails loud.
-    prebuilt = name in os.environ.get("E2E_PREBUILT", "").split(",")
-    if spec.get("build") and not prebuilt:
-        r = subprocess.run(spec["build"], cwd=repo / spec["build_cwd"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise SystemExit(
-                f"building {name} kernel with scenario fixtures failed:\n"
-                + (r.stderr or r.stdout)[-800:])
+    # the test. Staging is idempotent, so this is a stat walk when it is a no-op.
+    spec = artifacts.stage(repo, name, spec)
     if not Path(spec["cmd"][0]).exists():
-        raise SystemExit(
-            f"{name}: no binary at {spec['cmd'][0]}"
-            + (" (E2E_PREBUILT names it as already built)" if prebuilt else ""))
+        raise SystemExit(f"{name}: no staged artifact at {spec['cmd'][0]}")
     return spec
 
 
