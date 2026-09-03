@@ -316,12 +316,10 @@ public actor RelayTransport {
                 id: id, data: .object(["error": .string("relay_connector: empty call target")]))
             return
         }
-        if case .deny(let reason) = decision {
-            _ = await sendReply(
-                id: id,
-                data: .object([
-                    "error": .string(reason), "reason": .string("unauthorized"),
-                ]))
+        // FORWARDED, not re-worded — the rule's own reason AND the repair it
+        // names, so a peer hitting a sealed leg learns how to open it.
+        if case .deny(let d) = decision {
+            _ = await sendReply(id: id, data: d.asRefusal)
             return
         }
         guard let kernel = kernel else {
@@ -329,16 +327,26 @@ public actor RelayTransport {
                 id: id, data: .object(["error": .string("relay_connector: no local kernel")]))
             return
         }
+        // UNDER THE LEG'S OWN IDENTITY. A relay peer's frame reaching
+        // `kernel.send` with a nil `currentSender` is an OPERATOR call — the
+        // two-sided gate is skipped and the leg's `can_call` bounds nothing. The
+        // leg id is the one we re-emit events on (`eventSink`, set at boot);
+        // python's read task inherits the same id from its boot dispatch.
+        let legId = eventSink ?? AgentId("relay_connector")
         if !isBinary {
             // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already
             // sends NAMES the execution, so a reconnect that replays its queue
             // joins the original instead of running the side effect twice.
-            let reply = await kernel.send([
-                Item.fromFrame(AgentId(target), inner, frameId: id.asString)
-            ])[0].result
+            let reply = await KernelTaskLocals.$currentSender.withValue(legId) {
+                await kernel.send([
+                    Item.fromFrame(AgentId(target), inner, frameId: id.asString)
+                ])[0].result
+            }
             _ = await sendReply(id: id, data: reply)
         } else {
-            let (reply, replyBody) = await kernel.sendWithBinary(AgentId(target), inner, body)
+            let (reply, replyBody) = await KernelTaskLocals.$currentSender.withValue(legId) {
+                await kernel.sendWithBinary(AgentId(target), inner, body)
+            }
             if replyBody.isEmpty {
                 // write_stream status → a plain text reply (no body).
                 _ = await sendReply(id: id, data: reply)
@@ -406,7 +414,7 @@ public actor RelayTransport {
         guard open else {
             return .object([
                 "error": .string("relay_connector: not connected"),
-                "reason": .string("not_connected"),
+                "reason": .string(Refusal.notConnected),
             ])
         }
         let id = mintId()
@@ -435,7 +443,7 @@ public actor RelayTransport {
             return (
                 .object([
                     "error": .string("relay_connector: not connected"),
-                    "reason": .string("not_connected"),
+                    "reason": .string(Refusal.notConnected),
                 ]), Data()
             )
         }
@@ -490,7 +498,7 @@ public actor RelayTransport {
         guard open, let client = client else {
             return .object([
                 "error": .string("relay_connector: not connected"),
-                "reason": .string("not_connected"),
+                "reason": .string(Refusal.notConnected),
             ])
         }
         relayNextId += 1
@@ -588,7 +596,7 @@ public actor RelayTransport {
         for (_, cont) in pending {
             cont.resume(
                 returning: .object([
-                    "error": .string(reason), "reason": .string("transport_dropped"),
+                    "error": .string(reason), "reason": .string(Refusal.transportClosed),
                 ]))
         }
         pending.removeAll()
@@ -596,7 +604,7 @@ public actor RelayTransport {
             cont.resume(
                 returning: (
                     .object([
-                        "error": .string(reason), "reason": .string("transport_dropped"),
+                        "error": .string(reason), "reason": .string(Refusal.transportClosed),
                     ]), Data()
                 ))
         }
@@ -604,7 +612,7 @@ public actor RelayTransport {
         for (_, cont) in relayPending {
             cont.resume(
                 returning: .object([
-                    "error": .string(reason), "reason": .string("transport_dropped"),
+                    "error": .string(reason), "reason": .string(Refusal.transportClosed),
                 ]))
         }
         relayPending.removeAll()

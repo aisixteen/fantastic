@@ -29,7 +29,14 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM means the process EXISTS and belongs to someone else. Treating it
+        # as dead let a second kernel overwrite a live lock and run two daemons
+        # in one workdir (measured 2026-09-02).
+        return True
+    except OSError:
         return False
 
 

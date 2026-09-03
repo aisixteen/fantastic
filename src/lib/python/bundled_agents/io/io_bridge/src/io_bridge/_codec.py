@@ -80,13 +80,35 @@ def encode_frame(envelope: dict) -> tuple[bytes, bool]:
 
 def decode_frame(data: bytes | str) -> dict:
     """Parse a wire frame back into an envelope. `str` ⇒ a text (JSON) frame; `bytes`
-    ⇒ a binary frame with the raw body restored at `_binary_path`."""
+    ⇒ a binary frame with the raw body restored at `_binary_path`.
+
+    A frame arrives from a PEER, so every length in it is hostile until checked: a
+    4-byte prefix claiming 4 GiB of header on a 3-byte frame used to slice garbage
+    and raise `struct.error`/`JSONDecodeError` out of whichever read loop called us.
+    The bounds are checked here, once, and every malformed frame leaves as the SAME
+    `ValueError` — so a caller can catch one thing and keep its socket."""
     if isinstance(data, str):
-        return json.loads(data)
+        try:
+            return json.loads(data)
+        except Exception as e:
+            raise ValueError(f"bad text frame: {e}") from e
+    if len(data) < 4:
+        raise ValueError(f"binary frame shorter than its 4-byte header ({len(data)}B)")
     head_len = struct.unpack(">I", data[:4])[0]
-    head = json.loads(data[4 : 4 + head_len].decode("utf-8"))
+    if 4 + head_len > len(data):
+        raise ValueError(
+            f"binary frame header claims {head_len}B but only "
+            f"{len(data) - 4}B follow the length prefix"
+        )
+    try:
+        head = json.loads(data[4 : 4 + head_len].decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"bad binary frame header: {e}") from e
     body = data[4 + head_len :]
-    path = head.pop("_binary_path", None)
+    path = head.pop("_binary_path", None) if isinstance(head, dict) else None
     if path is not None:
-        set_path(head, path, body)
+        try:
+            set_path(head, path, body)
+        except Exception as e:
+            raise ValueError(f"bad _binary_path {path!r}: {e}") from e
     return head

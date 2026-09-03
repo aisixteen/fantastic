@@ -171,3 +171,155 @@ async def test_sealed_store_surfaces_denied_write(seeded_kernel):
     )[0]["result"]
     assert "error" in w, w
     assert w.get("reason") == "unauthorized", w
+
+
+# ─── the loader's own guards (A-5) ──────────────────────────────
+
+
+async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_agent):
+    """`errors="replace"` turned a binary sidecar into U+FFFD mojibake and
+    returned it as `content`, so a caller could not tell a corrupt read from a
+    real one — and writing that back would have destroyed the file."""
+    from kernel import operator_context
+
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": "blob_bin_owner",
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert rec.get("id") == "blob_bin_owner", rec
+    with operator_context():
+        w = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": store_agent,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": "agents/blob_bin_owner/binary.bin",
+                            "bytes": b"\xff\xfe\x00\x01",
+                            "truncate": True,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert w.get("written") == 4, w
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "load_blob",
+                        "agent_id": "blob_bin_owner",
+                        "name": "binary.bin",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert r.get("reason") == "bad_encoding", r
+    assert r.get("content") is None, r
+    assert "�" not in str(r.get("error", "")), "the refusal must not carry mojibake"
+
+
+async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
+    """The record id arrives in the PAYLOAD, so without an owner guard any agent
+    granted `persist_record` could rewrite a sibling's record — the same hole
+    `_guard_blob_owner` closed one field over."""
+    from kernel import sender_context
+
+    async def _mk(agent_id):
+        rec = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": seeded_kernel.id,
+                            "id": agent_id,
+                            "handler_module": "file_bridge.tools",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert rec.get("id") == agent_id, rec
+        return agent_id
+
+    attacker = await _mk("ro_attacker")
+    victim = await _mk("ro_victim")
+    with sender_context(attacker):
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {
+                            "type": "persist_record",
+                            "record": {"id": victim, "parent_id": seeded_kernel.id},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert r.get("reason") == "unauthorized", r
+        # …and it may name ITSELF.
+        own = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {
+                            "type": "persist_record",
+                            "record": {"id": attacker, "parent_id": seeded_kernel.id},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert own.get("reason") != "unauthorized", own
+
+
+async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
+    """`forget_record` ends in an rmtree, so the same guard has to hold there."""
+    from kernel import sender_context
+
+    for aid in ("ro_f_attacker", "ro_f_victim"):
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": aid,
+                        "handler_module": "file_bridge.tools",
+                    },
+                }
+            ]
+        )
+    with sender_context("ro_f_attacker"):
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": seeded_kernel.id,
+                        "payload": {"type": "forget_record", "id": "ro_f_victim"},
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert r.get("reason") == "unauthorized", r

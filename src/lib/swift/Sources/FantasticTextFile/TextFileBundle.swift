@@ -31,6 +31,65 @@ extension JSON: Swift.Error {}
 private let CKPT_DIR = ".ckpt"
 private let CHUNK = 65536
 
+/// ABSENT ⇒ `def`. Present, an integer, ≥ `minimum` ⇒ that value. ANYTHING ELSE
+/// (a bool, a string, a float, an explicit null, a value under the bound) ⇒ a
+/// `bad_arg` refusal.
+///
+/// A present-but-wrong number is a TYPO, and `asInt ?? 0` hid it: `read
+/// {offset: "12"}` silently paged from the top and told the caller nothing.
+private func intArg(
+    _ payload: JSON, _ key: String, _ def: Int64, _ verb: String, _ minimum: Int64
+) -> Result<Int64, JSON> {
+    guard let raw = payload.asObject?[key] else { return .success(def) }
+    if case .integer(let n) = raw, n >= minimum { return .success(n) }
+    let want = minimum == 0 ? "a non-negative int" : "an int >= \(minimum)"
+    return .failure(Refusal.bad(verb, key, want))
+}
+
+// ─── per-document serialization ─────────────────────────────────
+// A mutate is read → verify → commit with awaits between; two concurrent
+// mutates on ONE document interleaved there would both derive from the same
+// pre-image and the second commit would silently discard the first. One lock
+// per (target surface, path), held from the first read through the rename;
+// `if_match` is checked UNDER it. Multi-edit patches take theirs in sorted key
+// order so two transactions over overlapping sets cannot deadlock. Entries are
+// pruned when nobody holds or waits, so the map never grows.
+private actor DocumentLocks {
+    static let shared = DocumentLocks()
+    private var held: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(_ key: String) async {
+        if !held.contains(key) {
+            held.insert(key)
+            return
+        }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            waiters[key, default: []].append(c)
+        }
+    }
+
+    func release(_ key: String) {
+        if var queue = waiters[key], !queue.isEmpty {
+            let next = queue.removeFirst()
+            waiters[key] = queue.isEmpty ? nil : queue
+            // ownership passes straight to the waiter; `held` stays set
+            next.resume()
+        } else {
+            held.remove(key)
+        }
+    }
+}
+
+/// Run `body` with every `(fb, path)` lock held, taken in sorted key order.
+private func locked(_ fb: String, _ paths: [String], _ body: () async -> JSON) async -> JSON {
+    let keys = Array(Set(paths.map { "\(fb)\u{0}\($0)" })).sorted()
+    for k in keys { await DocumentLocks.shared.acquire(k) }
+    let out = await body()
+    for k in keys.reversed() { await DocumentLocks.shared.release(k) }
+    return out
+}
+
 public struct TextFileBundle: AgentBundle {
     public let name = "text_file"
 
@@ -312,6 +371,17 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let p): path = p
         }
+        // Type the paging args BEFORE the read — a typo'd `offset` costs no IO.
+        let off: Int
+        switch intArg(payload, "offset", 0, "read", 0) {
+        case .failure(let e): return e
+        case .success(let v): off = Int(v)
+        }
+        let limit: Int
+        switch intArg(payload, "limit", 200, "read", 1) {
+        case .failure(let e): return e
+        case .success(let v): limit = Int(v)
+        }
         let data: Data
         switch await readAll(kernel, fb: fb, path: path) {
         case .failure(let e): return e
@@ -323,9 +393,9 @@ public struct TextFileBundle: AgentBundle {
         }
         var allLines = text.components(separatedBy: "\n")
         if allLines.last == "" { allLines.removeLast() }
-        let off = max(0, Int(payload["offset"].asInt ?? 0))
-        let limit = max(1, Int(payload["limit"].asInt ?? 200))
-        let end = min(off + limit, allLines.count)
+        // `limit: Int64.max` must page to eof, not trap on `off + limit`.
+        let (span, overflow) = off.addingReportingOverflow(limit)
+        let end = overflow ? allLines.count : min(span, allLines.count)
         var page: [JSON] = []
         if off < end {
             for (i, t) in allLines[off..<end].enumerated() {
@@ -336,7 +406,7 @@ public struct TextFileBundle: AgentBundle {
             "path": .string(path),
             "lines": .array(page),
             "total": .integer(Int64(allLines.count)),
-            "eof": .bool(off + limit >= allLines.count),
+            "eof": .bool(overflow || span >= allLines.count),
             "version": .string(version(data)),
         ])
     }
@@ -350,8 +420,18 @@ public struct TextFileBundle: AgentBundle {
         case .success(let p): path = p
         }
         if blob.isEmpty && payload["bytes"].isNull {
-            return Refusal.missing("write", "bytes (the document, raw bytes)")
+            return Refusal.missing("write", "bytes (the document — str is utf-8-encoded)")
         }
+        return await locked(fb, [path]) {
+            await writeLocked(kernel, fb: fb, path: path, payload: payload, blob: blob)
+        }
+    }
+
+    /// The locked half of `write`: the `if_match` check happens here, under
+    /// the document lock, and stays valid through the rename.
+    private func writeLocked(
+        _ kernel: Kernel, fb: String, path: String, payload: JSON, blob: Data
+    ) async -> JSON {
         if let err = await ifMatchGuard(kernel, fb: fb, path: path, payload: payload) {
             return err
         }
@@ -383,24 +463,26 @@ public struct TextFileBundle: AgentBundle {
         case .success(let p): path = p
         }
         if blob.isEmpty && payload["bytes"].isNull {
-            return Refusal.missing("append", "bytes (one raw chunk)")
+            return Refusal.missing("append", "bytes (one chunk — str is utf-8-encoded)")
         }
-        // absent offset = append at end (creates the file)
-        let (r, _) = await kernel.sendWithBinary(
-            AgentId(fb),
-            .object(["type": .string("write_stream"), "path": .string(path)]), blob)
-        guard case .object = r else { return .object(["error": .string("\(fb): no reply")]) }
-        if r["error"].asString != nil { return r }
-        let whole: Data
-        switch await readAll(kernel, fb: fb, path: path) {
-        case .failure(let e): return e
-        case .success(let d): whole = d
+        return await locked(fb, [path]) {
+            // absent offset = append at end (creates the file)
+            let (r, _) = await kernel.sendWithBinary(
+                AgentId(fb),
+                .object(["type": .string("write_stream"), "path": .string(path)]), blob)
+            guard case .object = r else { return .object(["error": .string("\(fb): no reply")]) }
+            if r["error"].asString != nil { return r }
+            let whole: Data
+            switch await readAll(kernel, fb: fb, path: path) {
+            case .failure(let e): return e
+            case .success(let d): whole = d
+            }
+            return .object([
+                "path": .string(path),
+                "size": r["size"],
+                "version": .string(version(whole)),
+            ])
         }
-        return .object([
-            "path": .string(path),
-            "size": r["size"],
-            "version": .string(version(whole)),
-        ])
     }
 
     private struct PlannedEdit {
@@ -448,10 +530,18 @@ public struct TextFileBundle: AgentBundle {
             guard let path = e["path"].asString, !path.isEmpty else {
                 return Refusal.bad("patch", "edits", "edit \(i): an object with a `path`")
             }
-            guard let n = e["hunks"].asInt, n >= 1 else {
+            // `.integer` ONLY — `asInt` promotes a whole double, so `hunks: 1.0`
+            // would pass here and be refused by python/rust. Same typing rule as
+            // `intArg`: a present-but-wrong count is a typo, not a coercion.
+            guard case .integer(let n) = e["hunks"], n >= 1 else {
                 return Refusal.bad("patch", "edits", "edit \(i) (\"\(path)\"): `hunks` (int >= 1)")
             }
             let n2 = Int(n)
+            if plan.contains(where: { $0.path == path }) {
+                return Refusal.bad(
+                    "patch", "edits",
+                    "each path at most once — put all of a file's hunks in one edit")
+            }
             if cursor + n2 > hunks.count {
                 cursor += n2
                 break
@@ -468,6 +558,19 @@ public struct TextFileBundle: AgentBundle {
                 "hunk counts that sum to the blob's blocks — edits claim \(cursor), "
                     + "the patch holds \(hunks.count)")
         }
+        // Every edit's document is held from the first read to the last rename.
+        return await locked(fb, plan.map { $0.path }) {
+            await patchTxn(kernel, fb: fb, plan: plan, payload: payload)
+        }
+    }
+
+    /// The locked half of `patch`: verify every hunk against the CURRENT
+    /// pre-image (the `if_match` check happens here, under the lock),
+    /// checkpoint all, apply all, self-clean or keep the pre-images.
+    private func patchTxn(_ kernel: Kernel, fb: String, plan planIn: [PlannedEdit], payload: JSON)
+        async -> JSON
+    {
+        var plan = planIn
         // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
         for i in plan.indices {
             let raw: Data
@@ -644,6 +747,16 @@ public struct TextFileBundle: AgentBundle {
         guard let ckptId = payload["ckpt_id"].asString, !ckptId.isEmpty else {
             return Refusal.missing("restore", "ckpt_id")
         }
+        return await locked(fb, [path]) {
+            await restoreLocked(kernel, fb: fb, path: path, ckptId: ckptId, payload: payload)
+        }
+    }
+
+    /// The locked half of `restore`: `if_match` checked under the document
+    /// lock, then the atomic put-back (or delete).
+    private func restoreLocked(
+        _ kernel: Kernel, fb: String, path: String, ckptId: String, payload: JSON
+    ) async -> JSON {
         if let err = await ifMatchGuard(kernel, fb: fb, path: path, payload: payload) {
             return err
         }
@@ -717,7 +830,7 @@ public struct TextFileBundle: AgentBundle {
                 "restore", "drop":
                 return unwired(verb)
             default:
-                return .object(["error": .string("text_file: unknown type \"\(verb)\"")])
+                return unknownType(verb)
             }
         }
         switch verb {
@@ -730,8 +843,14 @@ public struct TextFileBundle: AgentBundle {
         case "restore": return await restoreReply(kernel, fb: fb, payload: payload)
         case "drop": return await dropReply(kernel, fb: fb, payload: payload)
         default:
-            return .object(["error": .string("text_file: unknown type \"\(verb)\"")])
+            return unknownType(verb)
         }
+    }
+
+    private func unknownType(_ verb: String) -> JSON {
+        Refusal.make(
+            Refusal.unhandled, "text_file: unknown type \"\(verb)\"",
+            extra: [("verb", .string(verb))])
     }
 
     public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -748,12 +867,7 @@ public struct TextFileBundle: AgentBundle {
                 return await dispatch(
                     agent: agent, payload: payload, blob: Data(text.utf8), kernel: kernel)
             }
-            return .object([
-                "error": .string(
-                    "\(verb) carries raw bytes — call it on the binary channel "
-                        + "(send_binary), or pass the document as a str in `bytes` "
-                        + "(utf-8-encoded for you)")
-            ])
+            return Refusal.missing(verb, "bytes (the document — str is utf-8-encoded)")
         }
         return await dispatch(agent: agent, payload: payload, blob: Data(), kernel: kernel)
     }

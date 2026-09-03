@@ -57,8 +57,13 @@ extension AIBackend {
     /// `.failure(errorJSON)` for the `too_small` failsafe / unknown-strategy
     /// config error. Sets the public projection summary + private reaction
     /// cursor. Mirrors `_project_context`.
+    ///
+    /// `storeLen` is the DURABLE store's length behind `messages` — the index the
+    /// reaction cursor is recorded at. It is NOT derivable from `messages`, which is
+    /// a deduped/trimmed view.
     func projectContext(
-        provider: any AIProvider, agent: Agent, clientId: String, messages: [JSON], kernel: Kernel
+        provider: any AIProvider, agent: Agent, clientId: String, messages: [JSON],
+        storeLen: Int, kernel: Kernel
     ) async -> ProjectionOutcome {
         let agentKey = agent.id.value
         let b = AIContext.budget(agent)
@@ -135,7 +140,12 @@ extension AIBackend {
                 "dropped_turns": .integer(Int64(droppedN)),
                 "summarized": .bool(summarized),
             ]))
-        setMark(agentKey, index: max(0, body.count - 1), client: clientId)
+        // `storeLen`, NOT `body.count - 1`. `body` is the DEDUPED/trimmed model view
+        // and `deriveReaction` slices the FULL durable store by this index; whenever
+        // the trimmers dropped whole turns the index came up short by that many, so
+        // the reader scanned an assistant turn written BEFORE the notice and reported
+        // a reaction to a compaction the model had not yet seen.
+        setMark(agentKey, index: storeLen, client: clientId)
         await kernel.emit(
             agent.id,
             .object([
@@ -188,8 +198,13 @@ extension AIBackend {
 
     /// Read-model over the durable transcript: AFTER the last compaction notice
     /// (its cursor), did the model react? Scans the same client's thread for
-    /// `send` tool-calls — a `recall` to its OWN id, or a memory write
-    /// (`set`/`append`/`replace`). `nil` if no compaction has fired.
+    /// `send` tool-calls — a `recall` to its OWN id, or a memory write.
+    ///
+    /// THE MEMORY VERBS ARE `text_file`'s (`write`/`patch`/`append`). They were
+    /// durable_memory's (`set`/`replace`) until 2026-09-02 — a bundle that no longer
+    /// exists — so a model that DID persist, in the only way the substrate now
+    /// offers, was scored as not having reacted at all. `nil` if no compaction has
+    /// fired.
     func deriveReaction(agent: Agent, kernel: Kernel) async -> JSON? {
         let key = agent.id.value
         let fired = getProjection(key)["fired"].asBool ?? false
@@ -214,7 +229,7 @@ extension AIBackend {
                 if target == key && ptype == "recall" {
                     recalled = true
                     recallCount += 1
-                } else if ptype == "set" || ptype == "append" || ptype == "replace" {
+                } else if ptype == "write" || ptype == "patch" || ptype == "append" {
                     persisted = true
                 }
             }
@@ -227,14 +242,16 @@ extension AIBackend {
 
     // MARK: - verbs
 
-    /// Compact ONE stored turn for a `recall` reply: content capped so paging
-    /// back can't itself blow the window. Turns are now pure text (tool
-    /// calls/replies are inline `<tool_call>`/`<tool_response>` text), so this
-    /// is just a cap. Bounds the REPLY only, never the store.
+    /// Render ONE stored turn for a `recall` reply. Turns are pure text (tool
+    /// calls/replies are inline `<tool_call>`/`<tool_response>` text), so a turn with
+    /// content renders as that content and anything else falls back to the row.
+    ///
+    /// WHOLE, NOT CAPPED. Rust/swift truncated each turn at 2000 chars until
+    /// 2026-09-02 while python returned it verbatim — same verb, same store, two
+    /// different replies, and the cut half is exactly what a model pages back FOR.
     private func recallRender(_ m: JSON) -> String {
-        var s = m["content"].asString ?? ""
-        if s.isEmpty { s = m.serialize() }
-        return String(s.prefix(2000))
+        let s = m["content"].asString ?? ""
+        return s.isEmpty ? m.serialize() : s
     }
 
     /// `recall` verb: page turns back from the DURABLE chat store (the FULL

@@ -67,6 +67,35 @@ async fn create_bridge(kernel: &Arc<Kernel>, id: &str, peer_id: &str, transport:
         .result;
 }
 
+/// Open ONE edge, both ends, as an operator would when wiring a bridge.
+///
+/// An inbound bridge frame now dispatches AS THE LEG — the read loop runs under
+/// `with_sender(<bridge id>)`, closing the gate bypass where a peer's frame
+/// reached `Kernel::launch` with no sender and ran as the OPERATOR. So a bridge
+/// serving calls onto a SIBLING needs the egress grant on itself and the ingress
+/// grant on the target; the structural baseline covers only its own subtree and
+/// its parent.
+async fn grant_edge(kernel: &Arc<Kernel>, from: &str, to: &str) {
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": from,
+                   "can_call": {"$self": "*", "$parent": "*", "$children": "*", to: "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": to,
+                   "callable_by": {"$self": "*", "$parent": "*", "$children": "*", from: "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
+
 #[test]
 fn readme_present_and_titled() {
     assert!(!README.is_empty());
@@ -219,6 +248,9 @@ async fn forward_round_trip_over_memory() {
         .result;
     create_bridge(&kernel, &a_id, &b_id, "memory").await;
     create_bridge(&kernel, &b_id, &a_id, "memory").await;
+    // B serves the inbound call onto the file agent — a SIBLING, so the edge is
+    // explicit on both ends.
+    grant_edge(&kernel, &b_id, &file_id).await;
     inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
     let _ = kernel
         .send(vec![Item::new(
@@ -650,14 +682,18 @@ fn ingress_resolves_allow_and_deny() {
         verb: "reflect",
         token: None,
     }) {
-        Decision::Deny(reason) => {
+        Decision::Deny(denial) => {
+            // The verdict splits: `reason` states WHAT happened (the name was not
+            // resolvable), `hint` states the repair + the legal set. A caller that
+            // read only one half used to get half a refusal.
+            let (reason, hint) = (denial.reason, denial.hint);
             assert!(
                 reason.contains("password:kernel-internal-transcripts"),
                 "{reason}"
             );
             assert!(
-                reason.contains("allow_all_ingress"),
-                "must teach the legal set: {reason}"
+                hint.contains("allow_all_ingress"),
+                "must teach the legal set: {hint}"
             );
         }
         Decision::Allow => panic!("an unknown ingress rule must never allow"),
@@ -729,12 +765,13 @@ fn a_name_from_the_other_manifold_is_loud_not_silent() {
     // It still DENIES — an unresolvable rule is not an authorization — but it now names
     // the manifold mistake instead of looking like an ordinary seal.
     let sealed = authorizer::ingress::resolve(Some(&json!("silent_egress"))).unwrap();
-    let Decision::Deny(reason) = sealed.authorize(&call_action(None)) else {
+    let Decision::Deny(denial) = sealed.authorize(&call_action(None)) else {
         panic!("an egress name in ingress_rule must deny");
     };
+    let (reason, hint) = (denial.reason, denial.hint);
     assert!(reason.contains("silent_egress"), "{reason}");
-    assert!(reason.contains("manifold-scoped"), "{reason}");
-    assert!(reason.contains("allow_all_ingress"), "{reason}");
+    assert!(hint.contains("manifold-scoped"), "{hint}");
+    assert!(hint.contains("allow_all_ingress"), "{hint}");
 
     // The `auth` stem is scoped per manifold, so an egress-only stem cannot silently
     // seal ingress: it surfaces as THIS manifold's missing rule, by name.
@@ -869,6 +906,7 @@ async fn binary_call_round_trips_raw_bytes_over_the_bridge() {
         .result;
     let bid = id_for("brg_bin", &tmp);
     create_bridge_with_auth(&kernel, &bid, "stand_in", "allow_all").await;
+    grant_edge(&kernel, &bid, "fb").await;
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let _ = kernel
         .send(vec![Item::new(
@@ -1193,4 +1231,186 @@ async fn asymmetric_ingress_egress_via_engine() {
         .remove(0)
         .result;
     std::env::remove_var(env);
+}
+
+// ── the re-entrant round trip + inbound identity ────────────────────
+
+/// A bundle whose one verb forwards BACK over the bridge that just called it.
+/// This is the shape that deadlocked: served inline, the read loop is parked
+/// inside `kernel.send` and can never read the reply to its own outbound frame.
+struct BouncerBundle;
+
+#[async_trait]
+impl Bundle for BouncerBundle {
+    fn name(&self) -> &str {
+        "bouncer.tools"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        if payload.get("type").and_then(Value::as_str) != Some("bounce") {
+            return Ok(Some(json!({"error": "unknown verb"})));
+        }
+        let bridge = payload
+            .get("bridge")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let out = kernel
+            .send(vec![Item::new(
+                AgentId::from(bridge.as_str()),
+                json!({
+                    "type": "forward",
+                    "target": payload.get("back_to").cloned().unwrap_or(Value::Null),
+                    "payload": {"type": "reflect"},
+                    // Short, so the OLD inline code fails this in seconds rather
+                    // than parking it for the 30s default.
+                    "timeout": 3.0,
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        Ok(Some(json!({ "bounced": out })))
+    }
+}
+
+#[tokio::test]
+async fn a_reentrant_forward_completes_instead_of_deadlocking() {
+    let tmp = TempDir::new().unwrap();
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
+    kernel.bundles.register("bouncer.tools", BouncerBundle);
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("core"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    let _rx = kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+
+    let a_id = id_for("brg_a_re", &tmp);
+    let b_id = id_for("brg_b_re", &tmp);
+    let probe = id_for("bouncer", &tmp);
+    create_bridge(&kernel, &a_id, &b_id, "memory").await;
+    create_bridge(&kernel, &b_id, &a_id, "memory").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "bouncer.tools", "id": probe}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // B may reach the probe; the probe may reach B to forward back.
+    grant_edge(&kernel, &b_id, &probe).await;
+    grant_edge(&kernel, &probe, &b_id).await;
+    // A serves the probe's return hop onto the root.
+    grant_edge(&kernel, &a_id, "core").await;
+    inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
+    for id in [&a_id, &b_id] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from(id.as_str()),
+                json!({"type": "boot"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+    }
+
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        kernel.send(vec![Item::new(
+            AgentId::from(a_id.as_str()),
+            json!({"type": "forward", "target": probe,
+                   "payload": {"type": "bounce", "bridge": b_id, "back_to": "core"},
+                   "timeout": 10.0}),
+        )]),
+    )
+    .await
+    .expect("the round trip must not hang")
+    .remove(0)
+    .result;
+    assert_eq!(
+        reply["bounced"]["id"], "core",
+        "re-entrant forward: {reply}"
+    );
+}
+
+#[tokio::test]
+async fn an_inbound_call_is_gated_as_the_leg_not_the_operator() {
+    // The read loop was spawned with a bare `tokio::spawn`, which does not inherit
+    // `CURRENT_SENDER` — so an inbound frame reached `Kernel::launch` with
+    // `current_sender() == None`, the OPERATOR, and the two-sided gate never ran.
+    // Here the leg is OPEN inbound and granted NOTHING outbound: an operator call
+    // would list the tree, a leg call refuses on its own egress.
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let bid = id_for("brg_ident", &tmp);
+    // A SIBLING of the leg: no structural baseline token reaches it, so the only
+    // way the call lands is an explicit grant — or a bypassed gate.
+    let target = id_for("ff_ident", &tmp);
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": "file_bridge.tools", "id": target,
+                   "root": tmp.path().to_string_lossy()}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    create_bridge(&kernel, &bid, "stand_in", "memory").await;
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+
+    peer.send_frame(json!({"type":"call","id":"i1","target":target,
+                          "payload":{"type":"reflect"}}))
+        .await
+        .unwrap();
+    let reply = peer.recv_frame().await.expect("reply").into_value();
+    assert_eq!(reply["id"], "i1");
+    assert_eq!(
+        reply["data"]["reason"], "unauthorized",
+        "an inbound frame ran ungated: {reply}"
+    );
+    assert_eq!(reply["data"]["side"], "egress");
+    assert!(
+        reply["data"]["root"].is_null(),
+        "the record leaked past the gate: {reply}"
+    );
+
+    // And the gate is not simply always-deny: the granted edge dispatches.
+    grant_edge(&kernel, &bid, &target).await;
+    peer.send_frame(json!({"type":"call","id":"i2","target":target,
+                          "payload":{"type":"reflect"}}))
+        .await
+        .unwrap();
+    let ok = peer.recv_frame().await.expect("reply").into_value();
+    assert_eq!(ok["data"]["id"], target, "granted edge refused: {ok}");
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(bid.as_str()),
+            json!({"type": "shutdown"}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }

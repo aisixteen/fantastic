@@ -34,6 +34,78 @@ fn grant_facts(holder: Option<&Agent>, field: &str) -> (Value, Option<String>, H
 }
 
 impl Kernel {
+    /// Resolve an id the way `send` does — the `kernel` alias or a literal id.
+    /// `None` when it names no live agent.
+    fn resolve_agent(self: &Arc<Self>, id: Option<&Value>) -> Option<Arc<Agent>> {
+        let id = id.and_then(Value::as_str).filter(|s| !s.is_empty())?;
+        if id == "kernel" {
+            return self.root();
+        }
+        self.agents.get(&AgentId::from(id)).map(|e| Arc::clone(&e))
+    }
+
+    /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
+    /// refusal, or `None` when the sender may create under `parent`.
+    ///
+    /// Placing inside your OWN subtree is baseline (no grant). Anywhere else
+    /// needs egress on the parent (explicitly named — `create_agent` is
+    /// privileged, so a wildcard never covers it) AND the parent's own
+    /// `callable_by` accepting the sender.
+    fn gate_placement(
+        self: &Arc<Self>,
+        sender_id: &AgentId,
+        s_can: &Value,
+        s_parent: Option<&str>,
+        s_kids: &HashSet<String>,
+        loader_id: Option<&str>,
+        parent: &Arc<Agent>,
+    ) -> Option<Value> {
+        let mut node = Some(Arc::clone(parent));
+        while let Some(n) = node {
+            if n.id == *sender_id {
+                return None; // your own subtree — baseline
+            }
+            node = n
+                .parent_id
+                .as_ref()
+                .and_then(|p| self.agents.get(p).map(|e| Arc::clone(&e)));
+        }
+        let d = crate::authz::authorize_call(
+            s_can,
+            "create_agent",
+            parent.id.as_str(),
+            sender_id.as_str(),
+            s_parent,
+            s_kids,
+            loader_id,
+            true,
+        );
+        if !d.allowed {
+            return Some(json!({
+                "error": format!("{sender_id} may not create under {}", parent.id),
+                "reason": "unauthorized", "side": "egress", "hint": d.hint,
+            }));
+        }
+        let (t_call, t_parent, t_kids) = grant_facts(Some(parent.as_ref()), "callable_by");
+        let di = crate::authz::authorize_call(
+            &t_call,
+            "create_agent",
+            sender_id.as_str(),
+            parent.id.as_str(),
+            t_parent.as_deref(),
+            &t_kids,
+            loader_id,
+            false,
+        );
+        if !di.allowed {
+            return Some(json!({
+                "error": format!("{} does not accept a child from {sender_id}", parent.id),
+                "reason": "unauthorized", "side": "ingress", "hint": di.hint,
+            }));
+        }
+        None
+    }
+
     /// The two-sided call gate for an agent-originated send. Returns the error
     /// `Value` if the send is refused, else `None`. Checks egress (the sender's
     /// `can_call`) then ingress (the target's `callable_by`), both via the one
@@ -68,22 +140,40 @@ impl Kernel {
         let sender = self.agents.get(sender_id).map(|e| Arc::clone(&e));
         let (s_can, s_parent, s_kids) = grant_facts(sender.as_deref(), "can_call");
 
-        // FORKING YOUR OWN SUBTREE IS BASELINE — and the exemption keys on
-        // PLACEMENT, not on who answers. `create_agent` is privileged, so a
-        // wildcard never covers it; the one documented exception is that
-        // growing your OWN subtree needs no grant, which is what makes
-        // self-extension work with zero wiring.
+        // PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
+        // the agent it ACTS UPON is the parent named in `parent_id` — so that is
+        // what the gate asks about, on both sides. Gating the root instead made
+        // one grant (`<root>:[create_agent]`, the ordinary "may author tools"
+        // wiring) a key to the whole tree: the holder could plant a child under
+        // ANY agent and inherit `$parent:*` reach into it (measured 2026-09-02).
         //
-        // While the verb was answered by every agent that fell out for free
-        // (`other_id == holder_id`, because you addressed yourself). Now the
-        // verb is kernel-owned and the target is always the root, so that
-        // exemption could never fire again and EVERY agent would need an
-        // explicit `create_agent` grant on the root just to author its own
-        // tool. The property being preserved was never "you addressed
-        // yourself" — it is "the new agent lands in MY subtree", which
-        // `parent_id` now states outright.
-        let placement_is_own = verb == "create_agent"
-            && payload.get("parent_id").and_then(Value::as_str) == Some(sender_id.as_str());
+        // FORKING YOUR OWN SUBTREE IS BASELINE — placing under yourself or a
+        // descendant needs no grant at all, which is what makes self-extension
+        // work with zero wiring at any depth.
+        if verb == "create_agent" {
+            if let Some(parent) = self.resolve_agent(payload.get("parent_id")) {
+                if let Some(denial) = self.gate_placement(
+                    sender_id,
+                    &s_can,
+                    s_parent.as_deref(),
+                    &s_kids,
+                    loader_id.as_deref(),
+                    &parent,
+                ) {
+                    return Some(denial);
+                }
+                return self.check_conferral(
+                    sender_id,
+                    &s_can,
+                    s_parent.as_deref(),
+                    &s_kids,
+                    loader_id.as_deref(),
+                    payload,
+                );
+            }
+            // An unknown parent falls through to the ordinary path; the verb
+            // itself answers `unknown_agent`.
+        }
 
         // Egress — may the SENDER call the target?
         let d = crate::authz::authorize_call(
@@ -94,7 +184,7 @@ impl Kernel {
             s_parent.as_deref(),
             &s_kids,
             loader_id.as_deref(),
-            !placement_is_own,
+            true,
         );
         if !d.allowed {
             return Some(json!({
@@ -197,9 +287,31 @@ impl Kernel {
         // reach, so it is unbounded).
         if let Some(Value::Object(conferred)) = obj.get("can_call") {
             for (key, verbs) in conferred {
-                if key.starts_with('$') {
-                    continue; // structural tokens confer no lateral reach
-                }
+                let probe_key: &str = match key.as_str() {
+                    // Relative to the HOLDER — no lateral reach.
+                    "$self" | "$parent" | "$children" => continue,
+                    // NOT relative: `$loader` resolves to the ROOT for whoever
+                    // holds it, so conferring it hands over real reach on the
+                    // kernel's control surface (ps, cancel, ledger,
+                    // shutdown_kernel). Subset-probe it like any lateral edge —
+                    // skipping it let a grandchild grant its own child root
+                    // reach it did not hold (measured 2026-09-02).
+                    "$loader" => match loader_id {
+                        Some(r) => r,
+                        None => continue,
+                    },
+                    k if k.starts_with('$') => {
+                        return Some(json!({
+                            "error": format!(
+                                "{sender_id} cannot confer {key:?}: not a structural token \
+                                 — $self, $parent, $children and $loader are the only ones"
+                            ),
+                            "reason": "bad_arg", "arg": "can_call", "side": "delegation",
+                            "hint": crate::authz::FROM_ABOVE,
+                        }));
+                    }
+                    k => k,
+                };
                 // Conferring `"*"` (or a list with it) requires the granter to hold
                 // `"*"` on that target; a concrete list requires each verb.
                 let probe: Vec<&str> = match verbs {
@@ -212,7 +324,7 @@ impl Kernel {
                     let ok = crate::authz::authorize_call(
                         s_can,
                         v,
-                        key,
+                        probe_key,
                         sender_id.as_str(),
                         s_parent,
                         s_kids,
@@ -221,6 +333,18 @@ impl Kernel {
                     )
                     .allowed;
                     if !ok {
+                        if key == "$loader" {
+                            return Some(json!({
+                                "error": format!(
+                                    "{sender_id} cannot delegate {v:?} on $loader: it \
+                                     resolves to {probe_key}, which you do not hold — \
+                                     $loader is real reach on the kernel's control \
+                                     surface, not a structural token"
+                                ),
+                                "reason": "unauthorized", "side": "delegation",
+                                "hint": crate::authz::FROM_ABOVE,
+                            }));
+                        }
                         // Name the TRUE reason. A target that is not an agent at all
                         // is almost always one created in the SAME batch — items
                         // launch concurrently, so it is not there yet when this gate

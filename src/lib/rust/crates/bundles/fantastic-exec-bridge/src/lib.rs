@@ -52,6 +52,9 @@
 use async_trait::async_trait;
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::refusal::{
+    bad, missing, refusal, refusal_hint, with, NOT_FOUND, TRANSPORT_ERROR, UNAUTHORIZED,
+};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -193,7 +196,24 @@ impl Bundle for ExecBridgeBundle {
             if !known {
                 return Some(format!(
                     "ingress_rule={spec} is not a rule this bundle implements — \
-                     legal values: allow_all_ingress, deny_ingress, password_ingress"
+                     legal values: allow_all_ingress, deny_ingress"
+                ));
+            }
+        }
+        // `password_ingress` is meaningless on an in-process leg: the token is
+        // read off a WIRE ENVELOPE and the process edge has none — no frame ever
+        // presents one, so the rule could only refuse, or (until 2026-09-02) be
+        // satisfied by a secret persisted ON THE RECORD. Refused at the write
+        // (#116). Same rule as `fantastic_file::password_refusal`.
+        for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
+            let Some(spec) = meta.get(field) else {
+                continue;
+            };
+            if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
+                return Some(format!(
+                    "{field}={spec} is not applicable to the process edge: a leg with \
+                     no wire envelope can never present a token — legal values: \
+                     allow_all_ingress, deny_ingress"
                 ));
             }
         }
@@ -279,7 +299,9 @@ impl Bundle for ExecBridgeBundle {
                           exposes `kernel.send(target, payload) -> reply` (raises if the relay could \
                           not deliver), \
                           `kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, \
-                          `kernel.self_id`, `kernel.args`. Your sends carry THIS runner's identity \
+                          `kernel.self_id`. Arguments arrive as ARGV, like any command — there is \
+                          no `kernel.args`. One frame caps at 16 MiB; move more than that with \
+                          `write_stream` chunks. Your sends carry THIS runner's identity \
                           and grants (its `can_call`; a target must list this runner in \
                           `callable_by`). Do not rewrite the wire by hand.",
             }),
@@ -350,6 +372,10 @@ impl Bundle for ExecBridgeBundle {
 /// absent `ingress_rule` (or `auth`) resolves to deny-inbound, and every denial
 /// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
 /// inspects the kind, so a new one costs nothing and the audit trail is honest.
+///
+/// The reply FORWARDS the rule's own `Denial` — reason, hint, see. Hand-rolling a
+/// hint here made one sealed leg teach a different repair per bundle and per
+/// runtime; the rule that refused is the thing that knows the repair.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
     let spec = fantastic_io_bridge::authorizer::manifold_spec(
         meta.get("ingress_rule"),
@@ -366,14 +392,17 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         verb,
         token: meta.get("auth_token").and_then(Value::as_str),
     };
-    if let fantastic_io_bridge::authorizer::Decision::Deny(reason) =
+    if let fantastic_io_bridge::authorizer::Decision::Deny(d) =
         fantastic_io_bridge::gate_inbound(&rule, &action)
     {
-        return Some(json!({
-            "error": reason,
-            "reason": "unauthorized",
-            "hint": "the process edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress",
-        }));
+        let mut out = refusal(UNAUTHORIZED, d.reason);
+        if !d.hint.is_empty() {
+            with(&mut out, "hint", json!(d.hint));
+        }
+        if !d.see.is_empty() {
+            with(&mut out, "see", json!(d.see));
+        }
+        return Some(out);
     }
     None
 }
@@ -492,12 +521,33 @@ fn signal_jobs(agent_id: &AgentId, payload: &Value, sig: nix::sys::signal::Signa
     n
 }
 
+/// The `not_found` refusal for a named job this agent does not own, or `None`.
+///
+/// A `job_id` naming nothing used to answer `{killed:0}`/`{interrupted:0}` — the
+/// same reply as "it had already exited", so a typo read as success. `status`
+/// answered a bare `{error}` with no code at all, and a caller branching on
+/// `reason == "not_found"` (what the corpus and the e2e scenarios pin) never
+/// matched on this runtime.
+fn no_job(agent_id: &AgentId, payload: &Value) -> Option<Value> {
+    let jid = payload.get("job_id").and_then(Value::as_str)?;
+    if jobs::jobs().get(jid).is_some_and(|j| &j.owner == agent_id) {
+        return None;
+    }
+    let mut v = refusal(NOT_FOUND, format!("exec_bridge: no job {jid:?}"));
+    with(&mut v, "job_id", json!(jid));
+    Some(v)
+}
+
 fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    json!({"interrupted": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGINT)})
+    no_job(agent_id, payload).unwrap_or_else(
+        || json!({"interrupted": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGINT)}),
+    )
 }
 
 fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
-    json!({"killed": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGKILL)})
+    no_job(agent_id, payload).unwrap_or_else(
+        || json!({"killed": signal_jobs(agent_id, payload, nix::sys::signal::Signal::SIGKILL)}),
+    )
 }
 
 /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
@@ -508,13 +558,16 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
 /// the patterns. A `code` field is refused explicitly — this runs COMMANDS, not code.
 async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let meta = snapshot_meta(agent_id, kernel);
-    // `code` is not a field — run a command instead (py tools.py `_start`).
+    // EVERY refusal on this verb carries a CODE. Sibling argument errors used to
+    // split — `args`/`env` answered `bad_arg` while `command`/`code`/the policy
+    // wall answered a bare `{error}` — so nothing could tell a typo from a policy
+    // refusal without matching prose.
     if payload.get("code").is_some_and(|v| !v.is_null()) {
-        return json!({"error": "exec_bridge: `code` is not a field — run a command instead"});
+        return bad("start", "code", "absent — run a command instead");
     }
     let command = match payload.get("command").and_then(Value::as_str) {
         Some(c) if !c.trim().is_empty() => c.to_string(),
-        _ => return json!({"error": "exec_bridge: command (str) required"}),
+        _ => return missing("start", "command"),
     };
     // `args` — a list of scalars (str/int/float), each stringified into argv.
     let raw_args = payload.get("args").cloned().unwrap_or_else(|| json!([]));
@@ -525,15 +578,12 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                 match v {
                     Value::String(s) => out.push(s.clone()),
                     Value::Number(n) => out.push(n.to_string()),
-                    _ => {
-                        return json!({"error":
-                            "exec_bridge: start expects args to be a list of strings"})
-                    }
+                    _ => return bad("start", "args", "a list of strings"),
                 }
             }
             out
         }
-        _ => return json!({"error": "exec_bridge: start expects args to be a list of strings"}),
+        _ => return bad("start", "args", "a list of strings"),
     };
     // The FULL argv, shell-joined, matched against the allowlist BEFORE spawning.
     let mut argv = Vec::with_capacity(args.len() + 1);
@@ -541,7 +591,14 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     argv.extend(args.iter().cloned());
     let line = shlex_join(&argv);
     if let Some(why) = command_permitted(&meta, &line) {
-        return json!({ "error": why });
+        // An AUTHORIZATION denial, not a bad argument: the command line is
+        // well-formed and the LEG refused it. Same code the ingress gate answers,
+        // so one branch covers "the operator has not opened this".
+        return refusal_hint(
+            UNAUTHORIZED,
+            why,
+            "the leg's `allowed` policy decides; an operator may widen it",
+        );
     }
     // The per-call `env` block — a dict of str -> scalar.
     let env_extra: Map<String, Value> = match payload.get("env") {
@@ -549,23 +606,25 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         Some(Value::Object(m)) => {
             for v in m.values() {
                 if !matches!(v, Value::String(_) | Value::Number(_)) {
-                    return json!({"error":
-                        "exec_bridge: start expects env to be a dict of str -> str"});
+                    return bad("start", "env", "a dict of str -> str");
                 }
             }
             m.clone()
         }
-        _ => return json!({"error": "exec_bridge: start expects env to be a dict of str -> str"}),
+        _ => return bad("start", "env", "a dict of str -> str"),
     };
     let cwd = payload_str(payload, "cwd").or_else(|| meta_str(&meta, "cwd"));
 
     let spawned = match crate::spawn::spawn_job(&argv, agent_id.as_str(), &env_extra, cwd) {
         Ok(s) => s,
-        Err(e) => return json!({"error": format!("exec_bridge: spawn failed: {e}")}),
+        Err(e) => return refusal(TRANSPORT_ERROR, format!("exec_bridge: spawn failed: {e}")),
     };
     let crate::spawn::Spawned { child, ctrl } = spawned;
     let Some(pid) = child.id() else {
-        return json!({"error": "exec_bridge: child exited before it could be tracked"});
+        return refusal(
+            TRANSPORT_ERROR,
+            "exec_bridge: child exited before it could be tracked",
+        );
     };
     let job_id = format!("{:08x}", rand_job_id());
 
@@ -578,9 +637,20 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     // task inherits the handler's contextvar and is gated as this agent; re-enter
     // that identity here for parity — the runner's `can_call` bounds its programs.
     let owner = agent_id.clone();
+    // The relay's stop signal, held on the job row. `teardown` raises it instead of
+    // aborting this task, so the relay leaves by its own read loop and the proxy
+    // release after that loop actually runs.
+    let stop = Arc::new(tokio::sync::Notify::new());
     let ctrl_task = tokio::spawn(fantastic_kernel::send::with_sender(
         owner,
-        crate::relay::serve(rd, wr, agent_id.clone(), job_id.clone(), Arc::clone(kernel)),
+        crate::relay::serve(
+            rd,
+            wr,
+            agent_id.clone(),
+            job_id.clone(),
+            Arc::clone(kernel),
+            Arc::clone(&stop),
+        ),
     ));
 
     // spawn_task + row insert in ONE critical section, so no window exists in which a
@@ -599,6 +669,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             pid,
             task,
             ctrl: ctrl_task,
+            stop,
             // WHAT ran — so a caller can re-issue this job verbatim.
             command,
             args,
@@ -626,11 +697,15 @@ async fn boot_reply(_agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
 
 /// `status` — one job (full output) or all of THIS agent's jobs.
 fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
+    if let Some(gone) = no_job(agent_id, payload) {
+        return gone;
+    }
     let g = jobs::jobs();
     match payload.get("job_id").and_then(Value::as_str) {
+        // `no_job` above has already established that the row exists and is ours.
         Some(jid) => match g.get(jid).filter(|j| &j.owner == agent_id) {
             Some(j) => json!({"jobs": [jobs::snap(jid, j, true)]}),
-            None => json!({"error": format!("exec_bridge: no job {jid:?}")}),
+            None => json!({"jobs": []}),
         },
         None => json!({"jobs": g.iter()
             .filter(|(_, j)| &j.owner == agent_id)

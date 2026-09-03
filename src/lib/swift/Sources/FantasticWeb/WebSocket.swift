@@ -43,6 +43,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// loop (handlerAdded / channelRead / teardown all run there).
     private var watching: Set<AgentId> = []
     private var drainTask: Task<Void, Never>?
+    /// In-flight inbound `call` dispatches, keyed so each removes itself when it
+    /// finishes. Mutated ONLY on the event loop (channelRead + the completion hop).
+    private var callTasks: [UUID: Task<Void, Never>] = [:]
 
     init(hostId: String, legId: AgentId, kernel: Kernel) {
         self.hostId = hostId
@@ -82,6 +85,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     private func teardown() {
         drainTask?.cancel()
         drainTask = nil
+        // Cancel every in-flight dispatch. A `call` can run for minutes (an LLM
+        // stream); untracked, a client that closed its tab left it generating —
+        // billing tokens — into a dead channel. Python cancels its pending set on
+        // disconnect and rust aborts its JoinHandles; same bound here.
+        for (_, task) in callTasks {
+            task.cancel()
+        }
+        callTasks.removeAll()
         for src in watching {
             kernel.unwatch(src: src, watcher: clientId)
         }
@@ -117,6 +128,32 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // MARK: - frame dispatch
 
+    /// Spawn one inbound dispatch as a TRACKED task, under the LEG'S OWN
+    /// IDENTITY.
+    ///
+    /// Two things used to be missing here. (1) `Task { ... }` does not inherit a
+    /// task-local, so `KernelTaskLocals.currentSender` was nil inside and
+    /// `BatchSend.launch` skipped the two-sided gate entirely — every browser
+    /// call ran as the OPERATOR, bounded only by the leg's ingress rule. (2) the
+    /// task was untracked, so a disconnect could not stop it. Both are closed by
+    /// going through here; callers never build a bare `Task`.
+    ///
+    /// Must be called ON the event loop (channelRead is).
+    private func trackCall(channel: Channel, _ body: @escaping @Sendable () async -> Void) {
+        let key = UUID()
+        let legId = self.legId
+        let task = Task { [weak self] in
+            await KernelTaskLocals.$currentSender.withValue(legId) {
+                await body()
+            }
+            // Rebind before the hop: a captured `weak var self` is a mutable
+            // capture, which is not Sendable. The handler itself is (unchecked).
+            let handler = self
+            channel.eventLoop.execute { handler?.callTasks[key] = nil }
+        }
+        callTasks[key] = task
+    }
+
     private func handleText(_ text: String, channel: Channel) {
         guard let parsed = try? JSON.parse(text) else { return }
         switch parsed["type"].asString {
@@ -127,7 +164,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let token = parsed["auth_token"].asString
             let legId = self.legId
             let kernel = self.kernel
-            Task {
+            trackCall(channel: channel) {
                 if let denied = gateWebLeg(
                     kernel: kernel, legId: legId, target: target,
                     verb: payload["type"].asString ?? "", token: token)
@@ -153,7 +190,14 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             let target = parsed["target"].asString ?? hostId
             let payload = parsed["payload"]
             let kernel = self.kernel
-            Task { await kernel.emit(AgentId(target), payload) }
+            let legId = self.legId
+            Task {
+                // Same identity discipline as `call` — an emit dispatched with a
+                // nil sender is an OPERATOR emit.
+                await KernelTaskLocals.$currentSender.withValue(legId) {
+                    await kernel.emit(AgentId(target), payload)
+                }
+            }
         case "watch":
             if let src = parsed["src"].asString {
                 let s = AgentId(src)
@@ -164,7 +208,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                     // two-sided gate never runs — which is exactly how a leg
                     // granted only `assistant:[send]` could mirror any agent's
                     // inbox and read the model's prompt out of it.
-                    let denial = KernelTaskLocals.$currentSender.withValue(AgentId(hostId)) {
+                    // THE LEG, not the host agent: the ingress rule and the
+                    // `can_call` grants both hang off the `web_ws` record, and
+                    // python registers this under `web_agent_id`. Watching as the
+                    // HOST id credited the watch to whichever agent the URL named.
+                    let denial = KernelTaskLocals.$currentSender.withValue(legId) {
                         kernel.watch(src: s, watcher: clientId)
                     }
                     if let d = denial {
@@ -199,7 +247,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         let token = header["auth_token"].asString
         let legId = self.legId
         let kernel = self.kernel
-        Task {
+        trackCall(channel: channel) {
             if let denied = gateWebLeg(
                 kernel: kernel, legId: legId, target: target,
                 verb: inner["type"].asString ?? "", token: token)

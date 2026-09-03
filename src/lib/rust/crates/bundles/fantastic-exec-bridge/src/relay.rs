@@ -31,8 +31,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// A corrupt length must not become a 4 GiB allocation. The wire never legitimately
-/// exceeds this; python has no clamp only because its reader does not preallocate.
+/// ONE frame bound on this wire, both ends, every runtime. A corrupt length must
+/// not become a 4 GiB allocation, and a program that means to move 20 MB means to
+/// STREAM it. Over-limit is a WIRE VIOLATION — the framing itself is unusable, so
+/// there is nothing to reply to and the socket closes; the connector refuses to
+/// write such a frame in the first place, naming `write_stream`.
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
 /// Exactly ONE job per owner receives the owner's inbox. A re-started durable tool
@@ -53,6 +56,15 @@ fn owner_inbox() -> &'static Mutex<HashMap<AgentId, OwnerInbox>> {
 struct Sub {
     proxy: AgentId,
     drain: JoinHandle<()>,
+}
+
+impl Drop for Sub {
+    /// A dropped `JoinHandle` DETACHES its task — it does not abort it. So a `Sub`
+    /// that leaves scope by any path other than [`drop_proxy`] used to leave an
+    /// orphan drain task pushing forever into a socket nobody reads.
+    fn drop(&mut self) {
+        self.drain.abort();
+    }
 }
 
 /// Write one frame: `[4-byte BE len | kind | rest]`.
@@ -105,10 +117,10 @@ fn make_proxy(kernel: &Arc<Kernel>, proxy: &AgentId) -> mpsc::Receiver<Value> {
 
 /// Tear a proxy down. The `inboxes` removal is the rust-only step: a leaked row means
 /// `emit`'s auto-vivify path keeps `try_send`ing into a channel nobody drains, forever.
+/// The drain task is aborted by `Sub`'s `Drop` as `sub` goes out of scope here.
 async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.unwatch(src, &sub.proxy).await;
     kernel.inboxes.remove(&sub.proxy);
-    sub.drain.abort();
 }
 
 /// The job's own telemetry echoes back through the owner's watcher fanout; drop it so a
@@ -120,13 +132,34 @@ fn inbox_framer(p: &Value) -> Option<Value> {
     }
 }
 
-/// Serve one job's control socket until the child closes it.
+/// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
+/// EOF, an error, or a length over [`MAX_FRAME`] — a wire violation the stream
+/// cannot be resynchronised after.
+async fn read_frame(rd: &mut OwnedReadHalf) -> Option<Vec<u8>> {
+    let mut head = [0u8; 4];
+    rd.read_exact(&mut head).await.ok()?;
+    let n = u32::from_be_bytes(head);
+    if n > MAX_FRAME {
+        return None;
+    }
+    let mut body = vec![0u8; n as usize];
+    rd.read_exact(&mut body).await.ok()?;
+    Some(body)
+}
+
+/// Serve one job's control socket until the child closes it — or until `stop` is
+/// raised by [`crate::jobs::teardown`].
+///
+/// Both endings leave by the SAME door: the release block after the loop. That is
+/// the whole point of the signal — the previous teardown aborted this task, which
+/// skipped that block and leaked every proxy the job held.
 pub async fn serve(
     rd: OwnedReadHalf,
     wr: OwnedWriteHalf,
     owner: AgentId,
     job_id: String,
     kernel: Arc<Kernel>,
+    stop: Arc<tokio::sync::Notify>,
 ) {
     let wr = Arc::new(tokio::sync::Mutex::new(wr));
     let mut rd = rd;
@@ -135,18 +168,15 @@ pub async fn serve(
     let mut self_sub: Option<AgentId> = None;
 
     loop {
-        let mut head = [0u8; 4];
-        if rd.read_exact(&mut head).await.is_err() {
-            break; // EOF — the child is gone.
-        }
-        let n = u32::from_be_bytes(head);
-        if n > MAX_FRAME {
-            break;
-        }
-        let mut body = vec![0u8; n as usize];
-        if rd.read_exact(&mut body).await.is_err() {
-            break;
-        }
+        let frame = tokio::select! {
+            // A half-read frame is discarded with the connection, so the
+            // cancel-safety of `read_exact` does not matter here.
+            _ = stop.notified() => None,
+            f = read_frame(&mut rd) => f,
+        };
+        let Some(body) = frame else {
+            break; // EOF, a wire violation, or teardown — release and go.
+        };
         let Some((m, blob)) = unframe(&body) else {
             continue; // malformed body → skip the frame, never the connection
         };
@@ -210,7 +240,20 @@ pub async fn serve(
                 }
                 let proxy = AgentId::from(format!("_xbw_{job_id}_{src}").as_str());
                 let mut rx = make_proxy(&kernel, &proxy);
-                kernel.watch(&src, proxy.clone()).await;
+                // THE KERNEL DECIDES. `watch` is gated exactly like a send (it IS a
+                // read of the source) and can refuse. The refusal used to be
+                // discarded and the sub registered anyway, so the program held a
+                // subscription that simply never fired — deaf, with nothing to
+                // diagnose. Tell it, and register NOTHING.
+                if let Some(denial) = kernel.watch(&src, proxy.clone()).await {
+                    kernel.inboxes.remove(&proxy);
+                    push(
+                        &wr,
+                        &json!({"op": "event", "src": src.as_str(), "payload": denial}),
+                    )
+                    .await;
+                    continue;
+                }
                 let w = Arc::clone(&wr);
                 let s = src.clone();
                 let drain = tokio::spawn(async move {
@@ -242,7 +285,15 @@ pub async fn serve(
                 }
                 let proxy = AgentId::from(format!("_xbself_{job_id}").as_str());
                 let mut rx = make_proxy(&kernel, &proxy);
-                kernel.watch(&owner, proxy.clone()).await;
+                if let Some(denial) = kernel.watch(&owner, proxy.clone()).await {
+                    kernel.inboxes.remove(&proxy);
+                    push(
+                        &wr,
+                        &json!({"op": "event", "src": owner.as_str(), "payload": denial}),
+                    )
+                    .await;
+                    continue;
+                }
                 let w = Arc::clone(&wr);
                 let drain = tokio::spawn(async move {
                     while let Some(p) = rx.recv().await {

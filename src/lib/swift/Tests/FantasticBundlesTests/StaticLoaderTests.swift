@@ -104,8 +104,8 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     let before = kernel.allAgents().count
     let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
     #expect(r["booted"].asBool == true, "\(r.serialize())")
-    let skipped = Set((r["skipped"].asArray ?? []).compactMap { $0.asString })
-    #expect(skipped == ["memory", "worker"])
+    let reapplied = Set((r["reapplied"].asArray ?? []).compactMap { $0.asString })
+    #expect(reapplied == ["memory", "worker"])
     #expect((r["created"].asArray ?? []).isEmpty)
     #expect(kernel.allAgents().count == before)
 }
@@ -131,4 +131,40 @@ private func bootLoader(_ text: String) async -> (Kernel, () -> Void) {
     #expect(rec["error"].asString?.contains("not readable") == true)
     #expect(kernel.agent("sl2") == nil, "a doomed record was created anyway")
     #expect(kernel.allAgents().count == before)
+}
+
+@Test func aRosterEntryWithoutAnIdIsRefusedLoud() async {
+    // #105 — the roster is keyed by id, so an id-less entry can never match the
+    // agent the LAST boot minted: every reboot created ANOTHER one beside it and
+    // the flush persisted them all, with no word to the operator.
+    let (kernel, cleanup) = await bootLoader(
+        """
+        agents:
+          - handler_module: proxy_agent.tools
+        """)
+    defer { cleanup() }
+    let before = kernel.allAgents().count
+    let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
+    #expect(r["booted"].asBool == false, "\(r.serialize())")
+    let err = r["error"].asString ?? ""
+    #expect(err.contains("explicit id"), "\(err)")
+    #expect(err.contains("proxy_agent.tools"), "the entry is named: \(err)")
+    // NOTHING was created — not on this boot, and not by the create-time boot.
+    #expect(kernel.allAgents().count == before)
+    #expect(before == 2, "just the root + the loader itself")
+}
+
+@Test func anIdLessEntryIsRefusedBeforeTheValidOnesHydrate() async {
+    // The refusal is a REFUSAL, not a skip: boot stops at the bad entry.
+    let (kernel, cleanup) = await bootLoader(
+        """
+        agents:
+          - handler_module: proxy_agent.tools
+          - id: memory
+            handler_module: proxy_agent.tools
+        """)
+    defer { cleanup() }
+    let r = await kernel.send([Item("static_loader", ["type": "boot"])])[0].result
+    #expect(r["booted"].asBool == false, "\(r.serialize())")
+    #expect(kernel.agent(AgentId("memory")) == nil)
 }

@@ -188,6 +188,15 @@ impl Ledger {
         Opened::Fresh
     }
 
+    /// Whether a row exists under `exec_id` (named or minted, settled or not).
+    pub fn has(&self, exec_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("ledger poisoned")
+            .rows
+            .contains_key(exec_id)
+    }
+
     /// Count one dispatch attempt against `exec_id`; returns the new count.
     pub fn attempt(&self, exec_id: &str) -> u32 {
         let mut g = self.inner.lock().expect("ledger poisoned");
@@ -254,6 +263,12 @@ impl Ledger {
                 Some(v) => r.origin.as_ref() == Some(v),
             })
             .map(|(id, r)| {
+                // NO `verb` KEY. Python's row is exactly {id, target, status,
+                // attempts, retries, named, outcome?} and the ports carried an
+                // eighth key, so the same wiring answered a 7-key row here and an
+                // 8-key row there. The verb is not lost — it is what the SIDECAR
+                // stores (`settled_snapshot`), where it authorizes a joiner after
+                // a reboot; the read verb never needed it.
                 let mut o = json!({
                     "id": id,
                     "target": r.target.0,
@@ -261,7 +276,6 @@ impl Ledger {
                     "attempts": r.attempts,
                     "retries": r.retries,
                     "named": r.named,
-                "verb": r.verb,
                 });
                 if let Some(out) = &r.outcome {
                     o["outcome"] = out.to_value();

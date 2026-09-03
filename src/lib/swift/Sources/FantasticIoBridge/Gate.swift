@@ -31,8 +31,11 @@ public func gateWebLeg(
         return .object(["error": .string("\(error)")])
     }
     let action = AuthAction(kind: "call", target: target, verb: verb, token: token)
-    if case .deny(let reason) = gateInbound(rule: rule, action: action) {
-        return .object(["error": .string(reason), "reason": .string("unauthorized")])
+    // FORWARDED, not re-worded. The rule states the reason AND the repair; a web
+    // leg used to drop the repair entirely, so a browser/REST client hitting a
+    // sealed leg learned only that it was refused.
+    if case .deny(let d) = gateInbound(rule: rule, action: action) {
+        return d.asRefusal
     }
     return nil
 }
@@ -58,13 +61,11 @@ public func gateVerb(
         return .object(["error": .string("\(error)")])
     }
     let action = AuthAction(kind: "call", target: agentId, verb: verb, token: authToken)
-    if case .deny(let reason) = gateInbound(rule: rule, action: action) {
-        return .object([
-            "error": .string(reason),
-            "reason": .string("unauthorized"),
-            "hint": .string(
-                "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress"),
-        ])
+    // FORWARDED, not re-worded. This hint was hardcoded to say "the fs edge" for
+    // whichever leg called `gateVerb` — a web leg's denial claimed a filesystem
+    // edge — and it named a repair the rule itself already knows how to state.
+    if case .deny(let d) = gateInbound(rule: rule, action: action) {
+        return d.asRefusal
     }
     return nil
 }

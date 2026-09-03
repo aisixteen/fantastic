@@ -25,11 +25,12 @@
 use async_trait::async_trait;
 use fantastic_bundle as _; // keep the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::refusal::{bad, missing, refusal, UNHANDLED};
+use fantastic_kernel::refusal::{bad, missing, refusal, with, UNHANDLED};
 use fantastic_kernel::{current_task, Agent, AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 pub const README: &str = include_str!("readme.md");
 
@@ -40,6 +41,36 @@ pub const HANDLER_MODULE: &str = "text_file.tools";
 const CKPT_DIR: &str = ".ckpt";
 /// read/write chunk size on the stream verbs.
 const CHUNK: usize = 65536;
+
+/// ABSENT ⇒ `default`. Present, an integer, ≥ `minimum` ⇒ that value. ANYTHING
+/// ELSE (a bool, a string, a float, an explicit null, a value under the bound)
+/// ⇒ a `bad_arg` refusal.
+///
+/// A present-but-wrong number is a TYPO, and `as_u64().unwrap_or(default)` hid
+/// it: `read {offset: "12"}` silently paged from the top and told the caller
+/// nothing.
+fn int_arg(
+    payload: &Value,
+    key: &str,
+    default: u64,
+    verb: &str,
+    minimum: u64,
+) -> Result<u64, Value> {
+    let Some(raw) = payload.get(key) else {
+        return Ok(default);
+    };
+    match raw.as_u64() {
+        Some(n) if n >= minimum => Ok(n),
+        _ => {
+            let want = if minimum == 0 {
+                "a non-negative int".to_string()
+            } else {
+                format!("an int >= {minimum}")
+            };
+            Err(bad(verb, key, &want))
+        }
+    }
+}
 
 pub struct TextFileBundle;
 
@@ -83,6 +114,62 @@ fn version_of(data: &[u8]) -> String {
 /// This dispatch's kernel task pid — the checkpoint id space.
 fn pid() -> String {
     current_task().map_or_else(|| "op:00000000".to_string(), |t| t.0)
+}
+
+// ─── per-document serialization ─────────────────────────────────
+// A mutate is read → verify → commit with awaits between; two concurrent
+// mutates on ONE document interleaved there would both derive from the same
+// pre-image and the second commit would silently discard the first. One lock
+// per (target surface, path), held from the first read through the rename;
+// `if_match` is checked UNDER it. Multi-edit patches take theirs in sorted key
+// order so two transactions over overlapping sets cannot deadlock. Entries are
+// pruned once nobody but the map holds them, so the map never grows.
+
+type LockKey = (String, String);
+type LockMap = std::sync::Mutex<HashMap<LockKey, Arc<tokio::sync::Mutex<()>>>>;
+
+static LOCKS: OnceLock<LockMap> = OnceLock::new();
+
+fn locks() -> &'static LockMap {
+    LOCKS.get_or_init(Default::default)
+}
+
+/// The held document locks — released (and pruned) on drop.
+struct Held {
+    keys: Vec<LockKey>,
+    guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+async fn hold(fb: &str, paths: &[&str]) -> Held {
+    let mut keys: Vec<LockKey> = paths
+        .iter()
+        .map(|p| (fb.to_string(), (*p).to_string()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let arcs: Vec<Arc<tokio::sync::Mutex<()>>> = {
+        let mut m = locks().lock().unwrap_or_else(|e| e.into_inner());
+        keys.iter()
+            .map(|k| Arc::clone(m.entry(k.clone()).or_default()))
+            .collect()
+    };
+    let mut guards = Vec::with_capacity(arcs.len());
+    for a in arcs {
+        guards.push(a.lock_owned().await);
+    }
+    Held { keys, guards }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.guards.clear();
+        let mut m = locks().lock().unwrap_or_else(|e| e.into_inner());
+        for k in &self.keys {
+            if m.get(k).is_some_and(|a| Arc::strong_count(a) == 1) {
+                m.remove(k);
+            }
+        }
+    }
 }
 
 fn version_mismatch(want: &str, have: &str) -> Value {
@@ -363,6 +450,15 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Type the paging args BEFORE the read — a typo'd `offset` costs no IO.
+    let off = match int_arg(payload, "offset", 0, "read", 0) {
+        Ok(v) => v as usize,
+        Err(refusal) => return refusal,
+    };
+    let limit = match int_arg(payload, "limit", 200, "read", 1) {
+        Ok(v) => v as usize,
+        Err(refusal) => return refusal,
+    };
     let data = match read_all(kernel, fb, &path).await {
         Ok(d) => d,
         Err(e) => return e,
@@ -380,12 +476,7 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     if all_lines.last() == Some(&"") {
         all_lines.pop();
     }
-    let off = payload.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let limit = payload
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map_or(200, |v| v.max(1) as usize);
-    let end = (off + limit).min(all_lines.len());
+    let end = off.saturating_add(limit).min(all_lines.len());
     let page: Vec<Value> = all_lines
         .get(off..end)
         .unwrap_or(&[])
@@ -397,7 +488,7 @@ async fn read_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         "path": path,
         "lines": page,
         "total": all_lines.len(),
-        "eof": off + limit >= all_lines.len(),
+        "eof": off.saturating_add(limit) >= all_lines.len(),
         "version": version_of(&data),
     })
 }
@@ -422,8 +513,9 @@ async fn write_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
         Err(e) => return e,
     };
     if blob.is_empty() && payload.get("bytes").is_none() {
-        return missing("write", "bytes (the document, raw bytes)");
+        return missing("write", "bytes (the document — str is utf-8-encoded)");
     }
+    let _held = hold(fb, &[&path]).await;
     if let Some(err) = if_match_guard(kernel, fb, &path, payload).await {
         return err;
     }
@@ -451,8 +543,9 @@ async fn append_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u
         Err(e) => return e,
     };
     if blob.is_empty() && payload.get("bytes").is_none() {
-        return missing("append", "bytes (one raw chunk)");
+        return missing("append", "bytes (one chunk — str is utf-8-encoded)");
     }
+    let _held = hold(fb, &[&path]).await;
     // absent offset = append at end (creates the file)
     let (r, _) = kernel
         .send_with_binary(
@@ -539,6 +632,13 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
             );
         };
         let n = n as usize;
+        if plan.iter().any(|p| p.path == path) {
+            return bad(
+                "patch",
+                "edits",
+                "each path at most once — put all of a file's hunks in one edit",
+            );
+        }
         if cursor + n > hunks.len() {
             cursor += n;
             break;
@@ -565,6 +665,9 @@ async fn patch_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value, blob: &[u8
             ),
         );
     }
+    // Every edit's document is held from the first read to the last rename.
+    let paths: Vec<&str> = plan.iter().map(|e| e.path.as_str()).collect();
+    let _held = hold(fb, &paths).await;
     // ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
     for e in plan.iter_mut() {
         let raw = match read_all(kernel, fb, &e.path).await {
@@ -766,6 +869,7 @@ async fn restore_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value
     else {
         return missing("restore", "ckpt_id");
     };
+    let _held = hold(fb, &[&path]).await;
     if let Some(err) = if_match_guard(kernel, fb, &path, payload).await {
         return err;
     }
@@ -830,6 +934,12 @@ async fn drop_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
     json!({"dropped": true, "ckpt_id": ckpt_id, "path": path})
 }
 
+fn unknown_type(verb: &str) -> Value {
+    let mut r = refusal(UNHANDLED, format!("text_file: unknown type {verb:?}"));
+    with(&mut r, "verb", json!(verb));
+    r
+}
+
 /// One dispatch used by BOTH channels — the byte verbs take the blob, the rest
 /// ignore it.
 async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kernel>) -> Value {
@@ -844,7 +954,7 @@ async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kern
         return match verb {
             "read" | "write" | "patch" | "append" | "checkpoint" | "checkpoints" | "restore"
             | "drop" => unwired(verb),
-            other => refusal(UNHANDLED, format!("text_file: unknown type {other:?}")),
+            other => unknown_type(other),
         };
     };
     match verb {
@@ -856,7 +966,7 @@ async fn dispatch(agent: &Agent, payload: &Value, blob: &[u8], kernel: &Arc<Kern
         "checkpoints" => checkpoints_reply(kernel, &fb, payload).await,
         "restore" => restore_reply(kernel, &fb, payload).await,
         "drop" => drop_reply(kernel, &fb, payload).await,
-        other => refusal(UNHANDLED, format!("text_file: unknown type {other:?}")),
+        other => unknown_type(other),
     }
 }
 
@@ -885,17 +995,14 @@ impl Bundle for TextFileBundle {
         // document, utf-8. ai_core encodes for the MODEL; a spawned program's
         // ctrl-fd wire is JSON (no bytes type), so the str form is its one path
         // (measured live: E20's program was refused here and stored nothing).
-        if matches!(verb, "write" | "patch" | "append") {
-            if payload.get("bytes").and_then(Value::as_str).is_none() {
-                return Ok(Some(json!({
-                    "error": format!(
-                        "{verb} carries raw bytes — call it on the binary channel \
-                         (send_binary), or pass the document as a str in `bytes` \
-                         (utf-8-encoded for you)"
-                    ),
-                })));
-            }
-            // effective_blob in the reply fns lifts the str out of the payload.
+        // effective_blob in the reply fns lifts the str out of the payload.
+        if matches!(verb, "write" | "patch" | "append")
+            && payload.get("bytes").and_then(Value::as_str).is_none()
+        {
+            return Ok(Some(missing(
+                verb,
+                "bytes (the document — str is utf-8-encoded)",
+            )));
         }
         Ok(Some(dispatch(&agent, payload, &[], kernel).await))
     }

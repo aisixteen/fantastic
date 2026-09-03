@@ -173,3 +173,54 @@ def test_a_thought_with_no_call_persists_as_nothing():
 
 def test_calls_inside_and_outside_one_turn_both_persist():
     assert _pair(f"<think>a {_C} b</think>{_C}") == (2, 2)
+
+
+# ── the OTHER two dialects, inside a thought ─────────────────────────────────
+# The stripper kept only `<tool_call>` spans while DISPATCH parsed all three, so
+# the identical effect-without-cause gap stayed wide open for any model that
+# speaks another grammar — gemma-4 writes the CHANNEL form natively. Rust's
+# `kept_envelopes` has scanned all three since it was written.
+
+_CHANNEL = "<|tool_call>call:kernel_state.list_agents{}<tool_call|>"
+_INVOKE = (
+    '<invoke name="send"><parameter name="arguments">'
+    '{"target_id":"notes","payload":{"type":"read"}}'
+    "</parameter></invoke>"
+)
+
+
+def test_a_channel_call_and_an_invoke_inside_a_thought_survive_into_history():
+    """Both non-JSON dialects are kept, IN SOURCE ORDER, and the reasoning around
+    them still goes. Order matters: the record must state what happened in the
+    sequence it happened, not grouped by which grammar was used."""
+    text = (
+        f"<think>first I list the tree {_CHANNEL} then I read the note "
+        f"{_INVOKE} secret deliberation</think>"
+    )
+    assert _pair(text) == (2, 2)
+    kept = without_thinking(text)
+    assert _CHANNEL in kept and _INVOKE in kept
+    assert kept.index(_CHANNEL) < kept.index(_INVOKE), "source order, not table order"
+    for prose in ("first I list the tree", "then I read the note", "secret"):
+        assert prose not in kept, prose
+
+
+def test_all_three_dialects_mixed_in_one_thought_are_all_kept():
+    """A turn may mix grammars; none of the three is privileged."""
+    text = f"<think>a {_INVOKE} b {_C} c {_CHANNEL} d</think>"
+    assert _pair(text) == (3, 3)
+    kept = without_thinking(text)
+    assert kept.index(_INVOKE) < kept.index(_C) < kept.index(_CHANNEL)
+
+
+def test_an_unterminated_thought_keeps_the_other_dialects_too():
+    """The unterminated branch is the same rule — it used to have its own,
+    `<tool_call>`-only, copy of the scan."""
+    assert _pair(f"<think>cut mid {_CHANNEL}") == (1, 1)
+    assert _pair(f"<think>cut mid {_INVOKE}") == (1, 1)
+
+
+def test_an_unclosed_envelope_in_a_thought_is_reasoning_not_an_action():
+    """Only COMPLETE spans are kept: dispatch could not parse an opener with no
+    closer either, so keeping it would record an action that never ran."""
+    assert without_thinking("<think>maybe <|tool_call>call:x.y{} …</think>") == ""

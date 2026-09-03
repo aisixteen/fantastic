@@ -5,7 +5,7 @@
 
 use crate::agent_loop::{run_generation, BackendConfig};
 use crate::context::{budget as agent_budget, output_reserve, resolve_context_window};
-use crate::events::{emit_status, to_caller};
+use crate::events::emit_status;
 use crate::helpers::{agent_meta, mint_send_id, now_secs, safe_client, DEFAULT_CLIENT_ID};
 use crate::history::load_history;
 use crate::projection::derive_reaction;
@@ -72,18 +72,20 @@ pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     json!({"messages": messages, "client_id": client_id})
 }
 
-/// Compact ONE stored turn for a `recall` reply: content capped so paging back
-/// can't itself blow the window. Turns are now pure text (tool calls/replies are
-/// inline `<tool_call>`/`<tool_response>` text), so this is just a cap. Bounds
-/// the REPLY only, never the store.
+/// Render ONE stored turn for a `recall` reply. Turns are pure text (tool
+/// calls/replies are inline `<tool_call>`/`<tool_response>` text), so a turn with
+/// content renders as that content and anything else falls back to the row.
+///
+/// WHOLE, NOT CAPPED. Rust/swift truncated each turn at 2000 chars until
+/// 2026-09-02 while python returned it verbatim — same verb, same store, two
+/// different replies, and the cut half is exactly what a model pages back FOR.
 fn recall_render(m: &Value) -> String {
     let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-    let s = if content.is_empty() {
+    if content.is_empty() {
         serde_json::to_string(m).unwrap_or_default()
     } else {
         content.to_string()
-    };
-    s.chars().take(2000).collect()
+    }
 }
 
 /// `recall` verb: page turns back from the DURABLE chat store (the FULL
@@ -222,6 +224,44 @@ pub fn send_timeout_secs() -> u64 {
         .unwrap_or(SEND_TIMEOUT_SECS)
 }
 
+/// The queue row for one submission, removed when this guard is DROPPED while
+/// still armed — i.e. when the dispatch went away before it ever became the
+/// in-flight turn.
+///
+/// A `cancel`/`timeout` landing during the FIFO wait drops the whole `send`
+/// future at its await point, and the row it enqueued outlived it: `status`
+/// reported a generation nobody was running, forever, and told the next caller it
+/// was one deeper in the line than it was.
+struct QueuedGuard {
+    state: Arc<crate::state::BackendState>,
+    send_id: String,
+    armed: bool,
+}
+
+impl QueuedGuard {
+    /// Pop the row and stop guarding it: the wait is over, the caller owns the
+    /// lock, and the in-flight entry takes over from here.
+    fn disarm(&mut self) {
+        self.armed = false;
+        Self::dequeue(&self.state, &self.send_id);
+    }
+
+    fn dequeue(state: &crate::state::BackendState, send_id: &str) {
+        let mut q = state.queue.lock().expect("queue poisoned");
+        if let Some(pos) = q.iter().position(|e| e.send_id == send_id) {
+            q.remove(pos);
+        }
+    }
+}
+
+impl Drop for QueuedGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            Self::dequeue(&self.state, &self.send_id);
+        }
+    }
+}
+
 /// The shared `send` flow: guard the call chain → enqueue → FIFO lock → run the
 /// generation under a timeout → clean up → ROUTE the pass's output. The backend
 /// supplies a built `provider` (it has already failfast-checked file_bridge_id /
@@ -313,8 +353,22 @@ pub async fn send(
         queued_at: now_secs(),
     };
     state.queue.lock().expect("queue poisoned").push_back(entry);
+    // ARMED FROM HERE UNTIL THE LOCK IS OURS. A `cancel` (or an item `timeout`)
+    // that lands while this dispatch WAITS on the FIFO drops the future at the
+    // await below — the queue row would survive it forever, so `status` reported a
+    // phantom `mine_pending`/`others_pending` and every later caller's `ahead` was
+    // off by one. The guard's Drop removes the row; it is disarmed the moment the
+    // row is popped into the in-flight entry.
+    let mut queued_guard = QueuedGuard {
+        state: Arc::clone(&state),
+        send_id: send_id.clone(),
+        armed: true,
+    };
 
-    // Best-effort contention detection.
+    // Best-effort contention detection. ONE event, and it is the `status` one:
+    // a bare `{type:'queued'}` rode ahead of it on rust/swift until 2026-09-02,
+    // an undocumented extra type python never sends, which broke any per-submission
+    // event count and every cross-runtime event-stream diff.
     let contested = state.lock.try_lock().is_err();
     if contested {
         let ahead = state
@@ -323,14 +377,6 @@ pub async fn send(
             .expect("queue poisoned")
             .len()
             .saturating_sub(1);
-        to_caller(
-            kernel,
-            agent_id,
-            &client_id,
-            route,
-            json!({"type": "queued", "source": agent_id.as_str(), "send_id": send_id}),
-        )
-        .await;
         let mut detail = Map::new();
         detail.insert("send_id".to_string(), json!(send_id));
         detail.insert("ahead".to_string(), json!(ahead));
@@ -344,13 +390,9 @@ pub async fn send(
     let lock_arc = Arc::clone(&state.lock);
     let _guard = lock_arc.lock_owned().await;
 
-    // Pop ourselves from the queue, become the in-flight entry.
-    {
-        let mut q = state.queue.lock().expect("queue poisoned");
-        if let Some(pos) = q.iter().position(|e| e.send_id == send_id) {
-            q.remove(pos);
-        }
-    }
+    // Pop ourselves from the queue, become the in-flight entry — and disarm the
+    // guard, whose job (the wait is over) is done.
+    queued_guard.disarm();
     {
         let mut cur = state.current_meta.lock().expect("current poisoned");
         *cur = Some(CurrentEntry {
@@ -470,6 +512,10 @@ pub async fn send(
                 send_to,
                 system_prompt_for_route,
                 route_incoming,
+                // THE LAYER'S PER-CALL DEADLINE, threaded to every model call the
+                // router dispatches. The kernel defaults nothing.
+                timeout_secs as f64,
+                route,
             )
             .await;
         });

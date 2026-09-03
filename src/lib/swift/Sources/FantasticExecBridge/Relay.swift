@@ -35,7 +35,11 @@
         private var selfProxy: AgentId?
         private var closed = false
 
-        /// A corrupt length must never become a multi-GB allocation.
+        /// ONE frame bound on this wire, both ends, every runtime. A corrupt length
+        /// must never become a multi-GB allocation, and a program that means to move
+        /// 20 MB means to STREAM it. Over-limit is a WIRE VIOLATION — the framing
+        /// itself is unusable, so there is nothing to reply to and the socket closes;
+        /// the connector refuses to write such a frame in the first place.
         private static let maxFrame = 16 * 1024 * 1024
 
         /// Exactly ONE job per owner receives the owner's inbox — a restarted durable
@@ -67,7 +71,7 @@
             self.owner = owner
             self.jobId = jobId
             self.kernel = kernel
-            self.queue = DispatchQueue(label: "py.relay.\(jobId)")
+            self.queue = DispatchQueue(label: "exec_bridge.relay.\(jobId)")
         }
 
         func start() {
@@ -208,10 +212,28 @@
                 Task { await kernel.emit(tgt, payload) }
             case "watch":
                 guard let src = m["src"].asString, subs[src] == nil else { return }
-                let proxy = AgentId("_pyw_\(jobId)_\(src)")
-                let stream = kernel.ensureInbox(proxy)
+                // `_xb…`, not `_pyw…`: two spawner bundles in one kernel must not
+                // collide on a synthetic inbox id, and this one runs COMMANDS — the
+                // name has claimed "python" since before the runner was general.
+                let proxy = AgentId("_xbw_\(jobId)_\(src)")
                 let srcId = AgentId(src)
-                Task { await kernel.watch(src: srcId, watcher: proxy) }
+                // THE PROGRAM'S WATCH IS THIS AGENT'S WATCH, and THE KERNEL DECIDES.
+                // Off the handler's task-local this relay watched as the OPERATOR —
+                // ungated, so a refusal was not merely discarded, it could never
+                // happen. Re-enter the owner's identity (as the `send` case does) and
+                // register NOTHING when the answer is no: the inbox row is created by
+                // `watch` itself, only on the path that succeeds.
+                let denial = KernelTaskLocals.$currentSender.withValue(owner) {
+                    kernel.watch(src: srcId, watcher: proxy)
+                }
+                if let denial {
+                    push(
+                        .object([
+                            "op": .string("event"), "src": .string(src), "payload": denial,
+                        ]))
+                    return
+                }
+                let stream = kernel.ensureInbox(proxy)
                 let t = Task { [weak self] in
                     for await p in stream {
                         self?.queue.async {
@@ -228,13 +250,23 @@
                 else { return }
                 sub.task.cancel()
                 Task { await kernel.unwatch(src: AgentId(src), watcher: sub.proxy) }
+                kernel.removeInbox(sub.proxy)  // the proxy row is OURS to release
             case "onmessage":
                 guard selfProxy == nil else { return }  // a second onmessage is a no-op
                 supersedePredecessor(kernel)
-                let proxy = AgentId("_pyself_\(jobId)")
-                let stream = kernel.ensureInbox(proxy)
+                let proxy = AgentId("_xbself_\(jobId)")
                 let o = owner
-                Task { await kernel.watch(src: o, watcher: proxy) }
+                let denial = KernelTaskLocals.$currentSender.withValue(o) {
+                    kernel.watch(src: o, watcher: proxy)
+                }
+                if let denial {
+                    push(
+                        .object([
+                            "op": .string("event"), "src": .string(o.value), "payload": denial,
+                        ]))
+                    return
+                }
+                let stream = kernel.ensureInbox(proxy)
                 let t = Task { [weak self] in
                     for await p in stream {
                         // The job's own telemetry echoes back through the owner's
@@ -267,6 +299,7 @@
             prev.task.cancel()
             let o = owner
             Task { await kernel.unwatch(src: o, watcher: prev.proxy) }
+            kernel.removeInbox(prev.proxy)
         }
 
         /// Give up the owner's inbox — but ONLY if it still names this job. A superseded
@@ -276,6 +309,7 @@
             mine.task.cancel()
             let o = owner
             Task { await kernel.unwatch(src: o, watcher: mine.proxy) }
+            kernel.removeInbox(mine.proxy)
         }
 
         // MARK: - teardown
@@ -287,6 +321,7 @@
                 for (src, sub) in subs {
                     sub.task.cancel()
                     Task { await kernel.unwatch(src: AgentId(src), watcher: sub.proxy) }
+                    kernel.removeInbox(sub.proxy)  // the proxy row is OURS to release
                 }
                 if selfProxy != nil { releaseOwnerInbox(kernel) }
             }

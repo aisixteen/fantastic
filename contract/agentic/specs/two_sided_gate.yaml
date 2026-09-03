@@ -144,10 +144,26 @@ expect:
       expect: {allow: true}
       because: TSG-6
 
-    - name: and it survives a reboot — grants are persisted, not in-memory
+    # ── a reboot re-applies the MANIFEST, which owns the whole field ──
+    #
+    # THE MANIFEST IS TRUTH; a store is only a MEDIUM. The record IS persisted and
+    # IS hydrated — but `static_loader.boot` then writes each declared field back
+    # over the hydrated record, and `update_agent` REPLACES a named field rather
+    # than merging it. So a lateral edge the yaml does not declare is gone after a
+    # reboot, while everything the yaml declares comes back exactly. A durable
+    # roster change is a manifest edit, not a runtime `update_agent`.
+
+    - name: a reboot re-applies the manifest over the hydrated record
       reboot: {}
-    - assert_tree: {same_as: before_reboot}
-      because: TSG-6
-    - reach: {from: caller, to: gate_loader, send: {type: reflect}}
+    - name: the structural baseline survives the re-apply
+      reach: {from: caller, to: gate_loader, send: {type: reflect}}
       expect: {allow: true}
+      because: TSG-6
+    - name: and every edge the manifest declares is back
+      reach: {from: caller, to: both_grant, send: {type: list, path: ""}}
+      expect: {allow: true}
+      because: TSG-1
+    - name: but the runtime-only edge is NOT — the manifest never declared it
+      reach: {from: caller, to: neither_grants, send: {type: list, path: ""}}
+      expect: {allow: false, side: egress}
       because: TSG-6

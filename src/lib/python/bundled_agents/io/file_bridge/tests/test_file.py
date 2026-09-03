@@ -298,3 +298,173 @@ async def _fb(kernel, tmp_path, **meta) -> str:
         )
     )[0]["result"]
     return rec["id"]
+
+
+# ─── the 2026-09-02 closing sweep — argument validation + refusal codes ──
+
+
+async def _call(kernel, fb, **payload):
+    return (await kernel.send([{"target": fb, "payload": payload}]))[0]["result"]
+
+
+async def test_negative_offset_and_zero_length_are_refused_not_fatal(
+    seeded_kernel, file_bridge
+):
+    """`offset`/`length`/`chunk` used to be `int()`-coerced OUTSIDE the try: a
+    string raised out of the handler, a negative `length` read 0 bytes and made
+    `pump` spin forever. Now every bad value is `bad_arg` naming the arg."""
+    await _ws(seeded_kernel, file_bridge, "a.txt", b"abc")
+    for payload in (
+        {"type": "read_stream", "path": "a.txt", "offset": -1},
+        {"type": "read_stream", "path": "a.txt", "length": 0},
+        {"type": "read_stream", "path": "a.txt", "offset": "x"},
+        {"type": "read_stream", "path": "a.txt", "offset": True},
+        {"type": "write_stream", "path": "a.txt", "bytes": b"z", "offset": -5},
+        {"type": "pump", "source_path": "a.txt", "sink_path": "b.txt", "chunk": -1},
+        {"type": "pump", "source_path": "a.txt", "sink_path": "b.txt", "chunk": 0},
+    ):
+        r = await _call(seeded_kernel, file_bridge, **payload)
+        assert r.get("reason") == "bad_arg", (payload, r)
+        assert r["arg"] in payload, (payload, r)
+        assert not r.get("raised"), r
+    # and the legal shapes still stream
+    r = await _call(
+        seeded_kernel, file_bridge, type="read_stream", path="a.txt", offset=1, length=1
+    )
+    assert bytes(r["bytes"]) == b"b" and r["next_offset"] == 2, r
+
+
+async def test_an_in_root_symlink_pointing_outside_refuses(
+    seeded_kernel, file_bridge, tmp_path
+):
+    import os
+
+    secret = tmp_path.parent / "sweep_outside_secret.txt"
+    secret.write_text("outside")
+    os.symlink(secret, tmp_path / "docs")
+    r = await _call(seeded_kernel, file_bridge, type="read_stream", path="docs")
+    assert r.get("reason") == "transport_error" and "escapes root" in r["error"], r
+    r = await _call(seeded_kernel, file_bridge, type="list", path="docs")
+    assert r.get("reason") == "transport_error" and "escapes root" in r["error"], r
+
+
+async def test_bare_delete_refuses_a_populated_dir_recursive_removes_it(
+    seeded_kernel, file_bridge, tmp_path
+):
+    await _ws(seeded_kernel, file_bridge, "src/a.txt", b"x")
+    r = await _call(seeded_kernel, file_bridge, type="delete", path="src")
+    assert r.get("reason") == "transport_error", r
+    assert (tmp_path / "src" / "a.txt").exists()
+    r = await _call(
+        seeded_kernel, file_bridge, type="delete", path="src", recursive=True
+    )
+    assert r == {"path": "src", "deleted": True}, r
+    assert not (tmp_path / "src").exists()
+
+
+async def test_empty_path_delete_rename_mkdir_are_refused(
+    seeded_kernel, file_bridge, tmp_path
+):
+    """`delete {path:"", recursive:true}` resolved to the ROOT and removed the
+    whole served store. Empty ⇒ `missing_arg`; anything resolving to the root
+    itself (`.`, `a/..`) ⇒ `bad_arg`. The root is a boundary, not an operand."""
+    await _ws(seeded_kernel, file_bridge, "keep.txt", b"k")
+    (tmp_path / "a").mkdir()
+    for payload, arg, reason in (
+        ({"type": "delete", "path": "", "recursive": True}, "path", "missing_arg"),
+        ({"type": "delete", "recursive": True}, "path", "missing_arg"),
+        ({"type": "delete", "path": "a/..", "recursive": True}, "path", "bad_arg"),
+        (
+            {"type": "rename", "old_path": "", "new_path": "x"},
+            "old_path",
+            "missing_arg",
+        ),
+        (
+            {"type": "rename", "old_path": "a", "new_path": ""},
+            "new_path",
+            "missing_arg",
+        ),
+        (
+            {"type": "rename", "old_path": ".", "new_path": "x"},
+            "old_path",
+            "missing_arg",
+        ),
+        (
+            {"type": "rename", "old_path": "a", "new_path": "a/.."},
+            "new_path",
+            "bad_arg",
+        ),
+        ({"type": "mkdir", "path": ""}, "path", "missing_arg"),
+        ({"type": "mkdir", "path": "."}, "path", "missing_arg"),
+    ):
+        r = await _call(seeded_kernel, file_bridge, **payload)
+        assert r.get("reason") == reason and r.get("arg") == arg, (payload, r)
+    assert (tmp_path / "keep.txt").exists() and (tmp_path / "a").is_dir()
+
+
+async def test_absolute_path_is_refused_with_bad_arg(
+    seeded_kernel, file_bridge, tmp_path
+):
+    """Python used to `lstrip("/")` and serve `/README.md` as `root/README.md`,
+    against its own docstring; the ports refused. One rule now: refuse."""
+    await _ws(seeded_kernel, file_bridge, "README.md", b"r")
+    for verb, extra in (
+        ("read_stream", {"path": "/README.md"}),
+        ("list", {"path": "/"}),
+        ("delete", {"path": "/README.md"}),
+        ("mkdir", {"path": "/x"}),
+        ("write_stream", {"path": "/x", "bytes": b"b"}),
+        ("rename", {"old_path": "/README.md", "new_path": "y"}),
+    ):
+        r = await _call(seeded_kernel, file_bridge, type=verb, **extra)
+        assert r.get("reason") == "bad_arg", (verb, r)
+        assert "root-relative" in r["error"], r
+    assert (tmp_path / "README.md").read_bytes() == b"r"
+
+
+async def test_list_refusals_carry_codes(seeded_kernel, file_bridge):
+    await _ws(seeded_kernel, file_bridge, "f.txt", b"f")
+    r = await _call(seeded_kernel, file_bridge, type="list", path="nope")
+    assert r.get("reason") == "not_found" and r.get("path") == "nope", r
+    r = await _call(seeded_kernel, file_bridge, type="list", path="f.txt")
+    assert r.get("reason") == "bad_arg" and r.get("arg") == "path", r
+    r = await _call(
+        seeded_kernel, file_bridge, type="rename", old_path="nope", new_path="x"
+    )
+    assert r.get("reason") == "not_found" and r.get("path") == "nope", r
+    r = await _call(seeded_kernel, file_bridge, type="frobnicate")
+    assert r.get("reason") == "unhandled" and r.get("verb") == "frobnicate", r
+
+
+async def test_reflect_carries_posture_and_boot_is_null(seeded_kernel, file_bridge):
+    r = await _call(seeded_kernel, file_bridge, type="reflect")
+    assert r["ingress_rule"] == "allow_all_ingress"
+    assert r["egress_rule"] == "silent_egress"
+    assert r["sealed"] is False
+    assert "root_error" not in r
+    assert r["sentence"].startswith("Filesystem edge of the io family")
+    assert await _call(seeded_kernel, file_bridge, type="boot") is None
+
+
+async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel):
+    """A leg with no wire envelope can never present a token — `password_ingress`
+    on the fs edge could only ever refuse (python) or be satisfied by a secret
+    persisted on the record (the ports). Refused at the write, both spellings."""
+    for meta in ({"ingress_rule": "password_ingress"}, {"auth": "password"}):
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": "kernel_state",
+                            "handler_module": "file_bridge.tools",
+                            **meta,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert r.get("reason") == "invalid_meta", (meta, r)
+        assert "wire envelope" in r["error"], r

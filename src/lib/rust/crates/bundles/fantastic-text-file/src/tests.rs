@@ -529,12 +529,10 @@ async fn reflect_names_surface_and_grammar_and_byte_verbs_redirect_on_text() {
     )
     .await;
     assert_eq!(r["size"], 3, "{r}");
-    // With NO usable document the byte verbs still redirect to the binary carrier.
+    // With NO usable document the byte verbs refuse with the one shape.
     let r = call(&k, &ed, json!({"type": "write", "path": "x"})).await;
-    assert!(
-        r["error"].as_str().unwrap().contains("binary channel"),
-        "{r}"
-    );
+    assert_eq!(r["reason"], "missing_arg", "{r}");
+    assert!(r["arg"].as_str().unwrap().starts_with("bytes"), "{r}");
 }
 
 // ─── the TRANSACTION (multi-file edits in ONE patch) ────────────
@@ -678,4 +676,193 @@ async fn per_edit_if_match_guards_the_whole_transaction() {
     assert_eq!(r["reason"], "version_mismatch", "{r}");
     assert_eq!(r["path"], "b.py");
     assert_eq!(on_disk(&tmp, "a.py"), "one\n");
+}
+
+// ─── per-document serialization + payload hardening (sweep I-5) ──
+
+#[tokio::test]
+async fn patch_refuses_the_same_path_twice() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "a.md", "one\ntwo\n").await;
+    let blob = format!("{}\n{}", block("one", "1"), block("two", "2"));
+    let r = call_bin(
+        &k,
+        &ed,
+        json!({"type": "patch", "edits": [{"path": "a.md", "hunks": 1}, {"path": "a.md", "hunks": 1}]}),
+        blob.as_bytes(),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "edits", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("at most once"), "{r}");
+    assert_eq!(on_disk(&tmp, "a.md"), "one\ntwo\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_patches_on_one_file_both_land() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "f.py", "a = 1\nb = 2\n").await;
+    let one = {
+        let (k, ed) = (Arc::clone(&k), ed.clone());
+        tokio::spawn(async move {
+            call_bin(
+                &k,
+                &ed,
+                json!({"type": "patch", "edits": [{"path": "f.py", "hunks": 1}]}),
+                block("a = 1", "a = 10").as_bytes(),
+            )
+            .await
+        })
+    };
+    let two = {
+        let (k, ed) = (Arc::clone(&k), ed.clone());
+        tokio::spawn(async move {
+            call_bin(
+                &k,
+                &ed,
+                json!({"type": "patch", "edits": [{"path": "f.py", "hunks": 1}]}),
+                block("b = 2", "b = 20").as_bytes(),
+            )
+            .await
+        })
+    };
+    let (r1, r2) = (one.await.unwrap(), two.await.unwrap());
+    assert_eq!(r1["patched"], true, "{r1}");
+    assert_eq!(r2["patched"], true, "{r2}");
+    let final_text = on_disk(&tmp, "f.py");
+    assert_eq!(final_text, "a = 10\nb = 20\n");
+    // each reply's version is the document as it stood at THAT commit: one is
+    // the final image, the other the intermediate with only its own hunk.
+    let v_final = version_of(final_text.as_bytes());
+    let versions = [
+        r1["edits"][0]["version"].as_str().unwrap().to_string(),
+        r2["edits"][0]["version"].as_str().unwrap().to_string(),
+    ];
+    assert!(versions.contains(&v_final), "{versions:?} vs {v_final}");
+    let intermediates = [
+        version_of(b"a = 10\nb = 2\n"),
+        version_of(b"a = 1\nb = 20\n"),
+    ];
+    for v in &versions {
+        assert!(*v == v_final || intermediates.contains(v), "{v}");
+    }
+}
+
+#[tokio::test]
+async fn text_channel_bytes_guard_is_missing_arg() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    for verb in ["write", "patch", "append"] {
+        let r = call(&k, &ed, json!({"type": verb, "path": "x"})).await;
+        assert_eq!(r["reason"], "missing_arg", "{verb}: {r}");
+        assert!(r["arg"].as_str().unwrap().starts_with("bytes"), "{r}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_type_carries_verb() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    let r = call(&k, &ed, json!({"type": "frobnicate"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "frobnicate", "{r}");
+}
+
+#[tokio::test]
+async fn read_with_max_limit_does_not_trap() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "r.txt", "l1\nl2\n").await;
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "read", "path": "r.txt", "offset": 1, "limit": i64::MAX}),
+    )
+    .await;
+    assert_eq!(r["eof"], true, "{r}");
+    assert_eq!(r["lines"][0]["text"], "l2", "{r}");
+    assert_eq!(r["lines"].as_array().unwrap().len(), 1, "{r}");
+}
+
+#[tokio::test]
+async fn non_int_args_are_bad_arg_refusals() {
+    // #136 — a present-but-wrong number is a TYPO, not a new default.
+    // `as_u64().unwrap_or(0)` used to swallow `offset: "12"` and silently page
+    // from the top.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, ed) = mk(&tmp).await;
+    let body: String = (0..10).map(|i| format!("L{i}\n")).collect();
+    seed(&kernel, &ed, "n.txt", &body).await;
+    for bad_value in [
+        json!("ten"),
+        json!(1.5),
+        json!(true),
+        json!(null),
+        json!(-1),
+        json!([0]),
+    ] {
+        let r = call(
+            &kernel,
+            &ed,
+            json!({"type": "read", "path": "n.txt", "offset": bad_value.clone()}),
+        )
+        .await;
+        assert_eq!(r["reason"], json!("bad_arg"), "{bad_value}: {r}");
+        assert_eq!(r["arg"], json!("offset"), "{bad_value}: {r}");
+    }
+    for bad_value in [
+        json!("200"),
+        json!(2.5),
+        json!(true),
+        json!(null),
+        json!(0),
+        json!(-1),
+    ] {
+        let r = call(
+            &kernel,
+            &ed,
+            json!({"type": "read", "path": "n.txt", "limit": bad_value.clone()}),
+        )
+        .await;
+        assert_eq!(r["reason"], json!("bad_arg"), "{bad_value}: {r}");
+        assert_eq!(r["arg"], json!("limit"), "{bad_value}: {r}");
+    }
+    // ABSENT still takes the documented defaults (offset 0, limit 200).
+    let r = call(&kernel, &ed, json!({"type": "read", "path": "n.txt"})).await;
+    assert_eq!(r["total"], json!(10), "{r}");
+    assert_eq!(r["lines"][0]["n"], json!(1), "{r}");
+    assert_eq!(r["lines"][9]["text"], json!("L9"), "{r}");
+    assert_eq!(r["eof"], json!(true), "{r}");
+}
+
+#[tokio::test]
+async fn patch_hunk_count_must_be_an_int() {
+    // #136 — the per-edit `hunks` count is typed too: a string count would slice
+    // the shared blob by nothing at all.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, ed) = mk(&tmp).await;
+    seed(&kernel, &ed, "m.py", "a = 1\n").await;
+    let blob = block("a = 1", "a = 2");
+    for bad_value in [
+        json!("1"),
+        json!(1.5),
+        json!(true),
+        json!(null),
+        json!(0),
+        json!(-1),
+    ] {
+        let r = call_bin(
+            &kernel,
+            &ed,
+            json!({"type": "patch", "edits": [{"path": "m.py", "hunks": bad_value.clone()}]}),
+            blob.as_bytes(),
+        )
+        .await;
+        assert_eq!(r["reason"], json!("bad_arg"), "{bad_value}: {r}");
+        assert_eq!(r["arg"], json!("edits"), "{bad_value}: {r}");
+    }
+    // …and the file was not touched by any of them.
+    assert_eq!(on_disk(&tmp, "m.py"), "a = 1\n");
 }

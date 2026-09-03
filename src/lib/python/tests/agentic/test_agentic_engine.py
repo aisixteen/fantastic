@@ -226,7 +226,7 @@ async def test_hydrate_builds_the_declared_kernel_and_hands_back_its_receipts(
     assert h.creates["static_loader"]["id"] == "static_loader"
     boot = h.loader_boot("static_loader")
     assert boot["booted"] is True, boot
-    assert set(boot["skipped"]) == {"store", "memory", "worker", "quiet", "island"}, (
+    assert set(boot["reapplied"]) == {"store", "memory", "worker", "quiet", "island"}, (
         boot
     )
     assert boot["created"] == [], boot

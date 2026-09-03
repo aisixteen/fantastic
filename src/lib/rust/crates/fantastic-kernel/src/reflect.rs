@@ -202,6 +202,12 @@ pub fn apply_reflect_flags(
     let Some(obj) = reply.as_object_mut() else {
         return;
     };
+    // A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+    // produced a reply that reads like a healthy reflect with a stray error
+    // field, and a caller could not tell the two apart (2026-09-02).
+    if obj.contains_key("error") {
+        return;
+    }
     // `description` is a substrate meta field — surface it on every
     // reflect (bundle handlers don't know about it) unless already set.
     if !obj.contains_key("description") {

@@ -335,12 +335,17 @@ struct TaskTableCancelTests {
         let again = await cancel(kernel, taskId)
         #expect(again == .object(["cancelled": .bool(false), "killed": .array([])]))
 
-        // A malformed call fails LOUD; it does not report a phantom success.
+        // A malformed call fails LOUD, and CODED — python's `missing_arg` with
+        // the arg it wanted, not a prose-only `{error}` a caller had to
+        // string-match to branch on.
         let bad = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel")]))])[0].result
-        #expect(bad["error"].asString == "cancel: task_id (str) required")
+        #expect(bad["error"].asString == "cancel: task_id required")
+        #expect(bad["reason"].asString == "missing_arg")
+        #expect(bad["arg"].asString == "task_id")
         #expect(bad["cancelled"] == .null)
         let empty = await kernel.send([Item(AgentId("kernel"), .object(["type": .string("cancel"), "task_id": .string("")]))])[0].result
-        #expect(empty["error"].asString == "cancel: task_id (str) required")
+        #expect(empty["error"].asString == "cancel: task_id required")
+        #expect(empty["reason"].asString == "missing_arg")
     }
 
     // MARK: - the emergent one: an AGENT cancels another agent's work

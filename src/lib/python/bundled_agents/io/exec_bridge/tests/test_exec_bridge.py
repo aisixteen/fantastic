@@ -11,6 +11,9 @@ full-matched against the shell-joined command line).
 from __future__ import annotations
 
 import asyncio
+import json
+import socket
+import struct
 import sys
 
 
@@ -61,6 +64,64 @@ async def _wait_done(kernel, agent_id, job_id, secs=5.0):
     raise AssertionError(f"job {job_id} still running after {secs}s")
 
 
+async def _until(pred, secs=5.0, what="condition"):
+    """Poll the THING, never a sleep guess."""
+    for _ in range(int(secs / 0.02)):
+        if pred():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"{what} never held within {secs}s")
+
+
+# ─── speaking the control wire directly ─────────────────────────
+#
+# The relay is the unit under test in a few of these, so they drive it over a
+# socketpair the way a spawned program would — no subprocess, no timing race
+# between the child registering a callback and the frame coming back.
+
+
+async def _wire(kernel, owner="runner", job_id="j1"):
+    """Start a relay on one end of a socketpair; return the PROGRAM's end + task.
+
+    The sender contextvar is set around `create_task` because that is exactly how
+    the real relay inherits it from `_start`'s dispatch — the program's frames are
+    gated as the RUNNER, not as the operator."""
+    import exec_bridge.tools as ebt
+    from kernel._agent import _current_sender
+
+    parent, child = socket.socketpair()
+    child.setblocking(False)
+    tok = _current_sender.set(owner)
+    try:
+        task = asyncio.create_task(ebt._serve_ctrl(parent, owner, job_id, kernel))
+    finally:
+        _current_sender.reset(tok)
+    return child, task
+
+
+async def _wire_write(child, obj):
+    body = b"T" + json.dumps(obj).encode()
+    loop = asyncio.get_running_loop()
+    await loop.sock_sendall(child, struct.pack(">I", len(body)) + body)
+
+
+async def _wire_read(child, secs=5.0):
+    loop = asyncio.get_running_loop()
+
+    async def exactly(n):
+        buf = b""
+        while len(buf) < n:
+            c = await loop.sock_recv(child, n - len(buf))
+            if not c:
+                raise AssertionError("the relay closed the socket")
+            buf += c
+        return buf
+
+    hdr = await asyncio.wait_for(exactly(4), secs)
+    (n,) = struct.unpack(">I", hdr)
+    return json.loads((await asyncio.wait_for(exactly(n), secs))[1:])
+
+
 # ─── the gate ───────────────────────────────────────────────────
 
 
@@ -68,6 +129,10 @@ async def test_no_allowlist_runs_nothing(seeded_kernel):
     await _mk(seeded_kernel)
     r = await _start(seeded_kernel, "runner", "echo", ["hi"])
     assert "no commands are allowed" in r["error"]
+    # A POLICY wall, not a malformed argument — the model must be able to tell
+    # a typo from "the operator has not allowed this".
+    assert r["reason"] == "unauthorized", r
+    assert "allowed" in r["hint"], r
 
 
 async def test_unmatched_command_refused_naming_the_patterns(seeded_kernel):
@@ -83,6 +148,43 @@ async def test_match_is_anchored_not_a_prefix(seeded_kernel):
     await _mk(seeded_kernel, allowed=[r"echo [a-z ]*"])
     r = await _start(seeded_kernel, "runner", "echo", ["hi; rm -rf /"])
     assert "not allowed" in r["error"]
+
+
+async def test_every_start_refusal_carries_a_code(seeded_kernel):
+    """Sibling argument errors used to split — `args`/`env` answered `bad_arg`
+    while `command`/`code`/the policy wall answered a bare `{error}`, so nothing
+    could branch on the failure without matching prose."""
+    await _mk(seeded_kernel, agent_id="codes", allowed=[r"echo( .*)?"])
+
+    async def start(**payload):
+        return (
+            await seeded_kernel.send(
+                [{"target": "codes", "payload": {"type": "start", **payload}}]
+            )
+        )[0]["result"]
+
+    r = await start()
+    assert (r["reason"], r["arg"]) == ("missing_arg", "command"), r
+    r = await start(command="echo", code="x = 1")
+    assert (r["reason"], r["arg"]) == ("bad_arg", "code"), r
+    r = await start(command="echo", args=[{"nope": 1}])
+    assert (r["reason"], r["arg"]) == ("bad_arg", "args"), r
+    r = await start(command="echo", env={"K": ["nope"]})
+    assert (r["reason"], r["arg"]) == ("bad_arg", "env"), r
+    r = await start(command="rm", args=["-rf", "/"])
+    assert r["reason"] == "unauthorized", r
+
+
+async def test_an_unknown_job_id_is_not_found_on_every_verb(seeded_kernel):
+    await _mk(seeded_kernel, agent_id="nf", allowed=[r"echo( .*)?"])
+    for verb in ("status", "stop", "interrupt"):
+        r = (
+            await seeded_kernel.send(
+                [{"target": "nf", "payload": {"type": verb, "job_id": "deadbeef"}}]
+            )
+        )[0]["result"]
+        assert r["reason"] == "not_found", (verb, r)
+        assert r["job_id"] == "deadbeef", (verb, r)
 
 
 async def test_write_time_refusal_for_broken_regex(seeded_kernel):
@@ -351,3 +453,167 @@ def test_the_connector_raises_when_the_relay_cannot_deliver():
     out, err = proc.communicate(timeout=10)
     parent.close()
     assert b"RAISED fantastic: send('x') failed in transit: boom" in out, (out, err)
+
+
+# ─── the relay: denials, leaks, the frame bound ─────────────────
+
+
+async def test_a_denied_watch_reaches_the_program_and_registers_nothing(seeded_kernel):
+    """`kernel.watch` is gated like a send and can REFUSE. The refusal used to be
+    discarded: the sub was registered anyway and the program saw a subscription
+    that simply never fired — deaf, with nothing to diagnose."""
+    await _mk(seeded_kernel, allowed=["x"])
+    await _mk(seeded_kernel, agent_id="secret", allowed=["x"])  # no edge from runner
+    child, task = await _wire(seeded_kernel)
+
+    await _wire_write(child, {"op": "watch", "src": "secret"})
+    ev = await _wire_read(child)
+    assert ev["op"] == "event" and ev["src"] == "secret", ev
+    assert ev["payload"]["reason"] == "unauthorized", ev
+
+    assert "_xbw_j1_secret" not in seeded_kernel.ctx.inboxes
+    assert not seeded_kernel.ctx.agents["secret"]._watcher_ids
+
+    child.close()
+    await asyncio.wait_for(task, 5)
+
+
+async def test_an_oversized_frame_closes_the_control_socket(seeded_kernel):
+    """A length prefix over the bound is a WIRE VIOLATION — the framing itself is
+    unusable, so there is nothing to reply TO. Close, as every runtime does."""
+    import exec_bridge.tools as ebt
+
+    await _mk(seeded_kernel, allowed=["x"])
+    child, task = await _wire(seeded_kernel, job_id="j_big")
+    loop = asyncio.get_running_loop()
+    await loop.sock_sendall(child, struct.pack(">I", ebt.MAX_FRAME + 1))
+    assert await asyncio.wait_for(loop.sock_recv(child, 1), 5) == b""
+    await asyncio.wait_for(task, 5)
+    child.close()
+
+
+def test_the_connector_refuses_to_send_an_oversized_frame():
+    """The other end of the same bound: the reference client raises where the
+    author has a stack, instead of writing a frame the relay closes the socket
+    over — which the connector's own reader reads as `the kernel is gone`."""
+    import subprocess
+
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    code = CONNECTOR_SRC + (
+        "try:\n"
+        "    kernel.emit({'blob': 'x' * (17 * 1024 * 1024)})\n"
+        "    print('SENT')\n"
+        "except ValueError as e:\n"
+        "    print('REFUSED', e)\n"
+    )
+    parent, child_end = socket.socketpair()
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-c", code],
+        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
+        pass_fds=[child_end.fileno()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_end.close()
+    out, err = proc.communicate(timeout=30)
+    parent.close()
+    assert b"REFUSED fantastic: frame exceeds 16 MiB" in out, (out, err)
+    assert b"write_stream" in out, (out, err)
+
+
+_WATCHER_CHILD = (
+    "import threading, sys\n"
+    "kernel.watch(kernel.self_id, lambda p: None)\n"
+    "kernel.on_message(lambda p: None)\n"
+    "print('READY'); sys.stdout.flush()\n"
+    "threading.Event().wait()\n"
+)
+
+
+async def test_stopping_a_watching_program_leaves_no_proxy_or_watcher(seeded_kernel):
+    """Every proxy the relay held is given back on the way out — the watcher row,
+    the INBOX row, and the drain task. A leaked inbox row makes `emit` auto-vivify
+    into a Queue nobody drains, one per (job, watched src), forever."""
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    py = sys.executable
+    await _mk(seeded_kernel, allowed=[rf"{py} -u -c .*"])
+    r = await _start(
+        seeded_kernel, "runner", py, ["-u", "-c", CONNECTOR_SRC + _WATCHER_CHILD]
+    )
+    boxes = seeded_kernel.ctx.inboxes
+    proxies = ("_xbw_%s_runner" % r["job_id"], "_xbself_%s" % r["job_id"])
+    await _until(
+        lambda: all(p in boxes for p in proxies), what="both proxies registered"
+    )
+    assert seeded_kernel.ctx.agents["runner"]._watcher_ids >= set(proxies)
+
+    await seeded_kernel.send([{"target": "runner", "payload": {"type": "stop"}}])
+    await _wait_done(seeded_kernel, "runner", r["job_id"])
+    await _until(
+        lambda: not any(p in boxes for p in proxies), what="both proxies released"
+    )
+    assert not (seeded_kernel.ctx.agents["runner"]._watcher_ids & set(proxies))
+
+
+async def test_a_cancelled_job_finalises_to_stopped_and_clear_removes_it(seeded_kernel):
+    """A cancelled job's row must not sit at `stopping` forever: `clear` refuses
+    that label by design, so an immortal row would be unforgettable."""
+    await _mk(seeded_kernel, allowed=[r"sleep .*"])
+    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    st = (
+        await seeded_kernel.send(
+            [{"target": "runner", "payload": {"type": "status", "job_id": r["job_id"]}}]
+        )
+    )[0]["result"]
+    await seeded_kernel.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {"type": "cancel", "task_id": st["jobs"][0]["task_id"]},
+            }
+        ]
+    )
+    row = await _wait_done(seeded_kernel, "runner", r["job_id"])
+    assert row["status"] == "stopped", row
+    c = (
+        await seeded_kernel.send([{"target": "runner", "payload": {"type": "clear"}}])
+    )[0]["result"]
+    assert c["cleared"] >= 1, c
+    left = (
+        await seeded_kernel.send([{"target": "runner", "payload": {"type": "status"}}])
+    )[0]["result"]
+    assert left["jobs"] == [], left
+
+
+async def test_the_connector_has_no_args(seeded_kernel):
+    """`kernel.args` / FANTASTIC_ARGS was advertised by every runtime's howto and
+    set by no spawner — a program written from the docs read `{}` and KeyError'd.
+    A command runner takes its arguments as ARGV."""
+    import re
+
+    from exec_bridge._connector import CONNECTOR_SRC
+
+    assert "FANTASTIC_ARGS" not in CONNECTOR_SRC
+    assert not re.search(r"^\s+args\s*=", CONNECTOR_SRC, re.M), CONNECTOR_SRC
+    await _mk(seeded_kernel, agent_id="noargs", allowed=["x"])
+    r = (
+        await seeded_kernel.send(
+            [{"target": "noargs", "payload": {"type": "connector"}}]
+        )
+    )[0]["result"]
+    assert "`kernel.self_id`, `kernel.args`" not in r["howto"], r["howto"]
+    assert "ARGV" in r["howto"], r["howto"]
+
+
+async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel):
+    """The process edge has no wire envelope — nothing can present a token, so
+    `password_ingress` is refused at the write (both spellings) rather than
+    sealing a leg the operator believes is password-gated."""
+    for i, meta in enumerate(
+        ({"ingress_rule": "password_ingress"}, {"auth": "password"})
+    ):
+        r = await _mk(seeded_kernel, agent_id=f"pw{i}", **meta)
+        assert r.get("reason") == "invalid_meta", (meta, r)
+        assert "wire envelope" in r["error"], r

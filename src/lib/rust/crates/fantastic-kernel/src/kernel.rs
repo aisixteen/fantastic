@@ -372,6 +372,45 @@ impl Kernel {
                 }
             }
         }
+        // REACHABILITY. Every parent resolving is not enough: a CYCLE
+        // (a -> b -> a) resolves on both ends and is unreachable from the root,
+        // so those records were dropped mid-hydration and reported afterwards —
+        // by which point the old tree was already gone. Caught HERE, with the
+        // other pre-teardown checks, so a bad snapshot is a no-op.
+        {
+            let mut kids: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            let mut root_id: &str = "";
+            for rec in &state.agents {
+                match &rec.parent_id {
+                    Some(p) => kids.entry(p.as_str()).or_default().push(rec.id.as_str()),
+                    None => root_id = rec.id.as_str(),
+                }
+            }
+            let mut reached: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut stack = vec![root_id];
+            while let Some(node) = stack.pop() {
+                if !reached.insert(node) {
+                    continue;
+                }
+                if let Some(cs) = kids.get(node) {
+                    stack.extend(cs.iter().copied());
+                }
+            }
+            let mut orphans: Vec<&str> = ids_seen
+                .iter()
+                .copied()
+                .filter(|id| !reached.contains(id))
+                .collect();
+            if !orphans.is_empty() {
+                orphans.sort_unstable();
+                return Err(KernelError::InvalidSnapshot(format!(
+                    "snapshot has {} record(s) unreachable from the root {root_id:?} \
+                     (a cycle or an orphaned parent chain): {orphans:?}",
+                    orphans.len()
+                )));
+            }
+        }
 
         // Drop the current tree. Inboxes close as their senders are
         // dropped from the DashMap (subscribers see the channel

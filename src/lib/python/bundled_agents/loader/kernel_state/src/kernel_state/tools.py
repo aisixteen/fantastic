@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import importlib.resources
 import json
+import secrets
 import uuid
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,7 @@ from file_bridge import fs
 
 from kernel import CURRENT_VERSION, operator_context
 from kernel import current_origin
-from kernel._refusal import guard_agent_id, missing
+from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, refusal
 
 # ─── disk I/O via `fs` (the ONE disk surface) — bootstrap cold primitives ──
 # These run before any agent exists, so they call `fs`'s functions directly (not the
@@ -300,16 +301,41 @@ async def _persist_via_store(
             existing = {}
     existing.update(record)
     body = json.dumps(existing, indent=2).encode("utf-8")
-    (
+    # ATOMIC COMMIT: stream into a tmp beside the target, then RENAME. A
+    # `write_stream` that dies after truncating leaves a half-written or empty
+    # `agent.json` — the record is gone and the next boot hydrates a tree with a
+    # hole in it. `rename` is the leg's own single atomic op, and it creates
+    # parents, so the failure modes are "the old record survives" or "the new one
+    # is complete", never a torn file. Same protocol `text_file._write_atomic`
+    # uses for a document.
+    tmp = f"{af}.tmp.{secrets.token_hex(4)}"
+    w = (
         await kernel.send(
             [
                 {
                     "target": store_id,
                     "payload": {
                         "type": "write_stream",
-                        "path": af,
+                        "path": tmp,
                         "bytes": body,
                         "truncate": True,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    if isinstance(w, dict) and w.get("error"):
+        # Leave the previous record untouched; a debris tmp is visible in `list`.
+        return
+    (
+        await kernel.send(
+            [
+                {
+                    "target": store_id,
+                    "payload": {
+                        "type": "rename",
+                        "old_path": tmp,
+                        "new_path": af,
                     },
                 }
             ]
@@ -556,13 +582,10 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "(2) RUN it on the COMMAND runner: `start {command, args}`, gated by its "
             "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
             "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
-            "file — NOT a new handler_module (you can't add modules). To wire your "
-            "worker to a SIBLING (`totals`): grant it `can_call:{totals}` AND "
-            "`update_agent id='totals'` to add it to `totals.callable_by` — you may "
-            "open ANY agent's ingress if you hold `update_agent`; only editing your "
-            "OWN grants is refused. Read {type:'reflect', readme:'self-extension'} "
-            "— send it to 'kernel' (the manual lives on the ROOT, not on any other "
-            "agent) — for the fd wire + detail."
+            "file — NOT a new handler_module. Create it as YOUR child; to wire it "
+            "to a SIBLING (`totals`) grant `can_call:{totals}` AND `update_agent "
+            "id='totals'` to add it to `totals.callable_by`. Read {type:'reflect', "
+            "readme:'self-extension'} — send it to 'kernel' — for the fd wire."
         )
         return base
     return {
@@ -817,6 +840,12 @@ async def _persist_record(id, payload, agent):
     if (bad_id := guard_agent_id("persist_record", record["id"])) is not None:
         return bad_id
     if (
+        denied := _guard_record_owner(
+            "persist_record", record["id"], record.get("parent_id"), agent
+        )
+    ) is not None:
+        return denied
+    if (
         bad_pid := _guard_parent_chain("persist_record", record.get("parent_id"))
     ) is not None:
         return bad_pid
@@ -840,6 +869,12 @@ async def _forget_record(id, payload, agent):
     # directory outside the store entirely.
     if (bad_id := guard_agent_id("forget_record", target)) is not None:
         return bad_id
+    if (
+        denied := _guard_record_owner(
+            "forget_record", target, payload.get("parent_id"), agent
+        )
+    ) is not None:
+        return denied
     if (
         bad_pid := _guard_parent_chain("forget_record", payload.get("parent_id"))
     ) is not None:
@@ -889,6 +924,55 @@ def _blob_reldir(agent, agent_id: str) -> str:
             agent, {"id": agent_id, "parent_id": rec.get("parent_id")}
         )
     return _store_reldir(agent, abs_dir)
+
+
+def _decoded_blob(name: str, raw: bytes) -> dict:
+    """Decode a sidecar STRICTLY. `errors="replace"` turned a non-text file into
+    U+FFFD mojibake and handed it back as `content` — the caller could not tell a
+    corrupt read from a real one, and writing that back would destroy the file.
+    A sidecar is text by contract; anything else is a refusal naming the byte."""
+    try:
+        return {"name": name, "content": raw.decode("utf-8")}
+    except UnicodeDecodeError as e:
+        return {
+            "error": f"load_blob: {name} is not utf-8 at byte {e.start}",
+            "reason": "bad_encoding",
+            "name": name,
+            "content": None,
+        }
+
+
+def _guard_record_owner(
+    verb: str, record_id: str, parent_id: object, agent
+) -> dict | None:
+    """Refuse a RECORD verb that names an agent outside the caller's own subtree.
+
+    Same hole `_guard_blob_owner` closed for sidecars, one field over: the record
+    id arrives in the PAYLOAD, so any agent granted `persist_record` on the
+    loader could rewrite — or `forget_record` could DELETE — a sibling's record.
+    An OPERATOR (`current_origin()` is None: the loader's own flush, the CLI, a
+    bridge hydrating at boot) is the bookkeeping this verb exists for and stays
+    ungated. An AGENT may name ITSELF or something it owns.
+    """
+    caller = current_origin()
+    if caller is None or caller == record_id:
+        return None
+    # Walk up from the named record: the payload's `parent_id` first (a foreign
+    # record is not in the tree), then the live chain.
+    seen: set[str] = set()
+    node = parent_id if isinstance(parent_id, str) and parent_id else None
+    if node is None:
+        node = (agent.ctx.get(record_id) or {}).get("parent_id")
+    while node and node not in seen:
+        if node == caller:
+            return None
+        seen.add(node)
+        node = (agent.ctx.get(node) or {}).get("parent_id")
+    return refusal(
+        UNAUTHORIZED,
+        f"{caller!r} may not {verb} {record_id!r} — a record verb is scoped to "
+        "the caller's own subtree; only an operator may name one outside it",
+    )
 
 
 def _guard_blob_owner(aid: str) -> str | None:
@@ -1023,10 +1107,7 @@ async def _load_blob(id, payload, agent):
                 break
             chunks.append(bytes(reply["bytes"]))
             if reply.get("eof"):
-                return {
-                    "name": name,
-                    "content": b"".join(chunks).decode("utf-8", "replace"),
-                }
+                return _decoded_blob(name, b"".join(chunks))
             nxt = reply.get("next_offset")
             if not isinstance(nxt, int) or nxt <= offset:
                 # No forward progress: stop rather than spin. Returning what we
@@ -1040,7 +1121,7 @@ async def _load_blob(id, payload, agent):
                 }
             offset = nxt
     if chunks:
-        return {"name": name, "content": b"".join(chunks).decode("utf-8", "replace")}
+        return _decoded_blob(name, b"".join(chunks))
     if isinstance(reply, dict) and reply.get("reason") == "unauthorized":
         out = {
             "error": f"load_blob: {reply.get('error', 'unauthorized')}",
@@ -1073,5 +1154,9 @@ VERBS = {
 async def handler(id: str, payload: dict, agent) -> dict | None:
     fn = VERBS.get(payload.get("type"))
     if fn is None:
-        return {"error": f"kernel_state: unknown type {payload.get('type')!r}"}
+        # CODED. A reason-less error on the ROOT — the most-addressed agent in
+        # the kernel — was decorated by `_apply_reflect_flags` into something
+        # that reads like a healthy reflect (2026-09-02).
+        t = payload.get("type")
+        return refusal(UNHANDLED, f"kernel_state: unknown type {t!r}", verb=t)
     return await fn(id, payload, agent)

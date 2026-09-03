@@ -474,3 +474,32 @@ async def test_shutdown_kills_pty_via_delete_agent(seeded_kernel):
             break
         await asyncio.sleep(0.05)
     assert reaped[0] == pid, f"PTY pid {pid} not reaped after shutdown"
+
+
+def test_exec_failure_in_the_child_exits_127_not_a_second_kernel(monkeypatch):
+    """A missing `command` must make the pty.fork CHILD `_exit(127)`.
+    Before the guard, `os.execvpe` raised inside the child and the
+    exception unwound through `_spawn` and the kernel dispatch — the
+    forked copy kept running the parent's event loop (a duplicate
+    kernel on the same sockets / .fantastic dir). We drive `_spawn`
+    directly with a stub kernel (no event loop → reader attach is a
+    no-op) and reap the child: WEXITSTATUS == 127, like a shell."""
+    import os
+
+    from terminal_backend import tools
+
+    class _Stub:
+        def get(self, _agent_id):
+            return {"command": "/no/such/shell"}
+
+    monkeypatch.setattr(tools, "_attach_reader", lambda *_a, **_k: None)
+    aid = "t_exec_fail"
+    tools._procs.pop(aid, None)
+    tools._spawn(aid, _Stub())
+    state = tools._procs.pop(aid)
+    try:
+        _, status = os.waitpid(state["pid"], 0)
+    finally:
+        os.close(state["fd"])
+    assert os.WIFEXITED(status), f"child did not exit normally: {status!r}"
+    assert os.WEXITSTATUS(status) == 127

@@ -2,12 +2,13 @@
 // `exec_bridge/_connector.py`.
 //
 // It is pure-stdlib Python (`os, json, socket, struct, threading, queue, sys`) with
-// zero dependency on the python kernel — each runtime's exec bridge prepends this
-// identical text (`shim:'python'`) and implements only the PARENT half of the
-// control socket. The wire is then identical by construction, not by discipline:
-// `[4-byte BE length | kind | rest]` (T = JSON, B = the io_bridge binary frame), with
-// FANTASTIC_CTRL_FD / FANTASTIC_SELF_ID /
-// FANTASTIC_ARGS in the child env.
+// zero dependency on the python kernel. A program that wants a `kernel` global
+// INCLUDES this text in its own source; every runtime implements only the PARENT
+// half of the control socket. The wire is then identical by construction, not by
+// discipline: `[4-byte BE length | kind | rest]` (T = JSON, B = the io_bridge
+// binary frame), one frame capped at 16 MiB, with FANTASTIC_CTRL_FD /
+// FANTASTIC_SELF_ID in the child env (arguments arrive as ARGV — there is no
+// FANTASTIC_ARGS).
 //
 // VENDORED rather than read from the python tree: SwiftPM cannot express a resource
 // outside its target dir, and this target is linked into the Apple app. Honesty is
@@ -30,6 +31,12 @@ try:
     _watchers = {}
     _inbox_cbs = set()
     _rid = [0]
+    # ONE frame bound, both ends, every runtime. Over it the RELAY treats the
+    # length as a wire violation and closes the socket — which the reader below
+    # reads as "the kernel is gone" and reaps the process. So refuse HERE, where
+    # the caller still has a stack to see: a 20 MB payload is a stream, not a
+    # frame.
+    _MAX_FRAME = 16 * 1024 * 1024
 
     def _bytes_at(obj, prefix=""):
         # The first bytes value, depth-first: (dotted path, value) or None.
@@ -69,6 +76,10 @@ try:
             head["_binary_path"] = path
             h = _j.dumps(head).encode("utf-8")
             d = b"B" + _st.pack(">I", len(h)) + h + body
+        if len(d) > _MAX_FRAME:
+            raise ValueError(
+                "fantastic: frame exceeds 16 MiB — stream it in chunks (write_stream)"
+            )
         with _wlock:
             _ctrl.sendall(_st.pack(">I", len(d)) + d)
 
@@ -154,15 +165,11 @@ try:
     _th.Thread(target=_reader, daemon=True).start()
 
     class _Kernel:
+        # The OWNER agent's id — the tool's public id, not the ephemeral job id.
+        # A general-purpose command runner takes its arguments as ARGV, like any
+        # other command: there is no per-call args object here, and no spawner in
+        # any runtime ever set the env var one would have ridden in.
         self_id = _o.environ.get("FANTASTIC_SELF_ID")
-        # THIS CALL'S arguments — whatever the caller put in `start`'s `args` field.
-        # Every other agent takes its arguments in the payload; without this the
-        # script executor is the one place the payload is discarded, so an authored
-        # tool can only know things that were baked into its `code` or stored on its
-        # record. With it the tool is a pure function: the caller passes the inputs
-        # AND names where the result goes, so one tool serves many callers and fans
-        # out for free. `{}` when the caller passed none.
-        args = _j.loads(_o.environ.get("FANTASTIC_ARGS") or "{}")
 
         def send(self, target, payload=None):
             with _wlock:
@@ -170,7 +177,13 @@ try:
                 r = str(_rid[0])
             q = _q.Queue()
             _pending[r] = q
-            _frame({"op": "send", "rid": r, "target": target, "payload": payload or {}})
+            try:
+                _frame(
+                    {"op": "send", "rid": r, "target": target, "payload": payload or {}}
+                )
+            except Exception:
+                _pending.pop(r, None)
+                raise
             m = q.get()
             if "error" in m:
                 # The RELAY could not deliver the reply (as opposed to the target

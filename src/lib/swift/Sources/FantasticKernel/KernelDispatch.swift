@@ -22,7 +22,11 @@ extension Kernel {
     ) async -> (JSON, Data) {
         let target: Agent? = targetId.value == "kernel" ? root : agent(targetId)
         guard let target = target else {
-            return (.object(["error": .string("no agent \(targetId)")]), Data())
+            // The SAME refusal the text channel gives — coded, and carrying the
+            // live id index so the caller can see what it could have meant.
+            return (
+                Refusal.unknown(targetId.value, live: allAgents().map { $0.id.value }), Data()
+            )
         }
         let verb = header["type"].asString ?? ""
         // Call gate (see `send`) — the binary path carries the same agent-originated
@@ -106,6 +110,10 @@ extension Kernel {
     /// Non-object replies pass through.
     func applyReflectFlags(_ target: Agent, _ payload: JSON, _ reply: inout JSON) {
         guard case .object(var obj) = reply else { return }
+        // A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+        // produced a reply that reads like a healthy reflect with a stray error
+        // field, and a caller could not tell the two apart (2026-09-02).
+        if obj["error"] != nil { return }
         // `description` is a substrate meta field — surface it on every
         // reflect (bundle handlers don't know about it) unless already set.
         if obj["description"] == nil, let d = target.descriptionMeta {
@@ -359,11 +367,12 @@ extension Kernel {
     /// window COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Double?, taskId: TaskId
+        timeout: Double?, taskId: TaskId, binary: Data? = nil
     ) async -> (JSON, Status) {
         guard let secs = timeout else {
             let r = await runDispatch(
-                target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId)
+                target: target, payload: payload, verb: verb, taskOut: taskOut,
+                taskId: taskId, binary: binary)
             return classify(r)
         }
         // Race the dispatch against the deadline. The loser is cancelled by the
@@ -404,7 +413,7 @@ extension Kernel {
 
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox? = nil,
-        taskId: TaskId? = nil
+        taskId: TaskId? = nil, binary: Data? = nil
     ) async -> JSON {
         // My own task is in a subtree the kernel is killing: register no new work
         // and run no handler. The kernel is INERT to a killed task from the
@@ -445,7 +454,18 @@ extension Kernel {
                 await KernelTaskLocals.$currentSender.withValue(target.id) {
                 await KernelTaskLocals.$currentTask.withValue(taskId) {
                     await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
-                            await self.dispatch(target: target, payload: payload)
+                            // A blob rides the BINARY channel under this same
+                            // row/ledger/timeout. The reply BODY is dropped here
+                            // exactly as python does: `write_stream` answers
+                            // JSON, and the batch is not the carrier for bytes.
+                            await {
+                                if let blob = binary {
+                                    return await self.dispatchBinary(
+                                        target: target, header: payload, blob: blob
+                                    ).0 ?? .null
+                                }
+                                return await self.dispatch(target: target, payload: payload)
+                            }()
                         }
                     }
                 }
@@ -488,19 +508,28 @@ extension Kernel {
             case "reflect":
                 return reflectIdentity(target)
             default:
-                return .object([
-                    "error":
-                        .string(
-                            "agent \(target.id) has no handler_module; cannot answer verb \(verb)"
-                        )
-                ])
+                // CODED, not a bare error. A reason-less `{error}` is decorated
+                // by `applyReflectFlags` into something that reads like a
+                // healthy reflect (kernel_verbs, tree, more) with a stray error
+                // field — the caller cannot tell a refusal from an answer
+                // (measured 2026-09-02).
+                return Refusal.make(
+                    Refusal.unhandled,
+                    "agent \(target.id) has no handler_module; cannot answer verb \(verb)",
+                    extra: [("verb", .string(verb))])
             }
         }
 
         guard let bundle = bundles.get(hm) else {
-            return .object([
-                "error": .string("no bundle for handler_module \"\(hm)\"")
-            ])
+            // NOT a create-time refusal: this kernel legitimately holds records
+            // whose bundle belongs to ANOTHER runtime (the browser's `*.ts`
+            // agents persist here), or is installed later. The call simply
+            // cannot be answered HERE, and says so with a code.
+            return Refusal.make(
+                Refusal.unhandled,
+                "agent \(target.id): handler_module \"\(hm)\" is not installed in "
+                    + "this runtime",
+                extra: [("verb", .string(verb))])
         }
 
         do {
@@ -579,6 +608,57 @@ extension Kernel {
             payload: .object(["type": .string(verb)]))
     }
 
+    /// Resolve an id the way `send` does — the `kernel` alias or a literal id.
+    /// `nil` when it names no live agent.
+    func resolveAgent(_ id: JSON) -> Agent? {
+        guard let s = id.asString, !s.isEmpty else { return nil }
+        return s == "kernel" ? root : agent(AgentId(s))
+    }
+
+    /// Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
+    /// refusal, or `nil` when the sender may create under `parent`.
+    ///
+    /// Placing inside your OWN subtree is baseline (no grant). Anywhere else
+    /// needs egress on the parent (explicitly named — `create_agent` is
+    /// privileged, so a wildcard never covers it) AND the parent's own
+    /// `callable_by` accepting the sender.
+    func gatePlacement(
+        sender: AgentId, sCan: JSON, sParent: String?, sKids: Set<String>,
+        loaderId: String?, parent: Agent
+    ) -> JSON? {
+        var node: Agent? = parent
+        while let n = node {
+            if n.id == sender { return nil }  // your own subtree — baseline
+            node = n.parentId.flatMap { agent($0) }
+        }
+        let d = authorizeCall(
+            grant: sCan, verb: "create_agent", otherId: parent.id.value,
+            holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
+            enforcePrivileged: true)
+        if !d.allowed {
+            return .object([
+                "error": .string("\(sender.value) may not create under \(parent.id.value)"),
+                "reason": .string("unauthorized"), "side": .string("egress"),
+                "hint": .string(d.hint),
+            ])
+        }
+        let tCall = parent.metaValue(forKey: "callable_by") ?? .null
+        let di = authorizeCall(
+            grant: tCall, verb: "create_agent", otherId: sender.value,
+            holderId: parent.id.value, parentId: parent.parentId?.value,
+            childIds: Set(parent.childIds().map { $0.value }), loaderId: loaderId,
+            enforcePrivileged: false)
+        if !di.allowed {
+            return .object([
+                "error": .string(
+                    "\(parent.id.value) does not accept a child from \(sender.value)"),
+                "reason": .string("unauthorized"), "side": .string("ingress"),
+                "hint": .string(di.hint),
+            ])
+        }
+        return nil
+    }
+
     func gate(sender: AgentId, verb: String, target: Agent, payload: JSON) -> JSON? {
         let loaderId = root?.id.value
         let senderAgent = agent(sender)
@@ -586,27 +666,35 @@ extension Kernel {
         let sParent = senderAgent?.parentId?.value
         let sKids = Set(senderAgent?.childIds().map { $0.value } ?? [])
 
-        // FORKING YOUR OWN SUBTREE IS BASELINE — and the exemption keys on
-        // PLACEMENT, not on who answers. `create_agent` is privileged, so a
-        // wildcard never covers it; the one documented exception is that growing
-        // your OWN subtree needs no grant, which is what makes self-extension
-        // work with zero wiring.
+        // PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
+        // the agent it ACTS UPON is the parent named in `parent_id` — so that is
+        // what the gate asks about, on both sides. Gating the root instead made
+        // one grant (`<root>:[create_agent]`, the ordinary "may author tools"
+        // wiring) a key to the whole tree: the holder could plant a child under
+        // ANY agent and inherit `$parent:*` reach into it (measured 2026-09-02).
         //
-        // While the verb was answered by every agent that fell out for free
-        // (`otherId == holderId`, because you addressed yourself). Now the verb
-        // is kernel-owned and the target is always the root, so that exemption
-        // could never fire again and EVERY agent would need an explicit
-        // `create_agent` grant on the root just to author its own tool. The
-        // property being preserved was never "you addressed yourself" — it is
-        // "the new agent lands in MY subtree", which `parent_id` states outright.
-        let placementIsOwn =
-            verb == "create_agent" && payload["parent_id"].asString == sender.value
+        // FORKING YOUR OWN SUBTREE IS BASELINE — placing under yourself or a
+        // descendant needs no grant at all, which is what makes self-extension
+        // work with zero wiring at any depth.
+        if verb == "create_agent", let parent = resolveAgent(payload["parent_id"]) {
+            if let denial = gatePlacement(
+                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
+                loaderId: loaderId, parent: parent)
+            {
+                return denial
+            }
+            return checkConferral(
+                sender: sender, sCan: sCan, sParent: sParent, sKids: sKids,
+                loaderId: loaderId, payload: payload)
+        }
+        // An unknown parent falls through to the ordinary path; the verb itself
+        // answers `unknown_agent`.
 
         // Egress — may the SENDER call the target?
         let d = authorizeCall(
             grant: sCan, verb: verb, otherId: target.id.value,
             holderId: sender.value, parentId: sParent, childIds: sKids, loaderId: loaderId,
-            enforcePrivileged: !placementIsOwn)
+            enforcePrivileged: true)
         if !d.allowed {
             return .object([
                 "error": .string("\(sender.value) may not call '\(verb)' on \(target.id.value)"),
@@ -690,7 +778,33 @@ extension Kernel {
         // granter itself holds (structural tokens free; `callable_by` is unbounded).
         if case .object(let conferred) = payload["can_call"] {
             for (key, verbs) in conferred {
-                if key.hasPrefix("$") { continue }
+                let probeKey: String
+                switch key {
+                // Relative to the HOLDER — no lateral reach.
+                case "$self", "$parent", "$children":
+                    continue
+                // NOT relative: `$loader` resolves to the ROOT for whoever holds
+                // it, so conferring it hands over real reach on the kernel's
+                // control surface (ps, cancel, ledger, shutdown_kernel).
+                // Subset-probe it like any lateral edge — skipping it let a
+                // grandchild grant its own child root reach it did not hold
+                // (measured 2026-09-02).
+                case "$loader":
+                    guard let r = loaderId else { continue }
+                    probeKey = r
+                default:
+                    if key.hasPrefix("$") {
+                        return .object([
+                            "error": .string(
+                                "\(sender.value) cannot confer '\(key)': not a structural "
+                                    + "token — $self, $parent, $children and $loader are "
+                                    + "the only ones"),
+                            "reason": .string("bad_arg"), "arg": .string("can_call"),
+                            "side": .string("delegation"), "hint": .string(fromAbove),
+                        ])
+                    }
+                    probeKey = key
+                }
                 // Conferring "*" (or a list with it) requires the granter to hold
                 // "*" on that target; a concrete list requires each verb.
                 var probe: [String] = ["*"]
@@ -699,10 +813,21 @@ extension Kernel {
                 }
                 for v in probe {
                     let ok = authorizeCall(
-                        grant: sCan, verb: v, otherId: key, holderId: sender.value,
+                        grant: sCan, verb: v, otherId: probeKey, holderId: sender.value,
                         parentId: sParent, childIds: sKids, loaderId: loaderId
                     ).allowed
                     if !ok {
+                        if key == "$loader" {
+                            return .object([
+                                "error": .string(
+                                    "\(sender.value) cannot delegate '\(v)' on $loader: it "
+                                        + "resolves to \(probeKey), which you do not hold — "
+                                        + "$loader is real reach on the kernel's control "
+                                        + "surface, not a structural token"),
+                                "reason": .string("unauthorized"),
+                                "side": .string("delegation"), "hint": .string(fromAbove),
+                            ])
+                        }
                         // Name the TRUE reason. A target that is not an agent at all
                         // is almost always one created in the SAME batch — items
                         // launch concurrently, so it is not there yet when this gate

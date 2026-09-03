@@ -7,10 +7,26 @@ import Testing
 
 @testable import FantasticKernel
 
+/// The roster here names `noop.tools`; it must be REGISTERED, or a `reflect`
+/// is a refusal ("handler_module is not installed in this runtime") rather than
+/// a reflect. It used to be unregistered and the assertions still passed, because
+/// a reason-less error was decorated with `can_call`/`callable_by` and read like
+/// a reflect — the exact confusion fixed 2026-09-02.
+private struct Noop: AgentBundle {
+    let name = "noop"
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        payload["type"].asString == "reflect"
+            ? .object(["id": .string(agentId.value), "sentence": .string("Noop.")])
+            : .object(["ok": .bool(true)])
+    }
+}
+
 @Suite("Substrate contract: paging, readable authority, root-owned verbs")
 struct ContractU1Tests {
     private func makeKernel() -> Kernel {
-        let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
+        let registry = BundleRegistry()
+        registry.register("noop.tools", Noop())
+        let kernel = Kernel(storage: .inMemory, bundles: registry)
         let root = Agent(id: "core", handlerModule: nil, parentId: nil)
         kernel.register(root)
         kernel.setRoot(root)
@@ -40,7 +56,9 @@ struct ContractU1Tests {
         #expect(r["reason"].asString == "not_here")
         let hint = r["hint"].asString ?? ""
         #expect(hint.contains("kernel"))
-        #expect(hint.contains("OPERAND"))
+        // Python's prose + the machine field naming the misaddressed verb.
+        #expect(hint.contains("`parent_id` / `id`"))
+        #expect(r["verb"].asString == "list_agents")
     }
 
     @Test func createAgentDemandsAParentAndResolvesItLikeATarget() async {

@@ -136,9 +136,14 @@ struct Dispatch {
     timeout: Option<f64>,
     /// The ledger key: the caller's id, or the minted pid for an unnamed item.
     exec_id: String,
-    /// Minted in the launch phase. A retry re-dispatches under a FRESH pid but
-    /// the SAME exec_id, so the execution keeps one handle across attempts.
+    /// The task-table handle. For a NAMED execution this IS `exec_id`, so `ps`
+    /// and `cancel` speak the caller's own id; an unnamed one carries its minted
+    /// pid. A retry re-registers under the same handle either way.
     task_id: TaskId,
+    /// Whether the caller named this execution (its id is the handle).
+    named: bool,
+    /// A RAW request body: present ⇒ dispatch through the BINARY channel.
+    binary: Option<Vec<u8>>,
 }
 
 /// An item that is JOINING an execution someone else is running, or that is
@@ -207,6 +212,55 @@ impl Kernel {
             }
         }
 
+        // The item's OWN fields are validated before anything is resolved, gated
+        // or minted (python order). `type` is the verb; there is no send without
+        // one — a typeless payload is a coded refusal for EVERY sender, never an
+        // `unhandled` from the target (measured 2026-09-02).
+        if !item.payload.is_object() {
+            return Launched::Settled(Outcome::refused(crate::refusal::missing("send", "payload")));
+        }
+        let Some(type_v) = item.payload.get("type") else {
+            return Launched::Settled(Outcome::refused(crate::refusal::missing(
+                "send",
+                "payload.type",
+            )));
+        };
+        let verb = match type_v.as_str() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return Launched::Settled(Outcome::refused(crate::refusal::bad(
+                    "send",
+                    "payload.type",
+                    "a non-empty string",
+                )))
+            }
+        };
+        if let Some(id) = &item.id {
+            // ONE ID SPACE: a caller id may not be empty and may not sit in the
+            // kernel-minted `<agent>:<hex>` namespace unless it NAMES an existing
+            // execution (re-fetch / join by pid) — minted ids are referenced,
+            // never created.
+            if id.is_empty() {
+                return Launched::Settled(Outcome::refused(crate::refusal::bad(
+                    "send",
+                    "id",
+                    "a non-empty string",
+                )));
+            }
+            if id.contains(':') && !self.ledger.has(id) {
+                let mut r = crate::refusal::refusal(
+                    crate::refusal::BAD_ARG,
+                    format!(
+                        "send: id {id:?} is in the kernel-minted pid namespace (':') and \
+                         names no known execution — minted ids can be referenced, never \
+                         created"
+                    ),
+                );
+                crate::refusal::with(&mut r, "arg", json!("id"));
+                return Launched::Settled(Outcome::refused(r));
+            }
+        }
+
         // Resolve target. Special id `"kernel"` aliases to the root.
         let resolved: Option<Arc<Agent>> = if item.target.as_str() == "kernel" {
             self.root()
@@ -219,8 +273,6 @@ impl Kernel {
                 self.agents.iter().map(|e| e.key().0.clone()).collect(),
             )));
         };
-
-        let verb = verb_of(&item.payload).to_string();
 
         // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // Trust boundary = who ORIGINATED the send. An operator send
@@ -238,22 +290,22 @@ impl Kernel {
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let origin = current_sender();
 
-        // MINT SYNCHRONOUSLY. The pid must exist before the first await — it is
-        // the ledger key for an unnamed item, and it is what makes the WHOLE
-        // batch visible in `ps` at once rather than appearing row by row.
-        let task_id = self.tasks.mint(&target.id);
-        // ONE ID SPACE: a caller's id names the execution; without one, the
-        // minted pid does. Either way there is exactly one handle.
+        // ONE ID SPACE, ONE HANDLE. A NAMED execution registers in the task
+        // table under the caller's own id, so `ps` shows that id and `cancel
+        // task_id=<id>` kills it — the id the caller already holds IS the
+        // handle. Minting a second, private pid for a named item meant the
+        // caller could not cancel or find its own execution (measured
+        // 2026-09-02). An UNNAMED item still mints, and the mint stays
+        // SYNCHRONOUS: the pid exists before the first await, which is what
+        // makes a whole batch visible in `ps` at once.
         let named = item.id.is_some();
+        let task_id = match &item.id {
+            Some(id) => TaskId(id.clone()),
+            None => self.tasks.mint(&target.id),
+        };
         let exec_id = item.id.unwrap_or_else(|| task_id.0.clone());
         let retries = item.retries.unwrap_or(0);
 
-        let verb = item
-            .payload
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
         match self
             .ledger
             .open(&exec_id, &target.id, &verb, retries, named, origin.clone())
@@ -301,6 +353,8 @@ impl Kernel {
             timeout: item.timeout,
             exec_id,
             task_id,
+            named,
+            binary: item.binary,
         }))
     }
 
@@ -325,6 +379,8 @@ impl Kernel {
             timeout,
             exec_id,
             task_id,
+            named,
+            binary,
         } = d;
 
         let mut next_pid = task_id;
@@ -341,6 +397,7 @@ impl Kernel {
                     Some(&mut this_pid),
                     timeout,
                     next_pid.clone(),
+                    binary.clone(),
                 )
                 .await;
             if !self.ledger.should_retry(&exec_id, status) {
@@ -349,7 +406,13 @@ impl Kernel {
             // Same exec id across attempts; a fresh task row per attempt, because
             // the previous one is already forgotten. Cancelling the execution
             // kills the current attempt AND this loop — a cancel is absorbing.
-            next_pid = self.tasks.mint(&target.id);
+            // A retry is the SAME execution, so it re-registers under the SAME
+            // id: cancelling that id kills the current attempt AND the loop.
+            next_pid = if named {
+                TaskId(exec_id.clone())
+            } else {
+                self.tasks.mint(&target.id)
+            };
         };
 
         let mut reply = reply;
@@ -450,6 +513,10 @@ impl Kernel {
     ///     child's death can be polled on another worker before its own stop
     ///     lands — the flag (set for the WHOLE subtree before anything is
     ///     stopped) closes that window.
+    // One attempt needs the target, the payload, the verb, the pid-out slot, the
+    // deadline, the task id and (since the binary channel joined the batch) the
+    // blob. Bundling them into a struct would only move the same seven fields.
+    #[allow(clippy::too_many_arguments)]
     async fn run_dispatch(
         self: &Arc<Self>,
         target: &Arc<Agent>,
@@ -458,6 +525,7 @@ impl Kernel {
         task_out: Option<&mut Option<TaskId>>,
         timeout: Option<f64>,
         task_id: TaskId,
+        binary: Option<Vec<u8>>,
     ) -> (Value, Status) {
         // The pid was minted in the SYNCHRONOUS launch phase and is already the
         // ledger key for an unnamed execution — minting a second one here would
@@ -505,7 +573,22 @@ impl Kernel {
                                         // Stopped: DROP the dispatch future — the
                                         // abort half of `cancel`.
                                         _ = cancel.notified() => None,
-                                        v = dispatch(kernel, tgt, payload) => Some(v),
+                                        // A blob rides the BINARY channel under
+                                        // this same row/ledger/timeout. The
+                                        // reply body is dropped here exactly as
+                                        // python does: `write_stream` answers
+                                        // JSON, and a `read_stream` through the
+                                        // batch is not the carrier for bytes.
+                                        v = async {
+                                            match binary {
+                                                Some(b) => {
+                                                    dispatch_binary(&kernel, tgt, payload, b)
+                                                        .await
+                                                        .0
+                                                }
+                                                None => dispatch(kernel, tgt, payload).await,
+                                            }
+                                        } => Some(v),
                                     }
                                 }),
                             ),
@@ -612,8 +695,13 @@ impl Kernel {
             self.agents.get(target_id).map(|e| Arc::clone(&e))
         };
         let Some(target) = resolved else {
+            // The SAME refusal the text channel gives — coded, and carrying the
+            // live id index so the caller can see what it could have meant.
             return (
-                json!({ "error": format!("no agent {target_id}") }),
+                crate::refusal::unknown_agent(
+                    target_id.as_str(),
+                    self.agents.iter().map(|e| e.key().0.clone()).collect(),
+                ),
                 Vec::new(),
             );
         };
@@ -840,18 +928,38 @@ fn dispatch(
             return match verb {
                 "boot" | "shutdown" => Value::Null,
                 "reflect" => crate::reflect::reflect_identity(&target),
-                _ => json!({
-                    "error": format!(
-                        "agent {:?} has no handler_module; cannot answer verb {:?}",
-                        target.id.0, verb
-                    ),
-                }),
+                // CODED, not a bare error. A reason-less `{error}` is decorated
+                // by `apply_reflect_flags` into something that reads like a
+                // healthy reflect (kernel_verbs, tree, more) with a stray error
+                // field — the caller cannot tell a refusal from an answer
+                // (measured 2026-09-02).
+                _ => {
+                    let mut r = crate::refusal::refusal(
+                        crate::refusal::UNHANDLED,
+                        format!(
+                            "agent {:?} has no handler_module; cannot answer verb {:?}",
+                            target.id.0, verb
+                        ),
+                    );
+                    crate::refusal::with(&mut r, "verb", json!(verb));
+                    r
+                }
             };
         };
         let Some(bundle) = kernel.bundles.get(hm) else {
-            return json!({
-                "error": format!("no bundle for handler_module {hm:?}"),
-            });
+            // NOT a create-time refusal: this kernel legitimately holds records
+            // whose bundle belongs to ANOTHER runtime (the browser's `*.ts`
+            // agents persist here), or is installed later. The call simply
+            // cannot be answered HERE, and says so with a code.
+            let mut r = crate::refusal::refusal(
+                crate::refusal::UNHANDLED,
+                format!(
+                    "agent {:?}: handler_module {hm:?} is not installed in this runtime",
+                    target.id.0
+                ),
+            );
+            crate::refusal::with(&mut r, "verb", json!(verb));
+            return r;
         };
         match bundle.handle(&target.id, &payload, &kernel).await {
             Ok(Some(v)) => v,

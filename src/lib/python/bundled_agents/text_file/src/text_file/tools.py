@@ -29,7 +29,9 @@ POSIX-legal verbatim as a filename (this project does not target Windows).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from contextlib import asynccontextmanager
 
 from kernel import current_task
 from kernel._refusal import (
@@ -44,6 +46,26 @@ from kernel._refusal import (
 CKPT_DIR = ".ckpt"
 #: read/write chunk size on the stream verbs.
 CHUNK = 65536
+
+
+# ─── argument typing ────────────────────────────────────────────
+
+
+def _int_arg(payload: dict, key: str, default: int, verb: str, minimum: int):
+    """ABSENT ⇒ `default`. Present, a plain int, ≥ `minimum` ⇒ that value.
+    ANYTHING ELSE ⇒ a `bad_arg` refusal.
+
+    A present-but-wrong number is a TYPO, and coercing it hides the typo: `read
+    {offset: "ten"}` raised `ValueError` out of the handler, and `{offset: null}`
+    silently paged from the top. `True` is an int in python and is rejected
+    explicitly — `limit: true` would otherwise return exactly one line."""
+    if key not in payload:
+        return default
+    v = payload[key]
+    if isinstance(v, bool) or not isinstance(v, int) or v < minimum:
+        want = "a non-negative int" if minimum == 0 else f"an int >= {minimum}"
+        return bad(verb, key, want)
+    return v
 
 
 # ─── the target surface ─────────────────────────────────────────
@@ -78,6 +100,44 @@ def _version(data: bytes) -> str:
 def _pid() -> str:
     """This dispatch's kernel task pid — the checkpoint id space."""
     return current_task() or "op:00000000"
+
+
+# ─── per-document serialization ─────────────────────────────────
+# A mutate is read → verify → commit with awaits between; two concurrent
+# mutates on ONE document interleaved there would both derive from the same
+# pre-image and the second commit would silently discard the first (measured:
+# two patches, distinct hunks, both `patched:true`, one hunk gone). One lock
+# per (target surface, path), held from the first read through the rename;
+# `if_match` is checked UNDER it. Multi-edit patches take theirs in sorted
+# key order so two transactions over overlapping sets cannot deadlock.
+# Entries are ref-counted and dropped at zero so the map never grows.
+
+_LOCKS: dict[tuple[str, str], list] = {}
+
+
+@asynccontextmanager
+async def _held(fb: str, *paths: str):
+    keys = sorted({(fb, p) for p in paths})
+    entries: list[list] = []
+    for k in keys:
+        e = _LOCKS.get(k)
+        if e is None:
+            e = _LOCKS[k] = [asyncio.Lock(), 0]
+        e[1] += 1
+        entries.append(e)
+    acquired: list[list] = []
+    try:
+        for e in entries:
+            await e[0].acquire()
+            acquired.append(e)
+        yield
+    finally:
+        for e in reversed(acquired):
+            e[0].release()
+        for k, e in zip(keys, entries):
+            e[1] -= 1
+            if e[1] == 0:
+                _LOCKS.pop(k, None)
 
 
 # ─── stream I/O (every byte through the gated leg) ──────────────
@@ -261,6 +321,13 @@ async def _read(id, payload, kernel):
     path = payload.get("path", "")
     if not path:
         return missing("read", "path")
+    # Type the paging args BEFORE the read — a typo'd `offset` costs no IO.
+    off = _int_arg(payload, "offset", 0, "read", 0)
+    if isinstance(off, dict):
+        return off
+    limit = _int_arg(payload, "limit", 200, "read", 1)
+    if isinstance(limit, dict):
+        return limit
     data, err = await _read_all(kernel, fb, path)
     if err is not None:
         return err
@@ -275,8 +342,6 @@ async def _read(id, payload, kernel):
     # `total` counts real lines.
     if all_lines and all_lines[-1] == "":
         all_lines.pop()
-    off = max(0, int(payload.get("offset") or 0))
-    limit = max(1, int(payload.get("limit") or 200))
     page = all_lines[off : off + limit]
     return {
         "path": path,
@@ -305,15 +370,16 @@ async def _write(id, payload, kernel):
     if not isinstance(data, (bytes, bytearray)):
         return missing("write", "bytes (the document — str is utf-8-encoded)")
     data = bytes(data)
-    if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
-        return err
-    ckpt_id = None
-    if payload.get("checkpoint"):
-        ckpt_id, err = await _take_checkpoint(kernel, fb, path)
-        if err is not None:
+    async with _held(fb, path):
+        if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
             return err
-    if err := await _write_atomic(kernel, fb, path, data):
-        return err
+        ckpt_id = None
+        if payload.get("checkpoint"):
+            ckpt_id, err = await _take_checkpoint(kernel, fb, path)
+            if err is not None:
+                return err
+        if err := await _write_atomic(kernel, fb, path, data):
+            return err
     out = {"path": path, "size": len(data), "version": _version(data)}
     if ckpt_id:
         out["ckpt_id"] = ckpt_id
@@ -333,26 +399,27 @@ async def _append(id, payload, kernel):
         data = data.encode("utf-8")  # text courtesy — same as `write`
     if not isinstance(data, (bytes, bytearray)):
         return missing("append", "bytes (one chunk — str is utf-8-encoded)")
-    r = (
-        await kernel.send(
-            [
-                {
-                    "target": fb,
-                    "payload": {
-                        "type": "write_stream",
-                        "path": path,
-                        "bytes": bytes(data),
-                        # absent offset = append at end (creates the file)
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    if not isinstance(r, dict) or r.get("error"):
-        return r if isinstance(r, dict) else {"error": str(r)}
-    whole, err = await _read_all(kernel, fb, path)
-    if err is not None:
-        return err
+    async with _held(fb, path):
+        r = (
+            await kernel.send(
+                [
+                    {
+                        "target": fb,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": path,
+                            "bytes": bytes(data),
+                            # absent offset = append at end (creates the file)
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        if not isinstance(r, dict) or r.get("error"):
+            return r if isinstance(r, dict) else {"error": str(r)}
+        whole, err = await _read_all(kernel, fb, path)
+        if err is not None:
+            return err
     return {"path": path, "size": r.get("size"), "version": _version(whole)}
 
 
@@ -436,6 +503,12 @@ async def _patch(id, payload, kernel):
             return bad(
                 "patch", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)"
             )
+        if any(p["path"] == e["path"] for p in plan):
+            return bad(
+                "patch",
+                "edits",
+                "each path at most once — put all of a file's hunks in one edit",
+            )
         plan.append(
             {
                 "path": e["path"],
@@ -451,6 +524,16 @@ async def _patch(id, payload, kernel):
             f"hunk counts that sum to the blob's blocks — edits claim {cursor}, "
             f"the patch holds {len(hunks)}",
         )
+    # Every edit's document is held from the first read to the last rename —
+    # sorted key order, so overlapping transactions cannot deadlock.
+    async with _held(fb, *(e["path"] for e in plan)):
+        return await _patch_txn(kernel, fb, plan, payload)
+
+
+async def _patch_txn(kernel, fb: str, plan: list[dict], payload: dict):
+    """The locked half of `patch`: verify every hunk against the CURRENT
+    pre-image (the `if_match` check happens here, under the lock), checkpoint
+    all, apply all, self-clean or keep the pre-images."""
     # ── VERIFY ALL BEFORE ANY: compute every file's new content in memory ──
     for e in plan:
         raw, err = await _read_all(kernel, fb, e["path"])
@@ -632,43 +715,44 @@ async def _restore(id, payload, kernel):
     ckpt_id = payload.get("ckpt_id", "")
     if not ckpt_id:
         return missing("restore", "ckpt_id")
-    if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
-        return err
-    src = _ckpt_path(path, ckpt_id)
-    # An `.absent` twin means the pre-image was NO FILE — restore deletes.
-    absent = (
-        await kernel.send(
-            [
-                {
-                    "target": fb,
-                    "payload": {
-                        "type": "read_stream",
-                        "path": src + ".absent",
-                        "offset": 0,
-                        "length": 1,
-                    },
-                }
-            ]
-        )
-    )[0]["result"]
-    if isinstance(absent, dict) and not absent.get("error"):
-        r = (
+    async with _held(fb, path):
+        if err := await _if_match_guard(kernel, fb, path, payload.get("if_match")):
+            return err
+        src = _ckpt_path(path, ckpt_id)
+        # An `.absent` twin means the pre-image was NO FILE — restore deletes.
+        absent = (
             await kernel.send(
-                [{"target": fb, "payload": {"type": "delete", "path": path}}]
+                [
+                    {
+                        "target": fb,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": src + ".absent",
+                            "offset": 0,
+                            "length": 1,
+                        },
+                    }
+                ]
             )
         )[0]["result"]
-        if not isinstance(r, dict) or r.get("error"):
-            return r if isinstance(r, dict) else {"error": str(r)}
-        return {"restored": True, "path": path, "deleted": True}
-    data, err = await _read_all(kernel, fb, src)
-    if err is not None:
-        if err.get("reason") == "not_found":
-            return refusal(
-                NOT_FOUND, f"restore: no checkpoint {ckpt_id!r} for {path!r}"
-            )
-        return err
-    if err := await _write_atomic(kernel, fb, path, data):
-        return err
+        if isinstance(absent, dict) and not absent.get("error"):
+            r = (
+                await kernel.send(
+                    [{"target": fb, "payload": {"type": "delete", "path": path}}]
+                )
+            )[0]["result"]
+            if not isinstance(r, dict) or r.get("error"):
+                return r if isinstance(r, dict) else {"error": str(r)}
+            return {"restored": True, "path": path, "deleted": True}
+        data, err = await _read_all(kernel, fb, src)
+        if err is not None:
+            if err.get("reason") == "not_found":
+                return refusal(
+                    NOT_FOUND, f"restore: no checkpoint {ckpt_id!r} for {path!r}"
+                )
+            return err
+        if err := await _write_atomic(kernel, fb, path, data):
+            return err
     return {"restored": True, "path": path, "version": _version(data)}
 
 

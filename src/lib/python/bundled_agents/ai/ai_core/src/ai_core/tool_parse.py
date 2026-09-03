@@ -776,10 +776,9 @@ def malformed_calls(text: str) -> list[dict]:
                 # identical unparseable retries, run ended by the tripwire with the
                 # artifact built but never run.
                 #
-                # A real program is now shown WHOLE; only a runaway is elided, and
-                # then from the MIDDLE so the tail survives. Bounded still, because
-                # a 40k body would otherwise blow the context it is being explained
-                # in. DEFANGED so quoting it cannot arm the scanner again.
+                # NO CAP AT ALL now — the block is shown WHOLE (pinned by
+                # `test_the_broken_block_is_shown_whole`, 40k). DEFANGED so quoting
+                # it cannot arm the scanner again.
                 "your_block": _defang(block.strip()),
             }
         )

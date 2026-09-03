@@ -460,6 +460,9 @@ class Kernel:
             "verb": verb,
             "started_at": time.time(),
             "_task": task,
+            # Set by `cancel_task` BEFORE the walk, so a dying handler cannot
+            # register new work on its way out (see `_launch`).
+            "_killed": False,
         }
         self.tasks[task_id] = entry
         task.add_done_callback(lambda _t, tid=task_id: self.forget_task(tid))
@@ -540,6 +543,16 @@ class Kernel:
         if task_id not in self.tasks:
             return {"cancelled": False, "killed": []}
         ids = self.task_subtree(task_id)
+        # MARK FIRST, kill second. `on_cancel` runs real teardown and can await,
+        # so a handler in the doomed subtree gets scheduling turns between the
+        # mark and the abort. Anything it sends in that window belongs to work
+        # that is already dead: without the mark it started fresh dispatches —
+        # new `ps` rows, new OS children — that outlived the cancel (measured
+        # 2026-09-02).
+        for tid in ids:
+            entry = self.tasks.get(tid)
+            if entry is not None:
+                entry["_killed"] = True
         for tid in ids:  # ① SIGTERM
             entry = self.tasks.get(tid)
             if entry is None:

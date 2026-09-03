@@ -32,6 +32,7 @@ from io_bridge._base import Action, Decision, EgressRule, IngressRule, parse_spe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import DenyInbound, resolve_ingress
 from io_bridge.egress_rules import Silent, resolve_egress
+from kernel._refusal import NOT_CONNECTED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
 
@@ -118,10 +119,14 @@ class _BridgeState:
     transport_kind: str = ""
     read_task: asyncio.Task | None = None
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
+    # In-flight INBOUND dispatches (one task per `call` frame). Held so the read
+    # loop can keep reading while a handler runs, and so teardown can cancel them.
+    pending_calls: set[asyncio.Task] = field(default_factory=set)
     corr_counter: int = 0
     # Optional transport-specific teardown the bundle registers in build_transport
-    # (e.g. `lambda: _kill_tunnel(proc)` for ssh+ws). Engine calls it on teardown.
-    cleanup: Callable[[], None] | None = None
+    # (e.g. `lambda: asyncio.to_thread(_kill_tunnel, proc)` for ssh+ws). AWAITED by
+    # the engine on teardown — a blocking kill belongs on a thread, not on the loop.
+    cleanup: Callable[[], Awaitable[None]] | None = None
     # Bundle-specific reflect/diagnostic state (e.g. ssh `tunnel_pid`). The engine
     # only clears it on teardown; the bundle's `reflect_fields` reads it.
     extra: dict = field(default_factory=dict)
@@ -163,6 +168,56 @@ def _next_corr(id: str, st: _BridgeState) -> str:
     return f"{id}-{st.corr_counter}"
 
 
+async def _serve_inbound_call(
+    st: "_BridgeState", transport: _BaseTransport, kernel: Any, frame: dict
+) -> None:
+    """Serve ONE inbound `call` frame and ship its reply.
+
+    Run as its own task, never inline in the read loop: the local handler may
+    itself `forward` back over this same bridge and await the answer, and a loop
+    parked inside `kernel.send` cannot read the frame that would settle it — the
+    round trip deadlocks until the 30s forward timeout. One task per call keeps
+    the loop free to read; `st.pending_calls` holds them so teardown can cancel.
+
+    The task inherits the read loop's context, so `_current_sender` is still the
+    BRIDGE AGENT — an inbound frame is gated as the leg, never as the operator.
+    """
+    target = frame.get("target")
+    payload = frame.get("payload") or {}
+    # AUTH GATE — the single shared choke point (`gate_inbound`, also used by the
+    # web inbound legs). The leg's INGRESS rule decides whether the peer may run
+    # this inbound call locally; a denial still gets a `reply` (echoing the
+    # corr-id) so the caller resolves cleanly.
+    decision = gate_inbound(st.ingress, "call", frame)
+    if not decision.allowed:
+        # Teaching denial — mirror the web inbound legs so discovery-through-
+        # denial works over bridge legs too (reason + hint + see).
+        reply: Any = {"error": decision.reason, "reason": "unauthorized"}
+        if decision.hint:
+            reply["hint"] = decision.hint
+        if decision.see:
+            reply["see"] = decision.see
+    else:
+        # A handler raise settles as a failed outcome — the error rides in
+        # `result`, so the wire keeps its `data` shape.
+        #
+        # ONE ID SPACE, wire included: the frame's `id` correlates the reply AND
+        # names the execution in the ledger. Reusing an id DECLARES "same
+        # intent" — the recorded outcome returns and nothing re-fires
+        # (double-click, racing tabs, retries). Mint a fresh id per intent; ":"
+        # is refused (the minted namespace); a reused id aimed elsewhere refuses
+        # loudly naming the bound target.
+        item = {"target": target, "payload": payload}
+        fid = frame.get("id")
+        if isinstance(fid, str) and fid:
+            item["id"] = fid
+        reply = (await kernel.send([item]))[0]["result"]
+    try:
+        await transport.send({"type": "reply", "id": frame.get("id"), "data": reply})
+    except ConnectionClosed:
+        pass  # the peer went away mid-dispatch; the read loop already knows
+
+
 async def _read_loop(id: str, kernel: Any) -> None:
     """Long-lived consumer of the transport. Frame shapes:
 
@@ -189,40 +244,12 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 break
             ftype = frame.get("type")
             if ftype == "call":
-                target = frame.get("target")
-                payload = frame.get("payload") or {}
-                # AUTH GATE — the single shared choke point (`gate_inbound`, also used
-                # by the web inbound legs). The leg's INGRESS rule decides whether the
-                # peer may run this inbound call locally; a denial still gets a `reply`
-                # (echoing the corr-id) so the caller resolves cleanly.
-                decision = gate_inbound(st.ingress, "call", frame)
-                if not decision.allowed:
-                    # Teaching denial — mirror the web inbound legs so discovery-
-                    # through-denial works over bridge legs too (reason + hint + see).
-                    reply = {"error": decision.reason, "reason": "unauthorized"}
-                    if decision.hint:
-                        reply["hint"] = decision.hint
-                    if decision.see:
-                        reply["see"] = decision.see
-                else:
-                    # A handler raise settles as a failed outcome — the error
-                    # rides in `result`, so the wire keeps its `data` shape.
-                    #
-                    # ONE ID SPACE, wire included: the frame's `id` correlates
-                    # the reply AND names the execution in the ledger. Reusing
-                    # an id DECLARES "same intent" — the recorded outcome
-                    # returns and nothing re-fires (double-click, racing tabs,
-                    # retries). Mint a fresh id per intent; ":" is refused (the
-                    # minted namespace); a reused id aimed elsewhere refuses
-                    # loudly naming the bound target.
-                    item = {"target": target, "payload": payload}
-                    fid = frame.get("id")
-                    if isinstance(fid, str) and fid:
-                        item["id"] = fid
-                    reply = (await kernel.send([item]))[0]["result"]
-                await transport.send(
-                    {"type": "reply", "id": frame.get("id"), "data": reply}
+                # TRACKED TASK, not an inline await — see `_serve_inbound_call`.
+                t = asyncio.create_task(
+                    _serve_inbound_call(st, transport, kernel, frame)
                 )
+                st.pending_calls.add(t)
+                t.add_done_callback(st.pending_calls.discard)
             elif ftype == "reply":
                 fut = st.pending.pop(frame.get("id"), None)
                 if fut is not None and not fut.done():
@@ -242,6 +269,12 @@ async def _read_loop(id: str, kernel: Any) -> None:
                     pass
             # Other frame types are ignored so the loop stays robust.
     finally:
+        # The transport is gone — every in-flight inbound dispatch has nowhere to
+        # send its reply. Cancel them so their handlers unwind now instead of
+        # running to completion into a dead socket.
+        for t in list(st.pending_calls):
+            t.cancel()
+        st.pending_calls.clear()
         try:
             await kernel.emit(id, {"type": "bridge_down"})
         except Exception:
@@ -264,6 +297,9 @@ async def _teardown(id: str) -> None:
             await st.read_task
         except (asyncio.CancelledError, Exception):
             pass
+    for t in list(st.pending_calls):
+        t.cancel()
+    st.pending_calls.clear()
     if st.transport is not None:
         try:
             await st.transport.close()
@@ -271,7 +307,7 @@ async def _teardown(id: str) -> None:
             pass
     if st.cleanup is not None:
         try:
-            st.cleanup()
+            await st.cleanup()
         except Exception:
             pass
     for fut in list(st.pending.values()):
@@ -320,7 +356,7 @@ async def boot(
             # ws failed) — run it so we don't leak.
             if st.cleanup is not None:
                 try:
-                    st.cleanup()
+                    await st.cleanup()
                 except Exception:
                     pass
                 st.cleanup = None
@@ -353,7 +389,9 @@ async def _forward(id, payload, kernel):
 
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {"error": "bridge.forward: not connected (call boot first)"}
+        return refusal(
+            NOT_CONNECTED, "bridge.forward: not connected", hint="call boot first"
+        )
 
     corr = _next_corr(id, st)
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -384,7 +422,9 @@ async def _watch_remote(id, payload, kernel):
         return {"error": "bridge.watch_remote: target (str) required"}
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {"error": "bridge.watch_remote: not connected (call boot first)"}
+        return refusal(
+            NOT_CONNECTED, "bridge.watch_remote: not connected", hint="call boot first"
+        )
     try:
         await st.transport.send({"type": "watch", "src": target})
     except ConnectionClosed as e:
@@ -399,7 +439,11 @@ async def _unwatch_remote(id, payload, kernel):
         return {"error": "bridge.unwatch_remote: target (str) required"}
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {"error": "bridge.unwatch_remote: not connected (call boot first)"}
+        return refusal(
+            NOT_CONNECTED,
+            "bridge.unwatch_remote: not connected",
+            hint="call boot first",
+        )
     try:
         await st.transport.send({"type": "unwatch", "src": target})
     except ConnectionClosed as e:

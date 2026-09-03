@@ -44,12 +44,51 @@ public struct AuthAction: Sendable {
     }
 }
 
+/// Everything a refusal carries — the denial half of python's `Decision`, field
+/// for field.
+///
+/// It used to be a bare `String`, so a rule could state a fact and nothing else:
+/// every gate that received one invented its own `hint` at the call site (the fs
+/// gate said "the fs edge is sealed" for whichever leg called it, web legs said
+/// nothing at all) and the three runtimes drifted into three vocabularies for the
+/// same `unauthorized` code. The rule KNOWS why it refused and how to open the
+/// edge; that knowledge travels with the verdict instead of being guessed
+/// downstream.
+public struct Denial: Sendable {
+    /// One line a person reads — the `error` field on the wire.
+    public let reason: String
+    /// The repair: what to do instead. Empty ⇒ the field is omitted.
+    public let hint: String
+    /// A doc pointer (readme key). Empty ⇒ the field is omitted.
+    public let see: String
+
+    public init(_ reason: String, hint: String = "", see: String = "") {
+        self.reason = reason
+        self.hint = hint
+        self.see = see
+    }
+
+    /// The wire shape every inbound gate answers a denial with. Built HERE so no
+    /// call site has to remember the key order or invent the teaching half.
+    public var asRefusal: JSON {
+        var out: JSON = .object([
+            "error": .string(reason), "reason": .string("unauthorized"),
+        ])
+        // Empty ⇒ ABSENT, not `""` — the same rule `Refusal.make` follows, so a
+        // caller can test for the key instead of testing for an empty string.
+        if !hint.isEmpty { out["hint"] = .string(hint) }
+        if !see.isEmpty { out["see"] = .string(see) }
+        return out
+    }
+}
+
 /// An ingress rule's verdict on an `AuthAction`.
 public enum AuthDecision: Sendable {
     /// Permit the inbound action — dispatch `kernel.send`.
     case allow
-    /// Refuse it; the dispatcher replies `{error, reason:"unauthorized"}`.
-    case deny(String)
+    /// Refuse it; the dispatcher replies with the `Denial`'s own fields
+    /// (`{error, reason:"unauthorized", hint?, see?}`), never its own wording.
+    case deny(Denial)
 }
 
 /// The inbound FILTER — decides whether the peer may perform an inbound action.

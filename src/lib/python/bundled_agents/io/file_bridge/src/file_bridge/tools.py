@@ -27,6 +27,7 @@ from __future__ import annotations
 from file_bridge import fs
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress
+from io_bridge._base import parse_spec
 from kernel._refusal import (
     NOT_FOUND,
     TRANSPORT_ERROR,
@@ -55,6 +56,56 @@ def _hidden(rec: dict) -> list[str]:
 
 def _is_hidden(name: str, hidden: list[str]) -> bool:
     return name in hidden or any(name == p for p in hidden)
+
+
+# ─── argument validation ────────────────────────────────────────
+# Every refusal below is `bad`/`missing` — the one shape, branchable on `reason`.
+# These used to be `int(...)` coercions OUTSIDE the try (a non-numeric string raised
+# out of the handler; a negative `length` read 0 bytes and `pump` spun forever), and
+# an empty `path` on delete/rename/mkdir resolved to the ROOT itself — `delete
+# {path:"", recursive:true}` removed the whole served store.
+
+
+def _int_arg(verb: str, payload: dict, name: str, default: int, minimum: int):
+    """`(value, None)` or `(None, refusal)`. Absent/None ⇒ default. A bool is NOT
+    an int here (JSON `true` must not read as offset 1)."""
+    v = payload.get(name)
+    if v is None:
+        return default, None
+    if isinstance(v, bool) or not isinstance(v, int) or v < minimum:
+        return None, bad(verb, name, f"an integer >= {minimum}")
+    return v, None
+
+
+def _path_arg(verb: str, payload: dict, name: str = "path"):
+    """`(path, None)` or `(None, refusal)`: a string, root-relative (no leading
+    '/'). The absolute form used to be silently re-rooted (`lstrip("/")`), which
+    contradicted the clamp's own promise; the ports always refused it."""
+    p = payload.get(name, "")
+    if p is None:
+        p = ""
+    if not isinstance(p, str):
+        return None, bad(verb, name, "a string")
+    if p.startswith("/"):
+        return None, bad(verb, name, "a root-relative path (no leading '/')")
+    return p, None
+
+
+def _target_arg(verb: str, root: str, payload: dict, name: str = "path"):
+    """`_path_arg` for a MUTATING verb: the path must name something INSIDE the
+    root — empty/`.` is `missing`, anything resolving to the root itself is
+    `bad`. The root is the served boundary, not an operand."""
+    p, err = _path_arg(verb, payload, name)
+    if err:
+        return None, err
+    if not p or p == ".":
+        return None, missing(verb, name)
+    try:
+        if fs.resolve(root, p) == fs.resolve_root(root):
+            return None, bad(verb, name, "a path inside the root, not the root itself")
+    except ValueError as e:
+        return None, refusal(TRANSPORT_ERROR, str(e))
+    return p, None
 
 
 # One `read` used to return a whole file, however large. MEASURED 2026-08-07: an AI agent
@@ -125,7 +176,9 @@ async def _list(id, payload, kernel):
     """args: path:str (default ''). Returns {path, files:[{name, path, type, size?}, ...]}. Hides DEFAULT_HIDDEN entries (.git, .env, .fantastic, …)."""
     rec = kernel.get(id) or {}
     root = _root_str(rec)
-    path = payload.get("path", "")
+    path, err = _path_arg("list", payload)
+    if err:
+        return err
     try:
         if not fs.exists(root, path):
             return refusal(NOT_FOUND, f"path {path!r} does not exist", path=path)
@@ -160,9 +213,12 @@ async def _delete(id, payload, kernel):
     if err := _readonly_or_none(rec):
         return err
     root = _root_str(rec)
-    path = payload.get("path", "")
+    path, err = _target_arg("delete", root, payload)
+    if err:
+        return err
     try:
-        if not fs.exists(root, path):
+        # `exists` follows symlinks — a DANGLING link is still a deletable name.
+        if not fs.exists(root, path) and not fs.is_symlink(root, path):
             return refusal(NOT_FOUND, f"path {path!r} does not exist", path=path)
         fs.remove(root, path, recursive=bool(payload.get("recursive")))
     except (ValueError, OSError) as e:
@@ -176,8 +232,12 @@ async def _rename(id, payload, kernel):
     if err := _readonly_or_none(rec):
         return err
     root = _root_str(rec)
-    old = payload.get("old_path", "")
-    new = payload.get("new_path", "")
+    old, err = _target_arg("rename", root, payload, "old_path")
+    if err:
+        return err
+    new, err = _target_arg("rename", root, payload, "new_path")
+    if err:
+        return err
     try:
         if not fs.exists(root, old):
             return refusal(NOT_FOUND, f"path {old!r} does not exist", path=old)
@@ -192,7 +252,9 @@ async def _mkdir(id, payload, kernel):
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
-    path = payload.get("path", "")
+    path, err = _target_arg("mkdir", _root_str(rec), payload)
+    if err:
+        return err
     try:
         fs.mkdir(_root_str(rec), path)
     except (ValueError, OSError) as e:
@@ -215,9 +277,15 @@ async def _read_stream(id, payload, kernel):
     Stateless cursor — no open handle, weak-coupled by id."""
     rec = kernel.get(id) or {}
     root = _root_str(rec)
-    path = payload.get("path", "")
-    offset = int(payload.get("offset", 0) or 0)
-    length = int(payload.get("length", 65536) or 65536)
+    path, err = _path_arg("read_stream", payload)
+    if err:
+        return err
+    offset, err = _int_arg("read_stream", payload, "offset", 0, 0)
+    if err:
+        return err
+    length, err = _int_arg("read_stream", payload, "length", 65536, 1)
+    if err:
+        return err
     try:
         if not fs.is_file(root, path):
             return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
@@ -245,18 +313,22 @@ async def _write_stream(id, payload, kernel):
     if err := _readonly_or_none(rec):
         return err
     root = _root_str(rec)
-    path = payload.get("path", "")
+    path, err = _path_arg("write_stream", payload)
+    if err:
+        return err
     data = payload.get("bytes", b"")
     if not isinstance(data, (bytes, bytearray)):
         return missing("write_stream", "bytes (one raw chunk)")
     data = bytes(data)
-    off_in = payload.get("offset")
+    off_in, err = _int_arg("write_stream", payload, "offset", -1, 0)
+    if err:
+        return err
     try:
         off, size = fs.write_chunk(
             root,
             path,
             data,
-            None if off_in is None else int(off_in),
+            None if off_in < 0 else off_in,
             truncate=bool(payload.get("truncate")),
         )
     except (ValueError, OSError) as e:
@@ -279,7 +351,9 @@ async def _pump(id, payload, kernel):
     sink = payload.get("sink") or id
     spath = payload.get("source_path") or payload.get("path") or ""
     dpath = payload.get("sink_path") or spath
-    length = int(payload.get("chunk", 65536) or 65536)
+    length, err = _int_arg("pump", payload, "chunk", 65536, 1)
+    if err:
+        return err
     offset, first, chunks = 0, True, 0
     while True:
         r = (
@@ -320,9 +394,17 @@ async def _pump(id, payload, kernel):
         if not isinstance(w, dict) or w.get("error"):
             return refusal(TRANSPORT_ERROR, f"pump: write to {sink!r} failed: {w}")
         first, chunks = False, chunks + 1
-        offset = r["next_offset"]
+        next_offset = r.get("next_offset")
         if r.get("eof"):
+            offset = next_offset if isinstance(next_offset, int) else offset
             break
+        if not isinstance(next_offset, int) or next_offset <= offset:
+            # No forward progress and no eof: a SOURCE that would loop forever.
+            return refusal(
+                TRANSPORT_ERROR,
+                f"pump: source {src!r} made no progress at offset {offset}",
+            )
+        offset = next_offset
     return {"source": spath, "sink": dpath, "bytes": offset, "chunks": chunks}
 
 
@@ -364,8 +446,29 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
             return (
                 f"ingress_rule={spec!r} is not a rule this bundle implements — "
-                "legal values: allow_all_ingress, deny_ingress, password_ingress"
+                "legal values: allow_all_ingress, deny_ingress"
             )
+    return _password_refusal(meta, "fs edge")
+
+
+def _password_refusal(meta: dict, edge: str) -> str | None:
+    """`password_ingress` is meaningless on an in-process leg: the token is read
+    off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
+    presents one, so the rule could only ever refuse (python) or, worse, be
+    satisfied by a secret persisted ON THE RECORD (the ports, until 2026-09-02).
+    Refused at the write, next to the mistake. Shared with exec_bridge."""
+    for field, stems in (
+        ("ingress_rule", ("password_ingress",)),
+        ("auth", ("password",)),
+    ):
+        if field in meta:
+            name, _ = parse_spec(meta[field])
+            if name in stems:
+                return (
+                    f"{field}={meta[field]!r} is not applicable to the {edge}: a leg "
+                    "with no wire envelope can never present a token — "
+                    "legal values: allow_all_ingress, deny_ingress"
+                )
     return None
 
 

@@ -7,9 +7,11 @@ kernel-mirroring `kernel` global. Frames are `[4-byte BE length | kind | rest]`:
 kind `T` = a UTF-8 JSON envelope; kind `B` = the io_bridge binary frame
 `[4-byte BE H | H-byte JSON header | raw body]`, the header naming in
 `_binary_path` where the body belongs (a `read_stream` chunk, a `write_stream`
-payload) — raw bytes ride the fd raw, never base64. If the channel can't be set
-up, `kernel` degrades to a stub that raises a clear error, so a job that
-doesn't touch the kernel still runs.
+payload) — raw bytes ride the fd raw, never base64. One frame caps at 16 MiB,
+the bound every relay reads with; over it `kernel.send`/`emit` raises rather
+than writing a frame the relay would close the socket over. If the channel
+can't be set up, `kernel` degrades to a stub that raises a clear error, so a job
+that doesn't touch the kernel still runs.
 
 Kept as a string in its own module (imported by `tools.py`, read once at import)
 rather than inline — it is exec'd in the JOB subprocess, never imported here.
@@ -25,6 +27,12 @@ try:
     _watchers = {}
     _inbox_cbs = set()
     _rid = [0]
+    # ONE frame bound, both ends, every runtime. Over it the RELAY treats the
+    # length as a wire violation and closes the socket — which the reader below
+    # reads as "the kernel is gone" and reaps the process. So refuse HERE, where
+    # the caller still has a stack to see: a 20 MB payload is a stream, not a
+    # frame.
+    _MAX_FRAME = 16 * 1024 * 1024
 
     def _bytes_at(obj, prefix=""):
         # The first bytes value, depth-first: (dotted path, value) or None.
@@ -64,6 +72,10 @@ try:
             head["_binary_path"] = path
             h = _j.dumps(head).encode("utf-8")
             d = b"B" + _st.pack(">I", len(h)) + h + body
+        if len(d) > _MAX_FRAME:
+            raise ValueError(
+                "fantastic: frame exceeds 16 MiB — stream it in chunks (write_stream)"
+            )
         with _wlock:
             _ctrl.sendall(_st.pack(">I", len(d)) + d)
 
@@ -149,15 +161,11 @@ try:
     _th.Thread(target=_reader, daemon=True).start()
 
     class _Kernel:
+        # The OWNER agent's id — the tool's public id, not the ephemeral job id.
+        # A general-purpose command runner takes its arguments as ARGV, like any
+        # other command: there is no per-call args object here, and no spawner in
+        # any runtime ever set the env var one would have ridden in.
         self_id = _o.environ.get("FANTASTIC_SELF_ID")
-        # THIS CALL'S arguments — whatever the caller put in `start`'s `args` field.
-        # Every other agent takes its arguments in the payload; without this the
-        # script executor is the one place the payload is discarded, so an authored
-        # tool can only know things that were baked into its `code` or stored on its
-        # record. With it the tool is a pure function: the caller passes the inputs
-        # AND names where the result goes, so one tool serves many callers and fans
-        # out for free. `{}` when the caller passed none.
-        args = _j.loads(_o.environ.get("FANTASTIC_ARGS") or "{}")
 
         def send(self, target, payload=None):
             with _wlock:
@@ -165,7 +173,13 @@ try:
                 r = str(_rid[0])
             q = _q.Queue()
             _pending[r] = q
-            _frame({"op": "send", "rid": r, "target": target, "payload": payload or {}})
+            try:
+                _frame(
+                    {"op": "send", "rid": r, "target": target, "payload": payload or {}}
+                )
+            except Exception:
+                _pending.pop(r, None)
+                raise
             m = q.get()
             if "error" in m:
                 # The RELAY could not deliver the reply (as opposed to the target

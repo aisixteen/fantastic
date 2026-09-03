@@ -9,6 +9,8 @@ passes the refusal through verbatim.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from pathlib import Path
 
 
@@ -723,3 +725,129 @@ async def test_write_accepts_str_and_utf8_encodes(seeded_kernel, tmp_path, monke
     )
     assert r.get("size") == len("h\u00e9llo\n".encode()), r
     assert (tmp_path / "sd" / "t.txt").read_text() == "h\u00e9llo\n"
+
+
+# ─── per-document serialization + payload hardening (sweep I-5) ──
+
+
+async def test_patch_refuses_the_same_path_twice(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.md", "one\ntwo\n")
+    blob = _block("one", "1") + "\n" + _block("two", "2")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "patch",
+            "edits": [{"path": "a.md", "hunks": 1}, {"path": "a.md", "hunks": 1}],
+            "bytes": blob.encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "bad_arg" and r["arg"] == "edits", r
+    assert "at most once" in r["error"]
+    assert (tmp_path / "sd" / "a.md").read_text() == "one\ntwo\n"
+
+
+async def test_concurrent_patches_on_one_file_both_land(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "f.py", "a = 1\nb = 2\n")
+    r1, r2 = await asyncio.gather(
+        _patch(seeded_kernel, ed, "f.py", _block("a = 1", "a = 10")),
+        _patch(seeded_kernel, ed, "f.py", _block("b = 2", "b = 20")),
+    )
+    assert r1["patched"] is True and r2["patched"] is True, (r1, r2)
+    final = (tmp_path / "sd" / "f.py").read_bytes()
+    assert final == b"a = 10\nb = 20\n", final
+    # each reply's version is the document as it stood at THAT commit: one is
+    # the final image, the other is the intermediate with only its own hunk.
+    v_final = hashlib.sha256(final).hexdigest()[:16]
+    versions = {r1["edits"][0]["version"], r2["edits"][0]["version"]}
+    assert v_final in versions, (versions, v_final)
+    intermediates = {
+        hashlib.sha256(b"a = 10\nb = 2\n").hexdigest()[:16],
+        hashlib.sha256(b"a = 1\nb = 20\n").hexdigest()[:16],
+    }
+    assert versions - {v_final} <= intermediates, versions
+
+
+async def test_text_channel_bytes_guard_is_missing_arg(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    for verb in ("write", "append"):
+        r = await _call(seeded_kernel, ed, {"type": verb, "path": "x"})
+        assert r["reason"] == "missing_arg" and r["arg"].startswith("bytes"), r
+    r = await _call(
+        seeded_kernel, ed, {"type": "patch", "edits": [{"path": "x", "hunks": 1}]}
+    )
+    assert r["reason"] == "missing_arg" and r["arg"].startswith("bytes"), r
+
+
+async def test_unknown_type_carries_verb(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    r = await _call(seeded_kernel, ed, {"type": "frobnicate"})
+    assert r["reason"] == "unhandled" and r["verb"] == "frobnicate", r
+
+
+async def test_read_with_max_limit_does_not_trap(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "r.txt", "l1\nl2\n")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {"type": "read", "path": "r.txt", "offset": 1, "limit": 2**63 - 1},
+    )
+    assert r["eof"] is True and [x["text"] for x in r["lines"]] == ["l2"], r
+
+
+async def test_non_int_args_are_bad_arg_refusals(seeded_kernel, tmp_path, monkeypatch):
+    """#136 — `read {offset: "ten"}` used to raise ValueError out of the handler
+    and `{offset: null}` silently paged from the top. A present-but-wrong number
+    is a typo, and it is answered as one."""
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "n.txt", "".join(f"L{i}\n" for i in range(10)))
+    for bad_value in ("ten", 1.5, True, None, -1, [0]):
+        r = await _call(
+            seeded_kernel, ed, {"type": "read", "path": "n.txt", "offset": bad_value}
+        )
+        assert r.get("reason") == "bad_arg" and r.get("arg") == "offset", (bad_value, r)
+    for bad_value in ("200", 2.0, True, None, 0, -1):
+        r = await _call(
+            seeded_kernel, ed, {"type": "read", "path": "n.txt", "limit": bad_value}
+        )
+        assert r.get("reason") == "bad_arg" and r.get("arg") == "limit", (bad_value, r)
+    # ABSENT still takes the documented defaults (offset 0, limit 200).
+    r = await _call(seeded_kernel, ed, {"type": "read", "path": "n.txt"})
+    assert [ln["text"] for ln in r["lines"]] == [f"L{i}" for i in range(10)]
+    assert r["lines"][0]["n"] == 1 and r["eof"] is True, r
+
+
+async def test_patch_hunk_count_must_be_an_int(seeded_kernel, tmp_path, monkeypatch):
+    """#136 — the per-edit `hunks` count is typed too: a string count would slice
+    the shared blob by nothing at all."""
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "m.py", "a = 1\n")
+    blob = _block("a = 1", "a = 2").encode("utf-8")
+    for bad_value in ("1", 1.5, True, None, 0, -1):
+        r = await _call(
+            seeded_kernel,
+            ed,
+            {
+                "type": "patch",
+                "edits": [{"path": "m.py", "hunks": bad_value}],
+                "bytes": blob,
+            },
+        )
+        assert r.get("reason") == "bad_arg" and r.get("arg") == "edits", (bad_value, r)
+    # …and the file was not touched by any of them.
+    r = await _call(seeded_kernel, ed, {"type": "read", "path": "m.py"})
+    assert [ln["text"] for ln in r["lines"]] == ["a = 1"], r

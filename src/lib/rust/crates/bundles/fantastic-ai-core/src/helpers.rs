@@ -84,14 +84,35 @@ pub fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Opaque id for a single user submission.
-pub fn mint_send_id() -> String {
+/// The mixer both minters below share: clock nanos ^ a stack address ^ the pid ^
+/// a monotonic counter. No `rand` dependency, and the counter is what makes two
+/// mints in the SAME nanosecond differ.
+fn mix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
     let mut stack: u64 = 0;
     let stack_ptr = &mut stack as *mut u64 as u64;
-    let mix = nanos ^ stack_ptr ^ std::process::id() as u64;
-    format!("snd_{:08x}", mix as u32)
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    nanos ^ stack_ptr ^ std::process::id() as u64 ^ seq
+}
+
+/// Opaque id for a single user submission.
+pub fn mint_send_id() -> String {
+    format!("snd_{:08x}", mix() as u32)
+}
+
+/// A FRESH 4-hex token for ONE delivered turn's batch — python's
+/// `secrets.token_hex(2)`.
+///
+/// Per TURN and not derived from the batch's content: two turns that made the
+/// same calls used to collide (rust/swift hashed `(dest, count, body lengths)`),
+/// which is the exact confusion the token exists to prevent — a model that reads
+/// the same file twice in a row saw `1 of 2 in batch 7f3a` both times and could
+/// not tell the batches apart (measured 2026-08-24, the re-read loop).
+pub fn mint_batch_token() -> String {
+    format!("{:04x}", mix() as u16)
 }

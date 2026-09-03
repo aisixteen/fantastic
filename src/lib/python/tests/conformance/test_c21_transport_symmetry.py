@@ -153,6 +153,12 @@ async def wired(tmp_path, monkeypatch):
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
+                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
+                    # it — the corpus' `delete-unknown` case is a kernel verb
+                    # like any other and every attributed leg must be able to
+                    # reach it, or the legs answer `unauthorized` where the
+                    # in-proc operator answers `unknown_agent`.
+                    "delete_agent",
                     "list_agents",
                     "reflect",
                 ],
@@ -181,6 +187,12 @@ async def wired(tmp_path, monkeypatch):
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
+                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
+                    # it — the corpus' `delete-unknown` case is a kernel verb
+                    # like any other and every attributed leg must be able to
+                    # reach it, or the legs answer `unauthorized` where the
+                    # in-proc operator answers `unknown_agent`.
+                    "delete_agent",
                     "list_agents",
                     "reflect",
                 ],
@@ -204,6 +216,12 @@ async def wired(tmp_path, monkeypatch):
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
+                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
+                    # it — the corpus' `delete-unknown` case is a kernel verb
+                    # like any other and every attributed leg must be able to
+                    # reach it, or the legs answer `unauthorized` where the
+                    # in-proc operator answers `unknown_agent`.
+                    "delete_agent",
                     "list_agents",
                     "reflect",
                 ],
@@ -242,6 +260,12 @@ async def wired(tmp_path, monkeypatch):
                 "kernel_state": [
                     "create_agent",
                     "update_agent",
+                    # `delete_agent` is PRIVILEGED, so a wildcard never covers
+                    # it — the corpus' `delete-unknown` case is a kernel verb
+                    # like any other and every attributed leg must be able to
+                    # reach it, or the legs answer `unauthorized` where the
+                    # in-proc operator answers `unknown_agent`.
+                    "delete_agent",
                     "list_agents",
                     "reflect",
                 ],

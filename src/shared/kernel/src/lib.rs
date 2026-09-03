@@ -21,7 +21,13 @@ pub use gateway::{KernelHandle, Runtime, Workspace};
 pub fn register_host_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     reg.register("file_bridge.tools", fantastic_file::FileBundle);
-    reg.register("yaml_state.tools", fantastic_yaml_state::YamlStateBundle);
+    // Memory is plain FILES: `yaml_state` was deleted with `durable_memory` and
+    // `text_file` replaced it. The product host registered the dead crate until
+    // 2026-09-03, so `src/` (cli + tui + shared) did not build at all.
+    reg.register(
+        fantastic_text_file::HANDLER_MODULE,
+        fantastic_text_file::TextFileBundle,
+    );
     reg.register("web.tools", fantastic_web::WebBundle);
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);

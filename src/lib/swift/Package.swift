@@ -144,7 +144,10 @@ let package = Package(
         ),
         .target(
             name: "FantasticScheduler",
-            dependencies: ["FantasticKernel", "FantasticJSON"]
+            // OrderedCollections: `validateMeta`'s signature names
+            // `OrderedDictionary<String, JSON>` (the record shape).
+            dependencies: ["FantasticKernel", "FantasticJSON",
+                           .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         .target(
             name: "FantasticStaticLoader",

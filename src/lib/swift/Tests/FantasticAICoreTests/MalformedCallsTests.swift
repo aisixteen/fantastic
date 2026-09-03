@@ -132,10 +132,17 @@ struct MalformedCallsTests {
         #expect(malformedCalls(echoed).isEmpty, "echoing it must not produce a new report")
     }
 
-    @Test func aHugeProgramBodyCannotBlowTheContextExplainingIt() {
+    /// THE BLOCK IS SHOWN WHOLE — python's behaviour, and the reason is the fault's
+    /// LOCATION: an unterminated string breaks at the END of a long payload, so a
+    /// head-only echo shows the model text that looks perfectly fine and it re-sends
+    /// the identical broken envelope (measured live_build 2026-08-24). Rust and swift
+    /// capped at 400 chars until 2026-09-02; the cost of the cap was a stuck model,
+    /// the cost of the whole block is context the model can act on.
+    @Test func malformedYourBlockIsShownWhole() {
         let text =
             #"<tool_call>{"name":"send","arguments":{"code":""#
             + String(repeating: "x", count: 40000)
-        #expect((malformedCalls(text)[0]["your_block"].asString ?? "").count <= 400)
+        let echoed = malformedCalls(text)[0]["your_block"].asString ?? ""
+        #expect(echoed.count > 40000, "the tail must survive: \(echoed.count) chars")
     }
 }

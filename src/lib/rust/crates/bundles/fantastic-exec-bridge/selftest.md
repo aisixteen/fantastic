@@ -60,13 +60,16 @@ $FANTASTIC pr start code="print(kernel.send('kernel', {'type':'reflect'})['id'])
 Expect: the kernel's root id in a `progress` line. This proves the control socket, the
 frame codec and reply correlation in one shot.
 
-### Test 5: per-call arguments
+### Test 5: per-call arguments are ARGV
 
 ```sh
-$FANTASTIC pr start code="print(kernel.args['n'] + 1)" args='{"n":41}'
+$FANTASTIC pr start command=$PY args='["-c","import sys; print(int(sys.argv[1]) + 1)","41"]'
 ```
 
-Expect: `42`. Absent `args` must give `{}`, never `null`.
+Expect: `42`. Arguments reach a program the way they reach any command — through
+`argv`. There is no `kernel.args` and no `FANTASTIC_ARGS`: the howto advertised one
+for months and no spawner in any runtime ever set it, so a program written from the
+docs read `{}` and raised `KeyError`.
 
 ### Test 6: an unknown verb is mail, and its absence is loud
 

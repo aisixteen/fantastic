@@ -25,9 +25,10 @@ private final class EchoBundle: AgentBundle {
     }
 }
 
-private func makeKernel(withEcho: Bool) async -> Kernel {
+private func makeKernel(withEcho: Bool, leg: String? = nil) async -> Kernel {
     let registry = BundleRegistry()
     if withEcho { registry.register("echo.tools", EchoBundle()) }
+    registry.register("relay_connector.tools", KernelBridgeBundle())
     let kernel = Kernel(storage: .inMemory, bundles: registry)
     let root = Agent(id: "core", handlerModule: nil, parentId: nil)
     kernel.register(root)
@@ -35,7 +36,38 @@ private func makeKernel(withEcho: Bool) async -> Kernel {
     if withEcho {
         _ = await kernel.send([Item("core", ["type": "create_agent", "parent_id": "core", "handler_module": "echo.tools", "id": "echo"])])[0].result
     }
+    if let leg { await makeLeg(kernel, id: leg, canCall: withEcho ? ["echo"] : ["core"]) }
     return kernel
+}
+
+/// Create the relay leg's OWN agent record, with the grants for wherever its
+/// inbound frames land.
+///
+/// An inbound frame now dispatches AS THE LEG — `RelayTransport.dispatchCall`
+/// wraps `kernel.send` in the leg's `currentSender` — so the leg has to BE an
+/// agent and hold real grants, exactly as in production. Before, the frame
+/// reached the kernel with a nil sender and ran as the OPERATOR: the two-sided
+/// gate never ran and a peer with a passing ingress rule could call anything.
+private func makeLeg(_ kernel: Kernel, id: String, canCall: [String]) async {
+    var grants: JSON = .object([:])
+    for t in canCall { grants[t] = .string("*") }
+    _ = await kernel.send([Item("core", .object([
+            "type": .string("create_agent"), "parent_id": .string("core"),
+            "handler_module": .string("relay_connector.tools"), "id": .string(id),
+            "can_call": grants,
+        ]))])[0].result
+    // The INGRESS half. `core` is the leg's parent, so `$children` already
+    // covers it; a SIBLING needs the edge opened by name.
+    for t in canCall where t != "core" {
+        var accept: JSON = .object([
+            "$self": .string("*"), "$parent": .string("*"), "$children": .string("*"),
+        ])
+        accept[id] = .string("*")
+        _ = await kernel.send([Item("core", .object([
+                "type": .string("update_agent"), "id": .string(t),
+                "callable_by": accept,
+            ]))])[0].result
+    }
 }
 
 private struct TestDeadlineExceeded: Error { let seconds: UInt64 }
@@ -171,8 +203,8 @@ private func pairTransports(
 struct RelayTransportTests {
     @Test func forwardRoundTripsOverRelay() async throws {
         try await withDeadline(15) {
-            let kernelA = await makeKernel(withEcho: false)
-            let kernelB = await makeKernel(withEcho: true)
+            let kernelA = await makeKernel(withEcho: false, leg: "brA")
+            let kernelB = await makeKernel(withEcho: true, leg: "brB")
             let (transportA, transportB) = await pairTransports(kernelA: kernelA, kernelB: kernelB)
 
             // 1) forward A → B's "echo" agent → reply tunnels back.
@@ -198,7 +230,7 @@ struct RelayTransportTests {
 
     @Test func binaryForwardStreamsRawBytesOverRelay() async throws {
         try await withDeadline(20) {
-            let kernelA = await makeKernel(withEcho: false)
+            let kernelA = await makeKernel(withEcho: false, leg: "brA")
             // kernelB hosts an OPEN file_bridge in a cwd-relative dir.
             let registry = BundleRegistry()
             registry.register("file_bridge.tools", FileBundle())
@@ -215,6 +247,8 @@ struct RelayTransportTests {
                     "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools",
                     "id": "fs", "root": .string(rel), "ingress_rule": "allow_all_ingress",
                 ])])[0].result
+            registry.register("relay_connector.tools", KernelBridgeBundle())
+            await makeLeg(kernelB, id: "brB", canCall: ["fs"])
 
             let (transportA, transportB) = await pairTransports(kernelA: kernelA, kernelB: kernelB)
 
@@ -253,8 +287,8 @@ struct RelayTransportTests {
 
     @Test func denyInboundRefusesReverseCall() async throws {
         try await withDeadline(15) {
-            let kernelA = await makeKernel(withEcho: false)
-            let kernelB = await makeKernel(withEcho: true)
+            let kernelA = await makeKernel(withEcho: false, leg: "brA")
+            let kernelB = await makeKernel(withEcho: true, leg: "brB")
             // B's leg is sealed — its inbound-call gate denies.
             let (transportA, transportB) = await pairTransports(
                 kernelA: kernelA, kernelB: kernelB, ingressB: IngressRules.DenyInbound())
@@ -277,8 +311,8 @@ struct RelayPasswordTests {
         // ONE bare stem, as `auth` carries it; each manifold appends its own suffix.
         let stem: JSON = ["type": "password", "env": .string(env)]
         try await withDeadline(15) {
-            let kernelA = await makeKernel(withEcho: false)
-            let kernelB = await makeKernel(withEcho: true)
+            let kernelA = await makeKernel(withEcho: false, leg: "brA")
+            let kernelB = await makeKernel(withEcho: true, leg: "brB")
             // A presents the group token (egress); B checks it (ingress). Both pass.
             let (transportA, transportB) = await pairTransports(
                 kernelA: kernelA, kernelB: kernelB,
@@ -297,8 +331,8 @@ struct RelayPasswordTests {
         setenv(env, "s3cret", 1)
         defer { unsetenv(env) }
         try await withDeadline(15) {
-            let kernelA = await makeKernel(withEcho: false)
-            let kernelB = await makeKernel(withEcho: true)
+            let kernelA = await makeKernel(withEcho: false, leg: "brA")
+            let kernelB = await makeKernel(withEcho: true, leg: "brB")
             // A presents NOTHING (silent egress); B requires the token → deny.
             let (transportA, transportB) = await pairTransports(
                 kernelA: kernelA, kernelB: kernelB,
@@ -329,13 +363,15 @@ struct ManifoldScopedRuleNameTests {
         let sealed = try IngressRules.resolve(.string("silent_egress"))
         let d = sealed.authorize(
             AuthAction(kind: "call", target: "t", verb: "read", token: nil))
-        guard case .deny(let reason) = d else {
+        guard case .deny(let denial) = d else {
             Issue.record("an egress name in ingress_rule must deny")
             return
         }
-        #expect(reason.contains("silent_egress"))
-        #expect(reason.contains("manifold-scoped"))
-        #expect(reason.contains("allow_all_ingress"))
+        // The bad NAME is the reason; the legal names + how to open the edge are
+        // the hint the rule now carries with it.
+        #expect(denial.reason.contains("silent_egress"))
+        #expect(denial.hint.contains("manifold-scoped"))
+        #expect(denial.hint.contains("allow_all_ingress"))
     }
 
     /// The `auth` STEM is scoped per manifold, so an egress-only stem cannot silently

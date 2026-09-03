@@ -128,6 +128,37 @@ extension Kernel {
         if roots == 0 {
             throw KernelError.invalidSnapshot("no root agent (parent_id=null)")
         }
+        if roots > 1 {
+            throw KernelError.invalidSnapshot(
+                "snapshot has \(roots) roots; expected exactly one")
+        }
+        // REACHABILITY. Every parent resolving is not enough: a CYCLE
+        // (a -> b -> a) resolves on both ends and is unreachable from the root,
+        // so those records were silently dropped — a document naming five agents
+        // booted a kernel holding three, with no word about the other two.
+        // Caught HERE, with the other pre-teardown checks, so a bad snapshot is
+        // a no-op rather than a half-destroyed tree.
+        var kids: [String: [String]] = [:]
+        var rootId = ""
+        for rec in state.agents {
+            if let p = rec.parentId {
+                kids[p, default: []].append(rec.id)
+            } else {
+                rootId = rec.id
+            }
+        }
+        var reached: Set<String> = []
+        var stack = [rootId]
+        while let node = stack.popLast() {
+            if !reached.insert(node).inserted { continue }
+            stack.append(contentsOf: kids[node] ?? [])
+        }
+        let orphans = state.agents.map(\.id).filter { !reached.contains($0) }.sorted()
+        if !orphans.isEmpty {
+            throw KernelError.invalidSnapshot(
+                "snapshot has \(orphans.count) record(s) unreachable from the root "
+                    + "\"\(rootId)\" (a cycle or an orphaned parent chain): \(orphans)")
+        }
 
         // Wipe existing state.
         for a in allAgents() {

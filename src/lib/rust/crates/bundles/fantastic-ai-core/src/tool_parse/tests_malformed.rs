@@ -198,12 +198,22 @@ fn the_channel_error_does_not_lecture_about_json() {
     );
 }
 
+/// THE BLOCK IS SHOWN WHOLE — python's behaviour, and the reason is the fault's
+/// LOCATION: an unterminated string breaks at the END of a long payload, so a
+/// head-only echo shows the model text that looks perfectly fine and it re-sends
+/// the identical broken envelope (measured live_build 2026-08-24). Rust and swift
+/// capped at 400 chars until 2026-09-02; the cost of the cap was a stuck model,
+/// the cost of the whole block is context the model can act on.
 #[test]
-fn a_huge_program_body_cannot_blow_the_context_explaining_it() {
+fn malformed_your_block_is_shown_whole() {
     let text = format!(
         r#"<tool_call>{{"name":"send","arguments":{{"code":"{}"#,
         "x".repeat(40000)
     );
     let bad = malformed_calls(&text).pop().expect("a report");
-    assert!(bad.your_block.chars().count() <= 400, "{}", bad.your_block);
+    assert!(
+        bad.your_block.chars().count() > 40000,
+        "the tail must survive: {} chars",
+        bad.your_block.chars().count()
+    );
 }

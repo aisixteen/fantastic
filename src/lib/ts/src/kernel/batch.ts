@@ -20,7 +20,7 @@ import type { Kernel } from "./kernel.ts";
 import type { Item, Outcome, Status } from "./outcome.ts";
 import type { Row } from "./ledger.ts";
 import { refused } from "./outcome.ts";
-import { BAD_ARG, refusal, missing, unknown } from "./refusal.ts";
+import { BAD_ARG, bad, refusal, missing, unknown } from "./refusal.ts";
 import { authorizeCall, denial } from "./authz.ts";
 
 /** An item that reached the ledger and now needs settling. */
@@ -56,6 +56,22 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   }
   if (!isPlainObject(payload)) {
     return { index, settled: refused(missing("send", "payload")) };
+  }
+  // `type` IS the verb; there is no send without one. Validated for EVERY sender
+  // BEFORE the gate, so a typeless payload is a coded refusal rather than an
+  // `unhandled` from whatever the target happens to be (2026-09-02; the shared
+  // C21 corpus pins this on all four runtimes).
+  if (!("type" in payload)) {
+    return { index, settled: refused(missing("send", "payload.type")) };
+  }
+  const payloadVerb = payload["type"];
+  if (typeof payloadVerb !== "string" || payloadVerb === "") {
+    return {
+      index,
+      settled: refused(
+        bad("send", "payload.type", "a non-empty string"),
+      ),
+    };
   }
   const timeout = item.timeout;
   if (

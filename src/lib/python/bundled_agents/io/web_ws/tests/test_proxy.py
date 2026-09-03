@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 
 import pytest
 from fastapi.testclient import TestClient
@@ -238,3 +239,55 @@ def test_ws_call_state_event_carries_host_as_sender(client, seeded_kernel):
     # surface's id ("test_web_ws" in this fixture).
     senders = {e.get("sender") for e in sends_to_core}
     assert senders == {"test_web_ws"}, f"expected sender='test_web_ws', got {senders}"
+
+
+# ─── malformed frames (a frame is an input, not a contract) ──────────
+
+
+def _read_until_type(ws, ftype, max_frames=10):
+    """Drain frames until one of `ftype` arrives (the connect-time auto-watch
+    can put `event` frames ahead of it)."""
+    for _ in range(max_frames):
+        msg = json.loads(ws.receive_text())
+        if msg.get("type") == ftype:
+            return msg
+    raise AssertionError(f"no {ftype!r} frame within {max_frames} frames")
+
+
+@pytest.mark.parametrize(
+    "send, raw",
+    [
+        ("bytes", b"\x00\x00\x00"),  # shorter than the 4-byte length prefix
+        ("bytes", struct.pack(">I", 9999) + b"{}"),  # header length past the end
+        ("bytes", struct.pack(">I", 8) + b"not json" + b"x"),  # bad header JSON
+        ("text", "{not json"),  # unparseable text frame
+        ("text", "[1]"),  # valid JSON, not an envelope
+        ("text", "7"),  # ditto
+    ],
+)
+def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, raw):
+    """Before this, `decode_inbound`/`.get` raised out of the receive loop and the
+    `finally` tore the whole connection down — cancelling every in-flight call on
+    it (an LLM generation with them). Now the bad frame is answered and the next
+    frame is served normally."""
+    with client.websocket_connect("/kernel_state/ws") as ws:
+        if send == "bytes":
+            ws.send_bytes(raw)
+        else:
+            ws.send_text(raw)
+        err = _read_until_type(ws, "error")
+        assert err["reason"] == "bad_arg"
+        assert "well-formed call/emit/watch envelope" in err["error"]
+        # THE POINT: the socket is still usable.
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "call",
+                    "target": "kernel_state",
+                    "payload": {"type": "reflect", "tree": "none"},
+                    "id": "after-bad",
+                }
+            )
+        )
+        msg = _read_until_reply(ws, "after-bad")
+        assert msg["data"]["id"] == "kernel_state"

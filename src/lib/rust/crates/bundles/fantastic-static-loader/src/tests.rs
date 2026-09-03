@@ -170,13 +170,13 @@ async fn boot_is_idempotent_by_id() {
         .remove(0)
         .result;
     assert_eq!(r["booted"], json!(true), "{r}");
-    let skipped: Vec<String> = r["skipped"]
+    let reapplied: Vec<String> = r["reapplied"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert!(skipped.contains(&"memory".to_string()) && skipped.contains(&"worker".to_string()));
+    assert!(reapplied.contains(&"memory".to_string()) && reapplied.contains(&"worker".to_string()));
     assert_eq!(r["created"], json!([]));
     assert_eq!(kernel.agents.len(), before);
 }
@@ -265,4 +265,47 @@ async fn a_record_without_a_manifest_is_allowed_and_boot_reports_it() {
         b["error"].as_str().unwrap().contains("no `manifest` path"),
         "{b}"
     );
+}
+
+#[tokio::test]
+async fn a_roster_entry_without_an_id_is_refused_loud() {
+    // #105 — the roster is keyed by id, so an id-less entry can never match the
+    // agent the LAST boot minted: every reboot created ANOTHER one beside it and
+    // the flush persisted them all, with no word to the operator.
+    let (kernel, _fixture) = boot_with_manifest("agents:\n  - handler_module: mock.tools\n").await;
+    let before = kernel.agents.len();
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("explicit id"), "{err}");
+    assert!(err.contains("mock.tools"), "the entry is named: {err}");
+    // NOTHING was created — not on this boot, and not by the create-time boot.
+    assert_eq!(kernel.agents.len(), before);
+    assert_eq!(before, 2, "just the root + the loader itself");
+}
+
+#[tokio::test]
+async fn an_id_less_entry_is_refused_before_the_valid_ones_hydrate() {
+    // The refusal is a REFUSAL, not a skip: boot stops at the bad entry.
+    let (kernel, _fixture) = boot_with_manifest(
+        "agents:\n  - handler_module: mock.tools\n  - id: memory\n    handler_module: mock.tools\n",
+    )
+    .await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("static_loader"),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["booted"], json!(false), "{r}");
+    assert!(!kernel.agents.contains_key(&AgentId::from("memory")));
 }

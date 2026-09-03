@@ -87,3 +87,43 @@ def test_open_append_hands_back_a_sink(tmp_path):
     finally:
         h.close()
     assert fs.read_bytes(str(base), "serve.log", external=True) == b"line\n"
+
+
+# ─── symlinks are names, not their targets ──────────────────────
+
+
+def test_remove_unlinks_a_symlink_not_its_target(tmp_path, monkeypatch):
+    """`remove` used to `resolve()` first — which FOLLOWS the link — and so
+    `delete link` (link -> data/) rmtree'd the real `data/` and left the link."""
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    fs.write_text("root", "data/keep.txt", "k")
+    os.symlink(tmp_path / "root" / "data", tmp_path / "root" / "link")
+    fs.remove("root", "link", recursive=True)
+    assert not os.path.lexists(tmp_path / "root" / "link")
+    assert (tmp_path / "root" / "data" / "keep.txt").read_text() == "k"
+    # a file symlink too — the target survives
+    os.symlink(tmp_path / "root" / "data" / "keep.txt", tmp_path / "root" / "flink")
+    fs.remove("root", "flink")
+    assert not (tmp_path / "root" / "flink").is_symlink()
+    assert (tmp_path / "root" / "data" / "keep.txt").exists()
+
+
+def test_dangling_symlink_is_deletable(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "root").mkdir()
+    os.symlink(tmp_path / "root" / "gone.txt", tmp_path / "root" / "dangling")
+    assert not fs.exists("root", "dangling")  # follows ⇒ absent…
+    assert fs.is_symlink("root", "dangling")  # …but the NAME is there
+    fs.remove("root", "dangling")
+    assert not (tmp_path / "root" / "dangling").is_symlink()
+
+
+def test_absolute_path_refuses_not_re_roots(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fs.write_text("root", "x.txt", "x")
+    with pytest.raises(ValueError):
+        fs.resolve("root", "/x.txt")

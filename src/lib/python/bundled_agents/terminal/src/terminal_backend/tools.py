@@ -239,7 +239,19 @@ def _spawn(agent_id: str, kernel) -> None:
             pass
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
-        os.execvpe(cmd, [cmd, *args], env)
+        # The child must NEVER fall through into the parent's code — an
+        # exec failure (missing command) would otherwise unwind through
+        # the kernel dispatch and keep running a second copy of the
+        # kernel event loop (inherited sockets, lock file). Exit 127 like
+        # a shell does; the message goes to the PTY (fd 2 is the slave).
+        try:
+            os.execvpe(cmd, [cmd, *args], env)
+        except BaseException as exc:  # noqa: BLE001 — any exception, then _exit
+            try:
+                os.write(2, f"{cmd}: {exc}\r\n".encode())
+            except OSError:
+                pass
+        os._exit(127)
     # parent
     _set_winsize(fd, cols, rows)
     state = {

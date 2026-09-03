@@ -249,10 +249,16 @@ enum AIPassOutcome {
     // MARK: - send
 
     private func sendVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
-        guard let text = payload["text"].asString else {
-            return .object(["error": .string("send requires text")])
-        }
-        let clientId = payload["client_id"].asString ?? "cli"
+        // MISSING `text` IS THE EMPTY STRING, not a refusal: python's
+        // `payload.get("text", "")` and rust's `unwrap_or("")` both run the turn, so
+        // a caller-driven agent kicking off from its system prompt alone worked on
+        // two kernels and was refused on the third with a reason they never produce.
+        let text = payload["text"].asString ?? ""
+        // SANITISED AT ENTRY, as python's `_send` does. The queue/current entry held
+        // the RAW id while `statusVerb` compared against `safeClient(requesting)`, so
+        // a browser client `tab 1/x` asking after its OWN work was told `is_mine:false,
+        // mine_pending:[], others_pending:1`.
+        let clientId = safeClient(payload["client_id"].asString ?? "cli")
         // A caller-supplied `system_prompt` REPLACES the default system block
         // (the caller teaches its own role/context there). Mirrors py/rust.
         let systemPrompt = payload["system_prompt"].asString
@@ -291,18 +297,13 @@ enum AIPassOutcome {
             AIQueuedEntry(
                 clientId: clientId, text: text, sendId: sendId, queuedAt: nowSecs()))
 
-        // Contention probe (best-effort, like Rust's try_lock): if a
-        // generation already holds the lock, tell the caller it's queued.
+        // Contention probe (best-effort, like Rust's try_lock): if a generation
+        // already holds the lock, tell the caller it's queued. ONE event, and it is
+        // the `status` one — a bare `{type:'queued'}` rode ahead of it on rust/swift
+        // until 2026-09-02, an undocumented type python never sends, which broke any
+        // per-submission event count and every cross-runtime event-stream diff.
         if await st.fifo.busy() {
             let ahead = max(0, st.queueDepth() - 1)
-            await kernel.emit(
-                agent.id,
-                .object([
-                    "type": .string("queued"),
-                    "source": .string(agent.id.value),
-                    "send_id": .string(sendId),
-                    "client_id": .string(clientId),
-                ]))
             await emitStatus(
                 agentId: agent.id, clientId: clientId, phase: "queued", st: st,
                 extraDetail: ["send_id": .string(sendId), "ahead": .integer(Int64(ahead))],
@@ -395,11 +396,15 @@ enum AIPassOutcome {
         // the task-locals and the row would land parentless, outside `cancel`'s
         // reach.
         if case .ok(let textOut) = produced {
+            let deadline = sendTimeoutSeconds
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
                     clientId: clientId, sendTo: sendTo, systemPrompt: systemPrompt,
-                    incoming: text)
+                    incoming: text,
+                    // THE LAYER'S PER-CALL DEADLINE, threaded to every model call
+                    // the router dispatches. The kernel defaults nothing.
+                    sendTimeout: deadline)
             }
         }
         return reply
@@ -444,7 +449,12 @@ enum AIPassOutcome {
         // The user row carries `id` only for stateless backends (FM bubble
         // identity); ollama/NIM don't. Stateless keeps history UI-only.
         let prior = await loadHistory(agent: agent, client: clientId, kernel: kernel)
-        let modelHistory = config.stateless ? [] : prior
+        // A trimmed VIEW, not a rewrite of the store: stale whole-state reads
+        // deduped and answered reflects reduced to a stub — the model's own
+        // distillation carries the facts forward (see `HistoryView.swift`). The
+        // durable sidecar keeps every turn, so the trace stays complete and `recall`
+        // pages anything back.
+        let modelHistory = config.stateless ? [] : dropAnsweredReflects(dedupeStaleReads(prior))
 
         // Rebuild the system block every turn from the live substrate (a lean
         // primer + self-reflect + the envelope how-to + the context how-to), OR
@@ -468,6 +478,10 @@ enum AIPassOutcome {
         if !config.stateless {
             switch await projectContext(
                 provider: provider, agent: agent, clientId: clientId, messages: messages,
+                // THE DURABLE STORE'S LENGTH, not the view's: `messages` carries the
+                // deduped/trimmed history, so counting it puts the reaction cursor
+                // short by exactly the turns the trimmers dropped.
+                storeLen: prior.count,
                 kernel: kernel)
             {
             case .projected(let projected):
@@ -767,7 +781,9 @@ enum AIPassOutcome {
     // MARK: - history
 
     private func historyVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
-        let clientId = payload["client_id"].asString ?? "cli"
+        // Sanitised at entry, like `send` — the sidecar is keyed by the SAFE id, so
+        // reading with the raw one answered from a thread that never existed.
+        let clientId = safeClient(payload["client_id"].asString ?? "cli")
         let messages = await loadHistory(agent: agent, client: clientId, kernel: kernel)
         return .object([
             "messages": .array(messages),

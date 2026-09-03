@@ -58,10 +58,12 @@ from kernel._refusal import (
     TIMEOUT,
     UNAUTHORIZED,
     UNHANDLED,
+    bad,
     guard_agent_id,
     missing,
     refusal,
 )
+from kernel._state import RESERVED_RECORD_KEYS
 from kernel._authz import (
     DEFAULT_CALLABLE_BY,
     DEFAULT_CAN_CALL,
@@ -153,11 +155,17 @@ _SYSTEM_VERB_DOCS = {
         "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
         "verb, started_at}]}, one row per in-flight dispatch. Paged."
     ),
+    # EVERY execution, not just the named ones. This said NAMED-only while the
+    # verb iterated the whole table, so a model reading the root reflect expected
+    # its own handful of jobs and received every minted-pid row beside them — the
+    # doc contradicting the reply it had just been handed.
     "ledger": (
-        "No args. NAMED executions and what they became — {executions:[{id, "
-        "target, status, attempts, retries, outcome?}]}, paged. Failed/timed_out/"
-        "cancelled rows are the dead-letter queue: inspect, then retry with a "
-        "NEW id if you choose — nothing is retried silently."
+        "No args. EVERY execution and what it became — named under its id, "
+        "unnamed under its minted pid — {executions:[{id, target, status, "
+        "attempts, retries, named, outcome?}]}, paged, scoped to what YOU "
+        "originated. Failed/timed_out/cancelled rows are the dead-letter queue: "
+        "inspect, then retry with a NEW id if you choose — nothing is retried "
+        "silently."
     ),
     "cancel": (
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
@@ -548,31 +556,26 @@ class Agent:
                     arg="timeout",
                 ),
             )
-        if target_id == "kernel":
-            target = self._root()
-        else:
-            # Resolve a well-known alias (declared via an `alias` meta, e.g.
-            # `web_loader`) to its agent id; a literal id resolves to itself.
-            target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
-        if target is None:
-            return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
+        # `type` is the verb; there is no send without one. Validated for EVERY
+        # send (operator included) BEFORE the gate, so a typeless payload is a
+        # coded refusal, never a TypeError out of `send` (HTTP 500 on web_rest)
+        # and never an `unhandled` from the target (measured 2026-09-02).
+        if "type" not in payload:
+            return outcome(None, FAILED, missing("send", "payload.type"))
         verb = payload.get("type")
-        # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
-        # Operator sends (`_current_sender` is None: CLI / cold bootstrap /
-        # loader-at-boot / test driver, or a verb running under
-        # `operator_context`) are the ORIGIN root of trust and pass ungated. Every
-        # AGENT-originated send — ANY verb, `reflect` included, nothing exempt —
-        # needs BOTH the sender's `can_call` (egress) AND the target's
-        # `callable_by` (ingress) to grant the edge.
-        sender_id = _current_sender.get()
-        if sender_id is not None:
-            denial = self._gate(sender_id, verb, target, payload)
-            if denial is not None:
-                return outcome(None, FAILED, denial)
-        # `kernel` reflect fast-path: a pure identity read (no dispatch, no
-        # telemetry, no table row), applied AFTER the gate so it is authorized
-        # like any other reflect. Async (reflect flags nest dispatches), so it
-        # rides the settle phase as a pid-less task.
+        if not isinstance(verb, str) or not verb:
+            return outcome(
+                None,
+                FAILED,
+                refusal(
+                    BAD_ARG,
+                    f"send: payload.type must be a non-empty string, got {verb!r}",
+                    arg="payload.type",
+                ),
+            )
+        # The item's OWN fields are validated before anything is resolved, gated
+        # or spawned: a bad `id`/`retries` used to be caught only after an unnamed
+        # dispatch had already started (orphaning a running task).
         exec_id = item.get("id")
         if exec_id is not None:
             # A caller-NAMED execution — "ensure it exists", the same semantics
@@ -589,22 +592,56 @@ class Agent:
                         arg="id",
                     ),
                 )
-            if ":" in exec_id:
+            if ":" in exec_id and exec_id not in self.ctx.executions:
                 # The minted namespace: a colon id NAMES an existing execution
                 # (re-fetch / join by pid) and never CREATES one — the kernel is
                 # the only allocator there.
-                if exec_id not in self.ctx.executions:
-                    return outcome(
-                        None,
-                        FAILED,
-                        refusal(
-                            BAD_ARG,
-                            f"send: id {exec_id!r} is in the kernel-minted pid "
-                            "namespace (':') and names no known execution — "
-                            "minted ids can be referenced, never created",
-                            arg="id",
-                        ),
-                    )
+                return outcome(
+                    None,
+                    FAILED,
+                    refusal(
+                        BAD_ARG,
+                        f"send: id {exec_id!r} is in the kernel-minted pid "
+                        "namespace (':') and names no known execution — "
+                        "minted ids can be referenced, never created",
+                        arg="id",
+                    ),
+                )
+        bad_retries = self._check_retries(item)
+        if bad_retries is not None:
+            return bad_retries
+        # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
+        # subtree before it aborts anything, because `on_cancel` hooks await —
+        # so a doomed handler gets scheduling turns on its way out, and what it
+        # sent there used to start fresh dispatches that outlived the cancel.
+        cur = _current_task.get()
+        if cur is not None and (self.ctx.tasks.get(cur) or {}).get("_killed"):
+            return outcome(None, CANCELLED, {"cancelled": True})
+        if target_id == "kernel":
+            target = self._root()
+        else:
+            # Resolve a well-known alias (declared via an `alias` meta, e.g.
+            # `web_loader`) to its agent id; a literal id resolves to itself.
+            target = self.ctx.agents.get(self.ctx.well_known.get(target_id, target_id))
+        if target is None:
+            return outcome(None, FAILED, self.ctx.unknown_agent(target_id))
+        # ── CALL GATE — fully-gated, two-sided, from-above ──────────────
+        # Operator sends (`_current_sender` is None: CLI / cold bootstrap /
+        # loader-at-boot / test driver, or a verb running under
+        # `operator_context`) are the ORIGIN root of trust and pass ungated. Every
+        # AGENT-originated send — ANY verb, `reflect` included, nothing exempt —
+        # needs BOTH the sender's `can_call` (egress) AND the target's
+        # `callable_by` (ingress) to grant the edge.
+        sender_id = _current_sender.get()
+        if sender_id is not None:
+            denial = self._gate(sender_id, verb, target, payload)
+            if denial is not None:
+                return outcome(None, FAILED, denial)
+        # `kernel` reflect fast-path: a pure identity read (no dispatch, no
+        # telemetry, no table row), applied AFTER the gate so it is authorized
+        # like any other reflect. Async (reflect flags nest dispatches), so it
+        # rides the settle phase as a pid-less task.
+        if exec_id is not None:
             entry = self.ctx.executions.get(exec_id)
             if entry is not None:
                 # The id is BOUND to its first execution's target — returning an
@@ -703,20 +740,25 @@ class Agent:
         # UNNAMED work is ledgered too — under its minted pid. Same row, same
         # engine: re-fetchable/joinable by pid, retryable, dead-letterable; the
         # ring (Kernel.ledger_cap) bounds what history costs.
-        pid, task = self._spawn_dispatch(target, payload)
+        # The row opens BEFORE the spawn: `retries` was validated up front, so
+        # nothing here can refuse after work has started.
+        pid = self.ctx.mint_task_id(target.id)
         fut, bad = self._ledger_open(pid, target, payload, timeout, item, named=False)
         if bad is not None:
             return bad
+        pid, task = self._spawn_dispatch(target, payload, task_id=pid)
         dispatched.append(
             _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
         )
         return None
 
-    def _ledger_open(self, exec_id, target, payload, timeout, item, *, named):
-        """Validate `retries` and open one ledger row. Returns (fut, refusal?)."""
+    @staticmethod
+    def _check_retries(item: dict) -> dict | None:
+        """`retries` must be a non-negative int. Checked in the launch phase
+        before anything runs; returns the failed outcome or None."""
         retries = item.get("retries", 0)
         if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
-            return None, outcome(
+            return outcome(
                 None,
                 FAILED,
                 refusal(
@@ -725,6 +767,13 @@ class Agent:
                     arg="retries",
                 ),
             )
+        return None
+
+    def _ledger_open(self, exec_id, target, payload, timeout, item, *, named):
+        """Open one ledger row (`retries` already validated). Returns (fut, refusal?)."""
+        retries = item.get("retries", 0)
+        if bad := self._check_retries(item):
+            return None, bad
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         # The row is the WHOLE engine: dedup and join key on it, retry re-issues
         # against it, dead-letter is reading it. `attempts` counts real runs;
@@ -927,6 +976,64 @@ class Agent:
         """The id `$loader` resolves to in a grant — the persistence root."""
         return self._root().id
 
+    def _resolve_agent(self, agent_id: object) -> "Agent | None":
+        """Resolve an id the way `send` does — the `kernel` alias, a declared
+        `alias`, or a literal id. None when it names no live agent."""
+        if not isinstance(agent_id, str) or not agent_id:
+            return None
+        if agent_id == "kernel":
+            return self._root()
+        return self.ctx.agents.get(self.ctx.well_known.get(agent_id, agent_id))
+
+    def _gate_placement(self, sender_id, s_can, s_parent, s_kids, root_id, parent):
+        """Two-sided gate on the PLACEMENT TARGET of `create_agent`. Returns a
+        refusal, or None when the sender may create under `parent`.
+
+        Placing inside your OWN subtree is baseline (no grant). Anywhere else
+        needs egress on the parent (explicitly named — `create_agent` is
+        privileged, so a wildcard never covers it) AND the parent's own
+        `callable_by` accepting the sender."""
+        node = parent
+        while node is not None:
+            if node.id == sender_id:
+                return None  # your own subtree — baseline
+            node = node.parent
+        d = authorize_call(
+            s_can,
+            "create_agent",
+            parent.id,
+            enforce_privileged=True,
+            holder_id=sender_id,
+            holder_parent=s_parent,
+            holder_children=s_kids,
+            loader_id=root_id,
+        )
+        if not d.allowed:
+            return refusal(
+                UNAUTHORIZED,
+                f"{sender_id} may not create under {parent.id}",
+                hint=_FROM_ABOVE,
+                side="egress",
+            )
+        di = authorize_call(
+            parent._meta.get("callable_by") or {},
+            "create_agent",
+            sender_id,
+            holder_id=parent.id,
+            holder_parent=parent.parent.id if parent.parent is not None else None,
+            holder_children=frozenset(parent._children),
+            loader_id=root_id,
+            enforce_privileged=False,
+        )
+        if not di.allowed:
+            return refusal(
+                UNAUTHORIZED,
+                f"{parent.id} does not accept a child from {sender_id}",
+                hint=_FROM_ABOVE,
+                side="ingress",
+            )
+        return None
+
     def _gate(self, sender_id: str, verb: str, target: "Agent", payload: dict):
         """The two-sided call gate. Returns an error dict if the send is refused,
         else None. Checks egress (sender's `can_call`) then ingress (target's
@@ -938,26 +1045,35 @@ class Agent:
         s_can = sender_rec.get("can_call") or {}
         s_parent = sender_rec.get("parent_id")
         s_kids = frozenset(sender._children) if sender is not None else frozenset()
-        # FORKING YOUR OWN SUBTREE IS BASELINE — the exemption keys on PLACEMENT,
-        # not on who answers. `create_agent` is privileged, so a wildcard never
-        # covers it; the one documented exception is that acting on YOURSELF needs
-        # no grant, which is what makes self-extension work with zero wiring.
-        # While the verb was answered by every agent that fell out for free —
-        # `other_id == holder_id` because you addressed yourself. Now the verb is
-        # kernel-owned and `other_id` is always the root, so the exemption would
-        # never fire again and every agent would need an explicit `create_agent`
-        # grant on the root just to author its own tool. The property being
-        # preserved was never "you addressed yourself" — it is "the new agent lands
-        # in YOUR subtree", and `parent_id` now states that outright.
-        privileged = not (
-            verb == "create_agent" and payload.get("parent_id") == sender_id
-        )
+        # PLACEMENT IS THE OPERAND. `create_agent` is answered by the root, but
+        # the agent it ACTS UPON is the parent named in `parent_id` — so that is
+        # what the gate asks about, on both sides. Gating the root instead made
+        # one grant (`<root>:[create_agent]`, the ordinary "may author tools"
+        # wiring) a key to the whole tree: the holder could plant a child under
+        # ANY agent and inherit `$parent:*` reach into it (measured 2026-09-02).
+        #
+        # FORKING YOUR OWN SUBTREE IS BASELINE — placing under yourself or a
+        # descendant needs no grant at all, which is what makes self-extension
+        # work with zero wiring at any depth.
+        if verb == "create_agent":
+            parent = self._resolve_agent(payload.get("parent_id"))
+            if parent is not None:
+                denial = self._gate_placement(
+                    sender_id, s_can, s_parent, s_kids, root_id, parent
+                )
+                if denial is not None:
+                    return denial
+                return self._check_conferral(
+                    sender_id, s_can, s_parent, s_kids, root_id, payload
+                )
+            # An unknown parent falls through to the ordinary path; the verb
+            # itself answers `unknown_agent`.
         # Egress — may the SENDER call the target?
         d = authorize_call(
             s_can,
             verb,
             target.id,
-            enforce_privileged=privileged,
+            enforce_privileged=True,
             holder_id=sender_id,
             holder_parent=s_parent,
             holder_children=s_kids,
@@ -1039,8 +1155,30 @@ class Agent:
         conferred = payload.get("can_call")
         if isinstance(conferred, dict):
             for key, verbs in conferred.items():
-                if key.startswith("$"):
-                    continue  # structural tokens confer no lateral reach
+                if key in ("$self", "$parent", "$children"):
+                    continue  # relative to the HOLDER — no lateral reach
+                if key == "$loader":
+                    # NOT relative: `$loader` resolves to the ROOT for whoever
+                    # holds it, so conferring it hands over real reach on the
+                    # kernel's control surface (ps, cancel, ledger,
+                    # shutdown_kernel). Subset-probe it like any lateral edge —
+                    # skipping it let a grandchild grant its own child root
+                    # reach it did not hold (measured 2026-09-02).
+                    probe_key = root_id
+                elif key.startswith("$"):
+                    return {
+                        "error": (
+                            f"{sender_id} cannot confer {key!r}: not a structural "
+                            "token — $self, $parent, $children and $loader are the "
+                            "only ones"
+                        ),
+                        "reason": "bad_arg",
+                        "arg": "can_call",
+                        "side": "delegation",
+                        "hint": _FROM_ABOVE,
+                    }
+                else:
+                    probe_key = key
                 need = list(verbs) if isinstance(verbs, (list, tuple)) else None
                 # Conferring `"*"` (or a list containing it) requires the granter
                 # to hold `"*"` on that target; a concrete list requires each verb.
@@ -1049,13 +1187,25 @@ class Agent:
                     ok = authorize_call(
                         s_can,
                         v,
-                        key,
+                        probe_key,
                         holder_id=sender_id,
                         holder_parent=s_parent,
                         holder_children=s_kids,
                         loader_id=root_id,
                     ).allowed
                     if not ok:
+                        if key == "$loader":
+                            return {
+                                "error": (
+                                    f"{sender_id} cannot delegate {v!r} on $loader: "
+                                    f"it resolves to {root_id}, which you do not "
+                                    "hold — $loader is real reach on the kernel's "
+                                    "control surface, not a structural token"
+                                ),
+                                "reason": "unauthorized",
+                                "side": "delegation",
+                                "hint": _FROM_ABOVE,
+                            }
                         # Name the TRUE reason. A target that is not an agent at
                         # all is almost always one created in the SAME batch —
                         # items launch concurrently, so it is not there yet when
@@ -1175,10 +1325,22 @@ class Agent:
         `_apply_reflect_flags`, so building a roster cannot recurse into
         building rosters.
         """
-        if a.handler_module:
+        # THE ROSTER IS GATED, one node at a time. `reflect` is not exempt from
+        # the call gate anywhere else, but this walk dispatched it directly, so
+        # any caller allowed to reflect ONE agent read every descendant's
+        # `sentence` and `description` through the tree — lateral discovery the
+        # gate exists to close (measured 2026-09-02). A denied node keeps its
+        # `id` and `children` (the SHAPE is already public through `tree=ids`)
+        # and nothing the agent says about itself. An operator (`sender` None)
+        # sees everything, as everywhere else.
+        sender = _current_sender.get()
+        may_reflect = sender is None or self._gate(sender, "reflect", a, {}) is None
+        if a.handler_module and may_reflect:
             raw = await self._run_dispatch(a, {"type": "reflect"})
-        else:
+        elif may_reflect:
             raw = a._reflect_identity()
+        else:
+            raw = {}
         raw = raw if isinstance(raw, dict) else {}
         node: dict[str, Any] = {"id": a.id}
         if raw.get("sentence"):
@@ -1186,7 +1348,7 @@ class Agent:
         # Operator-set purpose. More specific than the bundle sentence when
         # present ("the prod deploy key" vs "a yaml store"), so it belongs
         # in the router's view above all else.
-        if a.description is not None:
+        if a.description is not None and may_reflect:
             node["description"] = a.description
         # Purpose comes from the agent's REFLECT, not its record: much of what an
         # agent is FOR lives in its reflect (its `sentence`, its verbs), not as a
@@ -1225,6 +1387,11 @@ class Agent:
         Transport/wire docs are NOT here — they live in the doc tree
         (`reflect readme=index`, then drill by key)."""
         if payload.get("type") != "reflect" or not isinstance(reply, dict):
+            return reply
+        # A REFUSAL IS NOT A REFLECT. Decorating one with kernel_verbs/tree/more
+        # produced a reply that reads like a healthy reflect with a stray error
+        # field, and a caller could not tell the two apart (measured 2026-09-02).
+        if "error" in reply:
             return reply
         full = payload.get("detail") == "full"
         # `description` is a substrate meta field — surface it on EVERY
@@ -1551,6 +1718,20 @@ class Agent:
         target = self.ctx.agents.get(agent_id)
         if target is None:
             return self.ctx.unknown_agent(agent_id, deleted=False)
+        # THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
+        # every kernel verb, so cascading it empties the kernel and leaves a
+        # process with no control surface at all — `{"deleted": true}` and an
+        # empty tree (measured 2026-09-02). The guard lived only on the unused
+        # `Kernel.delete`, which nothing calls.
+        if target.parent is None:
+            return refusal(
+                BAD_ARG,
+                f"delete_agent: {agent_id} is the ROOT — it owns persistence and "
+                "answers the kernel verbs; deleting it would leave no kernel",
+                arg="id",
+                id=agent_id,
+                deleted=False,
+            )
         blocked_by = target._find_locked_descendant()
         if blocked_by is not None:
             # THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: True`
@@ -1642,15 +1823,37 @@ class Agent:
                     return None
                 if verb == "reflect":
                     return self._reflect_identity()
-                return {
-                    "error": f"agent {self.id!r} has no handler_module; cannot answer verb {verb!r}"
-                }
+                # CODED, not a bare error. A reason-less `{error}` is decorated
+                # by `_apply_reflect_flags` into something that reads like a
+                # healthy reflect (kernel_verbs, tree, more) with a stray error
+                # field — the caller cannot tell a refusal from an answer
+                # (measured 2026-09-02).
+                return refusal(
+                    UNHANDLED,
+                    f"agent {self.id!r} has no handler_module; cannot answer "
+                    f"verb {verb!r}",
+                    verb=verb,
+                )
             try:
                 mod = importlib.import_module(self.handler_module)
             except Exception as e:
-                return {"error": f"import {self.handler_module!r}: {e}"}
+                # NOT a create-time refusal: this kernel legitimately holds
+                # records whose bundle belongs to ANOTHER runtime (the browser's
+                # `*.ts` agents persist here), or is installed later. The call
+                # simply cannot be answered HERE, and says so with a code.
+                return refusal(
+                    UNHANDLED,
+                    f"agent {self.id!r}: handler_module "
+                    f"{self.handler_module!r} cannot be imported in this "
+                    f"runtime: {type(e).__name__}: {e}",
+                    verb=verb,
+                )
             if not hasattr(mod, "handler"):
-                return {"error": f"{self.handler_module} has no handler()"}
+                return refusal(
+                    UNHANDLED,
+                    f"{self.handler_module} has no handler()",
+                    verb=verb,
+                )
             return await mod.handler(self.id, payload, self)
         finally:
             _current_sender.reset(token)
@@ -1749,13 +1952,24 @@ class Agent:
         return {"tasks": tasks, "next": nxt}
 
     def _verb_ledger(self, payload: dict) -> dict:
-        """No args. NAMED executions — {executions:[{id, target, status,
-        attempts, retries, outcome?}]}, paged. `status` is 'in_flight' until the
-        row settles, then the outcome's own status; `outcome` appears only once
-        settled. Rows whose status is failed/timed_out/cancelled are the
-        DEAD-LETTER QUEUE: terminal, inspectable, never silently retried — a
-        retry is a caller's explicit new id. Unnamed sends never appear here
-        (their history is deliberately not kept)."""
+        """No args. EVERY execution and what it became — named under its id,
+        unnamed under its minted pid — {executions:[{id, target, status,
+        attempts, retries, named, outcome?}]}, paged. `status` is 'in_flight'
+        until the row settles, then the outcome's own status; `outcome` appears
+        only once settled. `named` says which kind of row it is: True for a
+        caller-named execution (its `id` is the caller's own, and is also its
+        `cancel`/`ps` handle), False for an unnamed send the kernel minted an
+        `<agent>:<hex8>` pid for.
+
+        This docstring — and the `ledger` line every reflect carries — used to
+        say NAMED executions only, and that "unnamed sends never appear here".
+        Both were true before unnamed executions were ledgered under their pid
+        and neither was true afterwards, so a model reading the reflect expected
+        its own handful of jobs and received every minted-pid row beside them.
+
+        Rows whose status is failed/timed_out/cancelled are the DEAD-LETTER
+        QUEUE: terminal, inspectable, never silently retried — a retry is a
+        caller's explicit new id."""
         # ORIGIN-SCOPED. The ledger carries other agents' RESULT BODIES; an
         # unscoped read would be a side-channel around `callable_by` (read any
         # agent's replies without its ingress ever saying yes). An agent sees
@@ -1941,10 +2155,10 @@ class Agent:
         agent building its own subtree names itself, which is one word and
         cannot be confused with "wherever this happened to be sent"."""
         handler_module = payload.get("handler_module")
-        if not handler_module:
+        if not isinstance(handler_module, str) or not handler_module:
             return missing("create_agent", "handler_module")
         parent_id = payload.get("parent_id")
-        if not parent_id:
+        if not isinstance(parent_id, str) or not parent_id:
             return missing(
                 "create_agent",
                 "parent_id",
@@ -1960,6 +2174,23 @@ class Agent:
             parent = self.ctx.agents.get(self.ctx.well_known.get(parent_id, parent_id))
         if parent is None:
             return self.ctx.unknown_agent(parent_id)
+        # Reserved keys name substrate wiring; a record may not carry them (the
+        # loader refuses such a record on the next boot).
+        for k in sorted(RESERVED_RECORD_KEYS):
+            if k in payload:
+                return bad(
+                    "create_agent",
+                    k,
+                    "absent — root_path/ctx/parent name substrate wiring the "
+                    "record may not carry",
+                )
+        # A handler_module this runtime cannot import is NOT refused: the host
+        # legitimately holds records for agents of ANOTHER kernel (the browser's
+        # `*.ts` bundles persist back here through `proxy_loader`), and a bundle
+        # can also be installed later. What was wrong is the SILENCE downstream —
+        # every later call answered a reason-less `{error: import …}` dressed up
+        # as a healthy reflect. That is fixed at dispatch, where the truth is
+        # known (see `_dispatch`), not by guessing here.
         meta = {
             k: v
             for k, v in payload.items()
@@ -2026,11 +2257,26 @@ class Agent:
         another `update_agent`. Documented, not gated.
         """
         target_id = payload.get("id")
-        if not target_id:
+        if not isinstance(target_id, str) or not target_id:
             return missing("update_agent", "id")
         # `parent_id` is STRUCTURE, not meta: an agent's place in the tree is
         # changed by creating it there, never by patching a field. Accepting it
         # here let a record describe a parent it did not have.
+        #
+        # `handler_module` is fixed at create — swapping it would leave a live
+        # agent whose in-process state belongs to the OLD bundle. Reserved keys
+        # name substrate wiring (`root_path`/`ctx`/`parent`); they used to be
+        # written into the record and then REFUSED by the loader on the next
+        # boot, so an accepted update made the workdir unbootable (2026-09-02).
+        for k in ("handler_module", *sorted(RESERVED_RECORD_KEYS)):
+            if k in payload:
+                return bad(
+                    "update_agent",
+                    k,
+                    "absent — handler_module is fixed at create_agent, and "
+                    "root_path/ctx/parent name substrate wiring the record "
+                    "may not carry",
+                )
         meta = {
             k: v for k, v in payload.items() if k not in ("type", "id", "parent_id")
         }
@@ -2071,7 +2317,7 @@ class Agent:
 
     async def _verb_delete_agent(self, payload: dict) -> dict:
         target_id = payload.get("id")
-        if not target_id:
+        if not isinstance(target_id, str) or not target_id:
             return missing("delete_agent", "id")
         result = await self.delete(target_id)
         if result.get("deleted"):

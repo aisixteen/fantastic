@@ -202,12 +202,26 @@ class RelayTransport(_BaseTransport):
             try:
                 self._ws = await self._dialer()
                 await self._on_socket_open()
-                return self._ws
             except Exception as e:
                 self._ws = None
                 if self._reconnect <= 0:
                     raise ConnectionClosed(f"relay connect failed: {e}") from e
                 await asyncio.sleep(self._reconnect)
+                continue
+            if self._ws is None:
+                # The dial succeeded but the socket died DURING the open handshake —
+                # `_announce`/`_on_socket_open` nulls `_ws` when its first send fails
+                # (a relay restarting, an auth window closing between upgrade and
+                # first frame). Returning None here read as "explicitly closed" and
+                # ended the self-healing loop for good, on a leg whose record says
+                # `reconnect:10`. Keep healing: only `_closed` produces None.
+                if self._reconnect <= 0:
+                    raise ConnectionClosed(
+                        "relay connect failed: socket closed on open"
+                    )
+                await asyncio.sleep(self._reconnect)
+                continue
+            return self._ws
         return None
 
     async def send(self, frame: dict) -> None:

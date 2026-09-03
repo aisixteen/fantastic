@@ -53,6 +53,11 @@ pub fn context_notice(
 /// event. Returns `Ok(projected_model_messages)`, or `Err(error_value)` for
 /// the `too_small` failsafe / an unknown-strategy config error. Sets the
 /// public `state.projection` summary + the private `state.compaction_mark`.
+///
+/// `store_len` is the DURABLE store's length behind `messages` (from
+/// [`crate::assembly::assemble_messages`]) — the index the reaction cursor is
+/// recorded at. It is NOT derivable from `messages`, which is a deduped/trimmed
+/// view.
 #[allow(clippy::too_many_arguments)]
 pub async fn project_context(
     provider: &Arc<dyn Provider>,
@@ -63,6 +68,7 @@ pub async fn project_context(
     route: CallerRoute,
     name: &str,
     messages: Vec<Value>,
+    store_len: usize,
 ) -> Result<Vec<Value>, Value> {
     let meta = agent_meta(self_id, kernel);
     let b = agent_budget(&meta);
@@ -152,8 +158,13 @@ pub async fn project_context(
         "dropped_turns": dropped_n,
         "summarized": summarized,
     }));
+    // `store_len`, NOT `body.len() - 1`. `body` is the DEDUPED/trimmed model view
+    // and `derive_reaction` slices the FULL durable store by this index; whenever
+    // the trimmers dropped whole turns the index came up short by that many, so the
+    // reader scanned an assistant turn written BEFORE the notice and reported a
+    // reaction to a compaction the model had not yet seen.
     *state.compaction_mark.lock().expect("mark poisoned") =
-        Some((body.len().saturating_sub(1), client_id.to_string()));
+        Some((store_len, client_id.to_string()));
     to_caller(
         kernel,
         self_id,
@@ -178,7 +189,7 @@ pub async fn project_context(
 /// Read-model over the durable transcript: AFTER the last compaction notice
 /// (its cursor), did the model react? Scans the same client's thread for
 /// `send` tool-calls — a `recall` to its OWN id, or a memory write
-/// (`set`/`append`/`replace`). The reaction IS the 'ack'; this derives it.
+/// (`write`/`patch`/`append`). The reaction IS the 'ack'; this derives it.
 /// `None` if no compaction has fired.
 pub async fn derive_reaction(
     self_id: &AgentId,
@@ -205,7 +216,12 @@ pub async fn derive_reaction(
 }
 
 /// The reaction read itself, over the durable turns AFTER the notice cursor: did
-/// the model `recall` to its OWN id, or write to memory (`set`/`append`/`replace`)?
+/// the model `recall` to its OWN id, or write to memory?
+///
+/// THE MEMORY VERBS ARE `text_file`'s (`write`/`patch`/`append`). They were
+/// durable_memory's (`set`/`replace`) until 2026-09-02 — a bundle that no longer
+/// exists — so a model that DID persist, in the only way the substrate now
+/// offers, was scored as not having reacted at all.
 ///
 /// Pure, so the SHAPES it recognizes can be pinned. The parser rewrite widened
 /// that set on purpose: an UNTERMINATED envelope (nemotron omits the closing tag)
@@ -233,7 +249,7 @@ pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
             if target == Some(self_id) && ptype == Some("recall") {
                 recalled = true;
                 recall_count += 1;
-            } else if matches!(ptype, Some("set") | Some("append") | Some("replace")) {
+            } else if matches!(ptype, Some("write") | Some("patch") | Some("append")) {
                 persisted = true;
             }
         }
@@ -264,7 +280,7 @@ mod tests {
                 r#"<tool_call>{"name":"send","arguments":{"target_id":"me","payload":{"type":"recall"}}}"#,
             ),
             turn(
-                r#"<tool_call>{"name":"set","arguments":{"target_id":"mem","key":"k"}}</tool_call>"#,
+                r#"<tool_call>{"name":"write","arguments":{"target_id":"notes","path":"facts.md"}}</tool_call>"#,
             ),
         ];
         let r = reaction_from("me", &turns);

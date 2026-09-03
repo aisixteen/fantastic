@@ -77,8 +77,10 @@ struct DelegationGateTests {
         #expect(no["missing"].asString == "kid", "\(no.serialize())")
         let msg = no["error"].asString ?? ""
         #expect(msg.contains("no such agent") && msg.contains("next"), "\(no.serialize())")
-        let granted = ok["updated"].asBool == true || ok["can_call"]["kid"].asString == "*"
-            || ok["agent"]["can_call"]["kid"].asString == "*"
-        #expect(granted, "\(ok.serialize())")
+        // `update_agent` answers python's shape — {updated, id, agent} — so the
+        // granted edge is read off `agent`, not off the reply's own top level.
+        #expect(ok["updated"].asBool == true, "\(ok.serialize())")
+        #expect(ok["id"].asString == "peer", "\(ok.serialize())")
+        #expect(ok["agent"]["can_call"]["kid"].asString == "*", "\(ok.serialize())")
     }
 }

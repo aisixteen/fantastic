@@ -58,6 +58,39 @@ extension Kernel {
                 Outcome.refused(Refusal.bad("send", "timeout", "a positive number of seconds")))
         }
 
+        // The item's OWN fields are validated before anything is resolved, gated
+        // or minted (python order). `type` is the verb; there is no send without
+        // one — a typeless payload is a coded refusal for EVERY sender, never an
+        // `unhandled` from the target (measured 2026-09-02).
+        guard case .object(let obj) = item.payload else {
+            return .settled(Outcome.refused(Refusal.missing("send", "payload")))
+        }
+        guard let typeV = obj["type"] else {
+            return .settled(Outcome.refused(Refusal.missing("send", "payload.type")))
+        }
+        guard let verb = typeV.asString, !verb.isEmpty else {
+            return .settled(
+                Outcome.refused(Refusal.bad("send", "payload.type", "a non-empty string")))
+        }
+        if let id = item.id {
+            // ONE ID SPACE: a caller id may not be empty and may not sit in the
+            // kernel-minted `<agent>:<hex>` namespace unless it NAMES an existing
+            // execution — minted ids are referenced, never created.
+            if id.isEmpty {
+                return .settled(Outcome.refused(Refusal.bad("send", "id", "a non-empty string")))
+            }
+            if id.contains(":") && !ledger.has(id) {
+                return .settled(
+                    Outcome.refused(
+                        Refusal.make(
+                            Refusal.badArg,
+                            "send: id \"\(id)\" is in the kernel-minted pid namespace (':') "
+                                + "and names no known execution — minted ids can be "
+                                + "referenced, never created",
+                            extra: [("arg", .string("id"))])))
+            }
+        }
+
         // Resolve target. Special id "kernel" aliases to the root.
         let resolved: Agent? = item.target.value == "kernel" ? root : agent(item.target)
         guard let target = resolved else {
@@ -65,8 +98,6 @@ extension Kernel {
                 Outcome.refused(
                     Refusal.unknown(item.target.value, live: allAgents().map { $0.id.value })))
         }
-
-        let verb = item.payload["type"].asString ?? ""
 
         // ── CALL GATE — fully-gated, two-sided, from-above ──────────────
         // An operator send (`currentSender` is nil) is the origin root of trust
@@ -81,10 +112,14 @@ extension Kernel {
         // MINT SYNCHRONOUSLY. The pid must exist before the first await — it is
         // the ledger key for an unnamed item, and it is what makes the WHOLE
         // batch visible in `ps` at once.
-        let taskId = tasks.mint(target.id)
-        // ONE ID SPACE: a caller's id names the execution; without one, the
-        // minted pid does. Either way there is exactly one handle.
+        // ONE ID SPACE, ONE HANDLE. A NAMED execution registers in the task
+        // table under the caller's own id, so `ps` shows that id and `cancel
+        // task_id=<id>` kills it — the id the caller already holds IS the
+        // handle. Minting a second, private pid for a named item meant the
+        // caller could not cancel or find its own execution (measured
+        // 2026-09-02). An unnamed item still mints, synchronously.
         let named = item.id != nil
+        let taskId = item.id.map(TaskId.init) ?? tasks.mint(target.id)
         let execId = item.id ?? taskId.value
         let retries = item.retries ?? 0
         let origin = KernelTaskLocals.currentSender
@@ -122,7 +157,8 @@ extension Kernel {
         return .dispatch(
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
-                timeout: item.timeout, execId: execId, taskId: taskId))
+                timeout: item.timeout, execId: execId, taskId: taskId, named: named,
+                binary: item.binary))
     }
 
     /// One item's ASYNC half.
@@ -147,7 +183,7 @@ extension Kernel {
                 let box = TaskIdBox()
                 let (r, s) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
-                    taskOut: box, timeout: d.timeout, taskId: nextPid)
+                    taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary)
                 reply = r
                 status = s
                 pid = box.value
@@ -156,7 +192,9 @@ extension Kernel {
                 // because the previous one is already forgotten. Cancelling the
                 // execution kills the current attempt AND this loop — a cancel
                 // is absorbing.
-                nextPid = tasks.mint(d.target.id)
+                // A retry is the SAME execution, so it re-registers under the
+                // SAME handle: cancelling that id kills the attempt AND the loop.
+                nextPid = d.named ? TaskId(d.execId) : tasks.mint(d.target.id)
             }
 
             if d.verb == "reflect" && status == .completed {
@@ -221,7 +259,12 @@ struct Dispatch {
     let timeout: Double?
     /// The ledger key: the caller's id, or the minted pid for an unnamed item.
     let execId: String
-    /// Minted in the launch phase. A retry re-dispatches under a FRESH pid but
-    /// the SAME exec id, so the execution keeps one handle across attempts.
+    /// The task-table handle. For a NAMED execution this IS `execId`, so `ps`
+    /// and `cancel` speak the caller's own id; an unnamed one carries its minted
+    /// pid. A retry re-registers under the same handle either way.
     let taskId: TaskId
+    /// Whether the caller named this execution (its id is the handle).
+    let named: Bool
+    /// A RAW request body: present ⇒ dispatch through the BINARY channel.
+    let binary: Data?
 }

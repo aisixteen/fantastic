@@ -31,9 +31,12 @@ agents:
 Every declared agent gets the Unix baseline grant
 (`$self`/`$parent`/`$children`/`$loader`) plus whatever `can_call` the manifest
 names. After boot the roster is **closed**: an agent is deny-all and cannot
-`create_agent`, so the manifest is the whole roster. Give agents explicit `id`s
-— boot is idempotent by id (a reboot re-reads the manifest and skips agents that
-already exist), so the manifest and the persisted tree never duplicate.
+`create_agent`, so the manifest is the whole roster. Every entry MUST carry an
+explicit `id` — boot is idempotent by id (a reboot re-reads the manifest and
+RE-APPLIES the declared fields over an existing agent), so the manifest and the
+persisted tree never duplicate. An entry with no `id` is refused loud
+(`booted: false`): nothing could match it, so each reboot would mint another
+agent beside the last one's and persist it.
 
 The kernel knows nothing about YAML; this bundle owns the format — the same way
 `kernel_state` owns the on-disk `.fantastic` layout.

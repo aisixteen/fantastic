@@ -2,7 +2,7 @@
 
 This module is the ONLY place that calls `open()`/reads/writes the filesystem. The
 running-dir law lives here (a `root` is clamped to cwd; a `path` is clamped to that
-root — `../`, `~`, absolute escapes, outward symlinks all refuse), so the clamp is
+root — `../`, `~`, absolute paths, outward symlinks all refuse), so the clamp is
 **unbypassable**: nothing can read or write outside its allowed root by going around
 it, because there is no other disk code to go around to.
 
@@ -78,13 +78,36 @@ def resolve(root: str | Path, path: str | Path, *, external: bool = False) -> Pa
     the base may live anywhere — see module docstring). The target may not escape root via
     `..`/absolute/symlink either way. Returns the resolved absolute Path."""
     root_p = resolve_external_root(root) if external else resolve_root(root)
-    rel = str(path or "").lstrip("/")
+    rel = str(path or "")
+    if rel.startswith("/"):
+        # An absolute path is a hard escape — refused, never silently re-rooted
+        # (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`, and
+        # the docstring above promised the opposite). The agent layer answers
+        # this with `bad(verb, "path", …)` BEFORE reaching here.
+        raise ValueError(f"fs: path {path!r} escapes root")
     target = (root_p / rel).resolve() if rel else root_p
     try:
         target.relative_to(root_p)
     except ValueError:
         raise ValueError(f"fs: path {path!r} escapes root") from None
     return target
+
+
+def _lexical_leaf(root, path, *, external: bool = False) -> Path:
+    """The UNRESOLVED leaf under a resolved parent — the path a symlink itself
+    lives at. `resolve()` follows the link all the way to its target, so testing
+    `is_symlink()` on its result is always False; the leaf must be probed before
+    the follow. The parent is still clamped (resolve), so the leaf cannot escape."""
+    rel = str(path or "")
+    parent_rel, _, name = rel.rpartition("/")
+    parent = resolve(root, parent_rel, external=external)
+    return parent / name if name else parent
+
+
+def is_symlink(root, path, *, external: bool = False) -> bool:
+    """True if `path` ITSELF is a symlink (dangling or not) — `exists()` follows
+    links, so a dangling one reports absent while still occupying the name."""
+    return _lexical_leaf(root, path, external=external).is_symlink()
 
 
 # ─── existence / stat ───────────────────────────────────────────
@@ -209,9 +232,19 @@ def rename(root, old, new, *, external: bool = False) -> None:
 
 
 def remove(root, path, *, recursive: bool = False, external: bool = False) -> None:
-    """Delete a file, an empty dir, or (recursive) a dir tree. Clamped to root."""
+    """Delete a file, an empty dir, or (recursive) a dir tree. Clamped to root.
+
+    A symlink is UNLINKED, never followed: the leaf is probed before `resolve()`
+    follows it. Measured 2026-09-02: `delete link` (link -> data/) recursed into
+    the real `data/` and left the link dangling — the target died, the name
+    survived, and the dangling name could then never be deleted (`exists()`
+    follows). A dangling symlink is deletable for the same reason."""
+    leaf = _lexical_leaf(root, path, external=external)
+    if leaf.is_symlink():
+        leaf.unlink()
+        return
     target = resolve(root, path, external=external)
-    if target.is_dir() and not target.is_symlink():
+    if target.is_dir():
         if recursive:
             _rmtree(target)
         else:

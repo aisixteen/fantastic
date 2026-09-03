@@ -591,10 +591,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
             guard let transport = bridgeFor(agentId) else {
-                return .object([
-                    "error": .string("no bridge attached"),
-                    "reason": .string("not_attached"),
-                ])
+                return Refusal.make(
+                    Refusal.notConnected, "bridge.forward: not connected",
+                    hint: "call boot first")
             }
             return await transport.forward(
                 target: AgentId(targetStr),
@@ -607,10 +606,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
             guard let transport = bridgeFor(agentId) else {
-                return .object([
-                    "error": .string("no bridge attached"),
-                    "reason": .string("not_attached"),
-                ])
+                return Refusal.make(
+                    Refusal.notConnected, "bridge.watch_remote: not connected",
+                    hint: "call boot first")
             }
             return await transport.watchRemote(target: AgentId(targetStr))
         case "unwatch_remote":
@@ -621,20 +619,18 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
                 ])
             }
             guard let transport = bridgeFor(agentId) else {
-                return .object([
-                    "error": .string("no bridge attached"),
-                    "reason": .string("not_attached"),
-                ])
+                return Refusal.make(
+                    Refusal.notConnected, "bridge.unwatch_remote: not connected",
+                    hint: "call boot first")
             }
             return await transport.unwatchRemote(target: AgentId(targetStr))
         case "list_peers", "watch_directory", "unwatch_directory":
             // Directory surface (relay_connector): addresses the relay's own `relay`
             // agent (target:"relay"), not the partner.
             guard let transport = bridgeFor(agentId) else {
-                return .object([
-                    "error": .string("relay_connector.\(verb): not connected (call boot first)"),
-                    "reason": .string("not_attached"),
-                ])
+                return Refusal.make(
+                    Refusal.notConnected, "relay_connector.\(verb): not connected",
+                    hint: "call boot first")
             }
             let timeout = payload["timeout"].asDouble ?? 30
             switch verb {
@@ -646,11 +642,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
             // Advertise/update this peer's directory typing (role/owner_guid/exposes):
             // persisted (so it re-announces next boot) + pushed to the relay live.
             guard let transport = bridgeFor(agentId) else {
-                return .object([
-                    "error": .string(
-                        "relay_connector.set_identity: not connected (call boot first)"),
-                    "reason": .string("not_attached"),
-                ])
+                return Refusal.make(
+                    Refusal.notConnected, "relay_connector.set_identity: not connected",
+                    hint: "call boot first")
             }
             if let role = payload["role"].asString, role != "manager", role != "kernel" {
                 return .object([
@@ -697,7 +691,9 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         }
         guard let transport = bridgeFor(agentId) else {
             return (
-                .object(["error": .string("bridge.forward: not connected (call boot first)")]),
+                Refusal.make(
+                    Refusal.notConnected, "bridge.forward: not connected",
+                    hint: "call boot first"),
                 Data()
             )
         }

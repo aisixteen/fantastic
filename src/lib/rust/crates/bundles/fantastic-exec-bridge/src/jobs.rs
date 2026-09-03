@@ -25,6 +25,13 @@ pub struct Job {
     pub task: TaskId,
     /// The relay task serving this job's control socket.
     pub ctrl: JoinHandle<()>,
+    /// The relay's STOP SIGNAL — raised by [`teardown`] instead of aborting
+    /// `ctrl`. An abort drops `serve` at its await point, so the release code
+    /// that runs AFTER its read loop never runs: every proxy the job held would
+    /// stay in `kernel.inboxes` and in each watched source's watcher set, with
+    /// orphan drain tasks writing into a closed socket. `serve` selects this
+    /// against its read and falls through to its own cleanup.
+    pub stop: Arc<tokio::sync::Notify>,
     /// The exact invocation — the program/binary. Reported by `status` so a caller
     /// that wants to re-run a job re-issues these verbatim.
     pub command: String,
@@ -127,6 +134,45 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     collected
 }
 
+/// Finalise the job row on EVERY way out of the pump — including the one that is
+/// not a return.
+///
+/// `cancel` ABORTS the pump task, which drops its future at the current await
+/// point: `child.wait()` never returns and the finalisation below it never runs.
+/// The row then kept the label [`teardown`] left on it — `stopping`, with
+/// `exit_code: None` — forever, and `clear` refuses `stopping` rows BY DESIGN, so
+/// the row was immortal and the job could never be forgotten. Python's pump
+/// catches `CancelledError` and finalises to `stopped`; this guard is the same
+/// guarantee, spelled as a `Drop`.
+struct FinalizeRow {
+    job_id: String,
+    armed: bool,
+}
+
+impl FinalizeRow {
+    /// The pump reached the end and wrote the REAL outcome itself.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FinalizeRow {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut g = jobs();
+        if let Some(j) = g.get_mut(&self.job_id) {
+            if j.exit_code.is_none() {
+                // `on_cancel` SIGKILLed the child before the abort; say so, and
+                // leave a label `clear` accepts.
+                j.status = "stopped".to_string();
+                j.exit_code = Some(-9);
+            }
+        }
+    }
+}
+
 /// The job's task-table body: drain both pipes, await exit, emit `job_done`.
 pub async fn pump(
     owner: AgentId,
@@ -134,6 +180,10 @@ pub async fn pump(
     mut child: tokio::process::Child,
     kernel: Arc<Kernel>,
 ) {
+    let mut finalize = FinalizeRow {
+        job_id: job_id.clone(),
+        armed: true,
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (o, e) = tokio::join!(
@@ -169,6 +219,7 @@ pub async fn pump(
         }
     );
     let code = child.wait().await.ok().and_then(|s| s.code());
+    finalize.disarm();
     {
         let mut g = jobs();
         if let Some(j) = g.get_mut(&job_id) {
@@ -193,7 +244,8 @@ pub async fn pump(
         .await;
 }
 
-/// SIGKILL the process and drop the relay. Idempotent; used by every death path.
+/// SIGKILL the process and ask the relay to stop. Idempotent; every death path
+/// (`stop`, `cancel`, `on_delete`) goes through here.
 pub fn teardown(j: &mut Job) {
     if j.exit_code.is_none() {
         j.status = "stopping".to_string();
@@ -203,5 +255,10 @@ pub fn teardown(j: &mut Job) {
             nix::sys::signal::Signal::SIGKILL,
         );
     }
-    j.ctrl.abort();
+    // SIGNAL, never `ctrl.abort()`. Aborting drops `serve` at its await point, so
+    // the proxy/watcher release that runs after its read loop is skipped and every
+    // `_xbw_*`/`_xbself_*` id the job held leaks — watcher rows, live mpsc senders
+    // in `kernel.inboxes`, and detached drain tasks. `notify_one` leaves a permit
+    // if the relay is mid-`send`, so the signal is never missed.
+    j.stop.notify_one();
 }
