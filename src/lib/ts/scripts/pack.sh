@@ -59,9 +59,20 @@ echo "pack.sh: esbuild $("$ESBUILD" --version) ($PLAT) verified."
 
 # ── bundle: one file, everything inlined, no chunks ─────────────────────────
 rm -rf "$OUT"; mkdir -p "$OUT"
+# PROFILE. `release` (the default, and what the release workflow builds) is
+# MINIFIED; `debug` is the SAME bundle, same entry, same aliases, same single
+# output file — only unminified, so a stack trace names real identifiers. e2e
+# builds debug so it exercises this exact path rather than a second one.
+case "${PACK_PROFILE:-release}" in
+  release) MIN_FLAG="--minify" ;;
+  debug)   MIN_FLAG="" ;;
+  *) echo "pack.sh: PACK_PROFILE must be release|debug, got '$PACK_PROFILE'" >&2; exit 1 ;;
+esac
+echo "pack.sh: profile ${PACK_PROFILE:-release}."
+
 "$ESBUILD" src/bundle.ts \
   --bundle --format=esm --platform=browser --target=esnext \
-  --minify --sourcemap \
+  $MIN_FLAG --sourcemap \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \
   --alias:@xterm/addon-fit=./src/vendor/addon-fit.js \
