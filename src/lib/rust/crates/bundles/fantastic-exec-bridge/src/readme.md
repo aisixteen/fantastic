@@ -83,11 +83,12 @@ the program emits on this agent's id (tag `say`/`done` with the caller's `client
 
 ## The wire (a program speaks it, or ignores it)
 
-The published contract is the WIRE. The child inherits three env vars:
+The published contract is the WIRE. The child inherits two env vars:
 
 - `FANTASTIC_CTRL_FD` — an already-open socket fd to the spawner.
 - `FANTASTIC_SELF_ID` — the OWNER agent's id (the tool's public id, not the job id).
-- `FANTASTIC_ARGS` — this call's `args`, as JSON.
+
+Arguments arrive as ARGV, like any command — there is no `FANTASTIC_ARGS`.
 
 Framing both directions: `[4-byte big-endian length | kind | rest]` — kind `T`: a JSON
 envelope; kind `B`: the io_bridge binary frame `[4-byte BE H | H-byte JSON header | raw
@@ -97,7 +98,9 @@ ops: `{op:"send", rid, target, payload}` · `{op:"emit", target?, payload}` ·
 `{op:"watch", src}` · `{op:"unwatch", src}` · `{op:"onmessage"}` · `{op:"offmessage"}`.
 Parent → child: `{op:"reply", rid, data}` · `{op:"event", src, payload}` ·
 `{op:"inbox", payload}`. `rid` correlates a `send` with its `reply`; the parent echoes it
-back untouched. **EOF on the fd means the kernel is GONE** — exit, or become an orphan
+back untouched. ONE FRAME CAPS AT 16 MiB in every runtime — over it the length prefix is a
+wire violation and the relay closes the socket, so move bulk with `write_stream` chunks
+(the reference client raises rather than writing such a frame). **EOF on the fd means the kernel is GONE** — exit, or become an orphan
 nothing can reach. Traffic goes child → spawner → kernel only: a job never dials a host and
 never knows a URL. A command that never reads the fd runs exactly like any OS process.
 
@@ -112,7 +115,7 @@ kernel.emit(target, payload)               # …or on another
 kernel.reflect(target="kernel")
 off = kernel.watch(src, cb)                # PUSH: cb(payload) per event from src
 off = kernel.on_message(cb)                # PUSH: turns on THIS agent's inbox
-kernel.self_id · kernel.args               # your agent id · this call's args
+kernel.self_id                             # your agent id (arguments are ARGV)
 ```
 
 So a job is a first-class routine: read memory anywhere, call an AI, spawn another job, push

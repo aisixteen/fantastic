@@ -1,7 +1,7 @@
 """scheduler bundle — recurring tasks as an agent.
 
 State (sidecars in `.fantastic/agents/{id}/`, persisted THROUGH the loader):
-  schedules.json   — list of {id, target, payload, interval_seconds, next_run, paused, run_count}
+  schedules.json   — list of {id, target, payload, interval_seconds, next_run, paused, run_count, timeout?}
   history.jsonl    — append-only schedule_fired events, ring-trimmed to HISTORY_MAX
 
 There is NOTHING to wire — the scheduler persists through `kernel_state` (the loader),
@@ -11,7 +11,7 @@ root (read-empty until then); a denied/failed write is surfaced, not lost.
 Verbs:
   reflect      -> {sentence, tick_sec, paused, ...}
   boot         -> start tick loop (idempotent)
-  schedule     args: target, payload, interval_seconds  -> {schedule_id}
+  schedule     args: target, payload, interval_seconds, timeout?  -> {schedule_id}
   unschedule   args: schedule_id                        -> {removed: bool}
   list                                                  -> {schedules: [...]}
   pause        args: schedule_id?                       -> pause one or all
@@ -19,9 +19,14 @@ Verbs:
   tick_now     args: schedule_id                        -> fire immediately
   history      args: limit?, schedule_id?              -> {history: [...]}
 
-A schedule fires by `kernel.send([{"target": target, "payload": payload}])`. After firing, scheduler
-emits `{type:"schedule_fired", ...}` to its OWN inbox only — the target gets
-the PAYLOAD, which is the tick; echoing telemetry at it doubled every delivery.
+A tick collects every DUE schedule, bumps `run_count`/`next_run`, persists FIRST
+(a crash inside the fire window cannot re-fire on reboot), then fires them all as
+ONE `kernel.send([{target, payload, timeout?}, ...])` batch — concurrent, so one
+hung target never blocks the others. `timeout` is the schedule's own per-fire
+bound (seconds); absent = wait forever (the kernel never defaults it). After
+firing, scheduler emits one `{type:"schedule_fired", ...}` per outcome to its OWN
+inbox only — the target gets the PAYLOAD, which is the tick; echoing telemetry
+at it doubled every delivery.
 """
 
 from __future__ import annotations
@@ -33,13 +38,63 @@ import secrets
 import time
 
 from kernel import operator_context
+from kernel._refusal import bad
 
 logger = logging.getLogger(__name__)
 
 HISTORY_MAX = 500
+#: seconds between tick-loop sweeps when the record does not name one.
+DEFAULT_TICK_SEC = 1.0
 
 _tick_tasks: dict[str, asyncio.Task] = {}
 _cache: dict[str, list[dict]] = {}  # in-process schedules cache
+
+
+# ─── argument typing ─────────────────────────────────────────────
+
+
+def _int_arg(payload: dict, key: str, default: int, verb: str, minimum: int):
+    """ABSENT ⇒ `default`. Present, a plain int, ≥ `minimum` ⇒ that value.
+    ANYTHING ELSE ⇒ a `bad_arg` refusal.
+
+    A present-but-wrong number is a TYPO, and both old behaviours hid it: `int()`
+    raised out of the handler (`{"raised": true}` — no `arg`, nothing to branch
+    on), while a bare `or default` turned `interval_seconds: "60"` into a silent
+    hourly schedule the caller believed was per-minute. `True` is an int in
+    python and is rejected explicitly — `interval_seconds: true` would otherwise
+    schedule once a second."""
+    if key not in payload:
+        return default
+    v = payload[key]
+    if isinstance(v, bool) or not isinstance(v, int) or v < minimum:
+        want = "a non-negative int" if minimum == 0 else f"an int >= {minimum}"
+        return bad(verb, key, want)
+    return v
+
+
+def _tick_sec(rec: dict) -> float:
+    """The record's sweep interval. `validate_meta` refuses a non-positive or
+    non-numeric `tick_sec` at WRITE time, so this read is total: an absent field
+    is the documented default, and no value that reached the record can raise
+    inside the loop."""
+    v = rec.get("tick_sec")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return DEFAULT_TICK_SEC
+    return float(v)
+
+
+def validate_meta(meta: dict, record: dict) -> str | None:
+    """Refuse a `tick_sec` that is not a positive number at WRITE time — the
+    point of the mistake. Silently defaulting it (rust/swift did) or raising out
+    of the tick loop (python did) both turn an operator's typo into a behaviour
+    change nobody is told about."""
+    merged = {**record, **meta}
+    if "tick_sec" not in merged:
+        return None
+    v = merged["tick_sec"]
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+        return "scheduler: tick_sec must be a positive number of seconds"
+    return None
 
 
 # ─── file routing ────────────────────────────────────────────────
@@ -160,68 +215,88 @@ async def _tick_loop(sid: str, kernel) -> None:
             rec = kernel.get(sid)
             if rec is None:
                 return
-            tick_sec = float(rec.get("tick_sec") or 1.0)
-            await asyncio.sleep(tick_sec)
+            await asyncio.sleep(_tick_sec(rec))
             if rec.get("paused"):
                 continue
             now = time.time()
             schedules = await _load(sid, kernel)
-            for sch in list(schedules):
-                if sch.get("paused"):
-                    continue
-                if now < sch.get("next_run", 0):
-                    continue
-                await _fire(sid, sch, kernel)
+            due = [
+                sch
+                for sch in list(schedules)
+                if not sch.get("paused") and now >= sch.get("next_run", 0)
+            ]
+            if not due:
+                continue
+            # Persist BEFORE the fire: run_count/next_run are bumped and saved
+            # first, so a crash inside the fire window does not re-fire the same
+            # tick on reboot (restart semantics are explicit: at-most-once).
+            for sch in due:
                 sch["run_count"] = sch.get("run_count", 0) + 1
-                sch["next_run"] = time.time() + sch["interval_seconds"]
-                if err := await _save(sid, kernel):
-                    logger.warning(
-                        "scheduler %s: persist failed: %s", sid, err.get("error")
-                    )
+                sch["next_run"] = now + sch["interval_seconds"]
+            if err := await _save(sid, kernel):
+                logger.warning(
+                    "scheduler %s: persist failed: %s", sid, err.get("error")
+                )
+            await _fire_many(sid, due, kernel)
     except asyncio.CancelledError:
         pass
     except Exception:
         logger.exception("scheduler tick crashed for %s", sid)
 
 
-async def _fire(sid: str, sch: dict, kernel) -> None:
-    target = sch.get("target", "")
-    payload = sch.get("payload") or {}
-    ts = time.time()
-    result = None
-    error = None
-    try:
-        result = (await kernel.send([{"target": target, "payload": payload}]))[0][
-            "result"
-        ]
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
+def _fire_item(sch: dict) -> dict:
+    item = {"target": sch.get("target", ""), "payload": sch.get("payload") or {}}
+    if sch.get("timeout") is not None:
+        item["timeout"] = sch["timeout"]
+    return item
 
-    event = {
-        "type": "schedule_fired",
-        "schedule_id": sch["id"],
-        "scheduler_id": sid,
-        "target": target,
-        "payload": payload,
-        "result": result,
-        "error": error,
-        "ts": ts,
-        "duration_ms": int((time.time() - ts) * 1000),
-    }
-    if err := await _append_history(sid, kernel, event):
-        logger.warning(
-            "scheduler %s: history persist failed: %s", sid, err.get("error")
-        )
-    # ONE delivery per tick. This used to also emit `schedule_fired` onto the
-    # TARGET's inbox, so a live program (exec_bridge mail → on_message) received
-    # every tick TWICE — the payload send and then this telemetry echo of the same
-    # tick, result included. Measured 2026-08-07 (combined probe, opus): the model
-    # discovered it live, named it "the double-fire hazard", and had to design its
-    # tool around filtering the duplicate. Telemetry about a fire is the
-    # SCHEDULER's story: its own inbox carries the event for watchers and
-    # `history` already persists it; the target got the actual payload, which IS
-    # the tick.
-    await kernel.emit(sid, event)
+
+async def _fire_many(sid: str, due: list[dict], kernel) -> None:
+    """Fire every due schedule as ONE batch send — concurrent, no head-of-line
+    blocking — then record one `schedule_fired` per outcome."""
+    ts = time.time()
+    outcomes: list[dict | None]
+    try:
+        outcomes = list(await kernel.send([_fire_item(s) for s in due]))
+    except Exception as e:
+        failure = {"status": "failed", "result": {"error": f"{type(e).__name__}: {e}"}}
+        outcomes = [failure for _ in due]
+    duration_ms = int((time.time() - ts) * 1000)
+    for sch, out in zip(due, outcomes):
+        status = (out or {}).get("status")
+        res = (out or {}).get("result")
+        result = None
+        error = None
+        if status == "completed":
+            result = res
+        else:
+            detail = res.get("error") if isinstance(res, dict) else res
+            error = f"{status}: {detail}"
+        event = {
+            "type": "schedule_fired",
+            "schedule_id": sch["id"],
+            "scheduler_id": sid,
+            "target": sch.get("target", ""),
+            "payload": sch.get("payload") or {},
+            "result": result,
+            "error": error,
+            "ts": ts,
+            "duration_ms": duration_ms,
+        }
+        if err := await _append_history(sid, kernel, event):
+            logger.warning(
+                "scheduler %s: history persist failed: %s", sid, err.get("error")
+            )
+        # ONE delivery per tick. This used to also emit `schedule_fired` onto the
+        # TARGET's inbox, so a live program (exec_bridge mail → on_message)
+        # received every tick TWICE — the payload send and then this telemetry
+        # echo of the same tick, result included. Measured 2026-08-07 (combined
+        # probe, opus): the model discovered it live, named it "the double-fire
+        # hazard", and had to design its tool around filtering the duplicate.
+        # Telemetry about a fire is the SCHEDULER's story: its own inbox carries
+        # the event for watchers and `history` already persists it; the target
+        # got the actual payload, which IS the tick.
+        await kernel.emit(sid, event)
 
 
 # ─── verbs ──────────────────────────────────────────────────────
@@ -233,7 +308,7 @@ async def _reflect(id, payload, kernel):
     return {
         "id": id,
         "sentence": "Recurring-task scheduler.",
-        "tick_sec": float(rec.get("tick_sec") or 1.0),
+        "tick_sec": _tick_sec(rec),
         "paused": bool(rec.get("paused")),
         "running": id in _tick_tasks and not _tick_tasks[id].done(),
         "verbs": {
@@ -254,14 +329,28 @@ async def _boot(id, payload, kernel):
 
 
 async def _schedule(id, payload, kernel):
-    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
+    """args: target:str, payload:{type:..,...}, interval_seconds:int (default 60), timeout:number? (seconds per fire; absent = wait forever). Returns {schedule_id, schedule}. Persisted THROUGH the loader; failfast if no store wired."""
     target = payload.get("target", "")
-    sched_payload = payload.get("payload") or {}
-    interval = max(1, int(payload.get("interval_seconds", 60)))
+    sched_payload = payload.get("payload")
+    if sched_payload is None:
+        sched_payload = {}
+    if not isinstance(sched_payload, dict):
+        # A list/string here used to raise `.get` out of the handler.
+        return bad("schedule", "payload", "an object with type")
+    interval = _int_arg(payload, "interval_seconds", 60, "schedule", 1)
+    if isinstance(interval, dict):
+        return interval
     if not target:
         return {"error": "schedule: target required"}
     if not sched_payload.get("type"):
         return {"error": "schedule: payload.type required"}
+    timeout = payload.get("timeout")
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
+        return bad("schedule", "timeout", "a positive number of seconds")
     sch = {
         "id": f"sch_{secrets.token_hex(3)}",
         "target": target,
@@ -272,6 +361,8 @@ async def _schedule(id, payload, kernel):
         "run_count": 0,
         "paused": False,
     }
+    if timeout is not None:
+        sch["timeout"] = timeout
     (await _load(id, kernel)).append(sch)
     if err := await _save(id, kernel):
         # roll back the in-cache append so a failed persist leaves no phantom schedule
@@ -347,27 +438,30 @@ async def _resume(id, payload, kernel):
 
 
 async def _tick_now(id, payload, kernel):
-    """args: schedule_id:str (req). Fires that schedule immediately, bumps run_count, persists. Returns {fired:true, schedule_id}."""
+    """args: schedule_id:str (req). Bumps run_count, persists, then fires that schedule immediately. Returns {fired:true, schedule_id}."""
     sid = payload.get("schedule_id")
     if not sid:
         return {"error": "tick_now: schedule_id required"}
     for s in await _load(id, kernel):
         if s["id"] == sid:
-            await _fire(id, s, kernel)
             s["run_count"] = s.get("run_count", 0) + 1
             if err := await _save(id, kernel):
+                s["run_count"] -= 1
                 return {
                     "error": f"scheduler.tick_now: {err['error']}",
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
+            await _fire_many(id, [s], kernel)
             return {"fired": True, "schedule_id": sid}
     return {"error": f"schedule {sid!r} not found"}
 
 
 async def _history(id, payload, kernel):
     """args: limit:int? (1..500, default 100), schedule_id:str?. Returns {history:[event,...], count}."""
-    limit = max(1, min(500, int(payload.get("limit", 100))))
-    entries = await _read_history(id, kernel, limit)
+    limit = _int_arg(payload, "limit", 100, "history", 1)
+    if isinstance(limit, dict):
+        return limit
+    entries = await _read_history(id, kernel, min(500, limit))
     sid = payload.get("schedule_id")
     if sid:
         entries = [e for e in entries if e.get("schedule_id") == sid]

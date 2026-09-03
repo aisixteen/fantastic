@@ -1,8 +1,28 @@
 {
-  "_doc": "C21 \u2014 ONE SEMANTICS, MANY TRANSPORTS, MANY RUNTIMES. The canonical assertion (a2a-tck ALL_TRANSPORTS, openai-agents runtime-symmetry): the SAME envelope, sent through ANY transport to ANY runtime, yields the SAME reply. Cases are DATA \u2014 add one here and every transport in every runtime is on the hook for it, with no per-runtime test to forget. JSON, not YAML, so every runtime reads it with what it already has: node parses it natively (the ts kernel ships ZERO runtime deps), python via json, rust via serde_json, swift via its own JSON type. JSON is also valid YAML, so a yaml parser reads it unchanged.",
-  "_root_placeholder": "`$root` in an `expect` means THAT RUNTIME'S root id \u2014 python `kernel_state`, rust/swift `core`. Parity asserts the per-runtime value, never equality. The target `kernel` is the alias every runtime resolves to its own root.",
-  "_fixture": "Built by each driver: `c21_probe` \u2014 an agent answering `poke` with {poked:<value>} and `reflect` with {id, sentence, verbs}; every transport leg granted on it. `c21_nobody` never exists.",
+  "_doc": "C21 — ONE SEMANTICS, MANY TRANSPORTS, MANY RUNTIMES. The canonical assertion (a2a-tck ALL_TRANSPORTS, openai-agents runtime-symmetry): the SAME envelope, sent through ANY transport to ANY runtime, yields the SAME reply. Cases are DATA — add one here and every transport in every runtime is on the hook for it, with no per-runtime test to forget. JSON, not YAML, so every runtime reads it with what it already has: node parses it natively (the ts kernel ships ZERO runtime deps), python via json, rust via serde_json, swift via its own JSON type. JSON is also valid YAML, so a yaml parser reads it unchanged.",
+  "_root_placeholder": "`$root` in an `expect` means THAT RUNTIME'S root id — python `kernel_state`, rust/swift `core`. Parity asserts the per-runtime value, never equality. The target `kernel` is the alias every runtime resolves to its own root.",
+  "_fixture": "Built by each driver: `c21_probe` — an agent answering `poke` with {poked:<value>} and `reflect` with {id, sentence, verbs}; every transport leg granted on it. `c21_nobody` never exists.",
+  "_order": "Cases replay IN ORDER against ONE kernel per leg, and a driver that compares legs pairwise replays the whole list per leg. So a case that MUTATES state must come FIRST and be idempotent — otherwise the legs after it observe a tree the first leg did not, and every later record-reading case (`list-agents-limited`) diverges for a reason that has nothing to do with the transport. `update-agent-shape` is the one mutating case; it sets a meta key no reflect surfaces.",
   "cases": [
+    {
+      "name": "update-agent-shape",
+      "target": "kernel",
+      "payload": {
+        "type": "update_agent",
+        "id": "c21_probe",
+        "note": "c21"
+      },
+      "expect_keys": [
+        "updated",
+        "id",
+        "agent"
+      ],
+      "expect": {
+        "updated": true,
+        "id": "c21_probe"
+      },
+      "note": "The record rides UNDER `agent`; the bare record rust and swift used to answer left a caller branching on `updated` reading nothing for the call that succeeded. FIRST and idempotent — see `_order`."
+    },
     {
       "name": "reflect-agent",
       "target": "c21_probe",
@@ -61,7 +81,7 @@
         "reason": "missing_arg",
         "arg": "parent_id"
       },
-      "note": "`parent_id` is REQUIRED on create_agent (#23) \u2014 it used to be accepted and silently stripped while the addressed agent became the parent."
+      "note": "`parent_id` is REQUIRED on create_agent (#23) — it used to be accepted and silently stripped while the addressed agent became the parent."
     },
     {
       "name": "update-nothing",
@@ -93,7 +113,14 @@
       },
       "expect": {
         "id": "$root"
-      }
+      },
+      "expect_keys": [
+        "id",
+        "tree",
+        "kernel_verbs"
+      ],
+      "pairwise": false,
+      "note": "pairwise:false — the reply is checked for SHAPE on every transport but never byte-diffed. The distilled `tree` is VIEWER-DEPENDENT: `reflect` is gated like every other verb, so each node is asked only if the CALLER may reflect it, and a transport leg (an agent) legitimately sees fewer nodes than the in-proc operator (ungated). Same reason the origin-scoped `ledger` is pairwise:false. Before 2026-09-02 the roster walk dispatched `reflect` directly, so any caller allowed to reflect ONE agent read every descendant's sentence out of the tree."
     },
     {
       "name": "ledger-answers-everywhere",
@@ -106,16 +133,57 @@
         "next"
       ],
       "pairwise": false,
-      "note": "pairwise:false \u2014 the reply is checked for SHAPE on every transport but never byte-diffed. `ledger` is ORIGIN-SCOPED by design (each leg sees the executions IT originated) and history accumulates between legs. The first ledger-all run proved it: the ws leg's view diverged from the operator's, correctly."
+      "note": "pairwise:false — the reply is checked for SHAPE on every transport but never byte-diffed. `ledger` is ORIGIN-SCOPED by design (each leg sees the executions IT originated) and history accumulates between legs. The first ledger-all run proved it: the ws leg's view diverged from the operator's, correctly."
     },
     {
       "name": "no-verb-at-all",
       "target": "c21_probe",
       "payload": {},
       "expect": {
-        "reason": "unhandled"
+        "reason": "missing_arg",
+        "arg": "payload.type"
       },
-      "note": "An empty payload is not a boot: a bare agent answers `unhandled`, it does not silently succeed."
+      "note": "A payload without `type` is not a send: every runtime refuses it in the launch phase (missing_arg on payload.type) for every sender, operator included — never a TypeError, never an `unhandled` from the target (measured 2026-09-02)."
+    },
+    {
+      "name": "create-empty-id",
+      "target": "kernel",
+      "payload": {
+        "type": "create_agent",
+        "handler_module": "c21_echo.tools",
+        "parent_id": "kernel",
+        "id": ""
+      },
+      "expect": {
+        "reason": "bad_arg",
+        "arg": "id"
+      },
+      "note": "A SUPPLIED id is the caller's choice and is validated as one; only an ABSENT id is minted. `\"\"` used to be silently replaced by a minted id in rust/swift."
+    },
+    {
+      "name": "delete-unknown",
+      "target": "kernel",
+      "payload": {
+        "type": "delete_agent",
+        "id": "c21_nobody"
+      },
+      "expect": {
+        "reason": "unknown_agent",
+        "deleted": false
+      },
+      "note": "A typo does not delete anything, and says so with a code plus the live `agents` index to correct from. Rust and swift answered a bare `{error: \"no agent ...\"}` — no code to branch on, no ids to recover with."
+    },
+    {
+      "name": "kernel-verb-on-child",
+      "target": "c21_probe",
+      "payload": {
+        "type": "ps"
+      },
+      "expect": {
+        "reason": "not_here",
+        "verb": "ps"
+      },
+      "note": "Kernel verbs act on the TREE, so the agent named is the OPERAND, not the actor — every runtime refuses them at a non-root agent with `not_here` AND names the misaddressed verb in `verb`, which the ports used to omit."
     }
   ]
 }

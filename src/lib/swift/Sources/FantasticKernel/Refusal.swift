@@ -52,6 +52,12 @@ public enum Refusal {
     public static let exists = "exists"
     /// The agent has no such verb (carries `verb`).
     public static let unhandled = "unhandled"
+    /// The named THING is absent — a path, a job, a key. NOT `unknownAgent`: the
+    /// agent answered, and what it was asked for is not there. Python has carried
+    /// this code since the set was written; the ports omitted it, so every bundle
+    /// that needed it (exec_bridge's `no job`, a file bundle's missing path)
+    /// answered a bare `{error}` and a caller branching on `reason` never matched.
+    public static let notFound = "not_found"
 
     // Transport codes — a leg that could not carry the call at all. Owned by the
     // bridge/relay bundles; listed here because they share the field, and a
@@ -69,7 +75,7 @@ public enum Refusal {
     /// Every legal code. A value outside this set is a programming error.
     public static let codes: Set<String> = [
         unauthorized, unknownAgent, missingArg, badArg, invalidMeta, locked,
-        notHere, exists, unhandled, notConnected, transportError,
+        notHere, exists, unhandled, notFound, notConnected, transportError,
         transportClosed, timeout,
     ]
 
@@ -147,11 +153,18 @@ public enum Refusal {
 
     /// Right verb, wrong agent. Kernel verbs act on the TREE, so the agent named
     /// is the OPERAND, not the actor — the refusal says where to send it.
+    ///
+    /// PYTHON'S PROSE, verbatim, plus the machine field. The runtimes said the
+    /// same thing in different words on the same `not_here` code, and the ports
+    /// dropped `verb` entirely — so a caller could branch on the code but not
+    /// learn WHICH verb it had misaddressed without parsing the sentence.
     public static func notHere(_ verb: String, _ id: String) -> JSON {
         make(
             notHere,
-            "\(verb): kernel-owned verb, answered by the ROOT only (asked \"\(id)\")",
-            hint: "send \(verb) to 'kernel'; the id you name is the OPERAND, not the target"
+            "\(verb) is a kernel verb — \(id) does not answer it",
+            hint: "address the kernel root (alias 'kernel'); name the agent you mean in "
+                + "`parent_id` / `id`",
+            extra: [("verb", .string(verb))]
         )
     }
 

@@ -84,9 +84,11 @@ async def _watch_directory(id, payload, kernel):
     without polling."""
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {
-            "error": "relay_connector.watch_directory: not connected (call boot first)"
-        }
+        return refusal(
+            NOT_CONNECTED,
+            "relay_connector.watch_directory: not connected",
+            hint="call boot first",
+        )
     return await st.transport.watch_directory()
 
 
@@ -106,9 +108,11 @@ async def _set_identity(id, payload, kernel):
     list). Persists the change so it re-announces on the next boot. Boot first."""
     st = _state(id)
     if st.transport is None or st.transport.closed:
-        return {
-            "error": "relay_connector.set_identity: not connected (call boot first)"
-        }
+        return refusal(
+            NOT_CONNECTED,
+            "relay_connector.set_identity: not connected",
+            hint="call boot first",
+        )
     if (
         "role" in payload
         and payload["role"] is not None

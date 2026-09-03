@@ -168,5 +168,5 @@ fn one_shot_dispatch_returns_json_reply() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"id\""));
     assert!(stdout.contains("\"sentence\""));
-    assert!(stdout.contains("Filesystem root"));
+    assert!(stdout.contains("Filesystem edge of the io family"));
 }

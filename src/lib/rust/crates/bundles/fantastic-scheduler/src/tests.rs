@@ -1,13 +1,14 @@
 //! Unit tests for this bundle crate.
 //!
 //! All tests drive through `kernel.send`, with a `fantastic-file`
-//! agent for persistence. That exercises the real wire path the
-//! scheduler uses in production, not a stub.
+//! agent as the loader's discovered store. That exercises the real
+//! wire path the scheduler uses in production, not a stub.
 
 use super::*;
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
 use serde_json::Map;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Per-test agent id. SCHEDULER_TASKS and SCHEDULE_CACHE are
@@ -25,12 +26,100 @@ fn scheduler_id_for(tmp: &TempDir) -> String {
     )
 }
 
+fn now() -> f64 {
+    now_secs()
+}
+
+/// What a probe target saw when it was hit: when, and the scheduler's
+/// persisted `schedules.json` at that instant (when a capture path is set).
+type Seen = (f64, Option<Value>);
+
+/// Every probe hit so far, keyed by probe agent id.
+#[derive(Clone, Default)]
+struct Hits(Arc<Mutex<HashMap<String, Seen>>>);
+
+impl Hits {
+    fn get(&self, id: &str) -> Option<Seen> {
+        self.0.lock().unwrap().get(id).cloned()
+    }
+    fn has(&self, id: &str) -> bool {
+        self.0.lock().unwrap().contains_key(id)
+    }
+}
+
+/// A probe target: `hit` records when it ran (optionally blocking `block`
+/// seconds) so the tests can measure the scheduler's fire discipline.
+struct ProbeBundle {
+    hits: Hits,
+    capture: Option<PathBuf>,
+}
+
+#[async_trait]
+impl Bundle for ProbeBundle {
+    fn name(&self) -> &str {
+        "sched_probe"
+    }
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+            "boot" | "shutdown" => Ok(None),
+            "reflect" => Ok(Some(
+                json!({"id": agent_id.as_str(), "sentence": "scheduler probe", "verbs": {}}),
+            )),
+            "hit" => {
+                let doc = self
+                    .capture
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+                self.hits
+                    .0
+                    .lock()
+                    .unwrap()
+                    .insert(agent_id.as_str().to_string(), (now(), doc));
+                if let Some(b) = payload.get("block").and_then(Value::as_f64) {
+                    tokio::time::sleep(Duration::from_secs_f64(b)).await;
+                }
+                Ok(Some(json!({"hit": agent_id.as_str()})))
+            }
+            other => Ok(Some(json!({"error": format!("unknown verb '{other}'")}))),
+        }
+    }
+}
+
+/// A kernel with the loader's store (a file agent at `.fantastic`) and a
+/// scheduler that fires against `core` (its $parent — no grant needed).
 async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
+    let (kernel, sch, _hits) = mk_probed(tmp, &[], None, true).await;
+    (kernel, sch)
+}
+
+/// A kernel with (optionally) the store, `probes` probe targets and a
+/// scheduler (tick 0.1s) granted to call them — both sides of the deny-all
+/// gate opened. `capture` makes every hit read that file.
+async fn mk_probed(
+    tmp: &TempDir,
+    probes: &[&str],
+    capture: Option<PathBuf>,
+    with_store: bool,
+) -> (Arc<Kernel>, AgentId, Hits) {
+    let hits = Hits::default();
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle);
+    kernel.bundles.register(
+        "sched_probe.tools",
+        ProbeBundle {
+            hits: hits.clone(),
+            capture,
+        },
+    );
     let kernel = Arc::new(kernel);
     let root = Agent::new(
         AgentId::from("core"),
@@ -43,27 +132,45 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     let _rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let sch_id = scheduler_id_for(tmp);
-    let file_id = format!("ff_{}", sch_id);
-    // File agent rooted at the workdir.
-    let _ = kernel
-        .send(vec![Item::new(
-            AgentId::from("core"),
-            json!({
-                "type":"create_agent",
-                "parent_id": "kernel",
-                "handler_module":"file_bridge.tools",
-                "id": file_id,
-                "root": tmp.path().join(".fantastic").to_string_lossy(),
-                "ingress_rule": "allow_all_ingress",
-                // Two-sided deny-all: accept the scheduler that persists through it.
-                "callable_by": { sch_id.clone(): "*" },
-            }),
-        )])
-        .await
-        .remove(0)
-        .result;
-    // Scheduler bound to file_id.
-    let _ = kernel
+    if with_store {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("core"),
+                json!({
+                    "type":"create_agent",
+                    "parent_id": "kernel",
+                    "handler_module":"file_bridge.tools",
+                    "id": format!("ff_{sch_id}"),
+                    "root": tmp.path().join(".fantastic").to_string_lossy(),
+                    "ingress_rule": "allow_all_ingress",
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "store: {r}");
+    }
+    let mut can_call = Map::new();
+    for p in probes {
+        let r = kernel
+            .send(vec![Item::new(
+                AgentId::from("core"),
+                json!({
+                    "type":"create_agent",
+                    "parent_id": "kernel",
+                    "handler_module":"sched_probe.tools",
+                    "id": p,
+                    "callable_by": { sch_id.clone(): "*" },
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert!(r.get("error").is_none(), "probe {p}: {r}");
+        can_call.insert((*p).to_string(), json!("*"));
+    }
+    // Nothing to wire: the scheduler persists THROUGH the loader.
+    let r = kernel
         .send(vec![Item::new(
             AgentId::from("core"),
             json!({
@@ -71,17 +178,58 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
                 "parent_id": "kernel",
                 "handler_module":HANDLER_MODULE,
                 "id": sch_id,
-                "file_bridge_id": file_id,
                 "tick_sec": 0.1,
-                // Deny-all: the scheduler persists schedules.json to its store
-                // directly → an explicit grant (fires against `core` = its $parent).
-                "can_call": { file_id: "*" },
+                "can_call": can_call,
             }),
         )])
         .await
         .remove(0)
         .result;
-    (kernel, AgentId::from(sch_id.as_str()))
+    assert!(r.get("error").is_none(), "scheduler: {r}");
+    (kernel, AgentId::from(sch_id.as_str()), hits)
+}
+
+async fn schedule(
+    kernel: &Arc<Kernel>,
+    sch: &AgentId,
+    target: &str,
+    interval: u64,
+    extra: Value,
+) -> Value {
+    let mut payload = json!({
+        "type": "schedule",
+        "target": target,
+        "payload": {"type": "hit"},
+        "interval_seconds": interval,
+    });
+    if let Some(obj) = extra.as_object() {
+        for (k, v) in obj {
+            if k == "hit" {
+                payload["payload"]
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(v.as_object().cloned().unwrap_or_default());
+            } else {
+                payload[k] = v.clone();
+            }
+        }
+    }
+    kernel
+        .send(vec![Item::new(sch.clone(), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+async fn wait_for(mut pred: impl FnMut() -> bool, secs: f64) -> bool {
+    let deadline = now() + secs;
+    while now() < deadline {
+        if pred() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    pred()
 }
 
 #[test]
@@ -100,49 +248,49 @@ async fn reflect_reports_state() {
         .remove(0)
         .result;
     assert_eq!(r["id"], sch.as_str());
-    let expected_ff = format!("ff_{}", sch.as_str());
-    assert_eq!(r["file_bridge_id"], expected_ff);
+    // Persists through the loader — no per-agent wiring is surfaced.
+    assert!(r.get("file_bridge_id").is_none(), "{r}");
     assert_eq!(r["paused"], false);
     // `create_agent` auto-fires boot (Python parity — see
-    // lifecycle::create_from_payload). Scheduler.boot with
-    // file_bridge_id + tick_sec set starts the tick loop, so
-    // running is true by reflect time.
+    // lifecycle::create_from_payload), so the tick loop is running by
+    // reflect time.
     assert_eq!(r["running"], true);
 }
 
 #[tokio::test]
-async fn boot_refuses_without_file_bridge_id() {
+async fn boot_succeeds_without_store_schedule_failfasts() {
+    // Boot never needs a store (python): the tick loop starts; the first WRITE
+    // surfaces the loader's error, and nothing lingers in the cache.
     let tmp = TempDir::new().unwrap();
-    let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, SchedulerBundle);
-    kernel
-        .bundles
-        .register("file_bridge.tools", fantastic_file::FileBundle);
-    let kernel = Arc::new(kernel);
-    let root = Agent::new(
-        AgentId::from("core"),
-        None,
-        None,
-        Map::new(),
-        tmp.path().join(".fantastic"),
-        false,
-    );
-    let _rx = kernel.register(Arc::clone(&root));
-    kernel.set_root(Arc::clone(&root));
-    let _ = kernel
-            .send(vec![Item::new(AgentId::from("core"), json!({"type":"create_agent","parent_id":"kernel","handler_module":HANDLER_MODULE,"id":"sch2"}))])
-            .await
-            .remove(0)
-            .result;
+    let (kernel, sch, _hits) = mk_probed(&tmp, &[], None, false).await;
+    let r = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["running"], true, "{r}");
     let r = kernel
         .send(vec![Item::new(
-            AgentId::from("sch2"),
-            json!({"type": "boot"}),
+            sch.clone(),
+            json!({
+                "type": "schedule",
+                "target": "core",
+                "payload": {"type": "list_agents"},
+                "interval_seconds": 5,
+            }),
         )])
         .await
         .remove(0)
         .result;
-    assert!(r["error"].as_str().unwrap().contains("file_bridge_id"));
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.starts_with("scheduler.schedule:"), "{r}");
+    assert!(err.contains("no store"), "{r}");
+    let listed = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(listed["schedules"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -171,7 +319,7 @@ async fn schedule_persists_and_lists() {
         .result;
     let schedules = listed["schedules"].as_array().unwrap();
     assert!(schedules.iter().any(|s| s["id"] == sid));
-    // schedules.json exists on disk via file agent.
+    // schedules.json exists on disk via the loader's store.
     assert!(tmp
         .path()
         .join(format!(".fantastic/agents/{}/schedules.json", sch))
@@ -200,6 +348,35 @@ async fn schedule_requires_target_and_payload_type() {
         .remove(0)
         .result;
     assert!(r2["error"].as_str().unwrap().contains("payload.type"));
+}
+
+#[tokio::test]
+async fn schedule_rejects_a_bad_timeout() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch) = mk_kernel(&tmp).await;
+    for bad_value in [json!(0), json!(-1), json!("5"), json!(true)] {
+        let r = kernel
+            .send(vec![Item::new(
+                sch.clone(),
+                json!({
+                    "type": "schedule",
+                    "target": "core",
+                    "payload": {"type": "list_agents"},
+                    "timeout": bad_value,
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{r}");
+        assert_eq!(r["arg"], "timeout", "{r}");
+    }
+    let listed = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(listed["schedules"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -353,4 +530,231 @@ async fn tick_loop_fires_due_schedule() {
         run_count >= 1,
         "expected ≥1 fire after 1.5s, got run_count={run_count}",
     );
+}
+
+#[tokio::test]
+async fn due_schedules_fire_as_one_concurrent_batch() {
+    // Two due schedules; the FIRST one blocks 0.3s. Sequential firing would
+    // start the second ≥0.3s after the first; one batch starts both together.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_slow", "p_fast"], None, true).await;
+    let r1 = schedule(&kernel, &sch, "p_slow", 1, json!({"hit": {"block": 0.3}})).await;
+    let r2 = schedule(&kernel, &sch, "p_fast", 1, json!({})).await;
+    assert!(r1["schedule_id"].is_string(), "{r1}");
+    assert!(r2["schedule_id"].is_string(), "{r2}");
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await;
+    let both = wait_for(|| hits.has("p_slow") && hits.has("p_fast"), 3.0).await;
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
+        .await;
+    assert!(both, "both probes must be hit");
+    let gap = hits.get("p_fast").unwrap().0 - hits.get("p_slow").unwrap().0;
+    assert!(
+        gap.abs() < 0.25,
+        "not one batch: fast started {gap:.3}s after slow"
+    );
+    let listed = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+        .await
+        .remove(0)
+        .result;
+    for s in listed["schedules"].as_array().unwrap() {
+        assert!(s["run_count"].as_u64().unwrap() >= 1, "{s}");
+    }
+}
+
+#[tokio::test]
+async fn next_run_is_persisted_before_the_fire() {
+    // The probe reads schedules.json the moment it is hit: the store must
+    // already hold the bumped run_count/next_run (persist-BEFORE-fire).
+    let tmp = TempDir::new().unwrap();
+    let sch_id = scheduler_id_for(&tmp);
+    let capture = tmp
+        .path()
+        .join(format!(".fantastic/agents/{sch_id}/schedules.json"));
+    let (kernel, sch, hits) = mk_probed(&tmp, &["p_cap"], Some(capture), true).await;
+    let r = schedule(&kernel, &sch, "p_cap", 1, json!({})).await;
+    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "boot"}))])
+        .await;
+    let hit = wait_for(|| hits.has("p_cap"), 3.0).await;
+    let _ = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "shutdown"}))])
+        .await;
+    assert!(hit, "probe must be hit");
+    let (at, doc) = hits.get("p_cap").unwrap();
+    let doc = doc.expect("store had no schedules.json at fire time");
+    let rec = doc
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == sid)
+        .cloned()
+        .unwrap();
+    assert_eq!(rec["run_count"], 1, "{rec}");
+    assert!(
+        rec["next_run"].as_f64().unwrap() > at - 0.5,
+        "{rec} at {at}"
+    );
+}
+
+#[tokio::test]
+async fn a_schedule_timeout_bounds_its_fire() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, _hits) = mk_probed(&tmp, &["p_hang"], None, true).await;
+    let r = schedule(
+        &kernel,
+        &sch,
+        "p_hang",
+        60,
+        json!({"timeout": 0.1, "hit": {"block": 2.0}}),
+    )
+    .await;
+    let sid = r["schedule_id"].as_str().unwrap().to_string();
+    assert_eq!(r["schedule"]["timeout"], 0.1, "{r}");
+    let t0 = now();
+    let fired = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "tick_now", "schedule_id": sid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(fired["fired"], true, "{fired}");
+    assert!(
+        now() - t0 < 1.5,
+        "fire was not bounded by the schedule timeout"
+    );
+    let h = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "history", "schedule_id": sid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(h["count"], 1, "{h}");
+    let err = h["history"][0]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("timed_out"), "{h}");
+}
+
+#[tokio::test]
+async fn non_int_args_are_bad_arg_refusals() {
+    // #136 — a present-but-wrong number is a TYPO, not a new default.
+    // `as_u64().unwrap_or(60)` used to swallow `interval_seconds: "60"` and
+    // schedule hourly what the caller wrote as per-minute.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, _hits) = mk_probed(&tmp, &["p_x"], None, true).await;
+    for bad_value in [
+        json!("60"),
+        json!(1.5),
+        json!(true),
+        json!(null),
+        json!(0),
+        json!(-1),
+        json!([60]),
+    ] {
+        let r = kernel
+            .send(vec![Item::new(
+                sch.clone(),
+                json!({
+                    "type": "schedule", "target": "p_x", "payload": {"type": "hit"},
+                    "interval_seconds": bad_value.clone(),
+                }),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], json!("bad_arg"), "{bad_value}: {r}");
+        assert_eq!(r["arg"], json!("interval_seconds"), "{bad_value}: {r}");
+    }
+    // Nothing was scheduled by a refused call.
+    let listed = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "list"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(listed["schedules"], json!([]), "{listed}");
+    // ABSENT still takes the documented default (60s), and is NOT refused.
+    let ok = kernel
+        .send(vec![Item::new(
+            sch.clone(),
+            json!({"type": "schedule", "target": "p_x", "payload": {"type": "hit"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(ok["schedule"]["interval_seconds"], json!(60), "{ok}");
+
+    for bad_value in [json!("100"), json!(2.0), json!(true), json!(null), json!(0)] {
+        let h = kernel
+            .send(vec![Item::new(
+                sch.clone(),
+                json!({"type": "history", "limit": bad_value.clone()}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(h["reason"], json!("bad_arg"), "{bad_value}: {h}");
+        assert_eq!(h["arg"], json!("limit"), "{bad_value}: {h}");
+    }
+    // ABSENT `limit` is the default page, not a refusal.
+    let h = kernel
+        .send(vec![Item::new(sch.clone(), json!({"type": "history"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        h.get("history").is_some() && h.get("reason").is_none(),
+        "{h}"
+    );
+}
+
+#[tokio::test]
+async fn schedule_refuses_a_non_object_payload() {
+    // #136 — `payload: [1]` can never carry a `type`; say so as an ARG error.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, sch, _hits) = mk_probed(&tmp, &["p_x"], None, true).await;
+    for bad_value in [json!([1]), json!("hit"), json!(7)] {
+        let r = kernel
+            .send(vec![Item::new(
+                sch.clone(),
+                json!({"type": "schedule", "target": "p_x", "payload": bad_value.clone()}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], json!("bad_arg"), "{bad_value}: {r}");
+        assert_eq!(r["arg"], json!("payload"), "{bad_value}: {r}");
+    }
+}
+
+#[tokio::test]
+async fn a_non_numeric_tick_sec_is_refused_at_write_time() {
+    // #136 — `tick_sec: "0.5"` was silently defaulted to 1.0. The record is
+    // judged where the mistake is made.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, _sch, _hits) = mk_probed(&tmp, &[], None, true).await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({
+                "type": "create_agent", "parent_id": "kernel",
+                "handler_module": HANDLER_MODULE,
+                "id": "sch_ticks", "tick_sec": "0.5",
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("invalid_meta"), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains("tick_sec"),
+        "{r}"
+    );
+    assert!(!kernel.agents.contains_key(&AgentId::from("sch_ticks")));
 }

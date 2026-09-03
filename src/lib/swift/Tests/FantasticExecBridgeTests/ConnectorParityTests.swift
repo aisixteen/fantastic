@@ -42,8 +42,12 @@ struct ConnectorParityTests {
     /// Runs even in a swift-only checkout, where the test above skips.
     @Test func vendoredConnectorCarriesTheWireContract() {
         for needle in [
-            "FANTASTIC_CTRL_FD", "FANTASTIC_SELF_ID", "FANTASTIC_ARGS",
+            "FANTASTIC_CTRL_FD", "FANTASTIC_SELF_ID",
             #"_st.pack(">I""#, "_o._exit(0)",
+            // The write half of the 16 MiB bound: the client refuses to send a
+            // frame the relay would close the socket over, and says what to do
+            // instead. Naming it here keeps the two ends from drifting apart.
+            "_MAX_FRAME", "frame exceeds 16 MiB", "write_stream",
         ] {
             #expect(CONNECTOR_SRC.contains(needle))
         }

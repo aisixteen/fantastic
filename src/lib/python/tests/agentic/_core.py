@@ -341,8 +341,8 @@ async def core_a_reboot_rehydrates_the_identical_roster(h):
             declared = {a["id"] for a in ln.declared_agents if a.get("id")}
             check(
                 "PC-4",
-                set(boot.get("skipped") or []) == declared,
-                f"{ln.id}: skipped {sorted(boot.get('skipped') or [])},"
+                set(boot.get("reapplied") or []) == declared,
+                f"{ln.id}: reapplied {sorted(boot.get('reapplied') or [])},"
                 f" declared {sorted(declared)}",
             )
     # The reboot REPLACED the kernel; hand it back or every later

@@ -191,8 +191,8 @@ struct BundleSmokeTests {
 
     @Test func schedulerScheduleListUnschedule() async throws {
         // py/rust contract: schedule {target, payload, interval_seconds} → mints a
-        // schedule_id, persisted THROUGH file_bridge_id (store-relative
-        // agents/<id>/schedules.json); schedule/boot FAILFAST until wired.
+        // schedule_id, persisted THROUGH the loader (store-relative
+        // agents/<id>/schedules.json); a WRITE failfasts until a store is wired.
         let fm = FileManager.default
         let rel = "fantastic-sched-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -276,6 +276,242 @@ struct BundleSmokeTests {
             fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/history.jsonl").path))
     }
 
+    // ── #82 / #145: boot needs no store; one concurrent batch per tick,
+    //    persist-before-fire, per-schedule timeout ──────────────────
+
+    /// A store-backed kernel with `probes` probe targets and a scheduler
+    /// (tick 0.1s) granted to call them — both sides of the deny-all gate open.
+    private func makeProbedScheduler(
+        dir: URL, rel: String, probes: [String], capture: URL? = nil
+    ) async -> (Kernel, SchedProbe) {
+        let kernel = makeKernelWithAll(rootPath: dir)
+        let probe = SchedProbe(capture: capture)
+        kernel.bundles.register("sched_probe.tools", probe)
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "file_bridge.tools", "id": "store",
+                "root": .string(rel), "ingress_rule": "allow_all_ingress",
+            ])])[0].result
+        var canCall: JSON = .object([:])
+        for p in probes {
+            let r = await kernel.send([Item("core", [
+                    "type": "create_agent", "parent_id": "core", "handler_module": "sched_probe.tools", "id": .string(p),
+                    "callable_by": ["sched": "*"],
+                ])])[0].result
+            #expect(r["error"].isNull, "\(r)")
+            canCall[p] = "*"
+        }
+        let r = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "scheduler.tools", "id": "sched",
+                "tick_sec": .double(0.1), "can_call": canCall,
+            ])])[0].result
+        #expect(r["error"].isNull, "\(r)")
+        return (kernel, probe)
+    }
+
+    private func schedule(
+        _ kernel: Kernel, _ target: String, interval: Int64 = 1, hit: [String: JSON] = [:],
+        timeout: JSON? = nil
+    ) async -> JSON {
+        var hitPayload: JSON = ["type": "hit"]
+        for (k, v) in hit { hitPayload[k] = v }
+        var payload: JSON = [
+            "type": "schedule", "target": .string(target), "interval_seconds": .integer(interval),
+            "payload": hitPayload,
+        ]
+        if let timeout { payload["timeout"] = timeout }
+        return await kernel.send([Item("sched", payload)])[0].result
+    }
+
+    private func waitFor(_ pred: () -> Bool, seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if pred() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return pred()
+    }
+
+    @Test func schedulerBootsWithoutAStoreAndScheduleFailfasts() async throws {
+        // Boot never needs a store (python): the tick loop starts; the first
+        // WRITE surfaces the loader's error, and nothing lingers.
+        let kernel = makeKernelWithAll()
+        _ = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core", "handler_module": "scheduler.tools", "id": "sched",
+            ])])[0].result
+        let boot = await kernel.send([Item("sched", ["type": "boot"])])[0].result
+        #expect(boot["running"].asBool == true, "\(boot)")
+        let r = await kernel.send([Item("sched", [
+                "type": "schedule", "target": "core", "interval_seconds": .integer(5),
+                "payload": ["type": "list_agents"] as JSON,
+            ])])[0].result
+        let err = r["error"].asString ?? ""
+        #expect(err.hasPrefix("scheduler.schedule:"), "\(r)")
+        #expect(err.contains("no store"), "\(r)")
+        let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
+        #expect((list["schedules"].asArray ?? []).isEmpty)
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+    }
+
+    @Test func dueSchedulesFireAsOneConcurrentBatch() async throws {
+        // Two due schedules; the FIRST one blocks. Sequential firing cannot hit
+        // the second until that block ends, so "the fast one landed while the
+        // slow one was still inside its block" is the proof.
+        //
+        // The proof is a DEADLINE, not the gap between the two start stamps: the
+        // gap is load-dependent and flaked under the full suite (0.41s against a
+        // 0.25s tolerance, 2026-09-03) even though both fires were dispatched in
+        // one batch. The block is 4s and the deadline 3s, so the margin is wide
+        // enough that saturation cannot fake a pass.
+        let fm = FileManager.default
+        let rel = "fantastic-schedbatch-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let (kernel, probe) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_slow", "p_fast"])
+        let r1 = await schedule(kernel, "p_slow", hit: ["block": .double(4.0)])
+        let r2 = await schedule(kernel, "p_fast")
+        #expect(r1["schedule_id"].asString != nil, "\(r1)")
+        #expect(r2["schedule_id"].asString != nil, "\(r2)")
+        _ = await kernel.send([Item("sched", ["type": "boot"])])[0].result
+        // Anchor on the SLOW hit, never on boot: the first fire is due one
+        // interval out, so a deadline measured from boot races the interval.
+        let slowSeen = await waitFor({ probe.hit("p_slow") != nil }, seconds: 4.0)
+        #expect(slowSeen, "the slow schedule must fire")
+        // p_slow is now inside its 4s block (it records BEFORE sleeping).
+        // Sequential firing could not reach p_fast until that block ends; the 3s
+        // window leaves a full second of margin for a saturated executor.
+        let fastEarly = await waitFor({ probe.hit("p_fast") != nil }, seconds: 3.0)
+        #expect(fastEarly, "not one batch: the fast fire waited for the slow one")
+        let both = await waitFor({ probe.hit("p_slow") != nil && probe.hit("p_fast") != nil }, seconds: 6.0)
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        #expect(both, "both probes must be hit")
+        let list = await kernel.send([Item("sched", ["type": "list"])])[0].result
+        for s in list["schedules"].asArray ?? [] {
+            #expect((s["run_count"].asInt ?? 0) >= 1, "\(s)")
+        }
+    }
+
+    @Test func nextRunIsPersistedBeforeTheFire() async throws {
+        // The probe reads schedules.json the moment it is hit: the store must
+        // already hold the bumped run_count/next_run (persist-BEFORE-fire).
+        let fm = FileManager.default
+        let rel = "fantastic-schedpersist-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let capture = dir.appendingPathComponent("agents/sched/schedules.json")
+        let (kernel, probe) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_cap"], capture: capture)
+        let r = await schedule(kernel, "p_cap")
+        let sid = try #require(r["schedule_id"].asString)
+        _ = await kernel.send([Item("sched", ["type": "boot"])])[0].result
+        let hit = await waitFor({ probe.hit("p_cap") != nil }, seconds: 3.0)
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+        #expect(hit, "probe must be hit")
+        let seen = try #require(probe.hit("p_cap"))
+        let doc = try #require(seen.doc, "store had no schedules.json at fire time")
+        let rec = try #require((doc.asArray ?? []).first { $0["id"].asString == sid })
+        #expect(rec["run_count"].asInt == 1, "\(rec)")
+        #expect((rec["next_run"].asDouble ?? 0) > seen.at - 0.5, "\(rec) at \(seen.at)")
+    }
+
+    @Test func aScheduleTimeoutBoundsItsFire() async throws {
+        let fm = FileManager.default
+        let rel = "fantastic-schedtimeout-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let (kernel, _) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_hang"])
+        let r = await schedule(kernel, "p_hang", interval: 60, hit: ["block": .double(2.0)], timeout: .double(0.1))
+        let sid = try #require(r["schedule_id"].asString)
+        #expect(r["schedule"]["timeout"].asDouble == 0.1, "\(r)")
+        let t0 = Date()
+        let fired = await kernel.send([Item("sched", ["type": "tick_now", "schedule_id": .string(sid)])])[0].result
+        #expect(fired["fired"].asBool == true, "\(fired)")
+        #expect(Date().timeIntervalSince(t0) < 1.5, "fire was not bounded by the schedule timeout")
+        let h = await kernel.send([Item("sched", ["type": "history", "schedule_id": .string(sid)])])[0].result
+        #expect(h["count"].asInt == 1, "\(h)")
+        #expect((h["history"][0]["error"].asString ?? "").contains("timed_out"), "\(h)")
+        // A bad timeout is refused with the kernel's bad_arg code.
+        for badValue in [JSON.integer(0), .integer(-1), .string("5"), .bool(true)] {
+            let bad = await schedule(kernel, "p_hang", timeout: badValue)
+            #expect(bad["reason"].asString == "bad_arg" && bad["arg"].asString == "timeout", "\(bad)")
+        }
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+    }
+
+    @Test func nonIntArgsAreBadArgRefusals() async throws {
+        // #136 — a present-but-wrong number is a TYPO, not a new default.
+        // `asInt ?? 60` used to swallow `interval_seconds: "60"` and schedule
+        // hourly what the caller wrote as per-minute.
+        let fm = FileManager.default
+        let rel = "fantastic-schedints-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let (kernel, _) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_x"])
+        let badIntervals: [JSON] = [
+            .string("60"), .double(1.5), .bool(true), .null, .integer(0), .integer(-1),
+            .array([.integer(60)]),
+        ]
+        for badValue in badIntervals {
+            let r = await kernel.send([Item("sched", [
+                    "type": "schedule", "target": "p_x", "payload": ["type": "hit"] as JSON,
+                    "interval_seconds": badValue,
+                ])])[0].result
+            #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
+            #expect(r["arg"].asString == "interval_seconds", "\(badValue.serialize()): \(r.serialize())")
+        }
+        // Nothing was scheduled by a refused call.
+        let listed = await kernel.send([Item("sched", ["type": "list"])])[0].result
+        #expect((listed["schedules"].asArray ?? []).isEmpty, "\(listed.serialize())")
+        // ABSENT still takes the documented default (60s), and is NOT refused.
+        let ok = await kernel.send([Item("sched", [
+                "type": "schedule", "target": "p_x", "payload": ["type": "hit"] as JSON,
+            ])])[0].result
+        #expect(ok["schedule"]["interval_seconds"].asInt == 60, "\(ok.serialize())")
+
+        for badValue in [JSON.string("100"), .double(2.0), .bool(true), .null, .integer(0)] {
+            let h = await kernel.send([Item("sched", ["type": "history", "limit": badValue])])[0].result
+            #expect(h["reason"].asString == "bad_arg", "\(badValue.serialize()): \(h.serialize())")
+            #expect(h["arg"].asString == "limit", "\(badValue.serialize()): \(h.serialize())")
+        }
+        // ABSENT `limit` is the default page, not a refusal.
+        let h = await kernel.send([Item("sched", ["type": "history"])])[0].result
+        #expect(!h["history"].isNull && h["reason"].isNull, "\(h.serialize())")
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+    }
+
+    @Test func scheduleRefusesANonObjectPayload() async throws {
+        // #136 — `payload: [1]` can never carry a `type`; say so as an ARG error.
+        let fm = FileManager.default
+        let rel = "fantastic-schedpayload-\(UUID().uuidString)"
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let (kernel, _) = await makeProbedScheduler(dir: dir, rel: rel, probes: ["p_x"])
+        for badValue in [JSON.array([.integer(1)]), .string("hit"), .integer(7)] {
+            let r = await kernel.send([Item("sched", [
+                    "type": "schedule", "target": "p_x", "payload": badValue,
+                ])])[0].result
+            #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
+            #expect(r["arg"].asString == "payload", "\(badValue.serialize()): \(r.serialize())")
+        }
+        _ = await kernel.send([Item("sched", ["type": "shutdown"])])[0].result
+    }
+
+    @Test func aNonNumericTickSecIsRefusedAtWriteTime() async {
+        // #136 — `tick_sec: "0.5"` was silently defaulted to 1.0. The record is
+        // judged where the mistake is made.
+        let kernel = makeKernelWithAll()
+        let r = await kernel.send([Item("core", [
+                "type": "create_agent", "parent_id": "core",
+                "handler_module": "scheduler.tools", "id": "sch_ticks", "tick_sec": "0.5",
+            ])])[0].result
+        #expect(r["reason"].asString == "invalid_meta", "\(r.serialize())")
+        #expect((r["error"].asString ?? "").contains("tick_sec"), "\(r.serialize())")
+        #expect(kernel.agent(AgentId("sch_ticks")) == nil)
+    }
+
     @Test func kernelBridgeForwardInMemory() async {
         let kernel1 = makeKernelWithAll()
         let kernel2 = makeKernelWithAll()
@@ -353,6 +589,10 @@ struct BundleSmokeTests {
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
                 "ingress_rule": .string("allow_all_ingress"),
+                // The EGRESS half. An inbound frame dispatches AS THE LEG now, and
+                // `fs` is the leg's cousin (child of core, while the leg is a child
+                // of web) — no structural baseline token reaches it.
+                "can_call": .object(["fs": .string("*")]),
             ]))])[0].result
         let wsId = rec["id"].asString ?? "web_ws"
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("mount"), "child_id": .string(wsId)]))])[0].result
@@ -374,6 +614,11 @@ struct BundleSmokeTests {
                 "handler_module": .string("file_bridge.tools"),
                 "id": .string("fs"), "root": .string(rel),
                 "ingress_rule": .string("allow_all_ingress"),
+                // …and the INGRESS half, on the target.
+                "callable_by": .object([
+                    "$self": .string("*"), "$parent": .string("*"),
+                    "$children": .string("*"), "web_ws": .string("*"),
+                ]),
             ]))])[0].result
 
         let port = kernel.httpPort()
@@ -517,5 +762,56 @@ struct BundleSmokeTests {
                 "body": "not json",
             ])])[0].result
         #expect(reply["status"].asInt == 400)
+    }
+}
+
+/// A probe target for the scheduler tests: `hit` records when it ran (and the
+/// scheduler's persisted `schedules.json` at that instant when `capture` is
+/// set), optionally blocking `block` seconds.
+final class SchedProbe: AgentBundle, @unchecked Sendable {
+    struct Seen {
+        let at: Double
+        let doc: JSON?
+    }
+    let name = "sched_probe"
+    private let lock = NSLock()
+    private var hits: [String: Seen] = [:]
+    private let capture: URL?
+
+    init(capture: URL?) { self.capture = capture }
+
+    private func record(_ id: String, _ seen: Seen) {
+        lock.lock()
+        defer { lock.unlock() }
+        hits[id] = seen
+    }
+
+    func hit(_ id: String) -> Seen? {
+        lock.lock()
+        defer { lock.unlock() }
+        return hits[id]
+    }
+
+    func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown": return nil
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value), "sentence": .string("scheduler probe"),
+                "verbs": .object([:]),
+            ])
+        case "hit":
+            var doc: JSON? = nil
+            if let capture, let raw = try? String(contentsOf: capture, encoding: .utf8) {
+                doc = try? JSON.parse(raw)
+            }
+            record(agentId.value, Seen(at: Date().timeIntervalSince1970, doc: doc))
+            if let block = payload["block"].asDouble {
+                try await Task.sleep(nanoseconds: UInt64(block * 1_000_000_000))
+            }
+            return .object(["hit": .string(agentId.value)])
+        default:
+            return .object(["error": .string("unknown verb")])
+        }
     }
 }

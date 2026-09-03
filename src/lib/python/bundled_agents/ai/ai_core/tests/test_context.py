@@ -195,7 +195,9 @@ def test_context_notice_truncate_shape():
 async def test_seam_short_circuits_when_under_budget():
     msgs = [_turn("system", "S"), _turn("user", "hi")]
     k = _FakeKernel()
-    out = await _project_context({}, _cfg(), _FakeProvider(), "ai", k, "cli", msgs)
+    out = await _project_context(
+        {}, _cfg(), _FakeProvider(), "ai", k, "cli", msgs, len(msgs) - 1
+    )
     assert out == msgs  # unchanged
     assert _projection["ai"] == {"fired": False}
     assert k.sent == [] and k.emitted == []  # no context event when nothing compacts
@@ -212,6 +214,7 @@ async def test_seam_fires_prepends_notice_and_emits_event():
         k,
         "cli",
         msgs,
+        len(msgs) - 1,
     )
     assert estimate_tokens(out) <= 500  # fits the window now
     assert out[0]["role"] == "system"  # system block preserved
@@ -248,6 +251,7 @@ async def test_seam_notice_is_not_in_the_input_history():
         k,
         "web1",
         msgs,
+        len(msgs) - 1,
     )
     # the input list itself was not mutated to contain the notice
     assert "[context-notice]" not in json.dumps(msgs)
@@ -265,6 +269,7 @@ async def test_seam_failsafe_too_small_emits_event_and_errors():
         k,
         "cli",
         msgs,
+        len(msgs) - 1,
     )
     assert isinstance(out, dict) and "context_insufficient" in out["error"]
     assert _projection["ai"].get("too_small") is True
@@ -284,6 +289,7 @@ async def test_seam_unknown_strategy_errors_without_event():
         k,
         "cli",
         msgs,
+        len(msgs) - 1,
     )
     assert isinstance(out, dict) and "bogus" in out["error"]
     assert [p for t, p in k.sent if p.get("type") == "context"] == []
@@ -416,7 +422,8 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
         _send_turn(
             "ai", {"type": "recall", "query": "codename"}
         ),  # the recall reaction
-        _send_turn("mem", {"type": "set", "key": "codename", "value": "HALCYON"}),
+        # the persist reaction — `text_file`'s write, not the deleted KV `set`
+        _send_turn("notes", {"type": "write", "path": "facts.md", "text": "HALCYON"}),
         _turn("assistant", "It's HALCYON."),
     ]
 
@@ -428,6 +435,84 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
     _compaction_mark["ai"] = {"fired_at_index": 1, "client_id": "cli"}
     r = await core._derive_reaction("ai", None)
     assert r == {"recalled": True, "persisted": True, "recall_count": 1}
+
+
+async def test_reaction_counts_text_file_write_and_patch_not_dead_kv_verbs(monkeypatch):
+    """The persist verbs are `text_file`'s — memory is plain FILES now.
+
+    The set the reader scanned for (`set`/`append`/`replace`) was durable_memory's KV
+    surface, deleted with it. A model that reacted to a compaction by writing
+    `{type:'write', path:'facts.md'}` was scored as not having reacted at all."""
+    thread: list[dict] = []
+
+    async def fake_load(self_id, kernel, client_id):
+        return thread
+
+    monkeypatch.setattr(core, "_load_history", fake_load)
+    _projection["ai"] = {"fired": True}
+    _compaction_mark["ai"] = {"fired_at_index": 0, "client_id": "cli"}
+    try:
+        for verb in ("write", "patch", "append"):
+            thread[:] = [_send_turn("notes", {"type": verb, "path": "facts.md"})]
+            r = await core._derive_reaction("ai", None)
+            assert r["persisted"] is True, verb
+        for dead in ("set", "replace"):
+            thread[:] = [_send_turn("mem", {"type": dead, "key": "k", "value": "v"})]
+            r = await core._derive_reaction("ai", None)
+            assert r["persisted"] is False, dead
+    finally:
+        _projection.pop("ai", None)
+        _compaction_mark.pop("ai", None)
+
+
+async def test_the_reaction_cursor_is_the_store_index_not_the_deduped_view(monkeypatch):
+    """The mark is an index into the DURABLE STORE, never into the model view.
+
+    `_derive_reaction` slices the full store by `fired_at_index`, but the index used
+    to be `len(body) - 1` over the DEDUPED/trimmed view. Every turn `dedupe_stale_reads`
+    dropped made the cursor that much too small, so the scan started BEFORE the notice
+    and read an assistant turn written EARLIER as this compaction's reaction.
+
+    The store below is exactly that shape: two `notes reflect` replies (the first
+    superseded, so the view is one turn shorter than the store) and the memory write
+    as the LAST stored turn — precisely where the old off-by-one cursor landed."""
+    store = [
+        _turn("user", "the ask: " + "x" * 1200),
+        _turn("user", "[reply to ai:a1 · notes reflect]\n" + "A" * 1200),
+        _turn("user", "[reply to ai:a2 · notes reflect]\n" + "B" * 1200),
+        # written BEFORE the notice — not a reaction to a compaction that had not
+        # yet fired. Nothing after this point in the store, so `persisted` is False.
+        _send_turn("notes", {"type": "write", "path": "facts.md", "text": "HALCYON"}),
+    ]
+
+    async def fake_load(self_id, kernel, client_id):
+        return store
+
+    monkeypatch.setattr(core, "_load_history", fake_load)
+    k = _FakeKernel()
+    messages, store_len = await core._assemble(
+        "ai", "and now?", k, "cli", system_prompt="sys"
+    )
+    # the premise: the model view really IS shorter than the store.
+    assert store_len == len(store) == 4
+    assert len(messages) == 1 + (len(store) - 1) + 1, "system + deduped view + live"
+
+    out = await _project_context(
+        {"context_window": 500, "output_reserve": 0, "context_strategy": "compact"},
+        _cfg(),
+        _FakeProvider(),
+        "ai",
+        k,
+        "cli",
+        messages,
+        store_len,
+    )
+    assert not isinstance(out, dict), out
+    assert _projection["ai"]["fired"] is True
+    # store index, not view index — 3 (the write turn) was the old, wrong answer.
+    assert _compaction_mark["ai"]["fired_at_index"] == len(store) == 4
+    r = await core._derive_reaction("ai", None)
+    assert r == {"recalled": False, "persisted": False, "recall_count": 0}
 
 
 # ── cli context render ──────────────────────────────────────────────
@@ -655,6 +740,7 @@ async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
         _FakeKernel(),
         "cli",
         msgs,
+        len(msgs) - 1,
     )
     assert estimate_tokens(out) <= window, "the projection must still fit"
     kept = any(goal in (m.get("content") or "") for m in out)

@@ -654,3 +654,117 @@ async fn paste_image_binary_path_skips_base64() {
         .remove(0)
         .result;
 }
+
+/// `stop` must REAP the killed child — before this, the aborted reader
+/// never reached `cleanup_on_exit`'s wait and every stopped session
+/// stayed `<defunct>` until the kernel exited (one zombie per stop /
+/// restart / delete). `kill(pid, 0)` keeps answering success for a
+/// zombie, so ESRCH within 2 s is the proof it was waited.
+#[tokio::test]
+async fn stop_reaps_the_child_no_zombie() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, _parent, term, _rx) =
+        mk_term(&tmp, "reap", Some(vec!["bash", "-c", "sleep 30"])).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["spawned"], true, "spawn reply: {r:?}");
+    let pid = r["pid"].as_u64().expect("spawn reply carries pid") as i32;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Alive (and not a zombie) before stop.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "child should be alive before stop"
+    );
+    let st = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["stopped"], true, "stop reply: {st:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut gone = false;
+    while std::time::Instant::now() < deadline {
+        let rc = unsafe { libc::kill(pid, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        if rc == -1 && errno == Some(libc::ESRCH) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        gone,
+        "pid {pid} still exists (zombie or alive) 2 s after stop"
+    );
+}
+
+/// A `write` that fills the PTY input queue (child not reading) must
+/// NOT pin the runtime: the blocking `write_all` runs on the blocking
+/// pool while `write_lock` is held, so a concurrent `reflect` on the
+/// same agent still answers. `#[tokio::test]` is a current-thread
+/// runtime — before the fix the single worker sat in `write_all` and
+/// `reflect` could not run at all.
+#[tokio::test]
+async fn a_large_write_does_not_pin_the_runtime() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, _parent, term, _rx) = mk_term(&tmp, "bigw", Some(vec!["sleep", "30"])).await;
+    let r = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "spawn"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["spawned"], true, "spawn reply: {r:?}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 1 MiB of complete lines: in canonical mode the line discipline
+    // blocks the master write once queued lines reach the input cap
+    // (bytes without a newline past the cap are silently dropped, which
+    // would not block).
+    let line = format!("{}\n", "x".repeat(63));
+    let data = line.repeat((1024 * 1024) / line.len());
+    assert!(data.len() >= 1024 * 1024 - 64);
+    let k2 = Arc::clone(&kernel);
+    let t2 = term.clone();
+    let writer = tokio::spawn(async move {
+        k2.send(vec![Item::new(t2, json!({"type": "write", "data": data}))])
+            .await
+            .remove(0)
+            .result
+    });
+    // Let the write task start (and block in the PTY). Measured on the
+    // WALL CLOCK: a `tokio::time::timeout` polls the inner future first,
+    // so a runtime pinned for 30 s (until `sleep` exits) would still
+    // answer "completed" once the worker came back.
+    let t0 = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reflect = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
+        .await
+        .remove(0)
+        .result;
+    let elapsed = t0.elapsed();
+    assert_eq!(reflect["running"], true, "reflect reply: {reflect:?}");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "reflect took {elapsed:?} — the runtime is pinned by the write"
+    );
+    // Tear down: killing the child hangs up the PTY, which unblocks the
+    // parked write (it errors or completes).
+    let st = kernel
+        .send(vec![Item::new(term.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["stopped"], true, "stop reply: {st:?}");
+    let w = tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .expect("blocked write did not return after stop")
+        .expect("write task panicked");
+    assert!(
+        w.get("written").is_some() || w.get("error").is_some(),
+        "write reply: {w:?}"
+    );
+}

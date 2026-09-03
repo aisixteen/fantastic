@@ -5,6 +5,7 @@
 // file_bridge named by its `target_id`. Mirrors the python suite (the
 // immutable reference, `bundled_agents/text_file/tests/`).
 
+import CryptoKit
 import FantasticFile
 import FantasticJSON
 import FantasticKernel
@@ -345,7 +346,8 @@ struct TextFileTests {
         }
         let t = await call(
             k, .object(["type": .string("write"), "path": .string("x")]))
-        #expect(t["error"].asString?.contains("binary channel") == true)
+        #expect(t["reason"].asString == "missing_arg")
+        #expect(t["arg"].asString?.hasPrefix("bytes") == true)
     }
 
     // MARK: - the TRANSACTION (multi-file edits in ONE patch)
@@ -468,5 +470,146 @@ struct TextFileTests {
         #expect(r["path"].asString == "b.py")
         #expect(read(dir, "a.py") == "one\n")
     }
-}
 
+    // MARK: - per-document serialization + payload hardening (sweep I-5)
+
+    private func sha16(_ text: String) -> String {
+        let d = SHA256.hash(data: Data(text.utf8))
+        return d.map { String(format: "%02x", $0) }.joined().prefix(16).lowercased()
+    }
+
+    @Test func patchRefusesTheSamePathTwice() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "a.md", "one\ntwo\n")
+        let r = await callBin(
+            k,
+            .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.md"), "hunks": .integer(1)]),
+                    .object(["path": .string("a.md"), "hunks": .integer(1)]),
+                ]),
+            ]), block("one", "1") + "\n" + block("two", "2"))
+        #expect(r["reason"].asString == "bad_arg")
+        #expect(r["arg"].asString == "edits")
+        #expect(r["error"].asString?.contains("at most once") == true)
+        #expect(read(dir, "a.md") == "one\ntwo\n")
+    }
+
+    @Test func concurrentPatchesOnOneFileBothLand() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "f.py", "a = 1\nb = 2\n")
+        let header: JSON = .object([
+            "type": .string("patch"),
+            "edits": .array([.object(["path": .string("f.py"), "hunks": .integer(1)])]),
+        ])
+        async let one = callBin(k, header, block("a = 1", "a = 10"))
+        async let two = callBin(k, header, block("b = 2", "b = 20"))
+        let (r1, r2) = await (one, two)
+        #expect(r1["patched"].asBool == true, "\(r1)")
+        #expect(r2["patched"].asBool == true, "\(r2)")
+        let final = read(dir, "f.py")
+        #expect(final == "a = 10\nb = 20\n")
+        // each reply's version is the document as it stood at THAT commit: one
+        // is the final image, the other the intermediate with only its own hunk.
+        let vFinal = sha16(final)
+        let versions = [r1["edits"][0]["version"].asString ?? "", r2["edits"][0]["version"].asString ?? ""]
+        #expect(versions.contains(vFinal), "\(versions) vs \(vFinal)")
+        let intermediates = [sha16("a = 10\nb = 2\n"), sha16("a = 1\nb = 20\n")]
+        for v in versions {
+            #expect(v == vFinal || intermediates.contains(v), "\(v)")
+        }
+    }
+
+    @Test func textChannelBytesGuardIsMissingArg() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for verb in ["write", "patch", "append"] {
+            let r = await call(k, .object(["type": .string(verb), "path": .string("x")]))
+            #expect(r["reason"].asString == "missing_arg", "\(verb): \(r)")
+            #expect(r["arg"].asString?.hasPrefix("bytes") == true, "\(verb): \(r)")
+        }
+    }
+
+    @Test func unknownTypeCarriesVerb() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = await call(k, .object(["type": .string("frobnicate")]))
+        #expect(r["reason"].asString == "unhandled", "\(r)")
+        #expect(r["verb"].asString == "frobnicate", "\(r)")
+    }
+
+    @Test func readWithMaxLimitDoesNotTrap() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "r.txt", "l1\nl2\n")
+        let r = await call(
+            k,
+            .object([
+                "type": .string("read"), "path": .string("r.txt"),
+                "offset": .integer(1), "limit": .integer(Int64.max),
+            ]))
+        #expect(r["eof"].asBool == true, "\(r)")
+        #expect(r["lines"].asArray?.count == 1, "\(r)")
+        #expect(r["lines"][0]["text"].asString == "l2", "\(r)")
+    }
+
+    @Test func nonIntArgsAreBadArgRefusals() async {
+        // #136 — a present-but-wrong number is a TYPO, not a new default.
+        // `asInt ?? 0` used to swallow `offset: "12"` and silently page from
+        // the top.
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "n.txt", (0..<10).map { "L\($0)\n" }.joined())
+        let bads: [JSON] = [
+            .string("ten"), .double(1.5), .bool(true), .null, .integer(-1), .array([.integer(0)]),
+        ]
+        for badValue in bads {
+            let r = await call(
+                k,
+                .object([
+                    "type": .string("read"), "path": .string("n.txt"), "offset": badValue,
+                ]))
+            #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
+            #expect(r["arg"].asString == "offset", "\(badValue.serialize()): \(r.serialize())")
+        }
+        for badValue in [JSON.string("200"), .double(2.5), .bool(true), .null, .integer(0), .integer(-1)] {
+            let r = await call(
+                k,
+                .object([
+                    "type": .string("read"), "path": .string("n.txt"), "limit": badValue,
+                ]))
+            #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
+            #expect(r["arg"].asString == "limit", "\(badValue.serialize()): \(r.serialize())")
+        }
+        // ABSENT still takes the documented defaults (offset 0, limit 200).
+        let r = await call(k, .object(["type": .string("read"), "path": .string("n.txt")]))
+        #expect(r["total"].asInt == 10, "\(r.serialize())")
+        #expect(r["lines"][0]["n"].asInt == 1, "\(r.serialize())")
+        #expect(r["lines"][9]["text"].asString == "L9", "\(r.serialize())")
+        #expect(r["eof"].asBool == true, "\(r.serialize())")
+    }
+
+    @Test func patchHunkCountMustBeAnInt() async {
+        // #136 — the per-edit `hunks` count is typed too: a string count would
+        // slice the shared blob by nothing at all.
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "m.py", "a = 1\n")
+        let blob = block("a = 1", "a = 2")
+        for badValue in [JSON.string("1"), .double(1.5), .bool(true), .null, .integer(0), .integer(-1)] {
+            let r = await callBin(
+                k,
+                .object([
+                    "type": .string("patch"),
+                    "edits": .array([.object(["path": .string("m.py"), "hunks": badValue])]),
+                ]), blob)
+            #expect(r["reason"].asString == "bad_arg", "\(badValue.serialize()): \(r.serialize())")
+            #expect(r["arg"].asString == "edits", "\(badValue.serialize()): \(r.serialize())")
+        }
+        // …and the file was not touched by any of them.
+        #expect(read(dir, "m.py") == "a = 1\n")
+    }
+}

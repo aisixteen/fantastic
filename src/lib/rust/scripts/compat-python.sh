@@ -96,9 +96,9 @@ FILE_REPLY="$(curl -sf -m 5 -X POST \
     "http://localhost:$PORT/wr/ff")"
 echo "$FILE_REPLY" | grep -q '"sentence"' \
     || fail "POST /<rest>/ff reflect" "missing 'sentence'"
-echo "$FILE_REPLY" | grep -q 'Filesystem root' \
+echo "$FILE_REPLY" | grep -q 'Filesystem edge of the io family' \
     || fail "POST /<rest>/ff reflect" "wrong sentence"
-pass "POST /<rest>/ff reflect   → Filesystem root sentence"
+pass "POST /<rest>/ff reflect   → Filesystem edge sentence"
 
 # ── WS binary-frame channel ─────────────────────────────────────────
 # Probe: open a WS to the web_ws surface, send one binary frame with a

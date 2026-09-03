@@ -32,12 +32,78 @@ pub struct Action<'a> {
     pub token: Option<&'a str>,
 }
 
+/// Everything a refusal carries — the denial half of python's `Decision`,
+/// field for field.
+///
+/// It used to be a bare `String`, so a rule could state a fact and nothing
+/// else: every gate that received one invented its own `hint` at the call site
+/// (the fs gate said "the fs edge is sealed" for whichever leg called it) and
+/// the three runtimes drifted into three vocabularies for the same `unauthorized`
+/// code. The rule KNOWS why it refused and how to open the edge; that knowledge
+/// travels with the verdict instead of being guessed downstream.
+#[derive(Debug, Clone, Default)]
+pub struct Denial {
+    /// One line a person reads — the `error` field on the wire.
+    pub reason: String,
+    /// The repair: what to do instead. Empty ⇒ omit the field.
+    pub hint: String,
+    /// A doc pointer (readme key). Empty ⇒ omit the field.
+    pub see: String,
+}
+
+impl Denial {
+    /// A denial that states only the reason.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            hint: String::new(),
+            see: String::new(),
+        }
+    }
+
+    /// …plus the repair. A refusal that cannot be acted on costs the same as no
+    /// reply.
+    #[must_use]
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = hint.into();
+        self
+    }
+
+    /// …plus a doc pointer.
+    #[must_use]
+    pub fn with_see(mut self, see: impl Into<String>) -> Self {
+        self.see = see.into();
+        self
+    }
+
+    /// The wire shape every inbound gate answers a denial with. Built HERE so no
+    /// call site has to remember the key order or invent the teaching half — the
+    /// fs gate used to bolt on a hint claiming "the fs edge" for whichever leg
+    /// had called it.
+    #[must_use]
+    pub fn to_refusal(&self) -> Value {
+        let mut out = json!({ "error": self.reason, "reason": "unauthorized" });
+        let obj = out.as_object_mut().expect("json! object");
+        // Empty ⇒ ABSENT, not `""` — the same rule the kernel's `refusal`
+        // follows, so a caller tests for the key, not for an empty string.
+        if !self.hint.is_empty() {
+            obj.insert("hint".to_string(), Value::String(self.hint.clone()));
+        }
+        if !self.see.is_empty() {
+            obj.insert("see".to_string(), Value::String(self.see.clone()));
+        }
+        out
+    }
+}
+
 /// An ingress rule's verdict on an [`Action`].
 pub enum Decision {
     /// Permit the inbound action — dispatch `kernel.send`.
     Allow,
-    /// Refuse it; the read loop replies `{error, reason:"unauthorized"}`.
-    Deny(String),
+    /// Refuse it; the gate replies `{error: reason, reason:"unauthorized",
+    /// hint?, see?}` — forwarding the [`Denial`]'s fields, never inventing its
+    /// own.
+    Deny(Denial),
 }
 
 /// The inbound FILTER — decides whether the peer may perform an inbound action.

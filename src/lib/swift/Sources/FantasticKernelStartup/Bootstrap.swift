@@ -75,6 +75,11 @@ public enum Bootstrap {
         {
             try? kernel.load(json: json)
         }
+        // THE DURABLE LEDGER. `installLedgerPersistence` had no production
+        // caller in swift, so every settled execution was lost on exit and a
+        // reboot started with an empty ledger — dedup and join silently stopped
+        // holding across restarts (measured 2026-09-02).
+        await kernel.installLedgerPersistence()
         return kernel
     }
 
@@ -89,6 +94,9 @@ public enum Bootstrap {
         for agent in kernel.allAgents() {
             _ = await kernel.send([Item(agent.id, .object(["type": .string("boot")]))])[0].result
         }
+        // AFTER the boot loop: the store agent must be live before the ledger
+        // can rehydrate through it or install its flusher.
+        await kernel.installLedgerPersistence()
 
         FileHandle.standardError.write(
             "fantastic: daemon up. \(kernel.allAgents().count) agent(s) loaded. Ctrl-C to stop.\n"

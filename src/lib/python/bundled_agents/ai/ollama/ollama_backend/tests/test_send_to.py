@@ -450,7 +450,9 @@ async def test_prompt_states_the_mechanism_not_a_strategy(seeded_kernel, store_a
     'tuned' would quietly void every emergence result taken afterwards.
     """
     oid = await _make_ollama(seeded_kernel)
-    msgs = await ot._assemble(oid, "hi", seeded_kernel, "probe")
+    # `_assemble` returns (messages, store_len) — the store length is what the
+    # compaction mark records, so it cannot be derived from the model view.
+    msgs, _store_len = await ot._assemble(oid, "hi", seeded_kernel, "probe")
     sys_block = msgs[0]["content"].lower()
 
     # the mechanism IS stated

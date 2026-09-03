@@ -143,9 +143,11 @@ pub(crate) async fn create_from_payload(
     // verbs until the bundle lands. Matches Python's behaviour. Only
     // the LOAD path skips unknown bundles (weak-load semantics).
 
-    let id = match payload.get("id").and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => mint_id(hm),
+    // A supplied id — even "" — is the caller's choice and is validated as one
+    // by `guard_agent_id`; only an ABSENT id is minted (python parity).
+    let id = match payload.get("id") {
+        None | Some(Value::Null) => mint_id(hm),
+        Some(v) => v.as_str().unwrap_or("").to_string(),
     };
     // An id BECOMES A DIRECTORY, so it must be one safe segment. Enforced at
     // the mint, so every consumer inherits it rather than each remembering.
@@ -167,6 +169,16 @@ pub(crate) async fn create_from_payload(
         for (k, v) in obj {
             if matches!(k.as_str(), "type" | "id" | "handler_module" | "parent_id") {
                 continue;
+            }
+            // Reserved keys name substrate wiring; a record may not carry them
+            // (the loader refuses such a record on the next boot).
+            if crate::agent::RESERVED_RECORD_KEYS.contains(&k.as_str()) {
+                return crate::refusal::bad(
+                    "create_agent",
+                    k,
+                    "absent — root_path/ctx/parent name substrate wiring the \
+                     record may not carry",
+                );
             }
             meta.insert(k.clone(), v.clone());
         }
@@ -303,8 +315,33 @@ pub(crate) async fn delete_from_payload(
     };
     let id = AgentId::from(id_str);
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
-        return json!({ "error": format!("no agent {id_str:?}") });
+        // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE id
+        // index to self-correct from, and `deleted:false` so a caller reading
+        // that field is not told a typo succeeded. The bare `{error}` this used
+        // to answer is the measured 34-retry case — a fact with nothing to act
+        // on.
+        let mut r = crate::refusal::unknown_agent(
+            id_str,
+            kernel.agents.iter().map(|e| e.key().to_string()).collect(),
+        );
+        crate::refusal::with(&mut r, "deleted", json!(false));
+        return r;
     };
+    // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
+    // every kernel verb, so cascading it empties the kernel and leaves a process
+    // with no control surface at all — `{"deleted": true}` and an empty tree
+    // (measured 2026-09-02).
+    if target.parent_id.is_none() {
+        let mut r = crate::refusal::bad(
+            "delete_agent",
+            "id",
+            "not the ROOT — it owns persistence and answers the kernel verbs; \
+             deleting it would leave no kernel",
+        );
+        crate::refusal::with(&mut r, "id", json!(id_str));
+        crate::refusal::with(&mut r, "deleted", json!(false));
+        return r;
+    }
     // Refuse the cascade if ANY agent in the subtree (including the
     // target itself) carries `delete_lock=true`. Walking the subtree
     // matches Python's `_find_locked_descendant` — without this, the

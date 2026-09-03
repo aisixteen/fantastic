@@ -379,6 +379,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             id: Some("job1".into()),
             timeout: None,
             retries: None,
+            binary: None,
         }])
         .await
         .remove(0)
@@ -394,6 +395,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             id: Some("job1".into()),
             timeout: None,
             retries: None,
+            binary: None,
         }])
         .await
         .remove(0)
@@ -413,6 +415,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             id: Some("job1".into()),
             timeout: None,
             retries: None,
+            binary: None,
         }])
         .await
         .remove(0)

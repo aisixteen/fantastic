@@ -127,6 +127,11 @@ public final class ExecutionLedger: @unchecked Sendable {
 
     /// Count one dispatch attempt; returns the new count.
     @discardableResult
+    /// Whether a row exists under `execId` (named or minted, settled or not).
+    public func has(_ execId: String) -> Bool {
+        lock.withLock { rows[execId] != nil }
+    }
+
     public func attempt(_ execId: String) -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
@@ -179,6 +184,12 @@ public final class ExecutionLedger: @unchecked Sendable {
         return order.compactMap { id -> JSON? in
             guard let r = rows[id] else { return nil }
             if let v = viewer, r.origin != v { return nil }
+            // NO `verb` KEY. Python's row is exactly {id, target, status,
+            // attempts, retries, named, outcome?} and the ports carried an eighth
+            // key, so the same wiring answered a 7-key row here and an 8-key row
+            // there. The verb is not lost — it is what the SIDECAR stores
+            // (`settledSnapshot`), where it authorizes a joiner after a reboot;
+            // the read verb never needed it.
             var o: OrderedDictionary<String, JSON> = [
                 "id": .string(id),
                 "target": .string(r.target.value),
@@ -186,7 +197,6 @@ public final class ExecutionLedger: @unchecked Sendable {
                 "attempts": .integer(Int64(r.attempts)),
                 "retries": .integer(Int64(r.retries)),
                 "named": .bool(r.named),
-                "verb": .string(r.verb),
             ]
             if let out = r.outcome { o["outcome"] = out.asJSON }
             return .object(o)

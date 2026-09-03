@@ -197,15 +197,23 @@ extension Kernel {
         let r = resolveBlob("load_blob", payload)
         guard let ok = r.ok else { return r.refusal ?? .null }
         (store, path) = (ok.store, ok.path)
-        let (reply, body) = await storeBookkeepingBinary(
-            store, .object(["type": .string("read_stream"), "path": .string(path)]), Data())
-        if reply["error"].asString != nil {
-            return .object(["name": payload["name"], "content": .null])
+        switch await readWholeViaStore(store, path) {
+        case .refused(let r):
+            // ABSENT is `content: null`; anything else is the leg's own refusal
+            // and must propagate — a sealed store used to read as an empty file.
+            if r["reason"].asString == "not_found" || r["reason"] == .null {
+                return .object(["name": payload["name"], "content": .null])
+            }
+            return r
+        case .bytes(let data):
+            guard let text = String(data: data, encoding: .utf8) else {
+                return Refusal.make(
+                    Refusal.badArg,
+                    "load_blob: \(path) is not valid utf-8",
+                    extra: [("name", payload["name"]), ("content", .null)])
+            }
+            return .object(["name": payload["name"], "content": .string(text)])
         }
-        return .object([
-            "name": payload["name"],
-            "content": String(data: body, encoding: .utf8).map { JSON.string($0) } ?? .null,
-        ])
     }
 
     // ── the DURABLE LEDGER (#37) ──────────────────────────────────
@@ -238,9 +246,9 @@ extension Kernel {
     @discardableResult
     public func rehydrateLedger() async -> Int {
         guard let store = findStore() else { return 0 }
-        let (_, body) = await storeBookkeepingBinary(
-            store, .object(["type": .string("read_stream"), "path": .string(ledgerBlob)]), Data())
-        guard let text = String(data: body, encoding: .utf8), !text.isEmpty else { return 0 }
+        guard case .bytes(let data) = await readWholeViaStore(store, ledgerBlob),
+            let text = String(data: data, encoding: .utf8), !text.isEmpty
+        else { return 0 }
         guard let doc = try? JSON.parse(text) else {
             print("  [ledger] \(ledgerBlob) unreadable, starting empty")
             return 0

@@ -234,7 +234,9 @@ async fn a_kernel_verb_at_a_non_root_agent_says_where_to_send_it() {
         .result;
     assert_eq!(r["reason"], "not_here");
     assert!(r["hint"].as_str().unwrap().contains("kernel"));
-    assert!(r["hint"].as_str().unwrap().contains("OPERAND"));
+    // Python's prose + the machine field naming the misaddressed verb.
+    assert!(r["hint"].as_str().unwrap().contains("`parent_id` / `id`"));
+    assert_eq!(r["verb"], "list_agents");
 }
 
 #[tokio::test]

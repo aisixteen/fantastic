@@ -192,6 +192,24 @@
             return AgentId(r["id"].asString ?? id)
         }
 
+        @Test func passwordIngressIsRefusedOnFsAndProcessLegs() {
+            // The process half (the fs half lives in FantasticBundlesTests): a leg
+            // with no wire envelope can never present a token, so both spellings
+            // refuse at the write.
+            let b = ExecBridgeBundle()
+            let specs: [(String, JSON)] = [
+                ("ingress_rule", "password_ingress"),
+                ("ingress_rule", .object(["type": "password_ingress", "env": "X"])),
+                ("auth", "password"),
+            ]
+            for (field, spec) in specs {
+                let e = b.validateMeta([field: spec], record: [:])
+                #expect(e?.contains("wire envelope") == true, "\(field) → \(String(describing: e))")
+                #expect(e?.contains("allow_all_ingress") == true, "must teach the legal set")
+            }
+            #expect(b.validateMeta(["ingress_rule": "allow_all_ingress"], record: [:]) == nil)
+        }
+
         @Test func validateMetaRefusesWithdrawnFieldsAndBadAllowed() {
             let b = ExecBridgeBundle()
             for gone in ["code", "shim", "interpreter", "interpreters", "argv_template"] {
@@ -229,8 +247,10 @@
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "code_field")
             let r = await kernel.send([Item(a, .object(["type": .string("start"), "code": .string("x = 1")]))])[0].result
+            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+            #expect(r["arg"].asString == "code", "\(r.serialize())")
             #expect(
-                r["error"].asString == "exec_bridge: `code` is not a field — run a command instead",
+                r["error"].asString == "start: code must be absent — run a command instead",
                 "\(r.serialize())")
         }
 
@@ -371,6 +391,236 @@
         }
     }
 
+    // ─── the relay: denials, releases, the frame bound ───────────────
+    //
+    // The relay is the unit under test here, so these drive it over a socketpair
+    // the way a spawned program would — no subprocess, and no race between the
+    // child registering a callback and the frame coming back.
+
+    /// The PROGRAM's end of a control socket, with a relay serving the other.
+    private func wire(_ kernel: Kernel, owner: AgentId, jobId: String) -> (Int32, Relay) {
+        var fds: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0, "socketpair")
+        let relay = Relay(fd: fds[0], owner: owner, jobId: jobId, kernel: kernel)
+        relay.start()
+        _ = fcntl(fds[1], F_SETFL, O_NONBLOCK)  // so a test can never block on read
+        return (fds[1], relay)
+    }
+
+    private func wireWrite(_ fd: Int32, _ v: JSON) {
+        var body = Data([UInt8(ascii: "T")])
+        body.append(Data(v.serialize().utf8))
+        wireWriteRaw(fd, UInt32(body.count), body)
+    }
+
+    /// Write a length prefix and whatever follows it — the length is a parameter so
+    /// a test can state one the payload does not honour.
+    private func wireWriteRaw(_ fd: Int32, _ len: UInt32, _ body: Data) {
+        var frame = Data([
+            UInt8((len >> 24) & 0xFF), UInt8((len >> 16) & 0xFF),
+            UInt8((len >> 8) & 0xFF), UInt8(len & 0xFF),
+        ])
+        frame.append(body)
+        frame.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let w = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if w <= 0 { return }
+                off += w
+            }
+        }
+    }
+
+    /// `n` bytes, `nil` on EOF or timeout.
+    private func wireReadExactly(_ fd: Int32, _ n: Int, timeout: Double) async -> Data? {
+        var buf = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while buf.count < n && Date() < deadline {
+            var chunk = [UInt8](repeating: 0, count: n - buf.count)
+            let r = read(fd, &chunk, chunk.count)
+            if r > 0 {
+                buf.append(contentsOf: chunk[0..<r])
+            } else if r == 0 {
+                return nil  // EOF
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            } else {
+                return nil
+            }
+        }
+        return buf.count == n ? buf : nil
+    }
+
+    private func wireRead(_ fd: Int32, timeout: Double = 5) async -> JSON? {
+        guard let head = await wireReadExactly(fd, 4, timeout: timeout) else { return nil }
+        let n = head.reduce(0) { Int($0) << 8 | Int($1) }
+        guard let body = await wireReadExactly(fd, n, timeout: timeout) else { return nil }
+        return try? JSON.parse(Data(body.dropFirst()))
+    }
+
+    /// True once the relay has closed its end of the socket.
+    private func wireClosed(_ fd: Int32, timeout: Double = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var byte = [UInt8](repeating: 0, count: 1)
+        while Date() < deadline {
+            let r = read(fd, &byte, 1)
+            if r == 0 { return true }
+            if r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                continue
+            }
+            return false
+        }
+        return false
+    }
+
+    @Suite("exec_bridge relay")
+    struct ExecBridgeRelayTests {
+
+        /// `kernel.watch` is gated exactly like a send and can REFUSE. Off the
+        /// handler's task-local this relay watched as the OPERATOR — ungated, so the
+        /// refusal was not merely discarded, it could never happen; the program held a
+        /// subscription that simply never fired, deaf with nothing to diagnose.
+        @Test func aDeniedWatchReachesTheProgramAndRegistersNothing() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "denied_w")
+            _ = await createPy(kernel, id: "secret")  // no edge from the runner
+            let (fd, relay) = wire(kernel, owner: a, jobId: "j1")
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWrite(fd, .object(["op": .string("watch"), "src": .string("secret")]))
+            let ev = try #require(await wireRead(fd), "no frame came back")
+            #expect(ev["op"].asString == "event", "\(ev.serialize())")
+            #expect(ev["src"].asString == "secret", "\(ev.serialize())")
+            #expect(ev["payload"]["reason"].asString == "unauthorized", "\(ev.serialize())")
+            // …and NOTHING was registered.
+            let secret = try #require(kernel.agent(AgentId("secret")))
+            #expect(secret.watcherIds().isEmpty, "a denied watch left a watcher")
+        }
+
+        /// Every proxy the relay held is given back when the job goes: the watcher
+        /// rows on the source, and the drain tasks behind them. And the ids carry the
+        /// bundle's OWN prefix — two spawner bundles in one kernel must not collide,
+        /// and this one runs COMMANDS, so `_py…` was a lie as well as a hazard.
+        @Test func stoppingAWatchingProgramReleasesItsProxies() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "relay_rel")
+            let (fd, relay) = wire(kernel, owner: a, jobId: "j2")
+            defer { close(fd) }
+            // `$self` is a baseline edge, so both of these are permitted.
+            wireWrite(fd, .object(["op": .string("watch"), "src": .string(a.value)]))
+            wireWrite(fd, .object(["op": .string("onmessage")]))
+
+            let proxies: Set<AgentId> = [AgentId("_xbw_j2_\(a.value)"), AgentId("_xbself_j2")]
+            let owner = try #require(kernel.agent(a))
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && !proxies.isSubset(of: owner.watcherIds()) {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            #expect(
+                proxies.isSubset(of: owner.watcherIds()),
+                "the `_xb` proxies were never registered: \(owner.watcherIds())")
+
+            relay.stop()
+            let gone = Date().addingTimeInterval(5)
+            while Date() < gone && !owner.watcherIds().isDisjoint(with: proxies) {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            #expect(
+                owner.watcherIds().isDisjoint(with: proxies),
+                "a proxy leaked past teardown: \(owner.watcherIds())")
+        }
+
+        /// A length prefix over the bound is a WIRE VIOLATION — the framing itself is
+        /// unusable, so there is nothing to reply TO and the socket closes.
+        @Test func anOversizedFrameClosesTheControlSocket() async throws {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "big_frame")
+            let (fd, relay) = wire(kernel, owner: a, jobId: "j3")
+            defer {
+                relay.stop()
+                close(fd)
+            }
+            wireWriteRaw(fd, UInt32(16 * 1024 * 1024 + 1), Data())
+            #expect(await wireClosed(fd), "the relay must close on a wire violation")
+        }
+    }
+
+    @Suite("exec_bridge refusals")
+    struct ExecBridgeRefusalTests {
+
+        /// EVERY refusal on `start` carries a CODE. Sibling argument errors used to
+        /// split — `args`/`env` answered a typed message while `code`/`command`/the
+        /// policy wall answered a bare `{error}` with no `reason` at all.
+        @Test func everyStartRefusalCarriesACode() async {
+            let kernel = freshKernel()
+            let a = await create(kernel, id: "codes", allowed: ["echo( .*)?"])
+            func ask(_ p: OrderedDictionary<String, JSON>) async -> JSON {
+                var payload = p
+                payload["type"] = .string("start")
+                return await kernel.send([Item(a, .object(payload))])[0].result
+            }
+            var r = await ask([:])
+            #expect(r["reason"].asString == "missing_arg", "\(r.serialize())")
+            #expect(r["arg"].asString == "command", "\(r.serialize())")
+            r = await ask(["command": .string("echo"), "code": .string("x = 1")])
+            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+            #expect(r["arg"].asString == "code", "\(r.serialize())")
+            r = await ask(["command": .string("echo"), "args": .array([.object(["no": .integer(1)])])])
+            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+            #expect(r["arg"].asString == "args", "\(r.serialize())")
+            r = await ask(["command": .string("echo"), "env": .object(["K": .array([])])])
+            #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
+            #expect(r["arg"].asString == "env", "\(r.serialize())")
+            // A POLICY wall, not a malformed argument.
+            r = await ask(["command": .string("rm"), "args": .array([.string("-rf")])])
+            #expect(r["reason"].asString == "unauthorized", "\(r.serialize())")
+            #expect(r["hint"].asString?.contains("allowed") == true, "\(r.serialize())")
+        }
+
+        private func create(
+            _ kernel: Kernel, id: String, allowed: [String]
+        ) async -> AgentId {
+            let r = await kernel.send([Item(AgentId("core"), .object([
+                "type": .string("create_agent"), "parent_id": .string("core"),
+                "handler_module": .string("exec_bridge.tools"), "id": .string(id),
+                "ingress_rule": .string("allow_all_ingress"),
+                "allowed": .array(allowed.map(JSON.string)),
+            ]))])[0].result
+            return AgentId(r["id"].asString ?? id)
+        }
+
+        /// `status`/`stop`/`interrupt` on a job_id naming nothing answer `not_found`
+        /// with the id. `stop`/`interrupt` used to answer `{killed:0}` — the same
+        /// reply as "it had already exited", so a typo read as success.
+        @Test func anUnknownJobIdIsNotFoundOnEveryVerb() async {
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "nf")
+            for verb in ["status", "stop", "interrupt"] {
+                let r = await kernel.send([Item(a, .object([
+                    "type": .string(verb), "job_id": .string("deadbeef"),
+                ]))])[0].result
+                #expect(r["reason"].asString == "not_found", "\(verb): \(r.serialize())")
+                #expect(r["job_id"].asString == "deadbeef", "\(verb): \(r.serialize())")
+            }
+        }
+
+        /// `kernel.args` / FANTASTIC_ARGS was advertised by every runtime's howto and
+        /// set by no spawner — a program written from the docs read `{}` and
+        /// KeyError'd. A command runner takes its arguments as ARGV.
+        @Test func theConnectorHasNoArgs() async {
+            #expect(!CONNECTOR_SRC.contains("FANTASTIC_ARGS"))
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "noargs")
+            let r = await kernel.send([Item(a, .object(["type": .string("connector")]))])[0].result
+            let howto = r["howto"].asString ?? ""
+            #expect(!howto.contains("`kernel.self_id`, `kernel.args`"), "\(howto)")
+            #expect(howto.contains("ARGV"), "\(howto)")
+        }
+    }
+
     // ─── durable jobs, end to end ───────────────────────────────────
 
     private func drainUntil(
@@ -463,6 +713,62 @@
             let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
             #expect(out.contains("SIB unauthorized"), "the sibling must refuse: \(out)")
             #expect(out.contains("CORE core"), "the parent (baseline edge) still answers: \(out)")
+        }
+
+        /// PROGRESS IS LIVE. The pump used to buffer both pipes to EOF and emit every
+        /// line in one burst at exit, so exactly the jobs that need `progress` — a
+        /// durable tool that prints a line per request and never exits — produced no
+        /// output events at all and reported `lines: 0` for their whole life. This
+        /// program never exits, so a burst-at-exit pump can only time out here.
+        @Test func progressArrivesWhileTheProcessIsStillRunning() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "live_prog")
+            let stream = kernel.ensureInbox(a)
+            _ = await kernel.send([Item(a, pyStart(
+                py, "import sys, time\nprint('FIRST')\nsys.stdout.flush()\ntime.sleep(30)"))])[0].result
+            let events = await drainUntil(stream, timeout: 20) { $0["type"].asString == "progress" }
+            let p = events.first { $0["type"].asString == "progress" }
+            #expect(p?["line"].asString == "FIRST", "no live progress: \(events.count) events")
+            #expect(p?["stream"].asString == "stdout")
+            // …and the process is STILL RUNNING: this is not the exit burst.
+            let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
+            let row = st["jobs"].asArray?.first
+            #expect(row?["status"].asString == "running", "\(st.serialize())")
+            #expect(row?["lines"].asInt == 1, "the row must count the line LIVE: \(st.serialize())")
+            #expect(row?["last_line"].asString == "FIRST", "\(st.serialize())")
+            _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
+        }
+
+        /// A cancelled job's row finalises to `stopped` — not `failed` (the SIGKILL's
+        /// own status, indistinguishable from a program that failed on its own) — and
+        /// `clear` then forgets it. python/rust parity.
+        @Test func aCancelledJobFinalisesToStoppedAndClearRemovesIt() async throws {
+            guard let py = py3() else { return }
+            let kernel = freshKernel()
+            let a = await createPy(kernel, id: "dur_cancel")
+            let file = pidFile()
+            defer { try? FileManager.default.removeItem(at: file) }
+            _ = await kernel.send([Item(a, pyStart(py, sleepForeverCode(file)))])[0].result
+            let pid = try await waitForPid(file)
+            let row = try await waitForRow(kernel, agent: a.value, verb: "start")
+            _ = await cancelTask(kernel, try #require(row["id"].asString))
+            #expect(await waitProcessGone(pid), "pid \(pid) survived cancel")
+
+            var status = ""
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                let st = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
+                status = st["jobs"].asArray?.first?["status"].asString ?? ""
+                if status != "running" { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            #expect(status == "stopped", "the cancelled row settled as \(status)")
+
+            let cleared = await kernel.send([Item(a, .object(["type": .string("clear")]))])[0].result
+            #expect(cleared["cleared"].asInt ?? 0 >= 1, "\(cleared.serialize())")
+            let left = await kernel.send([Item(a, .object(["type": .string("status")]))])[0].result
+            #expect(left["jobs"].asArray?.count == 0, "\(left.serialize())")
         }
 
         /// No running job ⇒ a loud error, never a silent drop.

@@ -15,6 +15,7 @@
 //! afterwards.
 
 use crate::history::load_history;
+use crate::history_view::{dedupe_stale_reads, drop_answered_reflects};
 use crate::state::BackendState;
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
@@ -162,15 +163,22 @@ nothing is ever truly lost.
   `send('<your_own_id>', {type:'context_status'})`.
 "#;
 
-/// Build the per-turn message list: system block + persisted history + the user
-/// turn. A caller-supplied `system_prompt` REPLACES the default system block (a
-/// caller that wants a different role, or a different convention, owns it whole);
-/// the default is a lean primer + self-identity + [`SEND_TO_HOWTO`] +
-/// [`CONTEXT_HOWTO`], and NO agent menu.
+/// Build the per-turn message list: system block + the MODEL VIEW of the
+/// persisted history + the user turn. A caller-supplied `system_prompt` REPLACES
+/// the default system block (a caller that wants a different role, or a different
+/// convention, owns it whole); the default is a lean primer + self-identity +
+/// [`SEND_TO_HOWTO`] + [`CONTEXT_HOWTO`], and NO agent menu.
 ///
 /// The system block is rebuilt on EVERY turn and is never persisted, so it always
 /// reflects the tree as it is at send-time; the durable store holds only the
 /// user/assistant turns.
+///
+/// Returns `(messages, store_len)`. `store_len` is the DURABLE store's length
+/// behind those messages, and it is NOT derivable from them: the history is a
+/// deduped/trimmed VIEW (see [`crate::history_view`]), so counting the view puts
+/// the compaction reaction cursor short by exactly the turns the trimmers dropped
+/// — and [`crate::projection::derive_reaction`] then scans turns written BEFORE
+/// the notice and scores a reaction that never happened.
 pub async fn assemble_messages(
     self_id: &AgentId,
     _state: &Arc<BackendState>,
@@ -178,7 +186,7 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     client_id: &str,
     system_prompt: Option<&str>,
-) -> Vec<Value> {
+) -> (Vec<Value>, usize) {
     let system_content = match system_prompt {
         Some(s) if !s.trim().is_empty() => s.to_string(),
         _ => {
@@ -209,7 +217,13 @@ pub async fn assemble_messages(
         }
     };
     let mut messages = vec![json!({"role": "system", "content": system_content})];
-    messages.extend(load_history(self_id, kernel, client_id).await);
+    // A trimmed VIEW, not a rewrite of the store: stale whole-state reads deduped
+    // and answered reflects reduced to a stub — the model's own distillation
+    // carries the facts forward. Durable history keeps every turn, so the trace
+    // stays complete and `recall` pages anything back.
+    let store = load_history(self_id, kernel, client_id).await;
+    let store_len = store.len();
+    messages.extend(drop_answered_reflects(&dedupe_stale_reads(&store)));
     messages.push(json!({"role": "user", "content": user_text}));
-    messages
+    (messages, store_len)
 }

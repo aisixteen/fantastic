@@ -22,6 +22,7 @@
 // malformed items).
 
 import FantasticJSON
+import Foundation
 
 /// How one batch item ended.
 public enum Status: String, Sendable {
@@ -57,17 +58,26 @@ public struct Item: Sendable {
     public var timeout: Double?
     /// Optional retry budget for terminal failed/timed-out attempts.
     public var retries: UInt32?
+    /// Optional RAW request body. Present ⇒ the item rides the BINARY channel
+    /// (`AgentBundle.handleBinary`) instead of the text one, under the same task
+    /// row, ledger id, timeout and retries as any other item. Never base64: the
+    /// bytes travel beside the JSON header, not inside it. `sendWithBinary`
+    /// bypassed the batch entirely, so such a call had no task row, no ledger id
+    /// and no timeout (measured 2026-09-02).
+    public var binary: Data?
 
     /// A plain item: call `target` with `payload`, wait forever, no retries.
     public init(
         _ target: AgentId, _ payload: JSON,
-        id: String? = nil, timeout: Double? = nil, retries: UInt32? = nil
+        id: String? = nil, timeout: Double? = nil, retries: UInt32? = nil,
+        binary: Data? = nil
     ) {
         self.target = target
         self.payload = payload
         self.id = id
         self.timeout = timeout
         self.retries = retries
+        self.binary = binary
     }
 
     /// Read an item off a wire frame's fields.

@@ -103,6 +103,42 @@ extension Kernel {
     /// empty map, and every non-kernel key already on disk be quietly dropped on
     /// the next write. A partial read that looks like a successful one is the
     /// worst shape available.
+    /// Outcome of a pumped store read: the whole file, or the leg's own refusal.
+    /// Callers must distinguish "absent" (`reason: not_found`) from "denied" or
+    /// "the transport broke" — collapsing them to nil made a sealed store look
+    /// like an empty file (measured 2026-09-02).
+    enum StoreRead {
+        case bytes(Data)
+        case refused(JSON)
+    }
+
+    /// Read a store file WHOLE, pumping `read_stream` to EOF. A single
+    /// unpumped read returns only the first chunk (64 KiB by default), which
+    /// silently truncated every larger sidecar and ledger.
+    func readWholeViaStore(_ storeId: AgentId, _ path: String) async -> StoreRead {
+        var data = Data()
+        var offset = 0
+        while true {
+            let (got, body) = await storeSendBinary(
+                storeId,
+                .object([
+                    "type": .string("read_stream"), "path": .string(path),
+                    "offset": .integer(Int64(offset)),
+                ]), Data())
+            if got["error"].asString != nil {
+                // A refusal on the FIRST chunk is the file's status; one
+                // mid-stream is a partial read and must never look like a
+                // shorter file.
+                return .refused(got)
+            }
+            data.append(body)
+            if got["eof"].asBool == true { break }
+            guard let next = got["next_offset"].asInt, Int(next) > offset else { break }
+            offset = Int(next)
+        }
+        return .bytes(data)
+    }
+
     private func readViaStore(_ storeId: AgentId, _ path: String) async -> String? {
         var data = Data()
         var offset = 0
@@ -182,6 +218,13 @@ extension Kernel {
         guard let storeId = findStore(), let rootAgent = root else { return }
         let reldir = storeReldir(storeRoot: rootAgent.rootPath, agentRoot: agent.rootPath)
         if reldir.isEmpty { return }  // never remove the root
-        _ = await storeSend(storeId, .object(["type": .string("delete"), "path": .string(reldir)]))
+        // `recursive` is REQUIRED: an agent's dir holds `agent.json` (and any
+        // sidecars), and a bare `delete` on a populated dir refuses — py parity
+        // (`kernel_state._forget_via_store` has always passed it).
+        _ = await storeSend(
+            storeId,
+            .object([
+                "type": .string("delete"), "path": .string(reldir), "recursive": .bool(true),
+            ]))
     }
 }

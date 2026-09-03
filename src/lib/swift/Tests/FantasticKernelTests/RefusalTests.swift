@@ -31,9 +31,13 @@ struct RefusalTests {
         // the FIX rides in the refusal.
         let v = Refusal.notHere("create_agent", "some_child")
         #expect(v["reason"].asString == "not_here")
+        // PYTHON'S WORDS. One code must not mean two sentences across runtimes.
+        #expect(v["error"].asString == "create_agent is a kernel verb — some_child does not answer it")
         let hint = v["hint"].asString ?? ""
         #expect(hint.contains("kernel"))
-        #expect(hint.contains("OPERAND"))
+        #expect(hint.contains("`parent_id` / `id`"))
+        // The machine field: which verb was misaddressed, without parsing prose.
+        #expect(v["verb"].asString == "create_agent")
     }
 
     @Test func unknownAgentCarriesTheLiveIndex() {

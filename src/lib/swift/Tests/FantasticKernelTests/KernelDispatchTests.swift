@@ -291,8 +291,11 @@ struct SystemVerbTests {
                 "display_name": "Renamed",
                 "color": "#ff00ff",
             ])])[0].result
-        #expect(updated["display_name"].asString == "Renamed")
-        #expect(updated["color"].asString == "#ff00ff")
+        // {updated, id, agent} — python's shape; the record rides under `agent`.
+        #expect(updated["updated"].asBool == true)
+        #expect(updated["id"].asString == "u1")
+        #expect(updated["agent"]["display_name"].asString == "Renamed")
+        #expect(updated["agent"]["color"].asString == "#ff00ff")
     }
 
     @Test func getAgentReturnsRecord() async {

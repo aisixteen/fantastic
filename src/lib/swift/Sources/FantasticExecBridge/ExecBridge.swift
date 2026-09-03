@@ -183,14 +183,11 @@
                 let action = AuthAction(
                     kind: "spawn", target: agentId.value, verb: verb,
                     token: agent.metaValue(forKey: "auth_token")?.asString)
-                if case .deny(let reason) = rule.authorize(action) {
-                    return .object([
-                        "error": .string(reason),
-                        "reason": .string("unauthorized"),
-                        "hint": .string(
-                            "the process edge is sealed; open it: "
-                                + "update_agent <id> ingress_rule=allow_all_ingress"),
-                    ])
+                // FORWARDED, not re-worded — the rule states the reason and the
+                // repair; this hint was a second, shorter wording of the same
+                // thing, so the same seal read differently per edge.
+                if case .deny(let d) = rule.authorize(action) {
+                    return d.asRefusal
                 }
             }
             switch verb {
@@ -222,13 +219,17 @@
                             + "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
                             + "not deliver), "
                             + "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
-                            + "`kernel.self_id`, `kernel.args`. Your sends carry THIS runner's identity "
+                            + "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
+                            + "no `kernel.args`. One frame caps at 16 MiB; move more than that with "
+                            + "`write_stream` chunks. Your sends carry THIS runner's identity "
                             + "and grants (its `can_call`; a target must list this runner in "
                             + "`callable_by`). Do not rewrite the wire by hand."),
                 ])
             case "interrupt":
+                if let gone = noSuchJob(agentId, payload) { return gone }
                 return .object(["interrupted": .integer(Int64(signalJobs(agentId, payload, SIGINT)))])
             case "stop":
+                if let gone = noSuchJob(agentId, payload) { return gone }
                 return .object(["killed": .integer(Int64(signalJobs(agentId, payload, SIGKILL)))])
             default:
                 // ADDRESSABLE INBOX. A verb this bundle does not own is MAIL for the
@@ -259,26 +260,24 @@
         /// refused naming the patterns. A `code` field is refused explicitly.
         private func startReply(agentId: AgentId, payload: JSON, kernel: Kernel) async -> JSON {
             let record = kernel.agent(agentId)
-            // `code` is not a field — run a command instead (py `_start`).
+            // EVERY refusal on this verb carries a CODE. Sibling argument errors used
+            // to split — `args`/`env` answered a typed message while `code`/`command`/
+            // the policy wall answered a bare `{error}` with no `reason` at all — so
+            // nothing could tell a typo from a policy refusal without matching prose.
             if !payload["code"].isNull {
-                return .object([
-                    "error": .string("exec_bridge: `code` is not a field — run a command instead")
-                ])
+                return Refusal.bad("start", "code", "absent — run a command instead")
             }
             guard let command = payload["command"].asString,
                 !command.trimmingCharacters(in: .whitespaces).isEmpty
             else {
-                return .object(["error": .string("exec_bridge: command (str) required")])
+                return Refusal.missing("start", "command")
             }
             // `args` — a list of scalars (str/int/float), each stringified into argv.
             var args: [String] = []
             let rawArgs = payload["args"]
             if !rawArgs.isNull {
                 guard let arr = rawArgs.asArray else {
-                    return .object([
-                        "error": .string(
-                            "exec_bridge: start expects args to be a list of strings")
-                    ])
+                    return Refusal.bad("start", "args", "a list of strings")
                 }
                 for v in arr {
                     switch v {
@@ -286,10 +285,7 @@
                     case .integer(let i): args.append(String(i))
                     case .double(let d): args.append(numString(d))
                     default:
-                        return .object([
-                            "error": .string(
-                                "exec_bridge: start expects args to be a list of strings")
-                        ])
+                        return Refusal.bad("start", "args", "a list of strings")
                     }
                 }
             }
@@ -297,17 +293,19 @@
             let argv = [command] + args
             let line = shlexJoin(argv)
             if let why = commandPermitted(record, line) {
-                return .object(["error": .string(why)])
+                // An AUTHORIZATION denial, not a bad argument: the command line is
+                // well-formed and the LEG refused it. Same code the ingress gate
+                // answers, so one branch covers "the operator has not opened this".
+                return Refusal.make(
+                    Refusal.unauthorized, why,
+                    hint: "the leg's `allowed` policy decides; an operator may widen it")
             }
             // The per-call `env` block — a dict of str -> scalar.
             var envExtra: [String: String] = [:]
             let rawEnv = payload["env"]
             if !rawEnv.isNull {
                 guard let m = rawEnv.asObject else {
-                    return .object([
-                        "error": .string(
-                            "exec_bridge: start expects env to be a dict of str -> str")
-                    ])
+                    return Refusal.bad("start", "env", "a dict of str -> str")
                 }
                 for (k, v) in m {
                     switch v {
@@ -315,10 +313,7 @@
                     case .integer(let i): envExtra[k] = String(i)
                     case .double(let d): envExtra[k] = numString(d)
                     default:
-                        return .object([
-                            "error": .string(
-                                "exec_bridge: start expects env to be a dict of str -> str")
-                        ])
+                        return Refusal.bad("start", "env", "a dict of str -> str")
                     }
                 }
             }
@@ -329,7 +324,8 @@
                 spawned = try Spawn.job(
                     argv: argv, selfId: agentId.value, envExtra: envExtra, cwd: cwd)
             } catch {
-                return .object(["error": .string("exec_bridge: spawn failed: \(error)")])
+                return Refusal.make(
+                    Refusal.transportError, "exec_bridge: spawn failed: \(error)")
             }
             let jobId = String(UInt32.random(in: .min ... .max), radix: 16)
             let relay = Relay(
@@ -354,18 +350,20 @@
             return .object(["job_id": .string(jobId), "status": .string("running")])
         }
 
-        /// The job's task-table body: drain both pipes, emit `progress` per line,
-        /// await exit, update the row, emit `job_done`. The row STAYS after exit so
-        /// `status`/`clear` can see it (python/rust parity).
+        /// The job's task-table body: drain both pipes LIVE (a `progress` per line as
+        /// it arrives), await exit, update the row, emit `job_done`. The row STAYS
+        /// after exit so `status`/`clear` can see it (python/rust parity).
         private func pump(
             agentId: AgentId, jobId: String, spawned: Spawn.Spawned, kernel: Kernel
         ) async {
-            async let outD = drain(spawned.stdout.fileHandleForReading)
-            async let errD = drain(spawned.stderr.fileHandleForReading)
-            let o = String(data: await outD, encoding: .utf8) ?? ""
-            let e = String(data: await errD, encoding: .utf8) ?? ""
-            await emitLines(o, stream: "stdout", agentId: agentId, jobId: jobId, kernel: kernel)
-            await emitLines(e, stream: "stderr", agentId: agentId, jobId: jobId, kernel: kernel)
+            async let outD = pumpStream(
+                spawned.stdout.fileHandleForReading, stream: "stdout",
+                agentId: agentId, jobId: jobId, kernel: kernel)
+            async let errD = pumpStream(
+                spawned.stderr.fileHandleForReading, stream: "stderr",
+                agentId: agentId, jobId: jobId, kernel: kernel)
+            let o = await outD
+            let e = await errD
 
             let exit = ExitBox()
             spawned.process.terminationHandler = { p in exit.finish(p.terminationStatus) }
@@ -394,30 +392,25 @@
 
         /// Emit one `progress` per output line; the counter is SHARED across stdout
         /// and stderr (it lives on the job row), so `n` is one monotonic sequence.
-        private func emitLines(
-            _ text: String, stream: String, agentId: AgentId, jobId: String, kernel: Kernel
+        private func emitLine(
+            _ line: String, stream: String, agentId: AgentId, jobId: String, kernel: Kernel
         ) async {
-            if text.isEmpty { return }
-            var parts = text.components(separatedBy: "\n")
-            if parts.last == "" { parts.removeLast() }
-            for line in parts {
-                let n = lock.withLock { () -> Int in
-                    if var j = jobs[jobId] {
-                        j.lines += 1
-                        j.lastLine = line
-                        jobs[jobId] = j
-                        return j.lines
-                    }
-                    return 0
+            let n = lock.withLock { () -> Int in
+                if var j = jobs[jobId] {
+                    j.lines += 1
+                    j.lastLine = line
+                    jobs[jobId] = j
+                    return j.lines
                 }
-                await kernel.emit(
-                    agentId,
-                    .object([
-                        "type": .string("progress"), "job_id": .string(jobId),
-                        "n": .integer(Int64(n)), "line": .string(line),
-                        "stream": .string(stream),
-                    ]))
+                return 0
             }
+            await kernel.emit(
+                agentId,
+                .object([
+                    "type": .string("progress"), "job_id": .string(jobId),
+                    "n": .integer(Int64(n)), "line": .string(line),
+                    "stream": .string(stream),
+                ]))
         }
 
         // MARK: - status / clear
@@ -446,9 +439,7 @@
         private func statusReply(_ agentId: AgentId, payload: JSON) -> JSON {
             lock.withLock {
                 if let jid = payload["job_id"].asString {
-                    guard let j = jobs[jid], j.agent == agentId else {
-                        return .object(["error": .string("exec_bridge: no job \"\(jid)\"")])
-                    }
+                    guard let j = jobs[jid], j.agent == agentId else { return noJob(jid) }
                     return .object(["jobs": .array([snap(jid, j, full: true)])])
                 }
                 let rows = jobs.filter { $0.value.agent == agentId }
@@ -468,6 +459,22 @@
             }
             lock.withLock { for id in doomed { jobs.removeValue(forKey: id) } }
             return .object(["cleared": .integer(Int64(doomed.count))])
+        }
+
+        /// The `not_found` refusal for a job_id naming nothing. Spelled once.
+        private func noJob(_ jid: String) -> JSON {
+            Refusal.make(
+                Refusal.notFound, "exec_bridge: no job \"\(jid)\"",
+                extra: [("job_id", .string(jid))])
+        }
+
+        /// …and the guard that decides. A `job_id` naming nothing used to answer
+        /// `{killed:0}` / `{interrupted:0}` — the same reply as "it had already
+        /// exited", so a typo read as success.
+        private func noSuchJob(_ agentId: AgentId, _ payload: JSON) -> JSON? {
+            guard let jid = payload["job_id"].asString else { return nil }
+            let known = lock.withLock { jobs[jid]?.agent == agentId }
+            return known ? nil : noJob(jid)
         }
 
         /// `interrupt` / `stop` — signal this agent's jobs, or one named `job_id`.
@@ -512,38 +519,73 @@
         /// second job on the same agent is a different task and survives.
         public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
             let doomed = lock.withLock {
-                jobs.values.filter { $0.agent == agentId && $0.taskId == taskId }
+                jobs.filter { $0.value.agent == agentId && $0.value.taskId == taskId }
+                    .map(\.key)
             }
-            for job in doomed { teardown(job) }
+            for id in doomed { teardown(id) }
         }
 
-        /// Read one pipe to EOF without pinning a thread: `readabilityHandler` fires
-        /// on Foundation's own queue, and the empty read that means EOF resumes us.
-        private func drain(_ handle: FileHandle) async -> Data {
+        /// Read one pipe to EOF, emitting a `progress` PER LINE as it arrives, and
+        /// return the whole text for the final `job_done`/`status` snapshot.
+        ///
+        /// This used to buffer both pipes to EOF and emit every line in one burst at
+        /// exit, which made `progress` useless for exactly the jobs that need it: a
+        /// server-style program that prints a line per request and never exits
+        /// produced NO output events at all, and `status` reported `lines: 0` for its
+        /// whole life. `readabilityHandler` fires on Foundation's own queue (no thread
+        /// pinned); it splits on '\n' and carries the partial line, and the carry is
+        /// flushed at EOF so an unterminated last line is not lost.
+        private func pumpStream(
+            _ handle: FileHandle, stream: String, agentId: AgentId, jobId: String,
+            kernel: Kernel
+        ) async -> String {
             let box = DataBox()
-            return await withCheckedContinuation { (c: CheckedContinuation<Data, Never>) in
-                handle.readabilityHandler = { h in
-                    let chunk = h.availableData
-                    if chunk.isEmpty {
-                        h.readabilityHandler = nil
-                        c.resume(returning: box.take())
-                    } else {
-                        box.append(chunk)
-                    }
+            let carry = CarryBox()
+            let (lines, cont) = AsyncStream<String>.makeStream()
+            handle.readabilityHandler = { h in
+                let chunk = h.availableData
+                if chunk.isEmpty {
+                    h.readabilityHandler = nil
+                    if let tail = carry.flush() { cont.yield(tail) }
+                    cont.finish()
+                    return
                 }
+                box.append(chunk)
+                for line in carry.push(chunk) { cont.yield(line) }
             }
+            for await line in lines {
+                await emitLine(
+                    line, stream: stream, agentId: agentId, jobId: jobId, kernel: kernel)
+            }
+            return String(data: box.take(), encoding: .utf8) ?? ""
         }
 
-        /// Free the REAL resource of ONE job: SIGKILL its child + stop its relay.
+        /// Free the REAL resource of ONE job: SIGKILL its child + stop its relay, and
+        /// LABEL the row `stopping` so the pump finalises it to `stopped`.
+        ///
+        /// The label is not cosmetic. Without it a cancelled job finalised as
+        /// `failed` — the SIGKILL's non-zero status, indistinguishable from a program
+        /// that failed on its own — where python and rust both report `stopped`.
         /// Idempotent; never signals a pid it no longer owns.
-        private func teardown(_ job: Job) {
+        private func teardown(_ jobId: String) {
+            let job = lock.withLock { () -> Job? in
+                guard var j = jobs[jobId] else { return nil }
+                if j.exitCode == nil {
+                    j.status = "stopping"
+                    jobs[jobId] = j
+                }
+                return j
+            }
+            guard let job else { return }
             if job.process.isRunning { kill(job.pid, SIGKILL) }
             job.relay?.stop()
         }
 
         private func teardownAgent(_ agentId: AgentId) {
-            let doomed = lock.withLock { jobs.values.filter { $0.agent == agentId } }
-            for job in doomed { teardown(job) }
+            let doomed = lock.withLock {
+                jobs.filter { $0.value.agent == agentId }.map(\.key)
+            }
+            for id in doomed { teardown(id) }
         }
 
         // MARK: - validate_meta
@@ -557,7 +599,19 @@
                 let deny = rule as? IngressRules.DenyInbound, let bad = deny.unknown
             {
                 return "ingress_rule=\"\(bad)\" is not a rule this bundle implements — "
-                    + "legal values: allow_all, deny_inbound, password"
+                    + "legal values: allow_all_ingress, deny_ingress"
+            }
+            // `password_ingress` is meaningless on an in-process leg: the token is
+            // read off a WIRE ENVELOPE and the process edge has none — no frame ever
+            // presents one, so the rule could only refuse, or (until 2026-09-02) be
+            // satisfied by a secret persisted ON THE RECORD. Refused at the write
+            // (#116). Same rule as `FantasticFile.passwordRefusal`.
+            for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
+                if let spec = meta[field], ruleName(spec, default: "") == stem {
+                    return "\(field)=\(spec.serialize()) is not applicable to the process edge: "
+                        + "a leg with no wire envelope can never present a token — "
+                        + "legal values: allow_all_ingress, deny_ingress"
+                }
             }
             // The withdrawn code-runner fields are refused at WRITE time.
             for gone in ["code", "shim", "interpreter", "interpreters", "argv_template"] {
@@ -689,6 +743,39 @@
                     lock.unlock()
                 }
             }
+        }
+    }
+
+    /// The partial line held between pipe reads. A chunk boundary falls wherever the
+    /// OS put it, never on a newline, so the tail of every chunk waits here for the
+    /// rest of its line. `[UInt8]` rather than `Data` because array indices are always
+    /// zero-based — a sliced `Data`'s are not, which is a quiet way to read the wrong
+    /// bytes back out.
+    private final class CarryBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buf: [UInt8] = []
+
+        /// Append a chunk; return every COMPLETE line it closed.
+        func push(_ chunk: Data) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            buf.append(contentsOf: chunk)
+            var out: [String] = []
+            while let i = buf.firstIndex(of: UInt8(ascii: "\n")) {
+                out.append(String(decoding: buf[..<i], as: UTF8.self))
+                buf.removeFirst(i + 1)
+            }
+            return out
+        }
+
+        /// The unterminated tail at EOF, if there is one.
+        func flush() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !buf.isEmpty else { return nil }
+            let s = String(decoding: buf, as: UTF8.self)
+            buf.removeAll()
+            return s
         }
     }
 

@@ -15,11 +15,13 @@ MANIFEST = """\
 agents:
   - id: memory
     handler_module: text_file.tools
+    callable_by:
+      worker: [write, read]
   - id: worker
     handler_module: file_bridge.tools
     ingress_rule: allow_all_ingress
     can_call:
-      memory: [set, read]
+      memory: [write, read]
 """
 
 
@@ -61,12 +63,18 @@ async def test_declared_agents_carry_baseline_plus_explicit_grants(seeded_kernel
     can = seeded_kernel.ctx.get("worker")["can_call"]
     # Baseline is merged in…
     assert can["$self"] == "*" and can["$parent"] == "*" and can["$children"] == "*"
-    assert can["$loader"] == ["persist_blob", "load_blob"]
     # …and the manifest's explicit lateral grant is present.
-    assert can["memory"] == ["set", "read"]
+    assert can["memory"] == ["write", "read"]
     # memory got the baseline even with no explicit can_call in the manifest.
     mem = seeded_kernel.ctx.get("memory")["can_call"]
-    assert mem["$self"] == "*" and "$loader" in mem
+    assert mem["$self"] == "*"
+    # NOTHING is auto-granted. `$loader` is real reach on the kernel's control
+    # surface (ps/cancel/ledger/shutdown_kernel resolve through it), and only an
+    # agent that keeps its OWN sidecar — an AI's chat file, the scheduler's
+    # schedules — has any use for persist_blob/load_blob. A file surface or a
+    # runner never persists anything of its own, so a roster-wide grant would be
+    # reach handed out for nothing. A manifest that needs it declares it.
+    assert "$loader" not in can and "$loader" not in mem
 
 
 async def test_roster_is_closed_a_child_cannot_create_more(seeded_kernel):
@@ -99,30 +107,65 @@ async def test_worker_may_use_its_declared_edge_but_not_others(seeded_kernel):
                 [
                     {
                         "target": "memory",
-                        "payload": {"type": "set", "key": "k", "value": 1},
+                        "payload": {"type": "write", "path": "k.txt", "bytes": "1"},
                     }
                 ]
             )
         )[0]["result"]
-        # `delete` on memory was never granted → denied.
+        # `patch` on memory was never granted → denied.
         no = (
             await seeded_kernel.send(
-                [{"target": "memory", "payload": {"type": "delete", "key": "k"}}]
+                [{"target": "memory", "payload": {"type": "patch", "path": "k.txt"}}]
             )
         )[0]["result"]
     assert ok.get("reason") != "unauthorized"
     assert no.get("reason") == "unauthorized"
 
 
+async def test_the_manifest_wins_over_the_hydrated_record(seeded_kernel):
+    """THE MANIFEST IS TRUTH; a store is only a MEDIUM. Editing a grant in the
+    yaml and rebooting must change the live agent — it used to change nothing,
+    because an existing id was skipped and the hydrated record silently won."""
+    loader = await _init_loader(seeded_kernel)
+    assert seeded_kernel.ctx.get("worker")["can_call"]["memory"] == ["write", "read"]
+    Path("fantastic.yaml").write_text(
+        MANIFEST.replace("memory: [write, read]", "memory: [read]")
+    )
+    r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"]
+    assert r["booted"] is True, r
+    assert seeded_kernel.ctx.get("worker")["can_call"]["memory"] == ["read"], (
+        "the manifest must be re-applied over the hydrated record"
+    )
+
+
+async def test_a_manifest_that_reassigns_a_handler_module_fails_loud(seeded_kernel):
+    """A bundle cannot be swapped under a live agent, so the entry is refused by
+    NAME rather than silently ignored."""
+    loader = await _init_loader(seeded_kernel)
+    Path("fantastic.yaml").write_text(
+        MANIFEST.replace(
+            "  - id: memory\n    handler_module: text_file.tools",
+            "  - id: memory\n    handler_module: file_bridge.tools",
+        )
+    )
+    r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"]
+    assert r["booted"] is False, r
+    assert "memory" in r["error"] and "handler_module" in r["error"], r
+
+
 async def test_boot_is_idempotent_by_id(seeded_kernel):
     loader = await _init_loader(seeded_kernel)
     before = set(seeded_kernel.ctx.agents)
-    # Re-boot the loader: the manifest ids already exist → all skipped, no dup error.
+    # Re-boot the loader: the manifest ids already exist → re-applied, never duplicated.
     r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
         0
     ]["result"]
     assert r["booted"] is True
-    assert set(r["skipped"]) == {"memory", "worker"} and r["created"] == []
+    assert set(r["reapplied"]) == {"memory", "worker"} and r["created"] == []
     assert set(seeded_kernel.ctx.agents) == before
 
 
@@ -147,3 +190,39 @@ async def test_missing_manifest_reports_not_crashes(seeded_kernel):
     assert rec.get("reason") == "invalid_meta" and "not readable" in rec.get(
         "error", ""
     )
+
+
+async def test_a_roster_entry_without_an_id_is_refused_loud(seeded_kernel):
+    """#105 — the roster is keyed by id, so an id-less entry can never match the
+    agent the LAST boot minted: every reboot created ANOTHER one beside it and
+    the flush persisted them all, with no word to the operator."""
+    before = set(seeded_kernel.ctx.agents)
+    loader = await _init_loader(
+        seeded_kernel,
+        "agents:\n  - handler_module: text_file.tools\n",
+    )
+    r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"]
+    assert r["booted"] is False, r
+    assert "explicit id" in r["error"] and "text_file.tools" in r["error"], r
+    # NOTHING was created — not on this boot, and not by the create-time boot.
+    assert set(seeded_kernel.ctx.agents) == before | {loader}
+
+
+async def test_an_id_less_entry_is_refused_before_the_valid_ones_hydrate(
+    seeded_kernel,
+):
+    """The refusal is a REFUSAL, not a skip: boot stops at the bad entry."""
+    loader = await _init_loader(
+        seeded_kernel,
+        "agents:\n"
+        "  - handler_module: text_file.tools\n"
+        "  - id: memory\n"
+        "    handler_module: text_file.tools\n",
+    )
+    r = (await seeded_kernel.send([{"target": loader, "payload": {"type": "boot"}}]))[
+        0
+    ]["result"]
+    assert r["booted"] is False, r
+    assert "memory" not in seeded_kernel.ctx.agents

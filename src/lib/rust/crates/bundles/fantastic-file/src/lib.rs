@@ -28,6 +28,7 @@
 use async_trait::async_trait;
 use fantastic_bundle as _; // dep keeps the bundle ↔ kernel link explicit
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -88,17 +89,15 @@ impl Bundle for FileBundle {
             verb: "reflect",
             token: None,
         };
-        match rule.authorize(&probe) {
-            fantastic_io_bridge::authorizer::Decision::Deny(r)
-                if r.contains("unknown ingress rule") =>
-            {
-                Some(format!(
+        if let fantastic_io_bridge::authorizer::Decision::Deny(d) = rule.authorize(&probe) {
+            if d.reason.contains("unknown ingress rule") {
+                return Some(format!(
                     "ingress_rule={spec} is not a rule this bundle implements — \
-                 legal values: allow_all, deny_inbound, password"
-                ))
+                     legal values: allow_all_ingress, deny_ingress"
+                ));
             }
-            _ => None,
         }
+        password_refusal(meta, "fs edge")
     }
 
     fn name(&self) -> &str {
@@ -144,28 +143,32 @@ impl Bundle for FileBundle {
 
         let reply = match verb {
             // Discovery shows the configured root verbatim (no clamp — py parity).
-            "reflect" => reflect_reply(agent_id, &raw_root, readonly, &hidden),
+            "reflect" => reflect_reply(
+                agent_id,
+                &meta,
+                &raw_root,
+                readonly,
+                &hidden,
+                clamp_root(&raw_root, &workdir_base(kernel)).err(),
+            ),
             "boot" | "shutdown" => Value::Null,
             // The PUMP coordinates a SOURCE→SINK copy by id; it never touches
             // bytes/root itself, so it rides the text channel without a clamp.
             "pump" => pump_reply(agent_id, payload, kernel).await,
-            // Stream verbs carry RAW BYTES — binary channel only.
-            "read_stream" | "write_stream" => json!({
-                "error": format!(
-                    "{verb} carries raw bytes — call it on the binary channel \
-                     (send_with_binary), not text send"
-                ),
-            }),
+            // Stream verbs carry RAW BYTES — binary channel only. A CODED
+            // refusal (python serves these on the text channel; a consumer
+            // that lands here must be able to branch, not string-match).
+            "read_stream" | "write_stream" => rf::bad(
+                verb,
+                "bytes",
+                "raw bytes on the binary channel (send_with_binary)",
+            ),
             // Every data verb clamps the root to the running dir FIRST (a root
             // that escapes it refuses — the running-dir law).
             _ => {
                 let root = match clamp_root(&raw_root, &workdir_base(kernel)) {
                     Ok(r) => r,
-                    Err(e) => {
-                        return Ok(Some(
-                            json!({"error": e, "reason": "root_escapes_running_dir"}),
-                        ))
-                    }
+                    Err(e) => return Ok(Some(rf::refusal(rf::TRANSPORT_ERROR, e))),
                 };
                 match verb {
                     "list" => list_reply(&root, payload, &hidden),
@@ -175,7 +178,14 @@ impl Bundle for FileBundle {
                     "rename" => rename_reply(&root, payload),
                     "mkdir" if readonly => readonly_refusal(),
                     "mkdir" => mkdir_reply(&root, payload),
-                    other => json!({"error": format!("unknown verb {other:?}")}),
+                    other => {
+                        let mut v = rf::refusal(
+                            rf::UNHANDLED,
+                            format!("file_bridge: unknown type {other:?}"),
+                        );
+                        rf::with(&mut v, "verb", json!(other));
+                        v
+                    }
                 }
             }
         };
@@ -217,12 +227,7 @@ impl Bundle for FileBundle {
         // Running-dir law — clamp the root for stream ops too.
         let root = match clamp_root(&root_of(&meta), &workdir_base(kernel)) {
             Ok(r) => r,
-            Err(e) => {
-                return Ok((
-                    Some(json!({"error": e, "reason": "root_escapes_running_dir"})),
-                    Vec::new(),
-                ))
-            }
+            Err(e) => return Ok((Some(rf::refusal(rf::TRANSPORT_ERROR, e)), Vec::new())),
         };
         let readonly = meta
             .get("readonly")
@@ -264,20 +269,25 @@ fn gate(meta: &serde_json::Map<String, Value>, agent_id: &AgentId, verb: &str) -
         Ok(r) => r,
         Err(e) => return Some(json!({"error": e})),
     };
+    // NO token: the fs edge has no wire envelope, so nothing can present one.
+    // It used to read `auth_token` off the RECORD — a persisted secret in the
+    // portable workdir satisfied a `password_ingress` leg, the one thing the
+    // password rule exists to prevent. `password_ingress` is now refused at
+    // `validate_meta` (#116); the gate never reads the record for a credential.
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "call",
         target: agent_id.0.as_str(),
         verb,
-        token: meta.get("auth_token").and_then(Value::as_str),
+        token: None,
     };
-    if let fantastic_io_bridge::authorizer::Decision::Deny(reason) =
+    // FORWARDED, not re-worded. This hint was hardcoded to say "the fs edge" for
+    // whichever leg reached this gate, and it was a second, shorter wording of a
+    // repair the RULE already states — so the same seal read differently per edge
+    // and differently from python.
+    if let fantastic_io_bridge::authorizer::Decision::Deny(d) =
         fantastic_io_bridge::gate_inbound(&rule, &action)
     {
-        return Some(json!({
-            "error": reason,
-            "reason": "unauthorized",
-            "hint": "the fs edge is sealed; open it: update_agent <id> ingress_rule=allow_all_ingress",
-        }));
+        return Some(d.to_refusal());
     }
     None
 }
@@ -288,41 +298,36 @@ fn gate(meta: &serde_json::Map<String, Value>, agent_id: &AgentId, verb: &str) -
 /// handle): pull the next chunk by calling again with `offset=next_offset`.
 /// Mirrors py `file_bridge._read_stream`.
 fn read_stream_reply(root: &Path, header: &Value) -> (Value, Vec<u8>) {
-    let path_str = header.get("path").and_then(Value::as_str).unwrap_or("");
-    let offset = header.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    let length = header
-        .get("length")
-        .and_then(Value::as_u64)
-        .filter(|n| *n > 0)
-        .unwrap_or(65536);
-    let target = match resolve_safe(root, path_str) {
+    let path_str = match path_arg("read_stream", header, "path") {
         Ok(p) => p,
-        Err(e) => return (json!({"error": e}), Vec::new()),
+        Err(e) => return (e, Vec::new()),
+    };
+    let offset = match int_arg("read_stream", header, "offset", 0, 0) {
+        Ok(n) => n,
+        Err(e) => return (e, Vec::new()),
+    };
+    let length = match int_arg("read_stream", header, "length", 65536, 1) {
+        Ok(n) => n,
+        Err(e) => return (e, Vec::new()),
+    };
+    let target = match resolve_safe("read_stream", root, path_str) {
+        Ok(p) => p,
+        Err(e) => return (e, Vec::new()),
     };
     if !target.is_file() {
         // Python parity: the not-found refusal names its reason and path
         // (consumers — text_file checkpoints among them — branch on `reason`).
-        return (
-            json!({
-                "error": format!("file {path_str:?} not found"),
-                "reason": "not_found",
-                "path": path_str,
-            }),
-            Vec::new(),
-        );
+        let mut v = not_found(format!("file {path_str:?} not found"));
+        rf::with(&mut v, "path", json!(path_str));
+        return (v, Vec::new());
     }
     let size = match std::fs::metadata(&target) {
         Ok(m) => m.len(),
-        Err(e) => {
-            return (
-                json!({"error": format!("stat {}: {e}", target.display())}),
-                Vec::new(),
-            )
-        }
+        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e.to_string()), Vec::new()),
     };
     let chunk = match read_chunk(&target, offset, length) {
         Ok(b) => b,
-        Err(e) => return (json!({"error": e}), Vec::new()),
+        Err(e) => return (rf::refusal(rf::TRANSPORT_ERROR, e), Vec::new()),
     };
     let next_offset = offset + chunk.len() as u64;
     let header = json!({
@@ -331,43 +336,123 @@ fn read_stream_reply(root: &Path, header: &Value) -> (Value, Vec<u8>) {
         "next_offset": next_offset,
         "eof": next_offset >= size,
         "size": size,
-        "bytes_len": chunk.len(),
     });
     (header, chunk)
 }
 
 /// Read up to `length` bytes from `target` starting at `offset` (seek + read).
+/// The buffer grows only to what EXISTS: `take(length).read_to_end` — never an
+/// up-front `vec![0; length]`, which a caller-chosen `length` of 1 PB turned
+/// into an allocation abort of the whole kernel (#35/#100). No cap is needed:
+/// the file's size bounds it.
 fn read_chunk(target: &Path, offset: u64, length: u64) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f =
         std::fs::File::open(target).map_err(|e| format!("open {}: {e}", target.display()))?;
     f.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("seek {}: {e}", target.display()))?;
-    let mut buf = vec![0u8; length as usize];
-    let n = f
-        .read(&mut buf)
+    let mut buf = Vec::new();
+    f.take(length)
+        .read_to_end(&mut buf)
         .map_err(|e| format!("read {}: {e}", target.display()))?;
-    buf.truncate(n);
     Ok(buf)
+}
+
+/// The `not_found` refusal shape python emits (`{error, reason:"not_found"}`).
+/// Python's closed set carries `NOT_FOUND`; the rust `refusal` module does
+/// not yet (its `CODES` is 13 long, python's 14), and `rf::refusal` PANICS on
+/// a code outside its set — so the shape is spelled here until the kernel
+/// adds the constant. Same code, same keys as python; nothing else differs.
+fn not_found(error: String) -> Value {
+    json!({"error": error, "reason": "not_found"})
+}
+
+/// A string argument that is a ROOT-RELATIVE path: absent ⇒ `""`; a non-string
+/// or an absolute path is `bad_arg` (the absolute form is refused, never
+/// silently re-rooted — python used to `lstrip("/")` against its own docstring).
+fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, Value> {
+    let p = match payload.get(name) {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(rf::bad(verb, name, "a string")),
+    };
+    if p.starts_with('/') {
+        return Err(rf::bad(verb, name, "a root-relative path (no leading '/')"));
+    }
+    Ok(p)
+}
+
+/// An integer argument with a floor: absent/null ⇒ `default`; anything that is
+/// not a JSON integer (a bool, a float, a string) or is below `minimum` is
+/// `bad_arg` naming the arg. Mirrors py `_int_arg` — a negative `offset` used
+/// to trap swift and a huge `length` abort rust; now every runtime refuses.
+fn int_arg(
+    verb: &str,
+    payload: &Value,
+    name: &str,
+    default: u64,
+    minimum: u64,
+) -> Result<u64, Value> {
+    match payload.get(name) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => match v.as_i64() {
+            Some(n) if n >= 0 && (n as u64) >= minimum => Ok(n as u64),
+            _ => Err(rf::bad(verb, name, &format!("an integer >= {minimum}"))),
+        },
+    }
+}
+
+/// `path_arg` for a MUTATING verb: the path must name something INSIDE the
+/// root — empty/`.` is `missing_arg`, anything resolving to the root itself is
+/// `bad_arg`. `delete {path:"", recursive:true}` used to remove the whole
+/// served store (#97): the root is the boundary, not an operand.
+fn target_arg<'a>(
+    verb: &str,
+    root: &Path,
+    payload: &'a Value,
+    name: &str,
+) -> Result<(&'a str, PathBuf), Value> {
+    let p = path_arg(verb, payload, name)?;
+    if p.is_empty() || p == "." {
+        return Err(rf::missing(verb, name));
+    }
+    let target = resolve_safe(verb, root, p)?;
+    if normalize_lexical(&target) == normalize_lexical(root) {
+        return Err(rf::bad(
+            verb,
+            name,
+            "a path inside the root, not the root itself",
+        ));
+    }
+    Ok((p, target))
 }
 
 /// The SINK half — write ONE raw chunk (`blob`) at `offset` (default: append
 /// at end). `truncate:true` on the first chunk starts fresh. Returns
 /// `{path, written, offset, size}`. Mirrors py `file_bridge._write_stream`.
 fn write_stream_reply(root: &Path, header: &Value, blob: &[u8]) -> Value {
-    let path_str = header.get("path").and_then(Value::as_str).unwrap_or("");
+    let path_str = match path_arg("write_stream", header, "path") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let truncate = header
         .get("truncate")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let off_in = header.get("offset").and_then(Value::as_u64);
-    let target = match resolve_safe(root, path_str) {
+    let off_in = match header.get("offset") {
+        None | Some(Value::Null) => None,
+        Some(_) => match int_arg("write_stream", header, "offset", 0, 0) {
+            Ok(n) => Some(n),
+            Err(e) => return e,
+        },
+    };
+    let target = match resolve_safe("write_stream", root, path_str) {
         Ok(p) => p,
-        Err(e) => return json!({"error": e}),
+        Err(e) => return e,
     };
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return json!({"error": format!("mkdir parent: {e}")});
+            return rf::refusal(rf::TRANSPORT_ERROR, format!("mkdir parent: {e}"));
         }
     }
     match write_chunk(&target, blob, off_in, truncate) {
@@ -377,7 +462,7 @@ fn write_stream_reply(root: &Path, header: &Value, blob: &[u8]) -> Value {
             "offset": offset,
             "size": size,
         }),
-        Err(e) => json!({"error": e}),
+        Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e),
     }
 }
 
@@ -440,11 +525,10 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         .get("sink_path")
         .and_then(Value::as_str)
         .unwrap_or(spath);
-    let chunk = payload
-        .get("chunk")
-        .and_then(Value::as_u64)
-        .filter(|n| *n > 0)
-        .unwrap_or(65536);
+    let chunk = match int_arg("pump", payload, "chunk", 65536, 1) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let (src_id, sink_id) = (AgentId::from(src), AgentId::from(sink));
     let (mut offset, mut first, mut chunks) = (0u64, true, 0u64);
     loop {
@@ -455,8 +539,11 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 Vec::new(),
             )
             .await;
-        if let Some(err) = rmeta.get("error") {
-            return json!({"error": format!("pump: read from {src:?} failed: {err}")});
+        if rmeta.get("error").is_some() {
+            return rf::refusal(
+                rf::TRANSPORT_ERROR,
+                format!("pump: read from {src:?} failed: {rmeta}"),
+            );
         }
         let (wmeta, _) = kernel
             .send_with_binary(
@@ -465,17 +552,28 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
                 body,
             )
             .await;
-        if let Some(err) = wmeta.get("error") {
-            return json!({"error": format!("pump: write to {sink:?} failed: {err}")});
+        if wmeta.get("error").is_some() {
+            return rf::refusal(
+                rf::TRANSPORT_ERROR,
+                format!("pump: write to {sink:?} failed: {wmeta}"),
+            );
         }
         first = false;
         chunks += 1;
-        offset = rmeta
-            .get("next_offset")
-            .and_then(Value::as_u64)
-            .unwrap_or(offset);
+        let next = rmeta.get("next_offset").and_then(Value::as_u64);
         if rmeta.get("eof").and_then(Value::as_bool).unwrap_or(true) {
+            offset = next.unwrap_or(offset);
             break;
+        }
+        match next {
+            Some(n) if n > offset => offset = n,
+            // No forward progress and no eof: a SOURCE that would loop forever.
+            _ => {
+                return rf::refusal(
+                    rf::TRANSPORT_ERROR,
+                    format!("pump: source {src:?} made no progress at offset {offset}"),
+                )
+            }
         }
     }
     json!({"source": spath, "sink": dpath, "bytes": offset, "chunks": chunks})
@@ -579,27 +677,45 @@ fn expanduser(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Resolve `path` relative to `root`, refusing escapes.
+/// Resolve `path` relative to `root`, refusing escapes — the one refusal shape.
 ///
-/// Walks the components of the caller-supplied `path` (NOT the
-/// already-joined absolute form) so we can refuse any `..` that
-/// would climb above the root. Returns the joined-and-resolved
-/// absolute path on success. Symlink-following is left to the OS
-/// at access time — we only guarantee the LITERAL path can't escape.
-fn resolve_safe(root: &Path, path: &str) -> Result<PathBuf, String> {
-    // An absolute path is a hard escape — refuse, don't silently
-    // strip the leading slash.
+/// Two checks, both required:
+/// 1. LEXICAL — walk the caller's components and refuse any `..` that climbs
+///    above the root, and any absolute component (`bad_arg`: a root-relative
+///    path was wanted; the clamp never silently re-roots).
+/// 2. CANONICAL — the deepest EXISTING ancestor of the joined path is
+///    canonicalized and re-checked against the canonical root. This is what
+///    follows symlinks: an in-root `docs -> /etc` used to pass the lexical
+///    check and be followed by the OS at open time (#30 — python refused it,
+///    the ports served `/etc/passwd`). BOTH sides are canonicalized so macOS's
+///    `/var` ≡ `/private/var` alias cannot mismatch. A root that does not
+///    exist yet has nothing under it to follow, so the check is skipped; a
+///    dangling symlink LEAF cannot be canonicalized, so its parent is checked
+///    instead — which is what makes it deletable.
+///
+/// Escapes are `transport_error` ("… escapes root"), the code python's `fs`
+/// ValueError maps to.
+fn resolve_safe(verb: &str, root: &Path, path: &str) -> Result<PathBuf, Value> {
     if Path::new(path).is_absolute() {
-        return Err(format!("path {path:?} escapes root"));
+        return Err(rf::bad(
+            verb,
+            "path",
+            "a root-relative path (no leading '/')",
+        ));
     }
-    let rel = path.trim_start_matches('/');
+    let escape = || {
+        rf::refusal(
+            rf::TRANSPORT_ERROR,
+            format!("fs: path {path:?} escapes root"),
+        )
+    };
     let mut depth: i32 = 0;
-    for c in Path::new(rel).components() {
+    for c in Path::new(path).components() {
         match c {
             std::path::Component::ParentDir => {
                 depth -= 1;
                 if depth < 0 {
-                    return Err(format!("path {path:?} escapes root"));
+                    return Err(escape());
                 }
             }
             std::path::Component::CurDir => {}
@@ -607,25 +723,83 @@ fn resolve_safe(root: &Path, path: &str) -> Result<PathBuf, String> {
                 depth += 1;
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                // An absolute component inside `path` is a hard
-                // escape attempt — refuse rather than silently
-                // anchoring to filesystem root.
-                return Err(format!("path {path:?} escapes root"));
+                return Err(escape());
             }
         }
     }
-    Ok(root.join(rel))
+    let joined = root.join(path);
+    if let Ok(canon_root) = root.canonicalize() {
+        if let Some(canon) = joined.ancestors().find_map(|a| a.canonicalize().ok()) {
+            if !canon.starts_with(&canon_root) {
+                return Err(escape());
+            }
+        }
+    }
+    Ok(joined)
 }
 
-fn reflect_reply(agent_id: &AgentId, root: &Path, readonly: bool, hidden: &[String]) -> Value {
-    json!({
+/// `password_ingress` is meaningless on an in-process leg: the token is read
+/// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
+/// presents one, so the rule could only ever refuse (python) or, worse, be
+/// satisfied by a secret persisted ON THE RECORD (the ports, until
+/// 2026-09-02). Refused at the write, next to the mistake (#116). Both
+/// spellings: the scoped `ingress_rule` and the `auth` stem. Shared with
+/// `fantastic-exec-bridge`.
+pub fn password_refusal(meta: &serde_json::Map<String, Value>, edge: &str) -> Option<String> {
+    for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
+        let Some(spec) = meta.get(field) else {
+            continue;
+        };
+        if fantastic_io_bridge::authorizer::rule_name(Some(spec), "") == stem {
+            return Some(format!(
+                "{field}={spec} is not applicable to the {edge}: a leg with no wire \
+                 envelope can never present a token — legal values: \
+                 allow_all_ingress, deny_ingress"
+            ));
+        }
+    }
+    None
+}
+
+fn reflect_reply(
+    agent_id: &AgentId,
+    meta: &serde_json::Map<String, Value>,
+    root: &Path,
+    readonly: bool,
+    hidden: &[String],
+    root_error: Option<String>,
+) -> Value {
+    // The auth POSTURE, python's `describe(rec)`: rule NAMES (never config),
+    // keyed by the field a caller WRITES (read-key == write-key), + `sealed`.
+    let ingress = fantastic_io_bridge::authorizer::rule_name(
+        fantastic_io_bridge::authorizer::manifold_spec(
+            meta.get("ingress_rule"),
+            meta.get("auth"),
+            "_ingress",
+        )
+        .as_ref(),
+        "deny_ingress",
+    );
+    let egress = fantastic_io_bridge::authorizer::rule_name(
+        fantastic_io_bridge::authorizer::manifold_spec(
+            meta.get("egress_rule"),
+            meta.get("auth"),
+            "_egress",
+        )
+        .as_ref(),
+        "silent_egress",
+    );
+    let mut out = json!({
         "id": agent_id.as_str(),
-        "sentence": "Filesystem root.",
+        "sentence": "Filesystem edge of the io family — sealed by default, running-dir only.",
         "root": root.display().to_string(),
         "readonly": readonly,
         "hidden_count": hidden.len(),
+        "ingress_rule": ingress,
+        "egress_rule": egress,
+        "sealed": ingress != "allow_all_ingress",
         "verbs": {
-            "reflect": "Identity + filesystem root + readonly flag. No args.",
+            "reflect": "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed). No args.",
             "boot": "No-op. Returns None.",
             "list": "args: path:str (default '').",
             "delete": "args: path:str (req).",
@@ -635,24 +809,41 @@ fn reflect_reply(agent_id: &AgentId, root: &Path, readonly: bool, hidden: &[Stri
             "write_stream": "BINARY channel. args: path:str (req), offset:int? (default append), truncate:bool=false; request body = one raw chunk (a model composes it via send_binary's fenced form).",
             "pump": "args: source:str? + source_path:str (req) + sink:str? + sink_path:str? + chunk:int=65536. Server-side SOURCE→SINK copy.",
         }
-    })
+    });
+    if let Some(e) = root_error {
+        // Reflect NEVER refuses — the configured root is shown + the violation.
+        rf::with(&mut out, "root_error", json!(e));
+    }
+    out
 }
 
 fn list_reply(root: &Path, payload: &Value, hidden: &[String]) -> Value {
-    let path_str = payload.get("path").and_then(Value::as_str).unwrap_or("");
-    let target = match resolve_safe(root, path_str) {
+    let path_str = match path_arg("list", payload, "path") {
         Ok(p) => p,
-        Err(e) => return json!({"error": e}),
+        Err(e) => return e,
     };
-    let dir = if target.is_dir() {
-        target.clone()
-    } else {
-        return json!({"error": format!("path {path_str:?} is not a directory")});
+    let dir = match resolve_safe("list", root, path_str) {
+        Ok(p) => p,
+        Err(e) => return e,
     };
+    // Python's branches, in python's order: absent ⇒ not_found (+path); present
+    // but not a dir ⇒ bad_arg; the OS refusing the walk ⇒ transport_error.
+    if !dir.exists() {
+        let mut v = not_found(format!("path {path_str:?} does not exist"));
+        rf::with(&mut v, "path", json!(path_str));
+        return v;
+    }
+    if !dir.is_dir() {
+        return rf::bad(
+            "list",
+            "path",
+            &format!("a directory; {path_str:?} is not one"),
+        );
+    }
     let mut files: Vec<Value> = Vec::new();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) => return json!({"error": format!("list {}: {e}", dir.display())}),
+        Err(e) => return rf::refusal(rf::TRANSPORT_ERROR, e.to_string()),
     };
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -689,68 +880,70 @@ fn list_reply(root: &Path, payload: &Value, hidden: &[String]) -> Value {
     })
 }
 
+/// `delete path recursive?` — a file, an EMPTY dir, or (`recursive:true`) a
+/// dir tree. A symlink is UNLINKED, never followed (`symlink_metadata`, so a
+/// dangling one is still a deletable name). A bare delete on a populated dir
+/// refuses like python's `rmdir` (it used to `remove_dir_all` regardless, #57).
 fn delete_reply(root: &Path, payload: &Value) -> Value {
-    let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
-        return json!({"error": "delete requires path"});
+    let (path_str, target) = match target_arg("delete", root, payload, "path") {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    let target = match resolve_safe(root, path_str) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
+    let recursive = payload
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let Ok(lmeta) = std::fs::symlink_metadata(&target) else {
+        let mut v = not_found(format!("path {path_str:?} does not exist"));
+        rf::with(&mut v, "path", json!(path_str));
+        return v;
     };
-    if !target.exists() {
-        return json!({
-            "error": format!("path {path_str:?} not found"),
-            "reason": "not_found",
-            "path": path_str,
-        });
-    }
-    let result = if target.is_dir() {
+    let result = if lmeta.file_type().is_symlink() || !lmeta.is_dir() {
+        std::fs::remove_file(&target)
+    } else if recursive {
         std::fs::remove_dir_all(&target)
     } else {
-        std::fs::remove_file(&target)
+        std::fs::remove_dir(&target)
     };
     match result {
         Ok(_) => json!({"path": path_str, "deleted": true}),
-        Err(e) => json!({"error": format!("delete {}: {e}", target.display())}),
+        Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e.to_string()),
     }
 }
 
 fn rename_reply(root: &Path, payload: &Value) -> Value {
-    let old = payload.get("old_path").and_then(Value::as_str);
-    let new = payload.get("new_path").and_then(Value::as_str);
-    let (Some(old), Some(new)) = (old, new) else {
-        return json!({"error": "rename requires old_path + new_path"});
+    let (old, src) = match target_arg("rename", root, payload, "old_path") {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    let src = match resolve_safe(root, old) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
+    let (new, dst) = match target_arg("rename", root, payload, "new_path") {
+        Ok(t) => t,
+        Err(e) => return e,
     };
-    let dst = match resolve_safe(root, new) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
-    };
+    if !src.exists() {
+        let mut v = not_found(format!("path {old:?} does not exist"));
+        rf::with(&mut v, "path", json!(old));
+        return v;
+    }
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return json!({"error": format!("mkdir parent: {e}")});
+            return rf::refusal(rf::TRANSPORT_ERROR, format!("mkdir parent: {e}"));
         }
     }
     match std::fs::rename(&src, &dst) {
         Ok(_) => json!({"old_path": old, "new_path": new}),
-        Err(e) => json!({"error": format!("rename: {e}")}),
+        Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e.to_string()),
     }
 }
 
 fn mkdir_reply(root: &Path, payload: &Value) -> Value {
-    let Some(path_str) = payload.get("path").and_then(Value::as_str) else {
-        return json!({"error": "mkdir requires path"});
-    };
-    let target = match resolve_safe(root, path_str) {
-        Ok(p) => p,
-        Err(e) => return json!({"error": e}),
+    let (path_str, target) = match target_arg("mkdir", root, payload, "path") {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     match std::fs::create_dir_all(&target) {
         Ok(_) => json!({"path": path_str, "created": true}),
-        Err(e) => json!({"error": format!("mkdir {}: {e}", target.display())}),
+        Err(e) => rf::refusal(rf::TRANSPORT_ERROR, e.to_string()),
     }
 }
 

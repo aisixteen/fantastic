@@ -66,6 +66,7 @@ testpaths = [
   "bundled_agents/io/file_bridge/tests",
   "bundled_agents/text_file/tests",
   "bundled_agents/loader/kernel_state/tests",
+  "bundled_agents/loader/static_loader/tests",
   "bundled_agents/terminal/tests",
   "bundled_agents/ai/ai_core/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",

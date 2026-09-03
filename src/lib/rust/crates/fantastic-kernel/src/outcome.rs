@@ -85,6 +85,11 @@ pub struct Item {
     pub timeout: Option<f64>,
     /// Optional retry budget for terminal failed/timed_out attempts.
     pub retries: Option<u32>,
+    /// Optional RAW request body. Present ⇒ the item rides the BINARY channel
+    /// (`Bundle::handle_binary`) instead of the text one, under the same task
+    /// row, ledger id, timeout and retries as any other item. Never base64:
+    /// the bytes travel beside the JSON header, not inside it.
+    pub binary: Option<Vec<u8>>,
 }
 
 impl Item {
@@ -97,7 +102,17 @@ impl Item {
             id: None,
             timeout: None,
             retries: None,
+            binary: None,
         }
+    }
+
+    /// Carry a RAW request body — the item dispatches through the binary
+    /// channel. `send_with_binary` bypassed the batch entirely, so such a call
+    /// had no task row, no ledger id and no timeout (measured 2026-09-02).
+    #[must_use]
+    pub fn with_binary(mut self, blob: Vec<u8>) -> Self {
+        self.binary = Some(blob);
+        self
     }
 
     /// NAME this execution — the dedup/join/retry handle, and the same id

@@ -196,6 +196,20 @@ public final class Kernel: @unchecked Sendable {
         return stream
     }
 
+    /// Drop a SYNTHETIC inbox its owner created with `ensureInbox` — a relay's
+    /// watch proxy, a WS client's row. Whoever vivified it must release it, or
+    /// the continuation lingers forever and `emit` keeps buffering into a stream
+    /// nobody drains (measured 2026-09-02: a spawned program that watched an
+    /// agent left a `_xbw_…` row behind on every stop). NOT for an agent's own
+    /// inbox — that belongs to `unregister`, which also removes the agent.
+    public func removeInbox(_ id: AgentId) {
+        inboxLock.lock()
+        defer { inboxLock.unlock() }
+        _inboxes[id]?.finish()
+        _inboxes[id] = nil
+        _inboxStreams[id] = nil
+    }
+
     func deliverToInbox(_ id: AgentId, _ payload: JSON) {
         inboxLock.lock()
         let continuation = _inboxes[id]

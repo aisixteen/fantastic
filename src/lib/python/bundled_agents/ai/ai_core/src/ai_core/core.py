@@ -80,7 +80,16 @@ from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
 # 2026-08-06; `tool_parse`'s own docstring had already been corrected, and one of
 # two stale copies of a fact is worse than none.) `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
-from ai_core.tool_parse import extract_tool_calls, malformed_calls
+from ai_core.tool_parse import (
+    CHANNEL_CLOSE,
+    CHANNEL_OPEN,
+    CLOSE,
+    INVOKE_CLOSE,
+    INVOKE_OPEN,
+    OPEN,
+    extract_tool_calls,
+    malformed_calls,
+)
 from kernel import current_task, operator_context
 
 # ─── shared module-global state (keyed by agent id) ─────────────
@@ -843,15 +852,55 @@ def dedupe_stale_reads(history: list[dict]) -> list[dict]:
 # a correct reading of a record we had silently edited. It re-sent the call and gave
 # up. 3 of 169 dispatched calls across the day's runs were lost this way, and 2 of
 # the 3 were in the run that failed at turn 2 because of it.
-_CALL_SPAN = re.compile(r"<tool_call>.*?</tool_call>", re.S)
+#
+# ALL THREE DIALECTS, because dispatch parses all three. Keeping only the JSON
+# `<tool_call>` one left the identical gap open for a model that speaks another
+# grammar: gemma-4 emits the CHANNEL form (`<|tool_call>call:…<tool_call|>`), so its
+# calls ran, returned a `[reply to …]` next turn, and left no cause in the record —
+# the exact effect-without-cause failure this stripper exists to prevent. Rust's
+# `kept_envelopes` (think.rs) has scanned all three since it was written.
+#
+# The pairing MIRRORS `tool_parse._ENVELOPES` — that table is the source of truth
+# for which delimiters bound a call; a fourth envelope there is one line here.
+_ENVELOPE_PAIRS = (
+    (OPEN, CLOSE),
+    (INVOKE_OPEN, INVOKE_CLOSE),
+    (CHANNEL_OPEN, CHANNEL_CLOSE),
+)
+
+
+def _kept_envelopes(span: str) -> str:
+    """Every COMPLETE tool-call envelope inside `span`, in SOURCE order, one per line.
+
+    Source order, not dialect order: a turn that opened a channel call and then a
+    JSON one must read back the way it was written, or the record misstates the
+    sequence of actions. An opener with no closer is not kept — dispatch could not
+    have parsed it either, so it is reasoning, not an action."""
+    found: list[tuple[int, str]] = []
+    for open_tag, close_tag in _ENVELOPE_PAIRS:
+        at = 0
+        while True:
+            a = span.find(open_tag, at)
+            if a == -1:
+                break
+            b = span.find(close_tag, a)
+            if b == -1:
+                break
+            at = b + len(close_tag)
+            found.append((a, span[a:at]))
+    if not found:
+        return ""
+    found.sort(key=lambda hit: hit[0])
+    return "\n" + "\n".join(e for _, e in found) + "\n"
 
 
 def without_thinking(text: str) -> str:
     """Drop every `<think>…</think>` span — what goes into durable history.
 
-    KEEPS any `<tool_call>` found inside a dropped span: the reasoning goes, the
-    action stays. What was invoked must appear in the record of what happened, or
-    the model cannot account for the replies it receives."""
+    KEEPS any tool-call envelope found inside a dropped span — all three dialects
+    (`<tool_call>`, `<invoke>`, `<|tool_call>`), since dispatch parses all three:
+    the reasoning goes, the action stays. What was invoked must appear in the record
+    of what happened, or the model cannot account for the replies it receives."""
     out, i = [], 0
     while True:
         a = text.find(THINK_OPEN, i)
@@ -863,9 +912,9 @@ def without_thinking(text: str) -> str:
         if b == -1:
             # Unterminated (stream cut mid-thought) — the reasoning tail is dropped,
             # but a call already dispatched from it is still an action taken.
-            out.extend(_CALL_SPAN.findall(text[a:]))
+            out.append(_kept_envelopes(text[a:]))
             break
-        out.extend(_CALL_SPAN.findall(text[a:b]))
+        out.append(_kept_envelopes(text[a:b]))
         i = b + len(THINK_CLOSE)
     return "".join(out).strip()
 
@@ -1183,13 +1232,20 @@ async def _assemble(
     client_id: str,
     system_prompt: str | None = None,
     messages_override: list[dict] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """Build the message list. A caller-supplied `system_prompt` REPLACES the
     deterministic substrate prompt — the generic 'caller controls context' door:
     a state agent or a python routine reads a stored prompt and passes it here, so
     the AI needs NO yaml-specific code. A caller-supplied `messages` list REPLACES
     the persisted history (fully stateless — the AI holds no per-call state).
-    Both fall back to the default when absent."""
+    Both fall back to the default when absent.
+
+    Returns `(messages, store_len)` — `store_len` is how many turns the DURABLE
+    store held when this view was built (0 when the caller supplied its own
+    messages: there is no store behind them). The view is deduped and trimmed, so
+    its length is NOT a store index; `_project_context` needs the store one to mark
+    where this turn's reaction will land. Returning it here is the only place both
+    numbers are in hand at once."""
     if isinstance(system_prompt, str) and system_prompt.strip():
         sys_content = system_prompt
     else:
@@ -1225,6 +1281,7 @@ async def _assemble(
     # the user/assistant turns. The howto is not persisted — it always
     # reflects the latest state at send-time.
     messages: list[dict] = [{"role": "system", "content": sys_content}]
+    store_len = 0
     if isinstance(messages_override, list) and messages_override:
         messages.extend(messages_override)  # stateless: caller supplies the convo
     else:
@@ -1234,9 +1291,10 @@ async def _assemble(
         # so the trace stays complete): stale whole-state reads deduped, and answered
         # reflects reduced to a stub — the model's own distillation carries the facts.
         hist = await _load_history(self_id, kernel, client_id)
+        store_len = len(hist)
         messages.extend(drop_answered_reflects(dedupe_stale_reads(hist)))
     messages.append({"role": "user", "content": user_text})
-    return messages
+    return messages, store_len
 
 
 # ─── streaming + native tool-calls (Phase 2) ────────────────────
@@ -1362,14 +1420,25 @@ def _context_notice(
 
 
 async def _project_context(
-    rec, cfg: Backend, provider, self_id, kernel, client_id, messages
+    rec,
+    cfg: Backend,
+    provider,
+    self_id,
+    kernel,
+    client_id,
+    messages,
+    store_len: int,
 ):
     """Shape the assembled `messages` to fit the agent's token budget via its configured
     `context_strategy` (default `compact`), then prepend the ONE canonical context-notice
     and push a `context:compacted` event to the caller. Returns the projected message
     list, OR an `{error}` dict when even the system block + the live user turn won't fit
     (the `too_small` failsafe — a failfast that ALSO pushes a `context:too_small` event,
-    NOT a fallback). Durable store untouched. Called ONCE per send, at turn entry."""
+    NOT a fallback). Durable store untouched. Called ONCE per send, at turn entry.
+
+    `store_len` is the DURABLE store's length behind `messages` (from `_assemble`) —
+    the index the reaction cursor is recorded at. It is NOT derivable from `messages`,
+    which is a deduped/trimmed view."""
     b = budget(rec)
     if estimate_tokens(messages) <= b:
         _projection[self_id] = {"fired": False}
@@ -1460,8 +1529,14 @@ async def _project_context(
     }
     # PRIVATE reaction cursor: the store index where THIS turn's new turns (incl. any
     # recall/memory reactions) will land — `_derive_reaction` scans from here.
+    #
+    # `store_len`, NOT `len(body) - 1`. `body` is the DEDUPED/trimmed model view and
+    # `_derive_reaction` slices the FULL durable store; whenever `dedupe_stale_reads`
+    # dropped whole turns the view index is short by that many, so the scan started
+    # BEFORE the notice and scored an assistant turn the model wrote earlier as its
+    # reaction to a compaction it had not yet seen.
     _compaction_mark[self_id] = {
-        "fired_at_index": max(0, len(body) - 1),
+        "fired_at_index": store_len,
         "client_id": client_id,
     }
     await _to_caller(
@@ -1500,7 +1575,7 @@ async def _run(
         return {
             "error": cfg.provider_missing_error or f"{cfg.name}: provider unavailable"
         }
-    messages = await _assemble(
+    messages, store_len = await _assemble(
         self_id, user_text, kernel, client_id, system_prompt, messages_override
     )
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
@@ -1516,6 +1591,7 @@ async def _run(
             kernel,
             client_id,
             messages,
+            store_len,
         )
         if isinstance(projected, dict):  # too_small failsafe / config error
             return projected
@@ -1671,7 +1747,18 @@ def _make_send(cfg: Backend):
                 kernel, id, client_id, "queued", send_id=send_id, ahead=ahead
             )
 
-        async with lock:
+        # NOT `async with lock`. Our entry is already in the queue, and the WAIT is
+        # cancellable: an item `timeout` or an operator `cancel` landing here raises
+        # straight out of `acquire()`, and `async with`'s only cleanup is releasing a
+        # lock it never took — the queue row stayed forever, so `status` reported a
+        # phantom `others_pending` and every later caller's `ahead` was off by one.
+        # The dequeue is the acquire's own failure path; swift already does this.
+        try:
+            await lock.acquire()
+        except BaseException:
+            _dequeue_send(id, send_id)
+            raise
+        try:
             # We've got the lock — pop ourselves from the queue and become
             # the in-flight entry. _set_current establishes phase='thinking',
             # the started_at timestamp, and the kernel task id we run as.
@@ -1723,6 +1810,8 @@ def _make_send(cfg: Backend):
                 # entry (BEFORE the abort), which is what let it close the turn
                 # out for the client while this coroutine was still alive.
                 _clear_current(id)
+        finally:
+            lock.release()
 
         # OUTSIDE the lock — released by now, so a self-addressed follow-up can
         # acquire it. Detached (`spawn_task`) so THIS dispatch returns to its caller
@@ -1819,9 +1908,13 @@ async def _status(id, payload, kernel):
 
 
 def _recall_render(m: dict) -> str:
-    """Compact ONE stored turn for a recall reply: content capped so paging back can't
-    itself blow the window. Turns are now pure text (tool calls/replies are inline
-    `<tool_call>`/`<tool_response>` text), so this is just a cap. Bounds the REPLY only."""
+    """Render ONE stored turn for a recall reply — WHOLE, never truncated.
+
+    Turns are pure text (tool calls/replies are inline `<tool_call>`/`<tool_response>`
+    text), so this only serializes a non-str content. The page `limit` is the bound
+    that belongs here: recall exists to hand back a detail the model no longer has,
+    and a per-turn cap silently drops the very part it went looking for — the caller
+    says how many turns it wants, and each one arrives intact."""
     content = m.get("content")
     s = content if isinstance(content, str) else json.dumps(content, default=str)
     return s
@@ -1900,7 +1993,7 @@ async def _recall(id, payload, kernel):
 async def _derive_reaction(id, kernel) -> dict | None:
     """Read-model over the durable transcript: AFTER the last compaction notice (its
     `fired_at_index`), did the model react? Scans the same client's thread for `send`
-    tool-calls — a `recall` to its OWN id, or a memory write (`set`/`append`/`replace`)
+    tool-calls — a `recall` to its OWN id, or a memory write (`write`/`patch`/`append`)
     to any agent. The reaction IS the 'ack'; this derives it, no extra channel. Returns
     {recalled, persisted, recall_count} or None if no compaction has fired."""
     proj = _projection.get(id)
@@ -1924,7 +2017,11 @@ async def _derive_reaction(id, kernel) -> dict | None:
             if args.get("target_id") == id and ptype == "recall":
                 recalled = True
                 recall_count += 1
-            elif ptype in ("set", "append", "replace"):
+            # `text_file`'s MUTATING verbs. The old tuple ("set"/"append"/"replace")
+            # was durable_memory's KV surface, which is deleted — memory is plain
+            # files now, so a model that persisted with `write` or `patch` scored as
+            # not having reacted at all.
+            elif ptype in ("write", "patch", "append"):
                 persisted = True
     return {"recalled": recalled, "persisted": persisted, "recall_count": recall_count}
 

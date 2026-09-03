@@ -54,12 +54,21 @@ import time
 from exec_bridge import proc
 from io_bridge import decode_frame, describe as _describe, encode_frame
 from io_bridge import gate_inbound, resolve_ingress
-from kernel._refusal import NOT_FOUND, TRANSPORT_ERROR, bad, refusal
+from io_bridge._base import parse_spec
+from kernel._refusal import (
+    NOT_FOUND,
+    TRANSPORT_ERROR,
+    UNAUTHORIZED,
+    bad,
+    missing,
+    refusal,
+)
 
-# Per-call `args` ride the process env, and the whole env block caps near 1 MB on
-# darwin/linux — past it `execve` fails with a cryptic E2BIG. Refuse early and say why.
-# Bulk data belongs in an agent; pass its id.
-MAX_ARGS_BYTES = 256 * 1024
+# ONE frame bound on this wire, both ends, every runtime. A corrupt length must not
+# become a multi-GB allocation, and a program that means to move 20 MB means to
+# STREAM it (`write_stream`), not to frame it. Over-limit is a WIRE VIOLATION: the
+# relay closes the socket, and the connector refuses to write such a frame at all.
+MAX_FRAME = 16 * 1024 * 1024
 
 # job_id -> {owner, proc, status, started_at, exit_code, lines, last_line, stdout,
 #            stderr, task, task_id, ctrl_sock, ctrl_task}.
@@ -201,7 +210,12 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
     unserializable here and reached the program as None (measured 2026-09-02).
 
     The proxy ids carry this bundle's prefix (`_xb…`): two spawner bundles in one kernel
-    must not collide on a synthetic inbox id."""
+    must not collide on a synthetic inbox id.
+
+    A `watch`/`onmessage` the kernel REFUSES registers nothing — no proxy inbox, no
+    drain task, no `subs` row — and the refusal is pushed down the fd as an `event`
+    on the source. A silently-deaf subscription is the one failure the program's
+    author cannot diagnose."""
     try:
         reader, writer = await asyncio.open_connection(sock=parent_sock)
     except Exception:
@@ -223,6 +237,16 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
         data = (b"B" if binary else b"T") + wire
         writer.write(struct.pack(">I", len(data)) + data)
 
+    def release(src, proxy, task):
+        """Give a proxy back: unwatch, DROP THE INBOX ROW, cancel the drain.
+
+        The `inboxes.pop` is the step that used to be missing. `emit` auto-vivifies
+        a row it finds, so a leaked proxy keeps every later payload on `src` being
+        copied into a Queue nobody drains — one per (job, watched src), forever."""
+        kernel.unwatch(src, proxy)
+        kernel.ctx.inboxes.pop(proxy, None)
+        task.cancel()
+
     async def drain(proxy_id, framer):
         q = kernel.ctx.ensure_inbox(proxy_id)
         try:
@@ -242,6 +266,13 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             try:
                 hdr = await reader.readexactly(4)
                 (n,) = struct.unpack(">I", hdr)
+                if n > MAX_FRAME:
+                    # A WIRE VIOLATION, not a bad payload: the length prefix is the
+                    # framing itself, so the stream can no longer be resynchronised
+                    # and there is nothing to reply TO. Close, exactly as the ports
+                    # do. The connector refuses to write such a frame in the first
+                    # place, naming `write_stream`.
+                    break
                 body = await reader.readexactly(n)
             except (asyncio.IncompleteReadError, ConnectionError, OSError):
                 break
@@ -271,7 +302,15 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 src = m.get("src")
                 if src and src not in subs:
                     proxy = f"_xbw_{job_id}_{src}"
-                    kernel.watch(src, proxy)
+                    # THE KERNEL DECIDES. `watch` is gated exactly like a send (it
+                    # IS a read of the source), so it can refuse — and a refusal
+                    # discarded here left the program with a subscription that
+                    # simply never fired. Tell it, and register NOTHING.
+                    denial = kernel.watch(src, proxy)
+                    if denial is not None:
+                        push({"op": "event", "src": src, "payload": denial})
+                        await writer.drain()
+                        continue
                     t = asyncio.create_task(
                         drain(
                             proxy,
@@ -282,9 +321,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
             elif op == "unwatch":
                 ent = subs.pop(m.get("src"), None)
                 if ent:
-                    proxy, t = ent
-                    kernel.unwatch(m.get("src"), proxy)
-                    t.cancel()
+                    release(m.get("src"), *ent)
             elif op == "onmessage":
                 if self_sub[0] is None:
                     # Exactly ONE job per owner receives the owner inbox. If another job
@@ -293,10 +330,13 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     # every inbound `send` is delivered to both and doubled.
                     prev = _owner_inbox.pop(owner_id, None)
                     if prev is not None:
-                        kernel.unwatch(owner_id, prev["proxy"])
-                        prev["task"].cancel()
+                        release(owner_id, prev["proxy"], prev["task"])
                     proxy = f"_xbself_{job_id}"
-                    kernel.watch(owner_id, proxy)
+                    denial = kernel.watch(owner_id, proxy)
+                    if denial is not None:
+                        push({"op": "event", "src": owner_id, "payload": denial})
+                        await writer.drain()
+                        continue
                     t = asyncio.create_task(drain(proxy, _inbox_framer))
                     self_sub[0] = (proxy, t)
                     _owner_inbox[owner_id] = {
@@ -308,20 +348,15 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 ent = self_sub[0]
                 self_sub[0] = None
                 if ent:
-                    proxy, t = ent
-                    kernel.unwatch(owner_id, proxy)
-                    t.cancel()
+                    release(owner_id, *ent)
                     cur = _owner_inbox.get(owner_id)
                     if cur and cur["job_id"] == job_id:
                         _owner_inbox.pop(owner_id, None)
     finally:
-        for src, (proxy, t) in subs.items():
-            kernel.unwatch(src, proxy)
-            t.cancel()
+        for src, ent in subs.items():
+            release(src, *ent)
         if self_sub[0]:
-            proxy, t = self_sub[0]
-            kernel.unwatch(owner_id, proxy)
-            t.cancel()
+            release(owner_id, *self_sub[0])
             # Only if it still names THIS job — a supersede must not evict its
             # replacement (the bug `c2a4297` fixed).
             cur = _owner_inbox.get(owner_id)
@@ -390,11 +425,15 @@ async def _start(id, payload, kernel):
     import shlex
 
     rec = kernel.get(id) or {}
+    # Every refusal on this verb carries a CODE. Sibling argument errors used to
+    # split — `args`/`env` answered `bad_arg` while `command`/`code`/the policy wall
+    # answered a bare `{error}` — so a model could not tell a typo from a policy
+    # refusal without reading the prose.
     if payload.get("code") is not None:
-        return {"error": "exec_bridge: `code` is not a field — run a command instead"}
+        return bad("start", "code", "absent — run a command instead")
     command = payload.get("command")
     if not isinstance(command, str) or not command.strip():
-        return {"error": "exec_bridge: command (str) required"}
+        return missing("start", "command")
     raw_args = payload.get("args", [])
     if not isinstance(raw_args, list) or any(
         not isinstance(a, (str, int, float)) for a in raw_args
@@ -403,7 +442,14 @@ async def _start(id, payload, kernel):
     argv = [command, *[str(a) for a in raw_args]]
     line = shlex.join(argv)
     if why := _command_permitted(rec, line):
-        return {"error": why}
+        # An AUTHORIZATION denial, not a bad argument: the command line is
+        # well-formed and the LEG refused it. Same code the ingress gate answers,
+        # so one branch covers "the operator has not opened this".
+        return refusal(
+            UNAUTHORIZED,
+            why,
+            hint="the leg's `allowed` policy decides; an operator may widen it",
+        )
     cwd = payload.get("cwd") or rec.get("cwd") or None
 
     env_extra_user = payload.get("env") or {}
@@ -502,10 +548,22 @@ async def _status(id, payload, kernel):
     return {"jobs": [_snap(k) for k, v in _jobs.items() if v.get("owner") == id]}
 
 
+def _no_job(id: str, jid) -> dict | None:
+    """The `not_found` refusal for a named job this agent does not own, or None.
+
+    A job_id naming nothing used to answer `{killed:0}` / `{interrupted:0}` — the
+    same reply as "it had already exited", so a typo read as success."""
+    if jid and (jid not in _jobs or _jobs[jid].get("owner") != id):
+        return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+    return None
+
+
 async def _stop(id, payload, kernel):
     """args: job_id:str? — SIGKILL one job or ALL of this agent's running jobs.
     Returns {killed:int}."""
     jid = payload.get("job_id")
+    if gone := _no_job(id, jid):
+        return gone
     n = 0
     for k, v in _jobs.items():
         if v.get("owner") != id or (jid and k != jid):
@@ -524,6 +582,8 @@ async def _interrupt(id, payload, kernel):
     """args: job_id:str? — SIGINT one job or ALL of this agent's running jobs.
     Returns {interrupted:int}."""
     jid = payload.get("job_id")
+    if gone := _no_job(id, jid):
+        return gone
     n = 0
     for k, v in _jobs.items():
         if v.get("owner") != id or (jid and k != jid):
@@ -632,7 +692,9 @@ async def _connector(id, payload, kernel):
             "exposes `kernel.send(target, payload) -> reply` (raises if the relay could "
             "not deliver), "
             "`kernel.emit(payload)`, `kernel.watch(src, cb)`, `kernel.on_message(cb)`, "
-            "`kernel.self_id`, `kernel.args`. Your sends carry THIS runner's identity "
+            "`kernel.self_id`. Arguments arrive as ARGV, like any command — there is "
+            "no `kernel.args`. One frame caps at 16 MiB; move more than that with "
+            "`write_stream` chunks. Your sends carry THIS runner's identity "
             "and grants (its `can_call`; a target must list this runner in "
             "`callable_by`). Do not rewrite the wire by hand."
         ),
@@ -666,8 +728,25 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         if getattr(resolve_ingress({"ingress_rule": spec}), "unknown", None):
             return (
                 f"ingress_rule={spec!r} is not a rule this bundle implements — "
-                "legal values: allow_all, deny_inbound, password"
+                "legal values: allow_all_ingress, deny_ingress"
             )
+    # `password_ingress` is meaningless on an in-process leg: the token is read
+    # off a WIRE ENVELOPE and the process edge has none — no frame ever presents
+    # one, so the rule could only refuse, or (the ports, until 2026-09-02) be
+    # satisfied by a secret persisted ON THE RECORD. Refused at the write.
+    # Same rule as file_bridge's `_password_refusal`.
+    for field, stems in (
+        ("ingress_rule", ("password_ingress",)),
+        ("auth", ("password",)),
+    ):
+        if field in meta:
+            name, _ = parse_spec(meta[field])
+            if name in stems:
+                return (
+                    f"{field}={meta[field]!r} is not applicable to the process edge: "
+                    "a leg with no wire envelope can never present a token — "
+                    "legal values: allow_all_ingress, deny_ingress"
+                )
     for gone in ("code", "shim", "interpreter", "interpreters", "argv_template"):
         if gone in meta and meta[gone] is not None:
             return (

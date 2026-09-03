@@ -301,6 +301,9 @@ async fn web_with_rest_child_serves_rest() {
                 // Deny-all: an inbound relay dispatches browser calls into the
                 // kernel AS ITSELF — ingress_rule says WHO may call in, can_call
                 // says WHERE into the kernel it lands. This test POSTs to `core`.
+                // The leg SEALS without an explicit rule (403 before dispatch),
+                // so open it here as a browser-facing dev leg would be.
+                "ingress_rule": "allow_all_ingress",
                 "can_call": { "core": "*" },
             }),
         )])
@@ -1274,6 +1277,7 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
             json!({
                 "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_rest.tools", "id": rest_id,
+                "ingress_rule": "allow_all_ingress",
                 "can_call": { fb_id: "*", "ed_octet": "*" },
             }),
         )])
@@ -1376,4 +1380,217 @@ async fn web_rest_octet_leg_patch_and_read_stream() {
         .await
         .remove(0)
         .result;
+}
+
+/// A SEALED REST leg answers 403 with the repair — it does not serve, and it does
+/// not blame the wrong side.
+///
+/// The rust POST/GET handlers dispatched straight into `with_sender(owner)` with
+/// no ingress check, so a leg carrying NO `ingress_rule` — sealed by default
+/// everywhere else in the io family — served unauthenticated requests. Where a
+/// call did fail it failed on EGRESS and named a false cause ("wr_sealed may not
+/// call \"reflect\" on …") while the true one, this leg is sealed, was never said.
+#[tokio::test]
+async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, true);
+    let port = free_port();
+    let web_id = "web_sealed_rest";
+    let rest_id = "wr_sealed";
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    // NO ingress_rule — the sealed-by-default leg. `can_call` is wide open, so a
+    // 200 here could only mean the ingress gate never ran.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": web_id,
+                   "handler_module": "web_rest.tools", "id": rest_id,
+                   "can_call": {"core": "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": "core", "callable_by": {
+                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let boot_reply = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
+    wait_until_port_accepts(port).await;
+
+    let client = reqwest::Client::new();
+    // POST — the dispatch route.
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/{rest_id}/core"))
+        .header("Content-Type", "application/json")
+        .body(r#"{"type": "list_agents"}"#)
+        .send()
+        .await
+        .expect("http post");
+    assert_eq!(resp.status().as_u16(), 403, "a sealed leg must not serve");
+    let body: Value = resp.json().await.expect("body json");
+    assert_eq!(body["reason"], "unauthorized", "body: {body}");
+    assert!(
+        body["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ingress_rule=allow_all_ingress"),
+        "the 403 must carry the repair: {body}"
+    );
+    assert!(
+        body["agents"].is_null(),
+        "the tree leaked past the gate: {body}"
+    );
+
+    // GET /_reflect and GET /_reflect/<target> — the same seal.
+    for path in [
+        format!("http://127.0.0.1:{port}/{rest_id}/_reflect"),
+        format!("http://127.0.0.1:{port}/{rest_id}/_reflect/core"),
+    ] {
+        let r = client.get(&path).send().await.expect("http get");
+        assert_eq!(r.status().as_u16(), 403, "{path} served past the seal");
+        let b: Value = r.json().await.expect("body json");
+        assert_eq!(b["reason"], "unauthorized", "{path}: {b}");
+    }
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// The other side of the same gate: an OPEN leg dispatches, reflect routes
+/// included — so the seal above is the rule refusing, not the route breaking.
+#[tokio::test]
+async fn open_rest_leg_dispatches_including_the_reflect_routes() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp, false, true);
+    let port = free_port();
+    let web_id = "web_open_rest";
+    let rest_id = "wr_open";
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel",
+                   "handler_module": HANDLER_MODULE, "id": web_id, "port": port}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "create_agent", "parent_id": web_id,
+                   "handler_module": "web_rest.tools", "id": rest_id,
+                   "ingress_rule": "allow_all_ingress",
+                   "can_call": {"core": "*", "kernel": "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "update_agent", "id": "core", "callable_by": {
+                "$self": "*", "$parent": "*", "$children": "*", rest_id: "*"}}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let boot_reply = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "boot"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(boot_reply["running"], true, "boot: {boot_reply}");
+    wait_until_port_accepts(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/{rest_id}/_reflect"))
+        .send()
+        .await
+        .expect("http get");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "an open leg must serve reflect"
+    );
+    let body: Value = resp.json().await.expect("body json");
+    assert_eq!(body["id"], "core", "reflect body: {body}");
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/{rest_id}/_reflect/core"))
+        .send()
+        .await
+        .expect("http get");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from(web_id),
+            json!({"type": "stop"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// Finished call handles are pruned, so a long-lived socket cannot grow the
+/// pending vector without bound (#135). The handles still running are kept —
+/// they are exactly what `teardown` has to abort on disconnect.
+#[tokio::test]
+async fn finished_call_handles_are_pruned_before_the_next_push() {
+    let pending: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> =
+        std::sync::Mutex::new(Vec::new());
+
+    // 50 quick calls, the dashboard-polling shape. Each push prunes the ones
+    // already done, so the vector never carries the whole history.
+    for _ in 0..50 {
+        let h = tokio::spawn(async {});
+        h.await.expect("quick call");
+        // A finished handle can still be pushed; the NEXT push must drop it.
+        super::track_call(&pending, tokio::spawn(async {}));
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    super::track_call(&pending, tokio::spawn(std::future::pending::<()>()));
+    let held = pending.lock().unwrap().len();
+    assert!(held <= 2, "pending grew unbounded: {held} handles held");
+
+    // The one still running is KEPT — pruning must not drop what a disconnect
+    // has to cancel.
+    assert_eq!(held, 1, "the in-flight handle was pruned away");
+    let live = pending.lock().unwrap().pop().unwrap();
+    assert!(!live.is_finished());
+    live.abort();
 }

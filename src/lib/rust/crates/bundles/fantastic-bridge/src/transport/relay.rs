@@ -40,7 +40,11 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
-type SharedSink = Arc<Mutex<Option<WsSink>>>;
+/// The one live writer, behind a lock. Generic in the sink so the bounded-write
+/// path can be driven by a test sink that never completes — the stalled-peer case
+/// that used to hold this lock forever.
+type SharedSinkOf<S> = Arc<Mutex<Option<S>>>;
+type SharedSink = SharedSinkOf<WsSink>;
 /// The directory attributes we advertise to the relay (an opaque blob — the relay
 /// stores + reflects it, never interprets it). Shared + mutable so `set_identity`
 /// updates it and every reconnect re-announces the LATEST value. `Null`/`{}` ⇒ a
@@ -54,6 +58,71 @@ type RelayPending = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>
 pub const SUBPROTOCOL: &str = "fantastic.relay.v1";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_SECS: u64 = 30;
+
+/// The write DEADLINE on the relay sink.
+///
+/// Every write took the sink `Mutex` and then awaited `s.send(...)` with no bound.
+/// When the TCP send buffer to the relay fills (the host stopped reading — a
+/// partition, a wedged process), that await never returns and the lock is held
+/// forever: every other forward, the keepalive, AND `close()` park behind it, so
+/// the bridge agent can never be torn down. A deadline turns an unbounded stall
+/// into one refusal plus a re-dial.
+#[cfg(not(test))]
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Short under test so the stalled-peer case is exercised in milliseconds.
+#[cfg(test)]
+const SEND_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Write one message to the live sink under [`SEND_TIMEOUT`].
+///
+/// On expiry the sink is DROPPED (the lock is released for good, nothing else
+/// parks behind the dead write) and the leg is marked disconnected, so the
+/// supervisor re-dials instead of the whole transport wedging.
+async fn send_bounded<S>(
+    sink: &SharedSinkOf<S>,
+    connected: &AtomicBool,
+    what: &str,
+    msg: Message,
+) -> Result<(), SendFail>
+where
+    S: SinkExt<Message> + Unpin,
+    <S as futures_util::Sink<Message>>::Error: std::fmt::Display,
+{
+    let mut guard = sink.lock().await;
+    let Some(s) = guard.as_mut() else {
+        return Err(SendFail::NotConnected);
+    };
+    match tokio::time::timeout(SEND_TIMEOUT, s.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(SendFail::Failed(format!("{what}: {e}"))),
+        Err(_elapsed) => {
+            guard.take();
+            connected.store(false, Ordering::SeqCst);
+            Err(SendFail::Failed(format!(
+                "{what}: timed out after {SEND_TIMEOUT:?} (peer not reading)"
+            )))
+        }
+    }
+}
+
+/// Why a bounded write did not land. The directory surface answers
+/// `not_connected` and `transport_error` as DIFFERENT codes, so "no socket" and
+/// "the socket refused/stalled" must not collapse into one string.
+enum SendFail {
+    /// There is no live sink right now (pre-boot, or mid-reconnect).
+    NotConnected,
+    /// A socket existed and the write failed or outran [`SEND_TIMEOUT`].
+    Failed(String),
+}
+
+impl From<SendFail> for TransportError {
+    fn from(f: SendFail) -> Self {
+        match f {
+            SendFail::NotConnected => Self::ConnectionClosed("relay not connected".into()),
+            SendFail::Failed(m) => Self::ConnectionClosed(m),
+        }
+    }
+}
 
 /// Relay router transport with a self-healing connection. `send` writes to the
 /// current sink (errors while mid-reconnect); `recv` pulls frames the supervisor
@@ -137,7 +206,7 @@ impl RelayTransport {
         };
         // Advertise our directory identity on the eager socket (no-op if not
         // connected / plain peer). Each later reconnect re-announces (in supervise).
-        send_announce(&sink, &identity).await;
+        send_announce(&sink, &connected, &identity).await;
 
         let supervisor = tokio::spawn(supervise(
             url,
@@ -184,21 +253,24 @@ impl RelayTransport {
             .lock()
             .expect("relay_pending poisoned")
             .insert(id.clone(), tx);
+        if let Err(fail) = send_bounded(
+            &self.sink,
+            &self.connected,
+            "relay directory send",
+            Message::Text(frame.to_string()),
+        )
+        .await
         {
-            let text = frame.to_string();
-            let mut guard = self.sink.lock().await;
-            match guard.as_mut() {
-                Some(s) => {
-                    if s.send(Message::Text(text)).await.is_err() {
-                        self.relay_pending.lock().unwrap().remove(&id);
-                        return json!({"error":"relay_connector: directory send failed","reason":"transport_error"});
-                    }
+            self.relay_pending.lock().unwrap().remove(&id);
+            return match fail {
+                SendFail::NotConnected => {
+                    json!({"error":"relay_connector: not connected","reason":"not_connected"})
                 }
-                None => {
-                    self.relay_pending.lock().unwrap().remove(&id);
-                    return json!({"error":"relay_connector: not connected","reason":"not_connected"});
+                SendFail::Failed(m) => {
+                    json!({"error": format!("relay_connector: directory send failed: {m}"),
+                           "reason":"transport_error"})
                 }
-            }
+            };
         }
         match tokio::time::timeout(Duration::from_secs_f64(timeout_s), rx).await {
             Ok(Ok(v)) => v,
@@ -315,7 +387,7 @@ async fn supervise(
                     *sink.lock().await = Some(s);
                     connected.store(true, Ordering::SeqCst);
                     // Re-advertise: the relay drops our state on disconnect.
-                    send_announce(&sink, &identity).await;
+                    send_announce(&sink, &connected, &identity).await;
                     source
                 }
                 Err(_) => {
@@ -343,7 +415,7 @@ async fn supervise(
 /// Advertise our directory attributes to the relay (`{type:"announce", attrs,
 /// target:"relay"}`, fire-and-forget). No-op when the blob is empty (a plain peer)
 /// or when no socket is live (the next reconnect re-announces).
-async fn send_announce(sink: &SharedSink, identity: &SharedIdentity) {
+async fn send_announce(sink: &SharedSink, connected: &AtomicBool, identity: &SharedIdentity) {
     let attrs = identity.lock().expect("identity poisoned").clone();
     let empty = match &attrs {
         Value::Object(m) => m.is_empty(),
@@ -353,10 +425,7 @@ async fn send_announce(sink: &SharedSink, identity: &SharedIdentity) {
         return;
     }
     let text = json!({"type": "announce", "attrs": attrs, "target": "relay"}).to_string();
-    let mut guard = sink.lock().await;
-    if let Some(s) = guard.as_mut() {
-        let _ = s.send(Message::Text(text)).await;
-    }
+    let _ = send_bounded(sink, connected, "relay announce", Message::Text(text)).await;
 }
 
 /// Send the relay's no-reply `keepalive` verb every `HEARTBEAT_SECS` while
@@ -371,10 +440,13 @@ async fn heartbeat_loop(sink: SharedSink, closed: Arc<AtomicBool>, connected: Ar
         if !connected.load(Ordering::SeqCst) {
             continue;
         }
-        let mut guard = sink.lock().await;
-        if let Some(s) = guard.as_mut() {
-            let _ = s.send(Message::Text(beat.clone())).await;
-        }
+        let _ = send_bounded(
+            &sink,
+            &connected,
+            "relay keepalive",
+            Message::Text(beat.clone()),
+        )
+        .await;
     }
 }
 
@@ -409,16 +481,14 @@ impl BridgeTransport for RelayTransport {
         let env = json!({"type":"send","target":self.partner,"payload":frame});
         let text = serde_json::to_string(&env)
             .map_err(|e| TransportError::Other(format!("relay encode: {e}")))?;
-        let mut guard = self.sink.lock().await;
-        match guard.as_mut() {
-            Some(s) => s
-                .send(Message::Text(text))
-                .await
-                .map_err(|e| TransportError::ConnectionClosed(format!("relay send: {e}"))),
-            None => Err(TransportError::ConnectionClosed(
-                "relay not connected".into(),
-            )),
-        }
+        send_bounded(
+            &self.sink,
+            &self.connected,
+            "relay send",
+            Message::Text(text),
+        )
+        .await
+        .map_err(TransportError::from)
     }
 
     async fn send_binary(&self, header: Value, body: Vec<u8>) -> Result<(), TransportError> {
@@ -436,16 +506,14 @@ impl BridgeTransport for RelayTransport {
             env["_binary_path"] = json!(format!("payload.{inner_path}"));
         }
         let wire = encode_binary_frame(&env, &body);
-        let mut guard = self.sink.lock().await;
-        match guard.as_mut() {
-            Some(s) => s
-                .send(Message::Binary(wire))
-                .await
-                .map_err(|e| TransportError::ConnectionClosed(format!("relay send binary: {e}"))),
-            None => Err(TransportError::ConnectionClosed(
-                "relay not connected".into(),
-            )),
-        }
+        send_bounded(
+            &self.sink,
+            &self.connected,
+            "relay send binary",
+            Message::Binary(wire),
+        )
+        .await
+        .map_err(TransportError::from)
     }
 
     async fn recv_frame(&self) -> Result<Frame, TransportError> {
@@ -460,17 +528,22 @@ impl BridgeTransport for RelayTransport {
 
     async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        {
-            let mut guard = self.sink.lock().await;
-            if let Some(mut s) = guard.take() {
-                let _ = s.close().await;
-            }
-        }
+        // ABORT FIRST, then reach for the sink. The supervisor and the heartbeat
+        // both take the sink lock; with a write stalled on an unreadable peer,
+        // taking it here first meant `close()` — and therefore `delete_agent` on
+        // the bridge — could never return. Aborting the two owners leaves only
+        // this one bounded wait.
         if let Some(h) = self.supervisor.lock().await.take() {
             h.abort();
         }
         if let Some(h) = self.heartbeat.lock().await.take() {
             h.abort();
+        }
+        {
+            let mut guard = self.sink.lock().await;
+            if let Some(mut s) = guard.take() {
+                let _ = tokio::time::timeout(SEND_TIMEOUT, s.close()).await;
+            }
         }
         for (_id, tx) in self.relay_pending.lock().unwrap().drain() {
             let _ = tx.send(json!({"error":"relay_connector: closed","reason":"transport_closed"}));
@@ -492,20 +565,19 @@ impl BridgeTransport for RelayTransport {
     }
 
     async fn unwatch_directory(&self) -> Value {
-        let mut guard = self.sink.lock().await;
-        if let Some(s) = guard.as_mut() {
-            let _ = s
-                .send(Message::Text(
-                    json!({"type":"unwatch","target":"relay"}).to_string(),
-                ))
-                .await;
-        }
+        let _ = send_bounded(
+            &self.sink,
+            &self.connected,
+            "relay unwatch",
+            Message::Text(json!({"type":"unwatch","target":"relay"}).to_string()),
+        )
+        .await;
         json!({"ok": true, "unwatched": "relay"})
     }
 
     async fn set_identity(&self, attrs: Value) -> Value {
         *self.identity.lock().expect("identity poisoned") = attrs.clone();
-        send_announce(&self.sink, &self.identity).await;
+        send_announce(&self.sink, &self.connected, &self.identity).await;
         json!({"ok": true, "attrs": attrs})
     }
 }
@@ -569,5 +641,111 @@ mod tests {
         }
         let foreign = json!({"type":"event","source":"C","payload":{}});
         assert!(unwrap_binary(foreign, vec![], "B").is_none());
+    }
+    // ── the stalled peer (#88) ──────────────────────────────────────
+
+    /// A sink whose `poll_ready` never completes — the network partition where
+    /// the relay stopped reading and our kernel send buffer filled. Before the
+    /// deadline this parked the sink `Mutex` forever, so every other forward, the
+    /// keepalive and `close()` (hence `delete_agent` on the bridge) hung on it.
+    struct StalledSink;
+
+    impl futures_util::Sink<Message> for StalledSink {
+        type Error = std::io::Error;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_sink_times_out_drops_the_sink_and_marks_disconnected() {
+        let sink: SharedSinkOf<StalledSink> = Arc::new(Mutex::new(Some(StalledSink)));
+        let connected = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let err = send_bounded(&sink, &connected, "relay send", Message::Text("x".into()))
+            .await
+            .expect_err("a stalled peer must not park the writer forever");
+        assert!(
+            matches!(err, SendFail::Failed(ref m) if m.contains("timed out")),
+            "expected a timeout failure"
+        );
+        // Bounded, and by the DEADLINE — not by luck.
+        assert!(
+            started.elapsed() < SEND_TIMEOUT * 4,
+            "{:?}",
+            started.elapsed()
+        );
+        // The sink is DROPPED, so the lock is free for good and the supervisor
+        // re-dials instead of the whole transport wedging behind one write.
+        assert!(sink.lock().await.is_none(), "the dead sink was kept");
+        assert!(
+            !connected.load(Ordering::SeqCst),
+            "the leg still claims connected"
+        );
+        // And the lock really is free: the next writer gets it immediately.
+        assert!(matches!(
+            send_bounded(&sink, &connected, "relay send", Message::Text("y".into())).await,
+            Err(SendFail::NotConnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_returns_and_aborts_the_owners_of_the_sink_lock() {
+        // `close()` used to take the sink lock BEFORE aborting the supervisor and
+        // the heartbeat — both of which take that same lock to write. With a write
+        // stalled, `close()` could never return, so the bridge agent could not be
+        // deleted. It now aborts first and settles the directory waiters.
+        let supervisor = tokio::spawn(async { std::future::pending::<()>().await });
+        let heartbeat = tokio::spawn(async { std::future::pending::<()>().await });
+        let (_tx, rx) = mpsc::channel::<Result<Frame, TransportError>>(1);
+        let relay_pending: RelayPending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (dir_tx, dir_rx) = oneshot::channel::<Value>();
+        relay_pending
+            .lock()
+            .unwrap()
+            .insert("dir_1".to_string(), dir_tx);
+        let t = RelayTransport {
+            partner: "B".to_string(),
+            sink: Arc::new(Mutex::new(None)),
+            rx: Mutex::new(rx),
+            closed: Arc::new(AtomicBool::new(false)),
+            connected: Arc::new(AtomicBool::new(true)),
+            supervisor: Mutex::new(Some(supervisor)),
+            heartbeat: Mutex::new(Some(heartbeat)),
+            relay_pending,
+            relay_next_id: AtomicU64::new(0),
+            identity: Arc::new(std::sync::Mutex::new(json!({}))),
+        };
+        tokio::time::timeout(Duration::from_secs(2), t.close())
+            .await
+            .expect("close() must return");
+        assert!(t.closed.load(Ordering::SeqCst));
+        assert!(
+            t.supervisor.lock().await.is_none(),
+            "supervisor not aborted"
+        );
+        assert!(t.heartbeat.lock().await.is_none(), "heartbeat not aborted");
+        let settled = dir_rx
+            .await
+            .expect("a pending directory request must settle");
+        assert_eq!(settled["reason"], "transport_closed");
     }
 }

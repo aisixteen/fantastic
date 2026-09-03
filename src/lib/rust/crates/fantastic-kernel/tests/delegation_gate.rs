@@ -125,6 +125,9 @@ async fn delegating_on_an_agent_that_does_not_exist_names_that() {
         msg.contains("no such agent") && msg.contains("next"),
         "{no}"
     );
-    // Rust's update_agent answers with the record itself.
-    assert_eq!(ok["can_call"]["kid"], "*", "{ok}");
+    // `update_agent` answers python's shape — {updated, id, agent} — so the
+    // granted edge is read off `agent`, not off the reply's own top level.
+    assert_eq!(ok["updated"], true, "{ok}");
+    assert_eq!(ok["id"], "peer", "{ok}");
+    assert_eq!(ok["agent"]["can_call"]["kid"], "*", "{ok}");
 }

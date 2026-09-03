@@ -332,7 +332,10 @@ struct RoutingTests {
         let broken =
             #"<tool_call>{"name":"send","arguments":{"target_id":"core","#
             + #""code":"x = \"oops}}</tool_call>"#
-        let script = ProviderScript([[broken + "\n" + good], ["ok"], ["ok again"]])
+        // Pass 2 ends the chain EXPLICITLY: every unit is tagged now (python tags
+        // them all), so the delivered turn opens with `[reply to …` and a silent
+        // follow-up would earn the no-call nudge — correctly, and forever.
+        let script = ProviderScript([[broken + "\n" + good], ["ok " + doneEnvelope], ["ok again"]])
         let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         _ = await kernel.send([Item(ids["mock"]!, .object([
@@ -683,5 +686,195 @@ struct RoutingTests {
         try await Task.sleep(nanoseconds: 400_000_000)
         #expect(script.calls == 1, "prose to a person is the product")
     }
-}
 
+    // ─── the batch: one deadline, one stamp, one token per turn ─
+
+    /// EVERY dispatched model call carries the AI layer's per-call deadline. The
+    /// KERNEL defaults nothing, so a call to a handler that never returns used to
+    /// hang the whole batch forever: no reply, no timeout block, the chain dead with
+    /// nothing to read. Python has always set it; rust/swift did not until
+    /// 2026-09-02.
+    @Test func everyModelCallCarriesTheLayerDefaultTimeout() async throws {
+        // `slowpoke` takes 500ms. The layer's deadline is 100ms, and NO `timeout`
+        // arg is written in the envelope — the default has to do the work.
+        let script = ProviderScript([["read it " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let id = ids["mock"]!
+        await routeReply(
+            selfId: id, kernel: kernel,
+            text: callEnvelope(target: "slowpoke", payload: .object(["type": .string("crawl")])),
+            clientId: "c", sendTo: nil, systemPrompt: nil, incoming: "",
+            sendTimeout: 0.1)
+        #expect(
+            await script.waitForCalls(1),
+            "the timed-out call produced no block at all — the batch hung")
+        #expect(
+            script.requestText(0).contains("timed out after 0.1s"),
+            "the block must REPORT the timeout: \(script.requestText(0).suffix(400))")
+    }
+
+    /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
+    /// owed no reply, and it is not a silent turn: gating the nudge on the blocks
+    /// instead of python's `not calls and not units` tells the model "your turn
+    /// emitted no <tool_call> envelope" about a turn that did — and, on a chat turn,
+    /// hands that text to `send_to` on top.
+    @Test func allFireAndForgetCallsAreNotASilentTurn() async throws {
+        let fireAndForget = callEnvelope(
+            target: "probe", payload: .object(["type": .string("noted")]), replyTo: .some(nil))
+        let a = ProviderScript([
+            [fireAndForget + "\n" + fireAndForget], ["the nudge would land here"],
+        ])
+        let b = ProviderScript([["the handoff would land here"]])
+        let (kernel, ids, recorder) = await bootMockKernel(
+            config: scriptedConfig(["mock": a, "peer": b]), backendIds: ["mock", "peer"])
+        // A CHAIN turn (its incoming text is a delivered reply) — exactly the turn
+        // the nudge exists for, so nothing but the dispatch can keep it quiet.
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"),
+                "text": .string("[reply to core:1 · core ping]\nok"),
+                "client_id": .string("c"),
+                "send_to": .string("peer"),
+            ]))])[0].result
+        #expect(await recorder.waitForPayloads(2), "both fire-and-forget calls must RUN")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(a.calls == 1, "a dispatching turn must not be nudged")
+        #expect(b.calls == 0, "and must not fall through to send_to")
+    }
+
+    /// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
+    /// says it does. It rode on its own trailing line in rust/swift until 2026-09-02,
+    /// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
+    /// at the START of a block) cannot read at all.
+    @Test func theBatchStampLivesInsideTheReplyTag() async throws {
+        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let script = ProviderScript([[call + "\n" + call], ["both back " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2), "the batch never came back")
+        let turn2 = script.requestText(1)
+        #expect(
+            turn2.contains(" · 1 of 2 in batch ") && turn2.contains(" · 2 of 2 in batch "),
+            "the stamp must be composed into the tag: \(turn2.suffix(500))")
+        #expect(
+            !turn2.contains("[1 of 2 in batch"),
+            "no trailing stamp line may survive: \(turn2.suffix(500))")
+    }
+
+    /// Read a batch token out of a delivered turn. Anchored on the STAMP, not on the
+    /// words: the system block teaches the shape, so a bare `in batch ` search finds
+    /// the prompt's own `<token>` placeholder first.
+    private func batchToken(_ turn: String) -> String {
+        guard let r = turn.range(of: "1 of 2 in batch ") else {
+            Issue.record("no batch stamp in the delivered turn")
+            return ""
+        }
+        return String(turn[r.upperBound...].prefix(4))
+    }
+
+    /// A FRESH token per turn. Rust/swift derived it from the batch's own content
+    /// (destinations, counts, body lengths), so two turns that made the SAME calls
+    /// collided — which is the exact confusion the token exists to end: a model that
+    /// read one file twice saw `1 of 2 in batch 7f3a` both times (measured
+    /// 2026-08-24, the re-read loop).
+    @Test func twoIdenticalTurnsGetDifferentBatchTokens() async throws {
+        let call = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let twice = call + "\n" + call
+        let script = ProviderScript([[twice], [twice], ["enough " + doneEnvelope]])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(3), "the second batch never landed")
+        #expect(
+            batchToken(script.requestText(1)) != batchToken(script.requestText(2)),
+            "two identical turns must be distinguishable at a glance")
+    }
+
+    /// A question turn is a legitimate silent end, so detecting one SUPPRESSES the
+    /// nudge — which is exactly why it must be the JSON PAIR and not two loose
+    /// substrings. Rust/swift accepted `"type"` anywhere and `"question"` anywhere
+    /// until 2026-09-02, so a model writing prose about a "question" (while echoing
+    /// the prompt's own `"type"` example) ended its chain silently with the task
+    /// untouched. Python's `re.search(r'"type"\s*:\s*"question"')` is the contract.
+    @Test func questionDetectionRequiresTheJsonPair() {
+        #expect(
+            asksAQuestion(
+                #"{"type":"question","request_id":"r1","kind":"text","question":"which port?"}"#))
+        #expect(
+            asksAQuestion("{\"type\" \t: \n \"question\"}"),
+            "whitespace either side of the colon is python's `\\s*`")
+        #expect(
+            !asksAQuestion(#"I'll store the "question" for later; "type" is a field."#),
+            "prose about a question is not a question turn")
+        #expect(
+            !asksAQuestion(#"{"type":"send","payload":{"q":"question"}}"#),
+            "the pair must be `\"type\": \"question\"`, not any two words")
+        #expect(!asksAQuestion("plain prose, no calls, no question at all"))
+    }
+
+    /// A FAILED HANDOFF is announced as an ordinary `status` event — `detail.reason`,
+    /// the shape reflect's `emits` documents and a UI subscribes to. Rust/swift put
+    /// `reason`/`error` at the TOP level until 2026-09-02, so every subscriber saw
+    /// nothing: the silent-death regression the announcement exists to end, wearing
+    /// the announcement's own clothes.
+    @Test func aFailedHandoffIsAStatusEventWithDetail() async throws {
+        // `raiser` throws on every real verb, so the delivered turn cannot land.
+        let script = ProviderScript([
+            [callEnvelope(
+                target: "core", payload: .object(["type": .string("list_agents")]),
+                replyTo: .some("raiser"))]
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(AgentId("raiser"))
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        try await waitUntil("the dead handoff to be announced") {
+            sink.first(type: "status") != nil
+        }
+        let status = sink.first(type: "status") ?? .null
+        #expect(status["phase"].asString == "done", "\(status.serialize())")
+        #expect(status["detail"]["reason"].asString == "error", "\(status.serialize())")
+        #expect(
+            status["detail"]["error"].asString != nil,
+            "the announcement must say WHY: \(status.serialize())")
+        #expect(status["source"].asString == "raiser", "\(status.serialize())")
+        #expect(status["ts"].asDouble != nil, "\(status.serialize())")
+        #expect(status["client_id"].asString == "c", "\(status.serialize())")
+    }
+
+    /// A `reflect` reply is LARGE and TRANSIENT, and the instruction for what to
+    /// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
+    /// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
+    /// reflects. Only reflect bodies are dropped later, so only they carry it.
+    @Test func reflectRepliesCarryTheDistillationNudge() async throws {
+        let reflect = callEnvelope(target: "core", payload: cheapReflect)
+        let list = callEnvelope(target: "core", payload: .object(["type": .string("list_agents")]))
+        let script = ProviderScript([
+            [reflect + "\n" + list], ["SEEN core " + doneEnvelope],
+        ])
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": script]), backendIds: ["mock"])
+        _ = await kernel.send([Item(ids["mock"]!, .object([
+                "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
+            ]))])[0].result
+        #expect(await script.waitForCalls(2), "the reflect never came back")
+        let turn2 = script.requestText(1)
+        #expect(
+            turn2.contains("this body is TRANSIENT"),
+            "the reflect block must carry the distillation nudge")
+        #expect(turn2.contains("SEEN <id>"), "and must show the format it asks for")
+        #expect(
+            turn2.components(separatedBy: "this body is TRANSIENT").count == 2,
+            "and ONLY the reflect block carries it")
+    }
+}

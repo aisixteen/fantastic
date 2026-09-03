@@ -35,10 +35,17 @@ fn missing_and_bad_name_the_argument() {
 fn not_here_points_at_the_root() {
     let v = not_here("create_agent", "some_child");
     assert_eq!(v["reason"], "not_here");
+    // PYTHON'S WORDS. One code must not mean two sentences across runtimes.
+    assert_eq!(
+        v["error"],
+        "create_agent is a kernel verb — some_child does not answer it"
+    );
     // The fix is IN the refusal — the operand/target confusion is the whole
     // reason this code exists.
     assert!(v["hint"].as_str().unwrap().contains("kernel"));
-    assert!(v["hint"].as_str().unwrap().contains("OPERAND"));
+    assert!(v["hint"].as_str().unwrap().contains("`parent_id` / `id`"));
+    // The machine field: which verb was misaddressed, without parsing prose.
+    assert_eq!(v["verb"], "create_agent");
 }
 
 #[test]

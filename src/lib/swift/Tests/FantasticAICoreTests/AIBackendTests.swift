@@ -13,6 +13,14 @@ import Testing
 
 @testable import FantasticAICore
 
+/// The private reaction cursor, read through the same lock the backend uses.
+/// SYNCHRONOUS on purpose: `NSLock.lock()` is unavailable from an async context.
+private func readMark(_ backend: AIBackend, _ key: String) -> (Int, String)? {
+    backend.projectionLock.lock()
+    defer { backend.projectionLock.unlock() }
+    return backend.compactionMark[key]
+}
+
 // MARK: - Tests
 
 @Suite("AIBackend shared machinery")
@@ -58,11 +66,60 @@ struct AIBackendTests {
         #expect(r["queued"].asBool == nil)
     }
 
-    @Test func sendWithoutTextErrors() async throws {
+    /// A MISSING `text` IS THE EMPTY STRING. Python (`payload.get("text", "")`) and
+    /// rust (`unwrap_or("")`) both run the turn, so a caller-driven agent kicking
+    /// off from its system prompt alone worked on two kernels and was refused on the
+    /// third with a reason the others never produce.
+    @Test func sendDefaultsMissingTextToEmpty() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { .provider(MockProvider()) })
         let r = await kernel.send([Item(id, .object(["type": .string("send")]))])[0].result
-        #expect(r["error"].asString == "send requires text")
+        #expect(r["error"].asString == nil, "a missing `text` is not a refusal: \(r.serialize())")
+        #expect(r["response"].asString == "Hello", "the turn RAN")
+        let msgs = await historyRows(kernel: kernel, id: id, client: "cli")
+        #expect(msgs.first?["content"].asString == "", "and the user turn is the empty string")
+    }
+
+    /// `status.is_mine` is matched against the SANITISED client id, so the entry has
+    /// to be STORED sanitised too. Swift kept the raw id in the queue/current entry
+    /// while `statusVerb` compared `safeClient(requesting)`, so a browser client
+    /// `tab 1/x` asking after its OWN work was told `is_mine:false, mine_pending:[],
+    /// others_pending:1`. Python sanitizes both sides at entry.
+    @Test func statusIsMineMatchesASanitisedClientId() async throws {
+        let raw = "tab 1/x"
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+            })
+        let running = Task {
+            _ = await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("hi there"),
+                    "client_id": .string(raw),
+                ]))])[0].result
+        }
+        var snap: JSON = .null
+        for _ in 0..<50 {
+            let s = await kernel.send([Item(id, .object([
+                    "type": .string("status"), "client_id": .string(raw),
+                ]))])[0].result
+            if s["generating"].asBool == true {
+                snap = s
+                break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(snap["generating"].asBool == true)
+        #expect(snap["current"]["is_mine"].asBool == true, "\(snap.serialize())")
+        #expect(snap["current"]["text"].asString == "hi there", "the owner sees its own text")
+        #expect(snap["others_pending"].asInt == 0)
+        _ = await running.value
+        // The durable thread is keyed by the SAFE id too — reading with the raw one
+        // must find the same conversation, not an empty thread.
+        let h = await kernel.send([Item(id, .object([
+                "type": .string("history"), "client_id": .string(raw),
+            ]))])[0].result
+        #expect(h["client_id"].asString == "tab_1_x")
+        #expect((h["messages"].asArray ?? []).count == 2, "the raw id must reach its own thread")
     }
 
     @Test func makeProviderRefusalReturnedVerbatim() async throws {
@@ -616,7 +673,117 @@ struct AIBackendTests {
         #expect(st["last_projection"]["fired"].asBool == false)  // under-budget send
         #expect(st["last_reaction"] == .null)  // no compaction fired
     }
-}
 
-// The `author` verb + its SELF-CORRECT loop were DELETED — python has no `author`
-// subsystem (a coder AND its loop emerge from base abstractions + genesis readmes).
+    // ─── the queued event, the whole recall, the store cursor ───
+
+    /// ONE event on contention, and it is the `status` one. Rust/swift emitted a
+    /// bare `{type:'queued'}` ahead of it until 2026-09-02 — an undocumented type
+    /// python never sends, which broke any per-submission event count and every
+    /// cross-runtime event-stream diff.
+    @Test func contendedSendsEmitOneQueuedStatusAndNoBareQueuedEvent() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig {
+                .provider(MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+            })
+        let sink = EventSink()
+        let inbox = kernel.ensureInbox(id)
+        let pump = Task { for await ev in inbox { sink.add(ev) } }
+        defer { pump.cancel() }
+
+        let first = Task {
+            _ = await kernel.send([Item(id, .object([
+                    "type": .string("send"), "text": .string("one"), "client_id": .string("c"),
+                ]))])[0].result
+        }
+        try await waitUntil("the first generation to be in flight") {
+            (await kernel.send([Item(id, .object([
+                "type": .string("status"), "client_id": .string("c"),
+            ]))])[0].result)["generating"].asBool == true
+        }
+        _ = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string("two"), "client_id": .string("c"),
+            ]))])[0].result
+        _ = await first.value
+
+        #expect(
+            sink.first(type: "queued") == nil,
+            "the bare `queued` event is not part of the contract")
+        let queued = sink.snapshot().filter {
+            $0["type"].asString == "status" && $0["phase"].asString == "queued"
+        }
+        #expect(queued.count == 1, "one contended submission, one queued status")
+        #expect(queued.first?["detail"]["ahead"].asInt != nil)
+    }
+
+    /// `recall` answers the turn WHOLE. Rust/swift capped each recalled turn at 2000
+    /// chars while python returned it verbatim — same verb, same store, two different
+    /// replies, and the cut half is exactly what a model pages back FOR.
+    @Test func recallReturnsTheTurnWhole() async throws {
+        let (kernel, id) = try await freshMockKernel(
+            config: baseConfig { .provider(MockProvider()) })
+        let long = "HEAD " + String(repeating: "x", count: 6000) + " TAIL"
+        _ = await kernel.send([Item(id, .object([
+                "type": .string("send"), "text": .string(long), "client_id": .string("chat"),
+            ]))])[0].result
+        let r = await kernel.send([Item(id, .object([
+                "type": .string("recall"), "query": .string("HEAD"),
+                "client_id": .string("chat"),
+            ]))])[0].result
+        let content = (r["messages"].asArray ?? []).first?["content"].asString ?? ""
+        #expect(content.count == long.count, "capped at \(content.count) of \(long.count)")
+        #expect(content.hasSuffix("TAIL"), "the tail is what was being paged back")
+    }
+
+    /// The reaction cursor is the DURABLE STORE's length, not the model view's. The
+    /// view is deduped/trimmed, so counting it puts the cursor short by exactly the
+    /// turns the trimmers dropped — and `deriveReaction` then scans assistant turns
+    /// written BEFORE the notice and scores a reaction that never happened.
+    @Test func theCompactionCursorIsTheStoreLengthNotTheView() async throws {
+        let (kernel, ids, _) = await bootMockKernel(
+            config: scriptedConfig(["mock": ProviderScript([["x"]])]), backendIds: ["mock"])
+        let agent = kernel.agent(ids["mock"]!)!
+
+        // ① the store keeps every turn; the VIEW the prompt carries is shorter,
+        //    because the superseded reflect deduped away.
+        let store: [JSON] = [
+            .object([
+                "role": .string("user"),
+                "content": .string("[reply to ks:a1 · core reflect]\nOLD TREE"),
+            ]),
+            .object(["role": .string("assistant"), "content": .string("noted")]),
+            .object([
+                "role": .string("user"),
+                "content": .string("[reply to ks:a2 · core reflect]\nNEW TREE"),
+            ]),
+            .object(["role": .string("assistant"), "content": .string("noted again")]),
+        ]
+        let view = dropAnsweredReflects(dedupeStaleReads(store))
+        #expect(view.count < store.count, "the view must be shorter than the store")
+        #expect(
+            !view.map { $0["content"].asString ?? "" }.joined().contains("OLD TREE"),
+            "the superseded reflect must be gone from the VIEW")
+
+        // ② and the mark records the STORE's length, not the view's.
+        let backend = buildAIBackend(baseConfig { .provider(MockProvider()) })
+        var fat: [JSON] = [.object(["role": .string("system"), "content": .string("sys")])]
+        for i in 0..<60 {
+            fat.append(
+                .object([
+                    "role": .string(i % 2 == 0 ? "user" : "assistant"),
+                    "content": .string("turn\(i)-" + String(repeating: "x", count: 8000)),
+                ]))
+        }
+        let outcome = await backend.projectContext(
+            provider: MockProvider(), agent: agent, clientId: "probe", messages: fat,
+            storeLen: store.count, kernel: kernel)
+        guard case .projected = outcome else {
+            Issue.record("the projection must fire, not failfast")
+            return
+        }
+        let mark = readMark(backend, agent.id.value)
+        #expect(
+            mark?.0 == store.count,
+            "the cursor is the store length, got \(String(describing: mark))")
+        #expect(mark?.1 == "probe")
+    }
+}

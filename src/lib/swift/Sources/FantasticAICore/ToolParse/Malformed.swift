@@ -82,10 +82,13 @@ func malformedCalls(_ text: String) -> [JSON] {
                 "error": .string(
                     "tool_call NOT dispatched: \(reason). Nothing ran. " + hit.envelope.hint),
                 "envelope": .string(hit.envelope.opener),
-                // Enough to locate the break, bounded so a huge program body
-                // cannot itself blow the context it is being explained in, and
+                // THE WHOLE BLOCK, uncapped — python pins this. A 400-char prefix
+                // rode here until 2026-09-02 and it hid the fault: the break is at
+                // the END of a long payload, so the model was shown a head that
+                // looks fine and re-sent the identical broken envelope (measured
+                // live_build 2026-08-24, on python, before ITS cap was lifted).
                 // DEFANGED so quoting this error cannot arm the scanner again.
-                "your_block": .string(defang(String(body.prefix(400)))),
+                "your_block": .string(defang(body)),
             ]))
     }
     return out

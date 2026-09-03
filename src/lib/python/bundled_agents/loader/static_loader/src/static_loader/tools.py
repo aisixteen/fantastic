@@ -21,11 +21,18 @@ Manifest shape (`fantastic.yaml`):
     agents:
       - id: memory                     # explicit ids (idempotent across reboots)
         handler_module: text_file.tools
+        callable_by:                   # the INGRESS half — deny-all is TWO-SIDED,
+          worker: [write, read]        # so an edge needs both ends declared here
       - id: worker
         handler_module: exec_bridge.tools
         allowed: ['python3 .*']
-        can_call:                      # explicit lateral grants (deny-all)
-          memory: [set, read]
+        can_call:                      # the EGRESS half
+          memory: [write, read]
+
+    Nothing is auto-granted: a manifest entry gets the structural baseline
+    ({$self,$parent,$children}) and exactly what it declares. An agent that keeps
+    its own sidecar (an AI's chat, the scheduler's schedules) declares
+    `can_call: {$loader: [persist_blob, load_blob]}` itself.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import yaml
 from file_bridge import fs
 
 from kernel import operator_context
+from kernel._authz import DEFAULT_CALLABLE_BY, DEFAULT_CAN_CALL
 from kernel._refusal import UNHANDLED, refusal
 
 MANIFEST_FIELD = "manifest"
@@ -81,14 +89,21 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 
 
 async def _boot(id, payload, agent):
-    """Hydrate the declared roster as OPERATOR. Idempotent: a spec whose id
-    already exists (hydrated from disk on a reboot) is skipped, so the manifest
-    and the persisted tree never duplicate. Specs SHOULD carry explicit ids."""
+    """Hydrate the declared roster as OPERATOR.
+
+    THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM, cloud, an API).
+    Idempotent by id — an entry whose agent already exists is never duplicated —
+    but it is RE-APPLIED, not skipped: every declared field is written back over
+    the hydrated record, so editing the yaml is how you change the roster. Only
+    `handler_module` cannot change under a live agent (its in-process state
+    belongs to the old bundle); that entry fails loud. Every spec MUST carry an
+    explicit id — an id-less entry is refused, because it can only ever be
+    created anew. Returns `created` (new this boot) + `reapplied`."""
     agents, err = _load_manifest(agent)
     if err:
         return {"error": err, "booted": False}
     created: list[str] = []
-    skipped: list[str] = []
+    reapplied: list[str] = []
     with operator_context():
         for spec in agents:
             if not isinstance(spec, dict) or not spec.get("handler_module"):
@@ -97,8 +112,74 @@ async def _boot(id, payload, agent):
                     "booted": False,
                 }
             aid = spec.get("id")
-            if aid and agent.ctx.agents.get(aid) is not None:
-                skipped.append(aid)
+            # An id-less entry cannot be idempotent: the roster is keyed by id,
+            # so nothing matches the agent the LAST boot minted and this boot
+            # mints a SECOND one (`text_file_ab12cd`, then `text_file_ef34ab`),
+            # which the flush persists — the roster grows by one agent per
+            # restart and the operator is never told. The manifest is truth, so
+            # it must name its agents.
+            if not isinstance(aid, str) or not aid:
+                return {
+                    "error": f"static_loader: roster entry needs an explicit id: {spec!r}",
+                    "booted": False,
+                }
+            live = agent.ctx.agents.get(aid)
+            if live is not None:
+                # THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
+                # cloud, an API). So an id that already exists is RE-APPLIED from
+                # the manifest, never skipped: editing a grant in the yaml used
+                # to change nothing at all, because the hydrated record silently
+                # won and the operator got no word about it.
+                declared = {
+                    k: v
+                    for k, v in spec.items()
+                    if k not in ("id", "handler_module", "parent_id")
+                }
+                # `update_agent` REPLACES a named field, so a bare re-apply of
+                # `can_call` would delete the structural baseline the kernel
+                # stamps at create ($self/$parent/$children) and sever the agent
+                # from its own parent and children. Merge over the baseline,
+                # exactly as `create_agent` does.
+                for field, base in (
+                    ("can_call", DEFAULT_CAN_CALL),
+                    ("callable_by", DEFAULT_CALLABLE_BY),
+                ):
+                    if isinstance(declared.get(field), dict):
+                        declared[field] = {**base, **declared[field]}
+                if live.handler_module != spec["handler_module"]:
+                    # A bundle cannot be swapped under a live agent (its
+                    # in-process state belongs to the old one); the manifest is
+                    # asking for a different agent under a used name.
+                    return {
+                        "error": (
+                            f"static_loader: {aid!r} exists as "
+                            f"{live.handler_module!r} but the manifest declares "
+                            f"{spec['handler_module']!r} — a handler_module is "
+                            "fixed at create; delete the agent to re-declare it"
+                        ),
+                        "booted": False,
+                    }
+                if declared:
+                    r = (
+                        await agent.send(
+                            [
+                                {
+                                    "target": "kernel",
+                                    "payload": {
+                                        "type": "update_agent",
+                                        "id": aid,
+                                        **declared,
+                                    },
+                                }
+                            ]
+                        )
+                    )[0]["result"]
+                    if isinstance(r, dict) and r.get("error"):
+                        return {
+                            "error": f"static_loader: re-applying {aid!r}: {r['error']}",
+                            "booted": False,
+                        }
+                reapplied.append(aid)
                 continue
             # `parent_id` = THIS loader → the declared agent becomes the loader's
             # child ($parent = the loader), exactly as addressing the loader used to
@@ -134,7 +215,7 @@ async def _boot(id, payload, agent):
                     "error": f"static_loader: create failed for {spec!r}: {rec}",
                     "booted": False,
                 }
-    return {"booted": True, "created": created, "skipped": skipped}
+    return {"booted": True, "created": created, "reapplied": reapplied}
 
 
 async def _reflect(id, payload, agent):

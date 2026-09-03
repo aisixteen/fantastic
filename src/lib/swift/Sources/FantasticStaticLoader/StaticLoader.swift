@@ -10,7 +10,10 @@
 //
 // After boot the roster is CLOSED: deny-all means a roster agent cannot
 // `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
-// re-reads + skips agents that already exist). Declare explicit ids.
+// re-reads the manifest and RE-APPLIES the declared fields over an existing
+// agent). Every entry MUST name an explicit `id` — an id-less one is refused
+// loud, because nothing could match it and each reboot would mint another agent
+// beside the last.
 
 import FantasticFile
 import FantasticJSON
@@ -112,7 +115,7 @@ public struct StaticLoaderBundle: AgentBundle {
         }
         let agents = root["agents"]?.asArray ?? []
         var created: [JSON] = []
-        var skipped: [JSON] = []
+        var reapplied: [JSON] = []
         for spec in agents {
             guard case .object(let obj) = spec, obj["handler_module"]?.asString != nil else {
                 return .object([
@@ -122,8 +125,68 @@ public struct StaticLoaderBundle: AgentBundle {
                     "booted": .bool(false),
                 ])
             }
-            if let id = obj["id"]?.asString, kernel.agent(AgentId(id)) != nil {
-                skipped.append(.string(id))
+            // An id-less entry cannot be idempotent: the roster is keyed by id,
+            // so nothing matches the agent the LAST boot minted and this boot
+            // mints a SECOND one, which the flush persists — the roster grows by
+            // one agent per restart and the operator is never told. The manifest
+            // is truth, so it must name its agents.
+            guard let id = obj["id"]?.asString, !id.isEmpty else {
+                return .object([
+                    "error": .string(
+                        "static_loader: roster entry needs an explicit id: \(spec.serialize())"),
+                    "booted": .bool(false),
+                ])
+            }
+            if let live = kernel.agent(AgentId(id)) {
+                // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
+                // cloud, an API). So an id that already exists is RE-APPLIED
+                // from the manifest, never skipped: editing a grant in the yaml
+                // used to change nothing at all, because the hydrated record
+                // silently won and the operator got no word about it.
+                let declaredHM = obj["handler_module"]?.asString
+                if live.handlerModule != declaredHM {
+                    // A bundle cannot be swapped under a live agent (its
+                    // in-process state belongs to the old one).
+                    return .object([
+                        "error": .string(
+                            "static_loader: \"\(id)\" exists as "
+                                + "\"\(live.handlerModule ?? "")\" but the manifest declares "
+                                + "\"\(declaredHM ?? "")\" — a handler_module is fixed at "
+                                + "create; delete the agent to re-declare it"),
+                        "booted": .bool(false),
+                    ])
+                }
+                var patch = obj
+                patch["id"] = nil
+                patch["handler_module"] = nil
+                patch["parent_id"] = nil
+                // `update_agent` REPLACES a named field, so a bare re-apply of
+                // `can_call` would delete the structural baseline the kernel
+                // stamps at create and sever the agent from its own parent and
+                // children. Merge over the baseline, as `create_agent` does.
+                for field in ["can_call", "callable_by"] {
+                    if case .object(let declared)? = patch[field],
+                        case .object(var merged) = defaultCanCall()
+                    {
+                        for (k, v) in declared { merged[k] = v }
+                        patch[field] = .object(merged)
+                    }
+                }
+                if !patch.isEmpty {
+                    patch["type"] = .string("update_agent")
+                    patch["id"] = .string(id)
+                    let r = await KernelTaskLocals.$currentSender.withValue(nil) {
+                        await kernel.send([Item(AgentId("kernel"), .object(patch))])[0].result
+                    }
+                    if r["error"] != .null {
+                        return .object([
+                            "error": .string(
+                                "static_loader: re-applying \"\(id)\": \(r["error"].serialize())"),
+                            "booted": .bool(false),
+                        ])
+                    }
+                }
+                reapplied.append(.string(id))
                 continue
             }
             // create_agent to SELF → the declared agent becomes THIS loader's
@@ -153,7 +216,7 @@ public struct StaticLoaderBundle: AgentBundle {
         return .object([
             "booted": .bool(true),
             "created": .array(created),
-            "skipped": .array(skipped),
+            "reapplied": .array(reapplied),
         ])
     }
 
@@ -199,6 +262,9 @@ public struct StaticLoaderBundle: AgentBundle {
         declared agent as a child of itself (as operator). Every declared agent
         gets the Unix baseline grant plus whatever `can_call` the manifest names.
         After boot the roster is CLOSED (deny-all: an agent cannot create_agent),
-        so the manifest is the whole roster. Idempotent by id.
+        so the manifest is the whole roster. Idempotent by id — every entry MUST
+        carry an explicit `id`; an id-less one is refused loud (`booted: false`),
+        because nothing could match it and each reboot would mint another agent
+        beside the last one's.
         """
 }

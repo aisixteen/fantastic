@@ -185,6 +185,35 @@ fn validate_meta_refuses_withdrawn_fields_and_bad_allowed() {
     assert!(b.validate_meta(&ok, &Map::new()).is_none());
 }
 
+#[test]
+fn password_ingress_is_refused_on_fs_and_process_legs() {
+    // The process half (the fs half lives in fantastic-file): a leg with no wire
+    // envelope can never present a token, so both spellings refuse at the write.
+    let b = ExecBridgeBundle;
+    for (field, spec) in [
+        ("ingress_rule", json!("password_ingress")),
+        (
+            "ingress_rule",
+            json!({"type": "password_ingress", "env": "X"}),
+        ),
+        ("auth", json!("password")),
+    ] {
+        let mut meta = Map::new();
+        meta.insert(field.to_string(), spec);
+        let e = b
+            .validate_meta(&meta, &Map::new())
+            .unwrap_or_else(|| panic!("{field} password must be refused"));
+        assert!(e.contains("wire envelope"), "{e}");
+        assert!(
+            e.contains("allow_all_ingress"),
+            "must teach the legal set: {e}"
+        );
+    }
+    let mut ok = Map::new();
+    ok.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    assert!(b.validate_meta(&ok, &Map::new()).is_none());
+}
+
 #[tokio::test]
 async fn reflect_advertises_the_allowlist_not_interpreters() {
     let tmp = TempDir::new().unwrap();
@@ -236,10 +265,78 @@ async fn start_refuses_a_code_field() {
         .await
         .remove(0)
         .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "code", "{r}");
     assert_eq!(
-        r["error"], "exec_bridge: `code` is not a field — run a command instead",
+        r["error"], "start: code must be absent — run a command instead",
         "{r}"
     );
+}
+
+/// EVERY refusal on `start` carries a CODE. Sibling argument errors used to split —
+/// `args`/`env` answered `bad_arg` while `command`/`code`/the policy wall answered a
+/// bare `{error}` — so nothing could tell a typo from a policy refusal without
+/// matching prose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_start_refusal_carries_a_code() {
+    let tmp = TempDir::new().unwrap();
+    let mut meta = Map::new();
+    meta.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
+    meta.insert("allowed".to_string(), json!(["echo( .*)?"]));
+    let (kernel, a) = mk_kernel_with(&tmp, meta).await;
+    let ask = |p: Value| {
+        let kernel = Arc::clone(&kernel);
+        let a = a.clone();
+        async move { kernel.send(vec![Item::new(a, p)]).await.remove(0).result }
+    };
+
+    let r = ask(json!({"type": "start"})).await;
+    assert_eq!(
+        (&r["reason"], &r["arg"]),
+        (&json!("missing_arg"), &json!("command")),
+        "{r}"
+    );
+    let r = ask(json!({"type": "start", "command": "echo", "args": [{"no": 1}]})).await;
+    assert_eq!(
+        (&r["reason"], &r["arg"]),
+        (&json!("bad_arg"), &json!("args")),
+        "{r}"
+    );
+    let r = ask(json!({"type": "start", "command": "echo", "env": {"K": ["no"]}})).await;
+    assert_eq!(
+        (&r["reason"], &r["arg"]),
+        (&json!("bad_arg"), &json!("env")),
+        "{r}"
+    );
+    // A POLICY wall, not a malformed argument.
+    let r = ask(json!({"type": "start", "command": "rm", "args": ["-rf", "/"]})).await;
+    assert_eq!(r["reason"], "unauthorized", "{r}");
+    assert!(
+        r["hint"].as_str().is_some_and(|h| h.contains("allowed")),
+        "{r}"
+    );
+}
+
+/// `status`/`stop`/`interrupt` on a job_id naming nothing answer `not_found` with the
+/// id. `stop`/`interrupt` used to answer `{killed:0}` — the same reply as "it had
+/// already exited", so a typo read as success; `status` answered a bare `{error}` and
+/// a caller branching on `reason == "not_found"` never matched on this runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_job_id_is_not_found_on_every_verb() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    for verb in ["status", "stop", "interrupt"] {
+        let r = kernel
+            .send(vec![Item::new(
+                a.clone(),
+                json!({"type": verb, "job_id": "deadbeef"}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "not_found", "{verb}: {r}");
+        assert_eq!(r["job_id"], "deadbeef", "{verb}: {r}");
+    }
 }
 
 /// A command that matches no `allowed` pattern is refused, naming the patterns, and
@@ -429,6 +526,11 @@ fn connector_carries_the_wire_contract() {
         "FANTASTIC_SELF_ID",
         "_st.pack(\">I\"",
         "_o._exit(0)",
+        // The write half of the 16 MiB bound: the client refuses to send a frame
+        // the relay would close the socket over, and says what to do instead.
+        "_MAX_FRAME",
+        "frame exceeds 16 MiB",
+        "write_stream",
     ] {
         assert!(
             CONNECTOR_SRC.contains(needle),
@@ -877,4 +979,303 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
             .contains("WROTE 768 READ 768 True bytes"),
         "bytes did not round-trip raw: {done}"
     );
+}
+
+// ─── the relay: denials, leaks, the frame bound ─────────────────
+//
+// The relay is the unit under test here, so these drive it over a socketpair the
+// way a spawned program would — no subprocess, and no race between the child
+// registering a callback and the frame coming back.
+
+/// A relay serving one end of a socketpair, gated as `owner` exactly as `start`
+/// gates it. Returns the PROGRAM's end, the stop signal, and the relay's handle.
+#[allow(clippy::type_complexity)]
+fn wire(
+    kernel: &Arc<Kernel>,
+    owner: &AgentId,
+    job_id: &str,
+) -> (
+    tokio::net::UnixStream,
+    Arc<tokio::sync::Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (parent, child) = tokio::net::UnixStream::pair().expect("socketpair");
+    let (rd, wr) = parent.into_split();
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let relay = tokio::spawn(fantastic_kernel::send::with_sender(
+        owner.clone(),
+        crate::relay::serve(
+            rd,
+            wr,
+            owner.clone(),
+            job_id.to_string(),
+            Arc::clone(kernel),
+            Arc::clone(&stop),
+        ),
+    ));
+    (child, stop, relay)
+}
+
+async fn wire_write(child: &mut tokio::net::UnixStream, v: &Value) {
+    use tokio::io::AsyncWriteExt;
+    let body = [b"T".as_slice(), &serde_json::to_vec(v).unwrap()].concat();
+    child
+        .write_all(&[&(body.len() as u32).to_be_bytes()[..], &body].concat())
+        .await
+        .expect("write");
+}
+
+async fn wire_read(child: &mut tokio::net::UnixStream) -> Value {
+    use tokio::io::AsyncReadExt;
+    let mut head = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), child.read_exact(&mut head))
+        .await
+        .expect("no frame within 5s")
+        .expect("head");
+    let mut body = vec![0u8; u32::from_be_bytes(head) as usize];
+    child.read_exact(&mut body).await.expect("body");
+    serde_json::from_slice(&body[1..]).expect("json")
+}
+
+/// `kernel.watch` is gated exactly like a send and can REFUSE. The refusal used to
+/// be discarded: the sub was registered anyway, so the program held a subscription
+/// that simply never fired — deaf, with nothing to diagnose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    // A sibling the runner holds no edge to: watch must refuse.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("core"),
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "secret",
+                   "handler_module": HANDLER_MODULE, "ingress_rule": "allow_all_ingress"}),
+        )])
+        .await;
+
+    let (mut child, stop, relay) = wire(&kernel, &a, "j1");
+    wire_write(&mut child, &json!({"op": "watch", "src": "secret"})).await;
+    let ev = wire_read(&mut child).await;
+    assert_eq!(ev["op"], "event", "{ev}");
+    assert_eq!(ev["src"], "secret", "{ev}");
+    assert_eq!(ev["payload"]["reason"], "unauthorized", "{ev}");
+
+    // …and NOTHING was registered. No proxy inbox row — and no WATCHER row on the
+    // source either, which an emit proves from outside the crate: register the
+    // proxy's inbox ourselves, and a leaked watcher fans the payload into it.
+    let proxy = AgentId::from("_xbw_j1_secret");
+    assert!(!kernel.inboxes.contains_key(&proxy), "proxy inbox leaked");
+    let mut spy = inbox(&kernel, &proxy);
+    kernel
+        .emit(&AgentId::from("secret"), json!({"type": "ping"}))
+        .await;
+    assert!(spy.try_recv().is_err(), "the watcher row leaked");
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+}
+
+/// Teardown SIGNALS the relay instead of aborting it, so the release block after
+/// its read loop actually runs: the watcher rows, the INBOX rows and the drain
+/// tasks all go back. Aborting skipped that block, and every `_xbw_*`/`_xbself_*`
+/// id the job held stayed live — `emit` kept copying payloads into channels nobody
+/// drained, one leak per (job, watched src), forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, stop, relay) = wire(&kernel, &a, "j2");
+    // `$self` is a baseline edge, so both of these are permitted.
+    wire_write(&mut child, &json!({"op": "watch", "src": a.as_str()})).await;
+    wire_write(&mut child, &json!({"op": "onmessage"})).await;
+
+    let proxies = [
+        AgentId::from(format!("_xbw_j2_{a}").as_str()),
+        AgentId::from("_xbself_j2"),
+    ];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline
+        && !proxies.iter().all(|p| kernel.inboxes.contains_key(p))
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for p in &proxies {
+        assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
+    }
+
+    stop.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not stop")
+        .expect("relay");
+
+    for p in &proxies {
+        assert!(!kernel.inboxes.contains_key(p), "{p} leaked past teardown");
+    }
+    // The WATCHER rows went too: re-register both proxy inboxes and emit on the
+    // owner — a leaked watcher would fan the payload straight into them.
+    let mut spies: Vec<_> = proxies.iter().map(|p| inbox(&kernel, p)).collect();
+    kernel.emit(&a, json!({"type": "ping"})).await;
+    for (p, spy) in proxies.iter().zip(spies.iter_mut()) {
+        assert!(spy.try_recv().is_err(), "{p} left a watcher row");
+    }
+}
+
+/// A length prefix over the bound is a WIRE VIOLATION — the framing itself is
+/// unusable, so there is nothing to reply TO and the socket closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_frame_closes_the_control_socket() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let (mut child, _stop, relay) = wire(&kernel, &a, "j3");
+    child
+        .write_all(&(16 * 1024 * 1024u32 + 1).to_be_bytes())
+        .await
+        .expect("write");
+    let mut byte = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(5), child.read(&mut byte))
+        .await
+        .expect("the relay never closed")
+        .expect("read");
+    assert_eq!(n, 0, "the relay must close on a wire violation");
+    tokio::time::timeout(Duration::from_secs(5), relay)
+        .await
+        .expect("relay did not exit")
+        .expect("relay");
+}
+
+/// A cancelled job's row must not sit at `stopping` forever: `clear` refuses that
+/// label BY DESIGN, so the row was immortal and the job could never be forgotten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_job_finalises_to_stopped_and_clear_removes_it() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let job_id = r["job_id"].as_str().expect("job_id").to_string();
+    let task_id = {
+        let g = jobs::jobs();
+        g.get(&job_id).expect("row").task.to_string()
+    };
+    let c = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "cancel", "task_id": task_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(c["cancelled"], true, "{c}");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let done = jobs::jobs()
+            .get(&job_id)
+            .is_some_and(|j| j.status == "stopped");
+        if done || tokio::time::Instant::now() > deadline {
+            assert!(done, "the cancelled row never left `stopping`");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let cleared = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "clear"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(cleared["cleared"].as_u64().unwrap_or(0) >= 1, "{cleared}");
+    let st = kernel
+        .send(vec![Item::new(a, json!({"type": "status"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(st["jobs"].as_array().map(Vec::len), Some(0), "{st}");
+}
+
+/// `kernel.args` / FANTASTIC_ARGS was advertised by every runtime's howto and set
+/// by no spawner — a program written from the docs read `{}` and KeyError'd. A
+/// command runner takes its arguments as ARGV.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_connector_has_no_args() {
+    assert!(!CONNECTOR_SRC.contains("FANTASTIC_ARGS"));
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(a, json!({"type": "connector"}))])
+        .await
+        .remove(0)
+        .result;
+    let howto = r["howto"].as_str().expect("howto");
+    assert!(
+        !howto.contains("`kernel.self_id`, `kernel.args`"),
+        "{howto}"
+    );
+    assert!(howto.contains("ARGV"), "{howto}");
+}
+
+/// The other half of the same guarantee, through the REAL path: `stop` →
+/// `teardown` → the relay's own cleanup. Teardown used to `abort()` the relay
+/// task, which drops `serve` at its await point and skips the release entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_releases_the_proxies_a_real_job_held() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(
+                &py,
+                "import threading\n\
+                 kernel.watch(kernel.self_id, lambda p: None)\n\
+                 kernel.on_message(lambda p: None)\n\
+                 threading.Event().wait()\n",
+                true,
+            ),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let job_id = r["job_id"].as_str().expect("job_id").to_string();
+    let proxies = [
+        AgentId::from(format!("_xbw_{job_id}_{a}").as_str()),
+        AgentId::from(format!("_xbself_{job_id}").as_str()),
+    ];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline
+        && !proxies.iter().all(|p| kernel.inboxes.contains_key(p))
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for p in &proxies {
+        assert!(kernel.inboxes.contains_key(p), "{p} was never registered");
+    }
+
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline
+        && proxies.iter().any(|p| kernel.inboxes.contains_key(p))
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for p in &proxies {
+        assert!(!kernel.inboxes.contains_key(p), "{p} leaked past `stop`");
+    }
 }

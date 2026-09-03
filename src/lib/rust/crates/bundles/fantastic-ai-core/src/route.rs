@@ -30,6 +30,10 @@
 //! would trip [`fantastic_kernel::call_guard`] as a false cycle on turn 2. The
 //! INBOUND check lives in [`crate::verbs::send`], before the lock.
 
+use crate::events::{emit_status, CallerRoute};
+use crate::helpers::mint_batch_token;
+use crate::history_view::REFLECT_NUDGE;
+use crate::state::state_for;
 use crate::tool_parse::{extract_tool_calls, malformed_calls};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -114,6 +118,7 @@ async fn deliver(
     text: &str,
     client_id: &str,
     system_prompt: Option<&str>,
+    route: CallerRoute,
 ) {
     let mut payload = Map::new();
     payload.insert("type".to_string(), json!("send"));
@@ -139,6 +144,14 @@ async fn deliver(
     // Only the first send's error was ever visible, i.e. never the ones that
     // matter. This does NOT raise: the routing dispatch is detached, and
     // unwinding here would kill sibling branches that are still fine.
+    //
+    // THE ANNOUNCEMENT IS AN ORDINARY `status` EVENT — same shape a failed direct
+    // send produces (`{type:'status', source, phase:'done', detail:{…}, ts,
+    // client_id}`), because that is the shape reflect's `emits` documents and the
+    // shape a UI/harness subscribes to. It rode with `reason`/`error` at the TOP
+    // level here until 2026-09-02, so every subscriber reading `ev.detail.reason`
+    // saw nothing — the silent-death regression this announcement exists for,
+    // wearing the announcement's own clothes.
     let failed = !out.is_completed() || out.result.get("error").and_then(Value::as_str).is_some();
     if failed {
         let why = out
@@ -147,18 +160,20 @@ async fn deliver(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("delivery {}", out.status));
-        kernel
-            .emit(
-                &AgentId::from(target),
-                json!({
-                    "type": "status",
-                    "phase": "done",
-                    "reason": "error",
-                    "error": why,
-                    "client_id": client_id,
-                }),
-            )
-            .await;
+        let target_id = AgentId::from(target);
+        let mut detail = Map::new();
+        detail.insert("reason".to_string(), json!("error"));
+        detail.insert("error".to_string(), json!(why));
+        emit_status(
+            kernel,
+            &state_for(&target_id),
+            &target_id,
+            client_id,
+            route,
+            "done",
+            detail,
+        )
+        .await;
     }
 }
 
@@ -215,6 +230,11 @@ the chain explicitly: <tool_call>{\"name\":\"done\"}</tool_call>";
 /// model's calls are the agent's calls (gated via `with_sender`); `incoming`
 /// is the text this turn answered, which decides whether a silent chain turn
 /// earns the one no-call nudge.
+///
+/// `send_timeout` is the AI layer's per-call deadline — the KERNEL defaults
+/// nothing; this layer always supplies one, and the model may override it per
+/// call with a `timeout` arg in the envelope.
+#[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
     self_id: AgentId,
     kernel: Arc<Kernel>,
@@ -223,6 +243,8 @@ pub async fn route_reply(
     send_to: Option<String>,
     system_prompt: Option<String>,
     incoming: String,
+    send_timeout: f64,
+    route: CallerRoute,
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. This task is spawned
     // detached, and a tokio spawn does NOT inherit the task-local sender
@@ -241,10 +263,35 @@ pub async fn route_reply(
             send_to,
             system_prompt,
             incoming,
+            send_timeout,
+            route,
         )
         .await
     })
     .await
+}
+
+/// One EMITTED thing, in emission order — python's `units` tuple
+/// `(dest, target, verb, item_index, body)`. `idx` links a dispatched call to its
+/// outcome; `body` is pre-decided for the paths that never dispatch (a parse
+/// error, a missing target, a missing payload, the `@body` guard, the binary
+/// carrier).
+struct Unit {
+    dest: String,
+    target: String,
+    verb: String,
+    idx: Option<usize>,
+    body: Option<String>,
+}
+
+/// One rendered reply block, owed to `dest`. [`deliver_grouped`] composes the tag
+/// — including the batch stamp, which lives INSIDE it.
+struct Block {
+    dest: String,
+    pid: String,
+    target: String,
+    verb: String,
+    body: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -256,13 +303,15 @@ async fn route_reply_gated(
     send_to: Option<String>,
     system_prompt: Option<String>,
     incoming: String,
+    send_timeout: f64,
+    route: CallerRoute,
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
 
     // Everything owed to ONE destination, in the order the model wrote it.
     // Grouping (not a message per call) is the whole point — see below.
-    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut units: Vec<Unit> = Vec::new();
 
     // An envelope that OPENED and did not parse gets an error, exactly like a call
     // missing its `target_id` does. Reported FIRST and reported even when other
@@ -270,224 +319,305 @@ async fn route_reply_gated(
     // the model's intent, and which half was lost is not something it can infer
     // from the replies it got. Goes to SELF: `reply_to` lives inside the body we
     // could not read, and the documented default for an absent `reply_to` is self
-    // anyway.
+    // anyway. TAGGED like everything else (`[reply to - · - -]`): python tags every
+    // unit, so an error block is counted in M and reads like its siblings.
     for bad in malformed_calls(&text) {
-        blocks.push((self_id.as_str().to_string(), bad.report().to_string()));
+        units.push(Unit {
+            dest: self_id.as_str().to_string(),
+            target: "-".to_string(),
+            verb: "-".to_string(),
+            idx: None,
+            body: Some(bad.report().to_string()),
+        });
     }
 
     let done_called = calls.iter().any(|c| c.name == "done");
-    if !calls.is_empty() {
-        // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
-        // SINGLE `kernel.send([...])` — concurrent, side-effect order across
-        // calls undefined — and everything owed to one destination arrives as
-        // ONE delivered turn.
+    let any_calls = !calls.is_empty();
+    // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
+    // SINGLE `kernel.send([...])` — concurrent, side-effect order across
+    // calls undefined — and everything owed to one destination arrives as
+    // ONE delivered turn.
+    //
+    // Why whole, never split: replies used to land one per turn, so a turn
+    // that fanned out 7 calls spent the next 7 turns collecting its own
+    // answers, and every question asked in between was answered turns later
+    // by something older. Measured 2026-08-25 (`live_subai_langgraph`): the
+    // model re-asked `list_agents` five times and the run died with nothing
+    // built. Anthropic documents the split shape as the anti-pattern
+    // ("separate user messages reduce parallel tool use"), OpenAI 400s on a
+    // missing tool result, LangGraph's ToolNode collects every ToolMessage
+    // before the agent runs again. The model never sees a PARTIAL batch, so
+    // it never re-asks for the missing half.
+    let mut items: Vec<Item> = Vec::new();
+
+    for call in calls {
+        if call.name == "done" {
+            // The EXPLICIT end — not a dispatch, not an error, never nudged.
+            continue;
+        }
+        let args = &call.arguments;
+        let chosen: Option<&Value> = match args.get("target_id") {
+            Some(v) if !is_falsy(v) => Some(v),
+            _ => args.get("target"),
+        };
+        let target: Option<&str> = chosen
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        // `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
+        // own answer back, not that the answer is thrown away.
         //
-        // Why whole, never split: replies used to land one per turn, so a turn
-        // that fanned out 7 calls spent the next 7 turns collecting its own
-        // answers, and every question asked in between was answered turns later
-        // by something older. Measured 2026-08-25 (`live_subai_langgraph`): the
-        // model re-asked `list_agents` five times and the run died with nothing
-        // built. Anthropic documents the split shape as the anti-pattern
-        // ("separate user messages reduce parallel tool use"), OpenAI 400s on a
-        // missing tool result, LangGraph's ToolNode collects every ToolMessage
-        // before the agent runs again. The model never sees a PARTIAL batch, so
-        // it never re-asks for the missing half.
-        let mut items: Vec<Item> = Vec::new();
-        // Per dispatched item: where its answer goes, and what it called.
-        let mut routes: Vec<(Option<String>, String, String)> = Vec::new();
-
-        for call in calls {
-            if call.name == "done" {
-                // The EXPLICIT end — not a dispatch, not an error, never nudged.
-                continue;
-            }
-            let args = &call.arguments;
-            let chosen: Option<&Value> = match args.get("target_id") {
-                Some(v) if !is_falsy(v) => Some(v),
-                _ => args.get("target"),
-            };
-            let target: Option<&str> = chosen
-                .and_then(Value::as_str)
+        // The old default was fire-and-forget, and it made the one failure a
+        // model can never debug: gemma4:12b once left the key out of an
+        // otherwise perfect call, the reflect ran, its result was dropped, and
+        // the chain died at pass 1 with no reply, no error, and nothing to see.
+        // From inside the model that is indistinguishable from being finished.
+        //
+        // Stopping is still the default and still costs nothing — it is
+        // emitting NO call. A dropped key now costs a wasted turn instead of
+        // the whole task, and discarding a reply became something you must SAY
+        // (`reply_to: null` / "none"), which is the right way round.
+        let reply_to: Option<String> = match args.get("reply_to") {
+            Some(v) => v
+                .as_str()
                 .map(str::trim)
-                .filter(|s| !s.is_empty());
-            // `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
-            // own answer back, not that the answer is thrown away.
-            //
-            // The old default was fire-and-forget, and it made the one failure a
-            // model can never debug: gemma4:12b once left the key out of an
-            // otherwise perfect call, the reflect ran, its result was dropped, and
-            // the chain died at pass 1 with no reply, no error, and nothing to see.
-            // From inside the model that is indistinguishable from being finished.
-            //
-            // Stopping is still the default and still costs nothing — it is
-            // emitting NO call. A dropped key now costs a wasted turn instead of
-            // the whole task, and discarding a reply became something you must SAY
-            // (`reply_to: null` / "none"), which is the right way round.
-            let reply_to: Option<String> = match args.get("reply_to") {
-                Some(v) => v
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .filter(|s| !matches!(s.to_lowercase().as_str(), "none" | "null" | "nobody"))
-                    .map(str::to_string),
-                None => Some(self_id.as_str().to_string()),
-            };
-            let reply_to = reply_to.map(|r| {
-                if r == "self" {
-                    self_id.as_str().to_string()
-                } else {
-                    r
-                }
-            });
+                .filter(|s| !s.is_empty())
+                .filter(|s| !matches!(s.to_lowercase().as_str(), "none" | "null" | "nobody"))
+                .map(str::to_string),
+            None => Some(self_id.as_str().to_string()),
+        };
+        let reply_to = reply_to.map(|r| {
+            if r == "self" {
+                self_id.as_str().to_string()
+            } else {
+                r
+            }
+        });
 
-            let Some(target) = target else {
-                if let Some(rt) = reply_to {
-                    let body = json!({"error": NO_TARGET_ERROR, "you_sent": you_sent(args)});
-                    blocks.push((rt, body.to_string()));
-                }
-                continue;
-            };
-            let Some(Value::Object(payload)) = args.get("payload") else {
-                if let Some(rt) = reply_to {
-                    let body = json!({
-                        "error": no_payload_error(target),
-                        "target": target,
-                        "you_sent": you_sent(args),
-                    });
-                    blocks.push((rt, body.to_string()));
-                }
-                continue;
-            };
+        let Some(target) = target else {
+            if let Some(rt) = reply_to {
+                let body = json!({"error": NO_TARGET_ERROR, "you_sent": you_sent(args)});
+                units.push(Unit {
+                    dest: rt,
+                    target: "-".to_string(),
+                    verb: "-".to_string(),
+                    idx: None,
+                    body: Some(body.to_string()),
+                });
+            }
+            continue;
+        };
+        let mut binary_blob: Option<Vec<u8>> = None;
+        let Some(Value::Object(payload)) = args.get("payload") else {
+            if let Some(rt) = reply_to {
+                let body = json!({
+                    "error": no_payload_error(target),
+                    "target": target,
+                    "you_sent": you_sent(args),
+                });
+                units.push(Unit {
+                    dest: rt,
+                    target: target.to_string(),
+                    verb: "-".to_string(),
+                    idx: None,
+                    body: Some(body.to_string()),
+                });
+            }
+            continue;
+        };
 
-            let verb = payload
-                .get("type")
+        let mut payload = payload.clone();
+        let verb = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+
+        // send_binary: ONE named payload field is a file's CONTENTS, and a
+        // JSON payload has no bytes type — so a stream sink (`write_stream`)
+        // that wants raw bytes is otherwise unreachable. The model wrote the
+        // program as an ordinary string in `into` (default `bytes`); lift that
+        // field out of the header and dispatch it over the kernel's BINARY
+        // carrier, instead of leaving it in the JSON header. Mirrors python
+        // `core.py`'s send_binary branch.
+        //
+        // It rides the ORDINARY BATCH as an item carrying a blob. Dispatching it
+        // inline through `send_with_binary` gave it no task row, no ledger id,
+        // no timeout and no retries, and the model's reply tag read
+        // `[reply to - · …]` because there was no pid to name (2026-09-02).
+        if call.name == "send_binary" {
+            let field = args
+                .get("into")
                 .and_then(Value::as_str)
-                .unwrap_or("?")
+                .unwrap_or("bytes")
                 .to_string();
-
-            // send_binary: ONE named payload field is a file's CONTENTS, and a
-            // JSON payload has no bytes type — so a stream sink (`write_stream`)
-            // that wants raw bytes is otherwise unreachable. The model wrote the
-            // program as an ordinary string in `into` (default `bytes`); lift that
-            // field out of the header and dispatch it over the kernel's BINARY
-            // carrier (the same `send_with_binary` persistence rides), instead of
-            // the plain JSON `Item`. Mirrors python `core.py`'s send_binary branch,
-            // routed through rust's separate binary channel. Dispatched inline (the
-            // carrier is single-target, no ledger id/timeout); the batch path below
-            // handles ordinary sends.
-            if call.name == "send_binary" {
-                let field = args
-                    .get("into")
-                    .and_then(Value::as_str)
-                    .unwrap_or("bytes")
-                    .to_string();
-                if let Some(Value::String(prog)) = payload.get(&field) {
-                    if prog == "@body" {
-                        // A LITERAL "@body" is the fence placeholder with NO
-                        // fenced block — valid JSON, so it parses and would be
-                        // WRITTEN AS THE FILE (measured 2026-09-01, gym:
-                        // `illegal character '@'`). Refuse loud instead.
-                        if let Some(rt) = reply_to {
-                            let err = serde_json::json!({
-                                "error": "send_binary NOT dispatched: `bytes` is the \
-                                          literal placeholder \"@body\" but no fenced \
-                                          block followed. Re-send the SAME call with \
-                                          the program between column-0 marker lines \
-                                          inside the same <tool_call>: the JSON line, \
-                                          then `*** Begin Bytes`, the program verbatim, \
-                                          then `*** End Bytes`.",
-                                "target": target,
-                            });
-                            blocks.push((rt, format!("[reply to - · {target} {verb}]\n{err}")));
-                        }
-                        continue;
-                    }
-                    let blob = prog.clone().into_bytes();
-                    let mut header = payload.clone();
-                    header.remove(&field); // rides as the blob, not the JSON header
-                    let (reply, _body) = kernel
-                        .send_with_binary(&AgentId::from(target), Value::Object(header), blob)
-                        .await;
+            if let Some(Value::String(prog)) = payload.get(&field) {
+                if prog == "@body" {
+                    // A LITERAL "@body" is the fence placeholder with NO
+                    // fenced block — valid JSON, so it parses and would be
+                    // WRITTEN AS THE FILE (measured 2026-09-01, gym:
+                    // `illegal character '@'`). Refuse loud instead.
                     if let Some(rt) = reply_to {
-                        blocks.push((rt, format!("[reply to - · {target} {verb}]\n{reply}")));
+                        let err = serde_json::json!({
+                            "error": "send_binary NOT dispatched: `bytes` is the \
+                                      literal placeholder \"@body\" but no fenced \
+                                      block followed. Re-send the SAME call with \
+                                      the program between column-0 marker lines \
+                                      inside the same <tool_call>: the JSON line, \
+                                      then `*** Begin Bytes`, the program verbatim, \
+                                      then `*** End Bytes`.",
+                            "target": target,
+                        });
+                        units.push(Unit {
+                            dest: rt,
+                            target: target.to_string(),
+                            verb: verb.clone(),
+                            idx: None,
+                            body: Some(err.to_string()),
+                        });
                     }
                     continue;
                 }
-                // A non-string `into` field can't binary-carry; fall through and
-                // dispatch it as an ordinary JSON send (python leaves it as-is too).
+                let blob = prog.clone().into_bytes();
+                let mut header = payload.clone();
+                header.remove(&field); // rides as the blob, not the JSON header
+                binary_blob = Some(blob);
+                payload = header;
             }
+            // A non-string `into` field can't binary-carry; fall through and
+            // dispatch it as an ordinary JSON send (python leaves it as-is too).
+        }
 
-            let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
-            // The model may NAME the execution (dedup/join across retries) and may
-            // bound its own call. The kernel validates both; a bad value settles
-            // that one call as a refusal the model can read.
-            if let Some(id) = args.get("id").and_then(Value::as_str) {
-                if !id.is_empty() {
-                    item = item.with_id(id);
+        let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
+        // A `send_binary` call carries its bytes beside the JSON header; the
+        // kernel dispatches it through the binary channel under this same row,
+        // ledger id, timeout and retries.
+        if let Some(blob) = binary_blob {
+            item = item.with_binary(blob);
+        }
+        // EVERY dispatched call carries the layer's deadline. The KERNEL
+        // defaults nothing, so a call to a handler that never returns used to
+        // hang the whole batch forever here — no reply, no timeout block, the
+        // chain simply stopped (python has always set it; rust/swift did not
+        // until 2026-09-02). Set BEFORE the model's own `timeout` arg, which
+        // overrides it; the kernel validates that value, so a bad one settles
+        // as a refusal the model can read.
+        item = item.with_timeout(send_timeout);
+        // The model may NAME the execution (dedup/join across retries) and may
+        // bound its own call. The kernel validates both; a bad value settles
+        // that one call as a refusal the model can read.
+        if let Some(id) = args.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                item = item.with_id(id);
+            }
+        }
+        if let Some(t) = args.get("timeout").and_then(Value::as_f64) {
+            item = item.with_timeout(t);
+        }
+        if let Some(r) = args.get("retries").and_then(Value::as_u64) {
+            item = item.with_retries(r as u32);
+        }
+        items.push(item);
+        // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
+        // NOT counted in M — the model is owed a count of what it will
+        // actually receive.
+        if let Some(rt) = reply_to {
+            units.push(Unit {
+                dest: rt,
+                target: target.to_string(),
+                verb,
+                idx: Some(items.len() - 1),
+                body: None,
+            });
+        }
+    }
+
+    let outcomes = if items.is_empty() {
+        Vec::new()
+    } else {
+        kernel.send(items).await
+    };
+
+    // The result — INCLUDING an error — goes back. A call that failed silently
+    // is the one thing a model can never debug.
+    //
+    // PID first, then target+verb. Target+verb alone is NOT unique: with two
+    // calls in flight to one agent `[reply to kernel_state set]` is unmatchable
+    // — measured 2026-08-07 (opus re-issued both deletes, then theorised
+    // "duplicate delivery" about its own retries) and again 2026-08-20 (the
+    // model: "the reply queue is running ahead of me", then re-polled forever).
+    // The PID is the same id `ps`/`cancel` use, so a reply names a row the
+    // model can act on.
+    let blocks: Vec<Block> = units
+        .into_iter()
+        .map(|u| {
+            let (pid, body) = match u.idx {
+                Some(i) => {
+                    let out = &outcomes[i];
+                    let pid = out
+                        .pid
+                        .as_ref()
+                        .map(|t| t.0.clone())
+                        .unwrap_or_else(|| "-".to_string());
+                    let mut body = out.result.to_string();
+                    // Only reflect bodies are dropped later, so only they carry
+                    // the distillation notice.
+                    if u.verb == "reflect" {
+                        body.push_str(REFLECT_NUDGE);
+                    }
+                    (pid, body)
                 }
+                None => ("-".to_string(), u.body.unwrap_or_default()),
+            };
+            Block {
+                dest: u.dest,
+                pid,
+                target: u.target,
+                verb: u.verb,
+                body,
             }
-            if let Some(t) = args.get("timeout").and_then(Value::as_f64) {
-                item = item.with_timeout(t);
-            }
-            if let Some(r) = args.get("retries").and_then(Value::as_u64) {
-                item = item.with_retries(r as u32);
-            }
-            items.push(item);
-            routes.push((reply_to, target.to_string(), verb));
-        }
+        })
+        .collect();
 
-        let outcomes = if items.is_empty() {
-            Vec::new()
-        } else {
-            kernel.send(items).await
-        };
-
-        for (out, (reply_to, target, verb)) in outcomes.into_iter().zip(routes) {
-            // Fire-and-forget: it acted, nobody awaits the answer. Deliberately
-            // NOT counted in M — the model is owed a count of what it will
-            // actually receive.
-            let Some(rt) = reply_to else { continue };
-            // The result — INCLUDING an error — goes back. A call that failed
-            // silently is the one thing a model can never debug.
-            //
-            // PID first, then target+verb. Target+verb alone is NOT unique: with
-            // two calls in flight to one agent `[reply to kernel_state set]` is
-            // unmatchable — measured 2026-08-07 (opus re-issued both deletes,
-            // then theorised "duplicate delivery" about its own retries) and
-            // again 2026-08-20 (the model: "the reply queue is running ahead of me",
-            // then re-polled forever). The PID is the same id `ps`/`cancel` use,
-            // so a reply names a row the model can act on.
-            let pid = out.pid.as_ref().map(|t| t.0.as_str()).unwrap_or("-");
-            blocks.push((
-                rt,
-                format!("[reply to {pid} · {target} {verb}]\n{}", out.result),
-            ));
-        }
-    }
-
-    if !blocks.is_empty() {
-        silent_reset(&kernel, self_id.as_str(), &client_id);
-        deliver_grouped(&kernel, blocks, &client_id, sp).await;
-        return;
-    }
-    if done_called {
-        silent_reset(&kernel, self_id.as_str(), &client_id);
-        return; // explicitly finished — nothing more runs, nothing reminds
-    }
+    // THE TAIL BELOW IS PYTHON'S ORDER, step for step (core.py:1160-1176), and
+    // every step of it is load-bearing.
+    //
     // A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
-    // dispatched nothing is REMINDED AGAIN — the model is queried until it emits
-    // a call, `done`, or a question. Until 2026-09-01 the reminder fired ONCE
-    // and a second silent turn ended the chain silently (python-canonical fix:
-    // a planning-heavy model wrote prose for two turns and the run read as
-    // finished with the task untouched). A chat turn is not a chain. Bounded by
-    // `nudge_limit` on the record (default `NUDGE_LIMIT`) so an unattended
-    // kernel cannot spin forever on a model that never calls.
-    // A question turn is the OTHER legitimate silent end (ask + stop; the
-    // human's answer resumes the chain) — nudging it would stomp the wait.
-    let asked = text.contains("\"type\"") && text.contains("\"question\"");
+    // dispatched NOTHING is REMINDED AGAIN — the model is queried until it emits a
+    // call, `done`, or a question. Until 2026-09-01 the reminder fired ONCE and a
+    // second silent turn ended the chain silently (python-canonical fix: a
+    // planning-heavy model wrote prose for two turns and the run read as finished
+    // with the task untouched). A chat turn is not a chain: prose to a person is
+    // the product. Bounded by `nudge_limit` on the record (default `NUDGE_LIMIT`)
+    // so an unattended kernel cannot spin forever on a model that never calls.
+    //
+    // THE GATE IS `not calls and not units`, not `no blocks`: a turn whose calls
+    // all carried `reply_to:null` dispatched real work and is owed no reply, and
+    // rust nudged it anyway until 2026-09-02 — telling the model "your turn emitted
+    // no <tool_call> envelope" about a turn that did, and then handing that turn's
+    // text to `send_to` on top.
+    //
+    // A question turn is the OTHER legitimate silent end (ask + stop; the human's
+    // answer resumes the chain) — nudging it would stomp the wait.
+    let any_blocks = !blocks.is_empty();
     let chained =
         incoming.starts_with("[reply to ") || incoming.starts_with("[no call was dispatched]");
-    if chained && !asked {
+    let nudging = !any_calls && !any_blocks && chained && !asks_a_question(&text);
+    // RESET BEFORE DELIVERING, which python gets for free and rust does not:
+    // `_deliver_soon` only SCHEDULES the delivered turn, so python's trailing reset
+    // still lands before that turn routes. Here `deliver` awaits a `send` whose own
+    // routing is spawned, so a reset AFTER it races the delivered turn's streak
+    // bump — and wipes it, which buys the chain one extra nudge past its limit.
+    if !nudging {
+        silent_reset(&kernel, self_id.as_str(), &client_id);
+    }
+    if any_blocks {
+        deliver_grouped(&kernel, blocks, &client_id, sp, route).await;
+    }
+    if done_called {
+        return; // explicitly finished — nothing more runs, nothing reminds
+    }
+    if nudging {
         let streak = silent_bump(&kernel, self_id.as_str(), &client_id);
         let limit = kernel
             .agents
@@ -500,21 +630,70 @@ async fn route_reply_gated(
             })
             .unwrap_or(NUDGE_LIMIT);
         if streak <= limit {
-            deliver(&kernel, self_id.as_str(), NO_CALL_NUDGE, &client_id, sp).await;
+            deliver(
+                &kernel,
+                self_id.as_str(),
+                NO_CALL_NUDGE,
+                &client_id,
+                sp,
+                route,
+            )
+            .await;
         } else {
             silent_reset(&kernel, self_id.as_str(), &client_id);
         }
         return;
     }
-    silent_reset(&kernel, self_id.as_str(), &client_id);
-
+    if any_calls {
+        return;
+    }
+    // No call of the model's own, so the CALLER's one-shot handoff applies: hand
+    // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
+    // spend the model's turns for it.
     if let Some(to) = send_to.as_deref() {
-        deliver(&kernel, to, &text, &client_id, sp).await;
+        deliver(&kernel, to, &text, &client_id, sp, route).await;
     }
 }
 
+/// Did this turn ASK a question — i.e. does the text carry the JSON PAIR
+/// `"type": "question"`? A hand-scan of python's `re.search(r'"type"\s*:\s*"question"')`.
+///
+/// Two independent substring checks (`"type"` anywhere AND `"question"` anywhere)
+/// is what rust/swift did until 2026-09-02, and it silently ended chains: a model
+/// that writes prose about a `"question"` while echoing the prompt's `"type"`
+/// example was read as having asked, so the nudge never fired and the run stopped
+/// with the task untouched.
+fn asks_a_question(text: &str) -> bool {
+    let b = text.as_bytes();
+    for (at, _) in text.match_indices("\"type\"") {
+        let mut j = at + 6;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= b.len() || b[j] != b':' {
+            continue;
+        }
+        j += 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if text[j..].starts_with("\"question\"") {
+            return true;
+        }
+    }
+    false
+}
+
 /// ONE delivered message per destination: blocks joined by a blank line, each
-/// stamped `N of M in batch <token>` when the destination is owed more than one.
+/// tagged `[reply to <pid> · <target> <verb>]` — with ` · N of M in batch <token>`
+/// composed INSIDE that tag when the destination is owed more than one.
+///
+/// INSIDE, not a trailing line. The stamp rode on its own `[N of M in batch tok]`
+/// line after the body until 2026-09-02, which is neither what the shared prompt
+/// teaches nor what python's history trimmers can read (`_REPLY_TAG` /
+/// `_BLOCK_SPLIT` match the tag at the START of a block) — so a rust transcript
+/// looked untrimmable to python and a cross-runtime byte-diff failed on every
+/// multi-call turn.
 ///
 /// The stamp is for CORRELATION and COMPLETENESS, not "the rest are still in
 /// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
@@ -522,60 +701,43 @@ async fn route_reply_gated(
 /// three runs (opus 08-07, the model 08-20, the model 08-24).
 async fn deliver_grouped(
     kernel: &Arc<Kernel>,
-    blocks: Vec<(String, String)>,
+    blocks: Vec<Block>,
     client_id: &str,
     sp: Option<&str>,
+    route: CallerRoute,
 ) {
     // Destination order = first appearance, so the model reads them in the order
     // it wrote the calls.
     let mut order: Vec<String> = Vec::new();
-    let mut by_dest: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    for (dest, body) in blocks {
-        if !by_dest.contains_key(&dest) {
-            order.push(dest.clone());
+    let mut by_dest: HashMap<String, Vec<Block>> = HashMap::new();
+    for b in blocks {
+        if !by_dest.contains_key(&b.dest) {
+            order.push(b.dest.clone());
         }
-        by_dest.entry(dest).or_default().push(body);
+        by_dest.entry(b.dest.clone()).or_default().push(b);
     }
-    // One token per TURN, shared across destinations: it names the batch, and a
-    // model reading two destinations' messages can see they came from one turn.
-    let token = batch_token(&order, &by_dest);
+    // A FRESH token per TURN, shared across destinations: it names the batch, and
+    // a model reading two destinations' messages can see they came from one turn.
+    let token = mint_batch_token();
     for dest in order {
         let parts = by_dest.remove(&dest).unwrap_or_default();
         let m = parts.len();
-        let body = if m > 1 {
-            parts
-                .into_iter()
-                .enumerate()
-                .map(|(i, b)| format!("{b}\n[{} of {m} in batch {token}]", i + 1))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        } else {
-            parts.join("\n\n")
-        };
-        deliver(kernel, &dest, &body, client_id, sp).await;
+        let body = parts
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let mut tag = format!("[reply to {} \u{b7} {} {}", b.pid, b.target, b.verb);
+                if m > 1 {
+                    tag.push_str(&format!(" \u{b7} {} of {m} in batch {token}]", i + 1));
+                } else {
+                    tag.push(']');
+                }
+                format!("{tag}\n{}", b.body)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        deliver(kernel, &dest, &body, client_id, sp, route).await;
     }
-}
-
-/// A short, stable-per-turn batch token. Derived from the batch's own content so
-/// it needs no clock and no counter — both of which would differ across runtimes
-/// and make a cross-runtime byte-diff fail on noise.
-fn batch_token(
-    order: &[String],
-    by_dest: &std::collections::HashMap<String, Vec<String>>,
-) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for d in order {
-        d.hash(&mut h);
-        if let Some(parts) = by_dest.get(d) {
-            parts.len().hash(&mut h);
-            for p in parts {
-                p.len().hash(&mut h);
-            }
-        }
-    }
-    format!("{:04x}", h.finish() as u16)
 }
 
 #[cfg(test)]
@@ -629,6 +791,39 @@ mod tests {
             json!(bad[0].error),
             "the report the router delivers carries that exact sentence"
         );
+    }
+
+    /// A question turn is a legitimate silent end, so detecting one SUPPRESSES the
+    /// nudge — which is exactly why it must be the JSON PAIR and not two loose
+    /// substrings. Rust/swift accepted `"type"` anywhere and `"question"` anywhere
+    /// until 2026-09-02, so a model writing prose about a "question" (while echoing
+    /// the prompt's own `"type"` example) ended its chain silently with the task
+    /// untouched. Python's `re.search(r'"type"\s*:\s*"question"')` is the contract.
+    #[test]
+    fn question_detection_requires_the_json_pair() {
+        assert!(asks_a_question(
+            r#"{"type":"question","request_id":"r1","kind":"text","question":"which port?"}"#
+        ));
+        assert!(
+            asks_a_question("{\"type\" \t: \n \"question\"}"),
+            "whitespace either side of the colon is python's `\\s*`"
+        );
+        assert!(
+            !asks_a_question(r#"I'll store the "question" for later; "type" is a field."#),
+            "prose about a question is not a question turn"
+        );
+        assert!(
+            !asks_a_question(r#"{"type":"send","payload":{"q":"question"}}"#),
+            "the pair must be `\"type\": \"question\"`, not any two words"
+        );
+        assert!(!asks_a_question(
+            "plain prose, no calls, no question at all"
+        ));
+        // The one that ends the chain for real, quoted out of the how-to.
+        assert!(asks_a_question(
+            "Here it is:\n{\"type\": \"question\", \"kind\":\"confirm\", \
+             \"question\":\"proceed?\"}"
+        ));
     }
 
     /// `target` is accepted beside `target_id`, and the fall-through is python's

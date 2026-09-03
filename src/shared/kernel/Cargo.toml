@@ -26,7 +26,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 fantastic-kernel = { path = "../../lib/rust/crates/fantastic-kernel" }
 fantastic-core = { path = "../../lib/rust/crates/bundles/fantastic-core" }
 fantastic-file = { path = "../../lib/rust/crates/bundles/fantastic-file" }
-fantastic-yaml-state = { path = "../../lib/rust/crates/bundles/fantastic-yaml-state" }
+fantastic-text-file = { path = "../../lib/rust/crates/bundles/fantastic-text-file" }
 fantastic-static-loader = { path = "../../lib/rust/crates/bundles/fantastic-static-loader" }
 fantastic-web = { path = "../../lib/rust/crates/bundles/fantastic-web" }
 fantastic-web-ws = { path = "../../lib/rust/crates/bundles/fantastic-web-ws" }

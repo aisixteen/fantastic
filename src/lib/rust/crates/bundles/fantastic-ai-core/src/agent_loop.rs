@@ -70,7 +70,7 @@ pub async fn run_generation(
     // the MODEL view to fit the window ONCE at entry, prepending the canonical
     // [context-notice]; the durable store is never trimmed by it. A caller-supplied
     // `system_prompt` replaces the default system block (a caller teaches its tools).
-    let messages = assemble_messages(
+    let (messages, store_len) = assemble_messages(
         self_id,
         state,
         user_text,
@@ -80,7 +80,7 @@ pub async fn run_generation(
     )
     .await;
     let model_messages = match crate::projection::project_context(
-        provider, self_id, state, kernel, client_id, cfg.route, cfg.name, messages,
+        provider, self_id, state, kernel, client_id, cfg.route, cfg.name, messages, store_len,
     )
     .await
     {

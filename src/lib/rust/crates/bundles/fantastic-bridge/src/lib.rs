@@ -47,6 +47,7 @@
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
+use fantastic_kernel::refusal::{refusal_hint, NOT_CONNECTED};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -195,7 +196,11 @@ async fn dispatch(
 /// this connector's inbox; `unwatch_directory` stops it.
 async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value {
     let Some(state) = BRIDGES.lock().get(agent_id).cloned() else {
-        return json!({"error": format!("relay_connector.{op}: not connected (call boot first)")});
+        return refusal_hint(
+            NOT_CONNECTED,
+            format!("relay_connector.{op}: not connected"),
+            "call boot first",
+        );
     };
     let timeout = payload
         .get("timeout")
@@ -214,7 +219,11 @@ async fn directory_reply(agent_id: &AgentId, payload: &Value, op: &str) -> Value
 /// relay live (→ `peer_updated`). Mirrors py `_set_identity`.
 async fn set_identity_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let Some(state) = BRIDGES.lock().get(agent_id).cloned() else {
-        return json!({"error": "relay_connector.set_identity: not connected (call boot first)"});
+        return refusal_hint(
+            NOT_CONNECTED,
+            "relay_connector.set_identity: not connected",
+            "call boot first",
+        );
     };
     if let Some(role) = payload.get("role") {
         if !role.is_null() && role.as_str() != Some("manager") && role.as_str() != Some("kernel") {
@@ -654,9 +663,18 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     let read_state = Arc::clone(&state);
     let read_agent = agent_id.clone();
     let read_kernel = Arc::clone(kernel);
-    let task = tokio::spawn(async move {
+    // UNDER THE LEG'S OWN IDENTITY. `tokio::spawn` does NOT inherit the task-local
+    // `CURRENT_SENDER`, so an inbound `call` used to reach `Kernel::launch` with
+    // `current_sender() == None` — the OPERATOR — and the two-sided gate was
+    // skipped entirely for every frame a peer sent. Scoping the whole read loop to
+    // the bridge agent id makes an inbound frame a call BY THIS LEG, gated by its
+    // `can_call` and the target's `callable_by`, exactly as python's read task is
+    // (it inherits the boot dispatch's contextvar) and exactly as exec_bridge
+    // already does for its relay.
+    let sender_id = agent_id.clone();
+    let task = tokio::spawn(fantastic_kernel::send::with_sender(sender_id, async move {
         read_loop(read_agent, read_state, read_kernel).await;
-    });
+    }));
     *state.read_task.lock().await = Some(task);
 
     BRIDGES.lock().insert(agent_id.clone(), Arc::clone(&state));
@@ -731,7 +749,11 @@ async fn forward_core(
         Some(s) => s,
         None => {
             return (
-                json!({"error": "bridge.forward: not connected (call boot first)"}),
+                refusal_hint(
+                    NOT_CONNECTED,
+                    "bridge.forward: not connected",
+                    "call boot first",
+                ),
                 Vec::new(),
             )
         }
@@ -812,9 +834,11 @@ async fn watch_remote_reply(agent_id: &AgentId, payload: &Value, kind: &str) -> 
     let state = match BRIDGES.lock().get(agent_id).cloned() {
         Some(s) => s,
         None => {
-            return json!({
-                "error": format!("bridge.{kind}_remote: not connected (call boot first)")
-            })
+            return refusal_hint(
+                NOT_CONNECTED,
+                format!("bridge.{kind}_remote: not connected"),
+                "call boot first",
+            )
         }
     };
     let frame = json!({ "type": kind, "src": target });
@@ -831,7 +855,109 @@ async fn watch_remote_reply(agent_id: &AgentId, payload: &Value, kind: &str) -> 
 
 // ── read loop ───────────────────────────────────────────────────────
 
+/// The TEACHING denial a leg answers an inbound frame with — the rule's own
+/// `reason`/`hint`/`see`, never a sentence invented at the call site. Mirrors the
+/// python read loop and the web inbound legs, so discovery-through-denial works
+/// over a bridge leg exactly as it does over a browser socket.
+fn deny_reply(denial: &authorizer::Denial) -> Value {
+    let mut out = json!({"error": denial.reason, "reason": "unauthorized"});
+    if !denial.hint.is_empty() {
+        out["hint"] = json!(denial.hint);
+    }
+    if !denial.see.is_empty() {
+        out["see"] = json!(denial.see);
+    }
+    out
+}
+
+/// Serve ONE inbound `call` frame and ship its reply.
+///
+/// Run as its own task (see the read loop): the local handler may itself
+/// `forward` back over this same bridge, and a read loop parked inside
+/// `kernel.send` cannot read the frame that would settle it.
+///
+/// In production (WS) the bridge is a pure client and never sees inbound calls —
+/// its peer is the remote's `web_ws`, not another bridge. This path serves the
+/// memory-paired tests and the symmetric relay legs, where two in-process bridges
+/// shake hands (each read loop plays the `web_ws._on_call` role).
+async fn serve_inbound_call(
+    state: Arc<BridgeState>,
+    kernel: Arc<Kernel>,
+    frame: Value,
+    body: Vec<u8>,
+    is_binary: bool,
+) {
+    let corr_id = frame.get("id").cloned().unwrap_or(Value::Null);
+    let target = frame
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let inner = frame.get("payload").cloned().unwrap_or(Value::Null);
+    // AUTH GATE — the single choke point. The leg's policy decides whether this
+    // inbound call dispatches locally; on deny we reply {error,
+    // reason:"unauthorized"} (fail-fast, not a silent drop).
+    let verb = inner.get("type").and_then(Value::as_str).unwrap_or("");
+    let decision = state.ingress.authorize(&Action {
+        kind: "call",
+        target: &target,
+        verb,
+        // the `auth_token` rides the frame envelope, not the payload
+        token: frame.get("auth_token").and_then(Value::as_str),
+    });
+    if target.is_empty() {
+        let _ = state
+            .transport
+            .send_frame(json!({"type":"reply","id":corr_id,
+                "data":{"error":"bridge: empty call target"}}))
+            .await;
+    } else if let Decision::Deny(denial) = decision {
+        let _ = state
+            .transport
+            .send_frame(json!({"type":"reply","id":corr_id,"data":deny_reply(&denial)}))
+            .await;
+    } else if is_binary {
+        // Binary call — the body is the request chunk. Dispatch on the binary
+        // channel; the reply may carry a body (read_stream).
+        let (data, reply_body) = kernel
+            .send_with_binary(&AgentId::from(target.as_str()), inner, body)
+            .await;
+        if reply_body.is_empty() {
+            let _ = state
+                .transport
+                .send_frame(json!({"type":"reply","id":corr_id,"data":data}))
+                .await;
+        } else {
+            // Binary reply frame — body rides raw at `data.bytes`.
+            let mut env = json!({"type":"reply","id":corr_id,"data":data});
+            env["_binary_path"] = json!("data.bytes");
+            let _ = state.transport.send_binary(env, reply_body).await;
+        }
+    } else {
+        // THE FRAME ID IS THE EXECUTION ID. The correlator a peer already sends
+        // NAMES the execution, so a reconnect that replays its queue joins the
+        // original instead of running the side effect twice. No second `exec_id`
+        // field exists.
+        let reply = kernel
+            .send(vec![Item::from_frame(
+                AgentId::from(target.as_str()),
+                inner,
+                corr_id.as_str(),
+            )])
+            .await
+            .remove(0)
+            .result;
+        let _ = state
+            .transport
+            .send_frame(json!({"type":"reply","id":corr_id,"data":reply}))
+            .await;
+    }
+}
+
 async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
+    // In-flight inbound dispatches — one task per `call` frame, aborted together
+    // when the loop exits so nothing keeps running into a dead transport.
+    let mut calls: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     loop {
         let frame = match state.transport.recv_frame().await {
             Ok(f) => f,
@@ -847,78 +973,19 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
         let ftype = frame.get("type").and_then(Value::as_str).unwrap_or("");
         match ftype {
             "call" => {
-                // Inbound raw call. In production (WS) the bridge is a
-                // pure client and never sees inbound calls — its peer
-                // is the remote's `web_ws`, not another bridge. This
-                // branch serves the memory-paired tests, where two
-                // in-process bridges shake hands (each read loop plays
-                // the `web_ws._on_call` role).
-                let corr_id = frame.get("id").cloned().unwrap_or(Value::Null);
-                let target = frame
-                    .get("target")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let inner = frame.get("payload").cloned().unwrap_or(Value::Null);
-                // AUTH GATE — the single choke point. The leg's policy decides
-                // whether this inbound call dispatches locally; on deny we reply
-                // {error, reason:"unauthorized"} (fail-fast, not a silent drop).
-                let verb = inner.get("type").and_then(Value::as_str).unwrap_or("");
-                let decision = state.ingress.authorize(&Action {
-                    kind: "call",
-                    target: &target,
-                    verb,
-                    // the `auth_token` rides the frame envelope, not the payload
-                    token: frame.get("auth_token").and_then(Value::as_str),
-                });
-                if target.is_empty() {
-                    let _ = state
-                        .transport
-                        .send_frame(json!({"type":"reply","id":corr_id,
-                            "data":{"error":"bridge: empty call target"}}))
-                        .await;
-                } else if let Decision::Deny(reason) = decision {
-                    let _ = state
-                        .transport
-                        .send_frame(json!({"type":"reply","id":corr_id,
-                            "data":{"error":reason,"reason":"unauthorized"}}))
-                        .await;
-                } else if is_binary {
-                    // Binary call — the body is the request chunk. Dispatch on the
-                    // binary channel; the reply may carry a body (read_stream).
-                    let (data, reply_body) = kernel
-                        .send_with_binary(&AgentId::from(target.as_str()), inner, body)
-                        .await;
-                    if reply_body.is_empty() {
-                        let _ = state
-                            .transport
-                            .send_frame(json!({"type":"reply","id":corr_id,"data":data}))
-                            .await;
-                    } else {
-                        // Binary reply frame — body rides raw at `data.bytes`.
-                        let mut env = json!({"type":"reply","id":corr_id,"data":data});
-                        env["_binary_path"] = json!("data.bytes");
-                        let _ = state.transport.send_binary(env, reply_body).await;
-                    }
-                } else {
-                    // THE FRAME ID IS THE EXECUTION ID. The correlator a peer
-                    // already sends NAMES the execution, so a reconnect that
-                    // replays its queue joins the original instead of running
-                    // the side effect twice. No second `exec_id` field exists.
-                    let reply = kernel
-                        .send(vec![Item::from_frame(
-                            AgentId::from(target.as_str()),
-                            inner,
-                            corr_id.as_str(),
-                        )])
-                        .await
-                        .remove(0)
-                        .result;
-                    let _ = state
-                        .transport
-                        .send_frame(json!({"type":"reply","id":corr_id,"data":reply}))
-                        .await;
-                }
+                // TRACKED TASK, not an inline await. Serving the call here parked
+                // the loop inside `kernel.send`, so a handler that forwarded back
+                // over THIS bridge could never have its reply read — the round
+                // trip deadlocked until the 30s forward timeout. One task per
+                // call, each re-scoped to the leg's identity (a spawned task does
+                // not inherit `CURRENT_SENDER`), all aborted when the loop exits.
+                let call_state = Arc::clone(&state);
+                let call_kernel = Arc::clone(&kernel);
+                let call_sender = agent_id.clone();
+                calls.spawn(fantastic_kernel::send::with_sender(
+                    call_sender,
+                    serve_inbound_call(call_state, call_kernel, frame, body, is_binary),
+                ));
             }
             "event" => {
                 // Remote `watch` delivery — re-emit on this bridge's
@@ -959,7 +1026,10 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
         }
     }
 
-    // Read loop exit — emit bridge_down + fail every pending oneshot.
+    // Read loop exit — the transport is gone, so every in-flight inbound dispatch
+    // has nowhere to send its reply. Abort them, then emit bridge_down + fail
+    // every pending oneshot.
+    calls.abort_all();
     kernel.emit(&agent_id, json!({"type": "bridge_down"})).await;
     let drained: Vec<PendingReply> = {
         let mut p = state.pending.lock().expect("pending poisoned");

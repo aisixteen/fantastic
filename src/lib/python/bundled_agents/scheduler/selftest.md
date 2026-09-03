@@ -4,7 +4,7 @@
 > requires: `uv sync`
 > out-of-scope: HTTP, WS, AI
 
-Tick-loop + schedule persistence routed through file_bridge.
+Tick-loop + schedule persistence THROUGH the loader (`persist_blob`/`load_blob`) — nothing to wire.
 
 ## Pre-flight
 
@@ -15,23 +15,22 @@ rm -rf .fantastic
 
 ## Tests
 
-### Test 1: schedule without file_bridge_id → failfast
+### Test 1: schedule without a store → failfast (boot still succeeds)
 
 ```bash
 SC=$(fantastic kernel create_agent parent_id=kernel_state handler_module=scheduler.tools | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
 fantastic $SC schedule target=cli payload='{"type":"say","text":"x"}' interval_seconds=5
 ```
-Expected: `{"error":"scheduler: file_bridge_id required"}`.
+Expected: `{"error":"scheduler.schedule: persist_blob: no store wired — persistence not available"}` (and `reflect` reports `running: true` — boot never needs a store).
 
-### Test 2: configure with file_bridge_id, then schedule persists
+### Test 2: open a store at `.fantastic`, then schedule persists through the loader
 
 ```bash
 FA=$(fantastic kernel create_agent parent_id=kernel_state handler_module=file_bridge.tools root=.fantastic ingress_rule=allow_all_ingress | python -c "import json,sys;print(json.load(sys.stdin)['id'])")
-fantastic kernel_state update_agent id=$SC file_bridge_id=$FA
 SCH=$(fantastic $SC schedule target=cli payload='{"type":"say","text":"hello"}' interval_seconds=60 | python -c "import json,sys;print(json.load(sys.stdin)['schedule_id'])")
-test -f .fantastic/agents/$SC/schedules.json && echo "OK persisted via file_bridge agent"
+test -f .fantastic/agents/$SC/schedules.json && echo "OK persisted through the loader"
 ```
-Expected: `OK persisted via file_bridge agent`. File contents include the schedule_id.
+Expected: `OK persisted through the loader`. File contents include the schedule_id.
 
 ### Test 3: tick_now fires synchronously
 
@@ -75,8 +74,8 @@ Expected: `"count": <N>` with N ≥ 1.
 
 | # | Test | Pass |
 |---|------|------|
-| 1 | schedule fails without file_bridge_id | |
-| 2 | schedule persists via file_bridge agent | |
+| 1 | schedule fails without a store (boot succeeds) | |
+| 2 | schedule persists through the loader | |
 | 3 | tick_now fires | |
 | 4 | history.jsonl populated | |
 | 5 | pause + resume toggle | |

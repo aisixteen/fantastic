@@ -1762,7 +1762,7 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_prompt").await;
     let state = crate::state::state_for(&backend);
-    let messages =
+    let (messages, _store_len) =
         crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None).await;
     let sys_block = messages[0]["content"]
         .as_str()
@@ -1992,4 +1992,452 @@ async fn a_chat_turn_is_never_nudged() {
         .result;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(s.passes_served(), 1, "prose to a person is the product");
+}
+
+// ── the batch: one deadline, one stamp, one token per turn ───────────
+
+/// EVERY dispatched model call carries the AI layer's per-call deadline. The
+/// KERNEL defaults nothing, so a call to a handler that never returns used to hang
+/// the whole batch forever: no reply, no timeout block, the chain dead with
+/// nothing to read. Python has always set it; rust/swift did not until 2026-09-02.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_model_call_carries_the_layer_default_timeout() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_dl").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    // The peer's generation takes 2s. The layer's deadline is 0.2s, and NO
+    // `timeout` arg is written in the envelope — the default has to do the work.
+    let _sb = script(&b, vec![pass("too late")], Duration::from_secs(2));
+    let sa = script(
+        &a,
+        vec![pass("read it <tool_call>{\"name\":\"done\"}</tool_call>")],
+        Duration::ZERO,
+    );
+    let call = call_envelope(
+        b.as_str(),
+        json!({"type": "send", "text": "hi", "client_id": "probe"}),
+        Some("self"),
+    );
+    crate::route::route_reply(
+        a.clone(),
+        Arc::clone(&kernel),
+        call,
+        "probe".to_string(),
+        None,
+        None,
+        String::new(),
+        0.2,
+        CallerRoute::CliRoundTrip,
+    )
+    .await;
+    assert!(
+        until_passes(&sa, 1).await,
+        "the timed-out call produced no block at all — the batch hung"
+    );
+    let turn = sa.request(0);
+    assert!(
+        turn.contains("timed out after 0.2s"),
+        "the block must REPORT the timeout: {turn}"
+    );
+}
+
+/// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
+/// owed no reply, and it is not a silent turn: rust nudged it anyway until
+/// 2026-09-02 (gating on the blocks instead of python's `not calls and not
+/// units`), telling the model "your turn emitted no <tool_call> envelope" about a
+/// turn that did — and, on a chat turn, handing that text to `send_to` on top.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_faf").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    let sa = script(
+        &a,
+        vec![
+            pass(format!(
+                "{}\n{}",
+                call_envelope("core", json!({"type": "list_agents"}), Some("null")),
+                call_envelope("core", json!({"type": "list_agents"}), Some("null")),
+            )),
+            pass("the nudge would land here"),
+        ],
+        Duration::ZERO,
+    );
+    let sb = script(
+        &b,
+        vec![pass("the handoff would land here")],
+        Duration::ZERO,
+    );
+    // A CHAIN turn (its incoming text is a delivered reply) — exactly the turn the
+    // nudge exists for, so nothing but the dispatch can be what keeps it quiet.
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({
+                "type": "send",
+                "text": "[reply to core:1 · core ping]\nok",
+                "client_id": "probe",
+                "send_to": b.as_str(),
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        sa.passes_served(),
+        1,
+        "a dispatching turn must not be nudged"
+    );
+    assert_eq!(
+        sb.passes_served(),
+        0,
+        "and must not fall through to send_to"
+    );
+}
+
+/// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
+/// says it does. It rode on its own trailing line in rust/swift until 2026-09-02,
+/// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
+/// at the START of a block) cannot read at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_batch_stamp_lives_inside_the_reply_tag() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_stamp").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(format!(
+                "{}\n{}",
+                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+            )),
+            pass("both back <tool_call>{\"name\":\"done\"}</tool_call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the batch never came back");
+    let turn2 = s.request(1);
+    assert!(
+        turn2.contains(" · 1 of 2 in batch ") && turn2.contains(" · 2 of 2 in batch "),
+        "the stamp must be composed into the tag: {turn2}"
+    );
+    assert!(
+        !turn2.contains("[1 of 2 in batch"),
+        "no trailing stamp line may survive: {turn2}"
+    );
+}
+
+/// Read a batch token out of a delivered turn. Anchored on the STAMP (`1 of 2 in
+/// batch …`), not on the words: the system block teaches the shape, so a bare
+/// `in batch ` search finds the prompt's own `<token>` placeholder first.
+fn batch_token_of(turn: &str) -> String {
+    const MARK: &str = "1 of 2 in batch ";
+    let at = turn
+        .find(MARK)
+        .unwrap_or_else(|| panic!("no batch stamp in: {turn}"))
+        + MARK.len();
+    turn[at..].chars().take(4).collect()
+}
+
+/// A FRESH token per turn. Rust/swift derived it from the batch's own content
+/// (destinations, counts, body lengths), so two turns that made the SAME calls
+/// collided — which is the exact confusion the token exists to end: a model that
+/// read one file twice saw `1 of 2 in batch 7f3a` both times (measured 2026-08-24,
+/// the re-read loop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_identical_turns_get_different_batch_tokens() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_tok").await;
+    let twice = format!(
+        "{}\n{}",
+        call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+        call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+    );
+    let s = script(
+        &backend,
+        vec![
+            pass(twice.clone()),
+            pass(twice),
+            pass("enough <tool_call>{\"name\":\"done\"}</tool_call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 3).await, "the second batch never landed");
+    let first = batch_token_of(&s.request(1));
+    let second = batch_token_of(&s.request(2));
+    assert_ne!(
+        first, second,
+        "two identical turns must be distinguishable at a glance"
+    );
+}
+
+/// A `reflect` reply is LARGE and TRANSIENT, and the instruction for what to
+/// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
+/// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
+/// reflects. Only reflect bodies are dropped later, so only they carry it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflect_replies_carry_the_distillation_nudge() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_nudge").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(format!(
+                "{}\n{}",
+                call_envelope(
+                    "core",
+                    json!({"type": "reflect", "tree": "none"}),
+                    Some("self")
+                ),
+                call_envelope("core", json!({"type": "list_agents"}), Some("self")),
+            )),
+            pass("SEEN core <tool_call>{\"name\":\"done\"}</tool_call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the reflect never came back");
+    let turn2 = s.request(1);
+    assert!(
+        turn2.contains("this body is TRANSIENT") && turn2.contains("SEEN <id>"),
+        "the reflect block must carry the distillation nudge: {turn2}"
+    );
+    assert_eq!(
+        turn2.matches("this body is TRANSIENT").count(),
+        1,
+        "and ONLY the reflect block: {turn2}"
+    );
+}
+
+/// A FAILED HANDOFF is announced as an ordinary `status` event — `detail.reason`,
+/// the shape reflect's `emits` documents and a UI subscribes to. Rust/swift put
+/// `reason`/`error` at the TOP level until 2026-09-02, so every subscriber saw
+/// nothing: the silent-death regression the announcement exists to end, wearing
+/// the announcement's own clothes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_handoff_is_a_status_event_with_detail() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_hoff").await;
+    // The AI's own file leg: a real, reachable agent that answers `{type:'send'}`
+    // with an error — a handoff that cannot land.
+    let leg = format!("ff_{backend}");
+    let mut rx = rebind_backend_inbox(&kernel, &AgentId::from(leg.as_str()));
+    let s = script(
+        &backend,
+        vec![pass(call_envelope(
+            "core",
+            json!({"type": "list_agents"}),
+            Some(leg.as_str()),
+        ))],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let events = drain(&mut rx).await;
+    let status = events
+        .iter()
+        .find(|e| e.get("type").and_then(Value::as_str) == Some("status"))
+        .unwrap_or_else(|| panic!("the dead handoff was silent: {events:#?}"));
+    assert_eq!(status["phase"], "done", "{status:#?}");
+    assert_eq!(status["detail"]["reason"], "error", "{status:#?}");
+    assert!(
+        status["detail"]["error"].is_string(),
+        "the announcement must say WHY: {status:#?}"
+    );
+    assert_eq!(status["source"], leg.as_str(), "{status:#?}");
+    assert!(status.get("ts").is_some(), "{status:#?}");
+    assert_eq!(status["client_id"], "probe", "{status:#?}");
+    assert_eq!(s.passes_served(), 1);
+}
+
+/// ONE event on contention, and it is the `status` one. Rust/swift emitted a bare
+/// `{type:'queued'}` ahead of it until 2026-09-02 — an undocumented type python
+/// never sends, which broke any per-submission event count and every
+/// cross-runtime event-stream diff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "q1").await;
+    script(
+        &backend,
+        vec![pass("first"), pass("second")],
+        Duration::from_millis(400),
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let client_id = "browser_q";
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let c = client_id.to_string();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": c}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "two", "client_id": client_id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = first.await.expect("first send");
+    let mut events = drain(&mut rx).await;
+    while let Ok(v) = rx.try_recv() {
+        events.push(v);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.get("type").and_then(Value::as_str) == Some("queued")),
+        "the bare `queued` event is not part of the contract: {events:#?}"
+    );
+    let queued: Vec<&Value> = events
+        .iter()
+        .filter(|e| {
+            e.get("type").and_then(Value::as_str) == Some("status")
+                && e.get("phase").and_then(Value::as_str) == Some("queued")
+        })
+        .collect();
+    assert_eq!(
+        queued.len(),
+        1,
+        "one contended submission, one queued status: {events:#?}"
+    );
+    assert!(queued[0]["detail"]["ahead"].is_number(), "{:#?}", queued[0]);
+}
+
+/// `recall` answers the turn WHOLE. Rust/swift capped each recalled turn at 2000
+/// chars while python returned it verbatim — same verb, same store, two different
+/// replies, and the cut half is exactly what a model pages back FOR.
+#[tokio::test]
+async fn recall_returns_the_turn_whole() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rec_whole").await;
+    script(&backend, vec![pass("noted")], Duration::ZERO);
+    let long = format!("HEAD {} TAIL", "x".repeat(6000));
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": long, "client_id": "chat"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "recall", "query": "HEAD", "client_id": "chat"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let msgs = r["messages"].as_array().expect("recall messages");
+    let content = msgs[0]["content"].as_str().expect("content");
+    assert_eq!(
+        content.chars().count(),
+        long.chars().count(),
+        "{}",
+        &content[..80]
+    );
+    assert!(
+        content.ends_with("TAIL"),
+        "the tail is what was being paged back"
+    );
+}
+
+/// The reaction cursor is the DURABLE STORE's length, not the model view's. The
+/// view is deduped/trimmed, so counting it puts the cursor short by exactly the
+/// turns the trimmers dropped — and `derive_reaction` then scans assistant turns
+/// written BEFORE the notice and scores a reaction that never happened.
+#[tokio::test]
+async fn the_compaction_cursor_is_the_store_length_not_the_view() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "mark").await;
+    let state = crate::state::state_for(&backend);
+
+    // ① the store length is what `assemble_messages` reports — even though the
+    //    view it built is SHORTER, because the stale reflect deduped away.
+    let stale = "[reply to ks:a1 · core reflect]\nOLD TREE";
+    let fresh = "[reply to ks:a2 · core reflect]\nNEW TREE";
+    let turns = vec![
+        turn("user", stale),
+        turn("assistant", "noted"),
+        turn("user", fresh),
+        turn("assistant", "noted again"),
+    ];
+    crate::history::append_history(&backend, &kernel, "probe", &turns).await;
+    let (messages, store_len) =
+        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None).await;
+    assert_eq!(store_len, 4, "the STORE keeps every turn");
+    assert!(
+        messages.len() < 1 + store_len + 1,
+        "the view must be shorter than the store: {} messages",
+        messages.len()
+    );
+    assert!(
+        !Value::Array(messages).to_string().contains("OLD TREE"),
+        "the superseded reflect must be gone from the VIEW"
+    );
+
+    // ② and the mark records THAT number, not the view's length.
+    let provider: Arc<dyn Provider> = Arc::new(SummaryProvider("SUMMARY"));
+    let mut fat = vec![turn("system", "sys")];
+    fat.extend(body(60, 8000));
+    let n = fat.len();
+    let _ = crate::projection::project_context(
+        &provider,
+        &backend,
+        &state,
+        &kernel,
+        "probe",
+        CallerRoute::CliRoundTrip,
+        "mock_backend",
+        fat,
+        store_len,
+    )
+    .await
+    .expect("the projection must fire, not failfast");
+    let mark = state.compaction_mark.lock().expect("mark").clone();
+    assert_eq!(
+        mark,
+        Some((store_len, "probe".to_string())),
+        "the cursor is the store length (view body was {} turns)",
+        n - 1
+    );
 }

@@ -33,6 +33,7 @@ import logging
 import secrets
 
 from kernel import sender_context
+from kernel._refusal import bad
 
 from io_bridge import (
     decode_frame,
@@ -303,7 +304,28 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 raw = msg.get("bytes")
             if raw is None:
                 continue
-            frame = decode_inbound(raw)
+            # A FRAME IS AN INPUT, NOT A CONTRACT. Decoding used to run bare: a
+            # 3-byte binary frame raised `struct.error` out of the loop, a text
+            # frame that parsed to `[1]` raised `AttributeError` on `.get` — and
+            # either killed the whole connection through `finally`, cancelling
+            # every in-flight `call` on it (an LLM generation with it). Answer the
+            # bad frame and KEEP THE SOCKET.
+            try:
+                frame = decode_inbound(raw)
+            except Exception:
+                frame = None
+            if not isinstance(frame, dict):
+                await _send_envelope(
+                    {
+                        "type": "error",
+                        **bad(
+                            "frame",
+                            "frame",
+                            "a well-formed call/emit/watch envelope",
+                        ),
+                    }
+                )
+                continue
             ftype = frame.get("type")
             if ftype == "call":
                 t = asyncio.create_task(_on_call(frame))

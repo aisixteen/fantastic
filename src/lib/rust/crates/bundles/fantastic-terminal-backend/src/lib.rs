@@ -122,8 +122,12 @@ struct PtyState {
     reader_task: Mutex<Option<JoinHandle<()>>>,
     /// PTY writer (taken once from the master at spawn time; reused for
     /// every `write` / `paste_image` since `take_writer` errors on
-    /// second call).
-    writer: Mutex<Box<dyn std::io::Write + Send>>,
+    /// second call). A std mutex inside an `Arc` so the BLOCKING
+    /// `write_all`/`flush` can run on `spawn_blocking` — the fd blocks
+    /// while the PTY input queue is full (child not reading), and that
+    /// must pin a blocking-pool thread, never a runtime worker.
+    /// Ordering is still `write_lock` (tokio), held across the await.
+    writer: Arc<StdMutex<Box<dyn std::io::Write + Send>>>,
     /// Scrollback ring — a client calls `output` on connect to
     /// fetch what was emitted before it attached. Ring-trimmed to
     /// `MAX_SCROLLBACK_BYTES` to bound memory.
@@ -366,9 +370,11 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if is_running(agent_id) {
         return json!({"running": true, "already_booted": true});
     }
-    // Existing-but-dead state? Drop it before spawn replaces.
-    if TERMINALS.lock().contains_key(agent_id) {
-        TERMINALS.lock().remove(agent_id);
+    // Existing-but-dead state? Drop it before spawn replaces — and
+    // reap, in case the reader's own wait never ran.
+    let dead = TERMINALS.lock().remove(agent_id);
+    if let Some(dead) = dead {
+        reap_child(&dead).await;
     }
     let cmd = meta_string_array(agent_id, kernel, "cmd").unwrap_or_else(default_cmd);
     let cwd = meta_string(agent_id, kernel, "cwd");
@@ -386,9 +392,11 @@ async fn spawn_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         return json!({"error": "already running; call stop first"});
     }
     // Existing-but-dead state (scrollback retention). Drop it so spawn
-    // can install a fresh PtyState.
-    if TERMINALS.lock().contains_key(agent_id) {
-        TERMINALS.lock().remove(agent_id);
+    // can install a fresh PtyState — and reap, in case the reader's own
+    // wait never ran.
+    let dead = TERMINALS.lock().remove(agent_id);
+    if let Some(dead) = dead {
+        reap_child(&dead).await;
     }
     let cmd = payload
         .get("cmd")
@@ -436,21 +444,33 @@ async fn write_reply(agent_id: &AgentId, payload: &Value) -> Value {
     let data = payload.get("data").and_then(Value::as_str).unwrap_or("");
     let bytes = data.as_bytes().to_vec();
     let n = bytes.len();
-    // Serialize concurrent writes per-agent so a bracketed-paste
-    // sequence can't be interleaved with another write.
-    let _w = state.write_lock.lock().await;
-    let mut writer_guard = state.writer.lock().await;
-    // write_all blocks while the PTY pipe drains. The writer is owned
-    // by the state's Mutex; we can't move it across spawn_blocking
-    // without giving up the lock. Inline blocking write is OK here —
-    // PTY master buffers are kilobyte-sized, so writes don't sit long.
-    let res = writer_guard
-        .write_all(&bytes)
-        .and_then(|_| writer_guard.flush());
-    match res {
+    match pty_write(&state, bytes).await {
         Ok(()) => json!({"written": n}),
         Err(e) => json!({"error": format!("write: {e}")}),
     }
+}
+
+/// Write `bytes` to the PTY master, serialized per agent by
+/// `write_lock` (a bracketed-paste sequence can't interleave with
+/// another write). The blocking `write_all`+`flush` runs on
+/// `spawn_blocking` WHILE the write lock is held: a full PTY input
+/// queue (child SIGSTOPped, paste bigger than the line discipline
+/// buffer) parks a blocking-pool thread, not a tokio worker — the
+/// rest of the kernel (reflect, other agents) keeps answering.
+/// Python parity: `_write_all` awaits fd-writable off the loop.
+async fn pty_write(state: &Arc<PtyState>, bytes: Vec<u8>) -> std::io::Result<()> {
+    let _w = state.write_lock.lock().await;
+    let writer = Arc::clone(&state.writer);
+    tokio::task::spawn_blocking(move || {
+        // The std mutex is only ever taken INSIDE spawn_blocking, so it
+        // is never held across an await; a poisoned lock just means a
+        // previous write panicked — the fd is still usable.
+        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+        guard.write_all(&bytes)?;
+        guard.flush()
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(format!("write task: {e}"))))
 }
 
 fn ack_reply(agent_id: &AgentId, payload: &Value) -> Value {
@@ -569,13 +589,7 @@ async fn paste_image_impl(agent_id: &AgentId, bytes: Vec<u8>, mime: String) -> V
     // Type the absolute path + a single trailing space (no newline —
     // mirrors a drag-drop, not a submit).
     let inject = format!("{} ", path_str);
-    let inject_bytes = inject.into_bytes();
-    let _w = state.write_lock.lock().await;
-    let mut writer_guard = state.writer.lock().await;
-    if let Err(e) = writer_guard
-        .write_all(&inject_bytes)
-        .and_then(|_| writer_guard.flush())
-    {
+    if let Err(e) = pty_write(&state, inject.into_bytes()).await {
         return json!({"error": format!("paste_image: write: {e}")});
     }
     json!({"path": path_str, "bytes": bytes.len()})
@@ -695,12 +709,38 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
     if let Some(task) = state.reader_task.lock().await.take() {
         task.abort();
     }
+    // Reap. The aborted reader never reaches `cleanup_on_exit`'s wait,
+    // and portable-pty's Child has no reaping Drop — without this every
+    // stopped session stayed `<defunct>` until the kernel exited.
+    // Python `_cleanup` does close → SIGKILL → waitpid.
+    reap_child(&state).await;
     // Clean up the paste dir.
     let paste_dir = state.paste_dir.lock().await.take();
     if let Some(dir) = paste_dir {
         let _ = std::fs::remove_dir_all(&dir);
     }
     json!({"stopped": true})
+}
+
+/// Wait the child so it is not left a zombie. Non-blocking `try_wait`
+/// polls for up to 2 s (the child was just SIGKILLed — it is gone
+/// within milliseconds), then a blocking `wait` as the last resort.
+/// Idempotent: a child already reaped by `cleanup_on_exit` answers
+/// `Err(ECHILD)`, which counts as done.
+async fn reap_child(state: &Arc<PtyState>) {
+    let mut child = state.child.lock().await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => return,
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.wait();
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 // ── spawn + reader ──────────────────────────────────────────────────
@@ -797,7 +837,7 @@ async fn spawn_pty(
         cwd: cwd.clone(),
         env: env.clone(),
         reader_task: Mutex::new(None),
-        writer: Mutex::new(writer),
+        writer: Arc::new(StdMutex::new(writer)),
         scrollback: StdMutex::new(VecDeque::new()),
         scrollback_bytes: AtomicUsize::new(0),
         exited: std::sync::atomic::AtomicBool::new(false),

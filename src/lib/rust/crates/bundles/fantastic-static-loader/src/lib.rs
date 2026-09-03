@@ -9,8 +9,10 @@
 //!
 //! After boot the roster is CLOSED: deny-all means a roster agent cannot
 //! `create_agent`, so the manifest IS the roster. Idempotent by id (a reboot
-//! re-reads + skips agents that already exist), so the manifest and the persisted
-//! tree never duplicate. Declare explicit ids.
+//! re-reads the manifest and RE-APPLIES the declared fields over an existing
+//! agent), so the manifest and the persisted tree never duplicate. Every entry
+//! MUST name an explicit `id` — an id-less one is refused loud, because nothing
+//! could match it and each reboot would mint another agent beside the last.
 
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -76,7 +78,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         Err(e) => return json!({ "error": e, "booted": false }),
     };
     let mut created: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
+    let mut reapplied: Vec<String> = Vec::new();
     for spec in agents {
         let Some(obj) = spec.as_object() else {
             return json!({
@@ -90,11 +92,84 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
                 "booted": false,
             });
         }
-        if let Some(id) = obj.get("id").and_then(Value::as_str) {
-            if kernel.agents.contains_key(&AgentId::from(id)) {
-                skipped.push(id.to_string());
-                continue;
+        // An id-less entry cannot be idempotent: the roster is keyed by id, so
+        // nothing matches the agent the LAST boot minted and this boot mints a
+        // SECOND one, which the flush persists — the roster grows by one agent
+        // per restart and the operator is never told. The manifest is truth, so
+        // it must name its agents.
+        let Some(id) = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return json!({
+                "error": format!("static_loader: roster entry needs an explicit id: {spec}"),
+                "booted": false,
+            });
+        };
+        if let Some(live) = kernel.agents.get(&AgentId::from(id)) {
+            // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
+            // cloud, an API). So an id that already exists is RE-APPLIED
+            // from the manifest, never skipped: editing a grant in the yaml
+            // used to change nothing at all, because the hydrated record
+            // silently won and the operator got no word about it.
+            let declared_hm = obj.get("handler_module").and_then(Value::as_str);
+            if live.handler_module.as_deref() != declared_hm {
+                // A bundle cannot be swapped under a live agent (its
+                // in-process state belongs to the old one).
+                return json!({
+                    "error": format!(
+                        "static_loader: {id:?} exists as {:?} but the manifest \
+                         declares {declared_hm:?} — a handler_module is fixed at \
+                         create; delete the agent to re-declare it",
+                        live.handler_module
+                    ),
+                    "booted": false,
+                });
             }
+            drop(live);
+            let mut patch = obj.clone();
+            patch.remove("id");
+            patch.remove("handler_module");
+            patch.remove("parent_id");
+            // `update_agent` REPLACES a named field, so a bare re-apply of
+            // `can_call` would delete the structural baseline the kernel
+            // stamps at create and sever the agent from its own parent and
+            // children. Merge over the baseline, as `create_agent` does.
+            for (field, base) in [
+                ("can_call", fantastic_kernel::authz::default_can_call()),
+                (
+                    "callable_by",
+                    fantastic_kernel::authz::default_callable_by(),
+                ),
+            ] {
+                if let Some(Value::Object(declared)) = patch.get(field).cloned() {
+                    let mut merged = base;
+                    for (k, v) in declared {
+                        merged.insert(k, v);
+                    }
+                    patch.insert(field.to_string(), Value::Object(merged));
+                }
+            }
+            if !patch.is_empty() {
+                patch.insert("type".to_string(), json!("update_agent"));
+                patch.insert("id".to_string(), json!(id));
+                let r = with_operator(kernel.send(vec![Item::new(
+                    AgentId::from("kernel"),
+                    Value::Object(patch),
+                )]))
+                .await
+                .remove(0)
+                .result;
+                if let Some(e) = r.get("error") {
+                    return json!({
+                        "error": format!("static_loader: re-applying {id:?}: {e}"),
+                        "booted": false,
+                    });
+                }
+            }
+            reapplied.push(id.to_string());
+            continue;
         }
         // The declared agent becomes THIS loader's child ($parent = the loader),
         // but placement is stated by `parent_id`, not by who is addressed:
@@ -122,7 +197,7 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
             }
         }
     }
-    json!({ "booted": true, "created": created, "skipped": skipped })
+    json!({ "booted": true, "created": created, "reapplied": reapplied })
 }
 
 fn reflect_reply(agent: &Agent) -> Value {

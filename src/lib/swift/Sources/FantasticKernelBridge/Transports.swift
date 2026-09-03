@@ -80,7 +80,7 @@ public actor WebSocketTransport {
             cont.resume(
                 returning: .object([
                     "error": .string("websocket closed"),
-                    "reason": .string("transport_closed"),
+                    "reason": .string(Refusal.transportClosed),
                 ]))
         }
         pending.removeAll()
@@ -89,7 +89,7 @@ public actor WebSocketTransport {
                 returning: (
                     .object([
                         "error": .string("websocket closed"),
-                        "reason": .string("transport_closed"),
+                        "reason": .string(Refusal.transportClosed),
                     ]), Data()
                 ))
         }
@@ -100,7 +100,7 @@ public actor WebSocketTransport {
         guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
-                "reason": .string("not_connected"),
+                "reason": .string(Refusal.notConnected),
             ])
         }
         let id = mintId()
@@ -152,7 +152,7 @@ public actor WebSocketTransport {
             return (
                 .object([
                     "error": .string("websocket not connected"),
-                    "reason": .string("not_connected"),
+                    "reason": .string(Refusal.notConnected),
                 ]), Data()
             )
         }
@@ -208,7 +208,7 @@ public actor WebSocketTransport {
         guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
-                "reason": .string("not_connected"),
+                "reason": .string(Refusal.notConnected),
             ])
         }
         let frame: JSON = .object([
@@ -235,7 +235,7 @@ public actor WebSocketTransport {
         guard let client = client else {
             return .object([
                 "error": .string("websocket not connected"),
-                "reason": .string("not_connected"),
+                "reason": .string(Refusal.notConnected),
             ])
         }
         let frame: JSON = .object([
@@ -289,7 +289,7 @@ public actor WebSocketTransport {
             cont.resume(
                 returning: .object([
                     "error": .string("websocket connection dropped"),
-                    "reason": .string("transport_dropped"),
+                    "reason": .string(Refusal.transportClosed),
                 ]))
         }
         pending.removeAll()
@@ -298,7 +298,7 @@ public actor WebSocketTransport {
                 returning: (
                     .object([
                         "error": .string("websocket connection dropped"),
-                        "reason": .string("transport_dropped"),
+                        "reason": .string(Refusal.transportClosed),
                     ]), Data()
                 ))
         }

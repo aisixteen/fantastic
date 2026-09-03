@@ -67,6 +67,16 @@ pub fn kernel_verb_docs() -> Value {
     deepest first; refuses if any descendant carries `delete_lock`.",
         "list_agents": "No args. Every agent's record, flat. Paged.",
         "get": "args: id:str. One agent's record — null if unknown.",
+        // The verb lists EVERY row it holds, so the doc says so. It used to have
+        // no entry here at all (python's and swift's both claimed NAMED-only
+        // while their replies carried the unnamed rows too), which is the worst
+        // of the three: a caller reading a reflect learned the verb existed only
+        // from the code.
+        "ledger": "No args. EVERY execution and what it became — named under its id, \
+    unnamed under its minted pid — {executions:[{id, target, status, attempts, \
+    retries, named, outcome?}]}, paged, scoped to what YOU originated. \
+    Failed/timed_out/cancelled rows are the dead-letter queue: inspect, then \
+    retry with a NEW id if you choose — nothing is retried silently.",
         "ps": "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, \
     verb, started_at}]}, one row per in-flight dispatch. Paged.",
         "cancel": "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its \
@@ -250,12 +260,22 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
             // its own parent: `$parent` then resolves differently on the two
             // halves of the gate, and a reboot silently corrects it from the
             // agent's position on disk.
-            if k == "type"
-                || k == "id"
-                || k == "parent_id"
-                || RESERVED_RECORD_KEYS.contains(&k.as_str())
-            {
+            if k == "type" || k == "id" || k == "parent_id" {
                 continue;
+            }
+            // REFUSED, not silently skipped. `handler_module` is fixed at
+            // create — swapping it would leave a live agent whose in-process
+            // state belongs to the OLD bundle. Reserved keys name substrate
+            // wiring; they used to be dropped without a word, so the caller
+            // believed a change had landed that never did (2026-09-02).
+            if k == "handler_module" || RESERVED_RECORD_KEYS.contains(&k.as_str()) {
+                return crate::refusal::bad(
+                    "update_agent",
+                    k,
+                    "absent — handler_module is fixed at create_agent, and \
+                     root_path/ctx/parent name substrate wiring the record may \
+                     not carry",
+                );
             }
             patch.insert(k.clone(), v.clone());
             changed.push(k.clone());
@@ -315,5 +335,9 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
             }),
         )
         .await;
-    rec_value
+    // PYTHON'S REPLY SHAPE. The bare record left a caller that branches on
+    // `updated` — the field the kernel_verbs doc teaches — reading `undefined`
+    // on this runtime for the call that succeeded, so a model read success as
+    // failure and retried.
+    json!({ "updated": true, "id": rec.id, "agent": rec_value })
 }

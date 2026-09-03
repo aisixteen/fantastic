@@ -52,6 +52,12 @@ pub const NOT_HERE: &str = "not_here";
 pub const EXISTS: &str = "exists";
 /// The agent has no such verb (carries `verb`).
 pub const UNHANDLED: &str = "unhandled";
+/// The named THING is absent — a path, a job, a key. NOT `unknown_agent`: the
+/// agent answered, and what it was asked for is not there. Python has carried
+/// this code since the set was written; the ports omitted it, so every bundle
+/// that needed it (exec_bridge's `no job`, the file bundles' missing path)
+/// answered a bare `{error}` and a caller branching on `reason` never matched.
+pub const NOT_FOUND: &str = "not_found";
 
 // Transport codes — a leg that could not carry the call at all. Owned by the
 // bridge/relay bundles; listed here because they share the field, and a caller
@@ -68,7 +74,7 @@ pub const TIMEOUT: &str = "timeout";
 
 /// The closed set. Each names a KIND of refusal, not a call site — two verbs
 /// that fail for the same reason share a code, and a caller branches on the code.
-pub const CODES: [&str; 13] = [
+pub const CODES: [&str; 14] = [
     UNAUTHORIZED,
     UNKNOWN_AGENT,
     MISSING_ARG,
@@ -78,6 +84,7 @@ pub const CODES: [&str; 13] = [
     NOT_HERE,
     EXISTS,
     UNHANDLED,
+    NOT_FOUND,
     NOT_CONNECTED,
     TRANSPORT_ERROR,
     TRANSPORT_CLOSED,
@@ -204,13 +211,21 @@ pub fn bad(verb: &str, arg: &str, want: &str) -> Value {
 
 /// Right verb, wrong agent. Kernel verbs act on the TREE, so the agent named is
 /// the OPERAND, not the actor — the refusal says where to send it instead.
+///
+/// PYTHON'S PROSE, verbatim, plus the machine field. The two runtimes said the
+/// same thing in different words on the same `not_here` code, and the ports
+/// dropped `verb` entirely — so a caller could branch on the code but not learn
+/// WHICH verb it had misaddressed without parsing the sentence.
 #[must_use]
 pub fn not_here(verb: &str, id: &str) -> Value {
-    refusal_hint(
+    let mut v = refusal_hint(
         NOT_HERE,
-        format!("{verb}: kernel-owned verb, answered by the ROOT only (asked {id:?})"),
-        format!("send {verb} to 'kernel'; the id you name is the OPERAND, not the target"),
-    )
+        format!("{verb} is a kernel verb — {id} does not answer it"),
+        "address the kernel root (alias 'kernel'); name the agent you mean in \
+         `parent_id` / `id`",
+    );
+    with(&mut v, "verb", Value::String(verb.to_string()));
+    v
 }
 
 /// The reply for an id that names no agent — carrying the LIVE id index.

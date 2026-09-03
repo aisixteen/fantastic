@@ -34,6 +34,7 @@
             """
             terminal_backend — PTY shell session as an agent. One PTY per agent; process-memory state only.
             Verbs: reflect, boot, input, ack, resize, paste_image, shutdown. Output streams to this agent's own inbox as {type:"output", chunk} (a client watches it).
+            paste_image rides the BINARY channel: header {type:"paste_image", mime?} + blob = the image bytes (raw, never base64; 5 MB cap). Saves the image to a scratch file and types its path + a space into the PTY. Returns {path, bytes}.
             """
         }
 
@@ -58,7 +59,8 @@
                         "input": "args: data. Writes bytes to PTY stdin.",
                         "resize": "args: cols, rows. Resizes the PTY.",
                         "ack": "args: bytes. Flow control ack (no-op in Swift port).",
-                        "paste_image": "args: data_base64. Writes base64-decoded bytes.",
+                        "paste_image":
+                            "BINARY channel only: header {type, mime?} (default image/png; png/jpeg/gif/webp), blob = image bytes (raw, ≤ 5 MB). Saves to a scratch file, types path + space into the PTY. Returns {path, bytes}. On the text channel → missing_arg (blob).",
                         "shutdown": "Kills the session.",
                     ] as JSON,
                 ] as JSON
@@ -67,7 +69,14 @@
             case "input":
                 return inputVerb(agentId: agent.id, payload: payload)
             case "paste_image":
-                return pasteImageVerb(agentId: agent.id, payload: payload)
+                // The image is the blob of a binary frame. NO base64 field
+                // exists on the text channel (pure streams) — a caller that
+                // sends `data_base64` here is told which channel to use.
+                return Refusal.missing(
+                    "paste_image", "blob",
+                    hint:
+                        "send paste_image on the binary channel: header {type:\"paste_image\", mime?}, blob = the image bytes; base64 is never accepted"
+                )
             case "resize":
                 return resizeVerb(agentId: agent.id, payload: payload)
             case "ack":
@@ -80,6 +89,25 @@
             default:
                 return .object(["error": .string("unknown verb \(verb)")])
             }
+        }
+
+        public func handleBinary(
+            agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+        ) async throws -> (JSON?, Data) {
+            let verb = header["type"].asString ?? "(none)"
+            guard verb == "paste_image" else {
+                return (
+                    .object([
+                        "error": .string(
+                            "\(name): no binary edge — verb \"\(verb)\" does not accept binary frames"
+                        )
+                    ]), Data()
+                )
+            }
+            guard kernel.agent(agentId) != nil else {
+                return (.object(["error": .string("no agent")]), Data())
+            }
+            return (pasteImage(agentId: agentId, header: header, blob: blob), Data())
         }
 
         public func onShutdown(agentId: AgentId, kernel: Kernel) async throws {
@@ -141,17 +169,40 @@
             return .object(["ok": .bool(true)])
         }
 
-        private func pasteImageVerb(agentId: AgentId, payload: JSON) -> JSON {
+        /// Binary-channel `paste_image` (python `_paste_image`, rust
+        /// `paste_image_impl`): save the blob to a per-session scratch
+        /// file under the OS temp dir and type its absolute path + one
+        /// trailing space into the PTY — no newline, so pasting an image
+        /// never submits; it mirrors a file drag-drop.
+        private func pasteImage(agentId: AgentId, header: JSON, blob: Data) -> JSON {
             guard let session = sessionFor(agentId) else {
-                return .object(["error": .string("no session"), "reason": .string("not_booted")])
+                return .object(["error": .string("not running"), "reason": .string("not_booted")])
             }
-            guard let b64 = payload["data_base64"].asString,
-                let bytes = Data(base64Encoded: b64)
-            else {
-                return .object(["error": .string("paste_image requires data_base64")])
+            if blob.count > MAX_PASTE_IMAGE {
+                return .object([
+                    "error": .string("paste_image: \(blob.count) bytes exceeds the 5 MB cap")
+                ])
             }
-            session.write(data: bytes)
-            return .object(["ok": .bool(true), "bytes": .integer(Int64(bytes.count))])
+            let mime = (header["mime"].asString ?? "image/png").lowercased()
+            guard let ext = IMAGE_EXT[mime] else {
+                return .object([
+                    "error": .string("paste_image: unsupported image type \"\(mime)\"")
+                ])
+            }
+            let dir: String
+            do {
+                dir = try session.pasteDirectory(agentId: agentId)
+            } catch {
+                return .object(["error": .string("paste_image: mkdir: \(error)")])
+            }
+            let path = (dir as NSString).appendingPathComponent("paste_\(hex8()).\(ext)")
+            do {
+                try blob.write(to: URL(fileURLWithPath: path))
+            } catch {
+                return .object(["error": .string("paste_image: write: \(error)")])
+            }
+            session.write(data: Data((path + " ").utf8))
+            return .object(["path": .string(path), "bytes": .integer(Int64(blob.count))])
         }
 
         private func resizeVerb(agentId: AgentId, payload: JSON) -> JSON {
@@ -178,15 +229,33 @@
         }
     }
 
+    /// Image formats a pasted blob may carry, keyed by MIME (python `_IMAGE_EXT`).
+    private let IMAGE_EXT: [String: String] = [
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    ]
+    /// Per-image cap (python `MAX_PASTE_IMAGE`).
+    private let MAX_PASTE_IMAGE = 5 * 1024 * 1024
+
+    private func hex8() -> String {
+        String(format: "%08x", UInt32.random(in: .min ... .max))
+    }
+
     // MARK: - PtySession
 
     final class PtySession: @unchecked Sendable {
         let pid: pid_t
-        private let masterFd: Int32
+        private var masterFd: Int32
         private let agentId: AgentId
         private weak var kernel: Kernel?
         private let queue = DispatchQueue(label: "pty.read")
+        private let stateLock = NSLock()
         private var stopped = false
+        /// Lazily-minted scratch dir for pasted images (one per session,
+        /// removed by `terminate`).
+        private var pasteDir: String?
 
         init(pid: pid_t, masterFd: Int32, agentId: AgentId, kernel: Kernel) {
             self.pid = pid
@@ -267,10 +336,49 @@
             _ = ioctl(masterFd, TIOCSWINSZ, &winsize)
         }
 
+        /// Scratch dir for pasted images, created on first use — most
+        /// sessions never paste, so no temp dir is minted per spawn.
+        func pasteDirectory(agentId: AgentId) throws -> String {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            if let dir = pasteDir { return dir }
+            let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "fantastic_paste_\(agentId.value)_\(hex8())")
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true)
+            pasteDir = dir
+            return dir
+        }
+
+        /// Tear the session down ONCE (python `_cleanup`: SIGKILL + `waitpid`
+        /// so the child is reaped, never a zombie; the master closed). Order
+        /// here is kill → waitpid → close: the read pump is a THREAD parked
+        /// in `read(masterFd)`, and on macOS `close()` of a PTY master with a
+        /// pending read blocks (measured: the test helper sat in state `U`
+        /// with the child still alive). Killing the session leader first
+        /// revokes the slave, the read returns, and close is immediate.
+        /// Idempotent: `shutdown` followed by `deinit` must not re-kill a pid
+        /// the OS may have recycled, nor close an fd number that now belongs
+        /// to something else.
         func terminate() {
+            stateLock.lock()
+            if stopped {
+                stateLock.unlock()
+                return
+            }
             stopped = true
-            kill(pid, SIGTERM)
-            close(masterFd)
+            let fd = masterFd
+            masterFd = -1
+            let dir = pasteDir
+            pasteDir = nil
+            stateLock.unlock()
+            kill(pid, SIGKILL)
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            if fd >= 0 { close(fd) }
+            if let dir = dir {
+                try? FileManager.default.removeItem(atPath: dir)
+            }
         }
 
         deinit {

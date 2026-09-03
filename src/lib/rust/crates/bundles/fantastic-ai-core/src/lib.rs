@@ -85,6 +85,7 @@ pub mod context;
 pub mod events;
 pub mod helpers;
 pub mod history;
+pub mod history_view;
 pub mod projection;
 pub mod provider;
 pub mod route;

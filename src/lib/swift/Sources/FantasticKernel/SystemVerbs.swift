@@ -66,12 +66,17 @@ extension Kernel {
         // resources (OS subprocesses, PTYs, HTTP streams) die with it. An unknown
         // or already-finished id returns {cancelled:false} — it does not pretend.
         case "cancel":
+            // CODED. `{error: "cancel: task_id (str) required"}` could only be
+            // branched on by matching prose, so the shared corpus' `reason`
+            // matcher could never be satisfied here.
             guard let t = payload["task_id"].asString, !t.isEmpty else {
-                return .object(["error": .string("cancel: task_id (str) required")])
+                return Refusal.missing("cancel", "task_id")
             }
             return await cancelTask(TaskId(t))
         default:
-            return .object(["error": .string("unhandled system verb \(verb)")])
+            return Refusal.make(
+                Refusal.unhandled, "unhandled system verb '\(verb)'",
+                extra: [("verb", .string(verb))])
         }
     }
 
@@ -122,12 +127,18 @@ extension Kernel {
                 "args: agent_id:str, name:str. Read one of YOUR OWN sidecars back — "
                     + "{name, content:str|null}; null means never written. An agent may "
                     + "only name ITSELF."),
+            // EVERY execution, not just the named ones. Python's line said
+            // NAMED-only while the verb iterated the whole table, so a model
+            // reading the reflect expected its own handful of jobs and received
+            // every minted-pid row beside them — the doc contradicting the reply
+            // it had just been handed.
             "ledger": .string(
-                "No args. Executions and what they became — {executions:[{id, target, "
-                    + "status, attempts, retries, outcome?}]}, paged, scoped to what YOU "
-                    + "originated. failed/timed_out/cancelled rows are the DEAD-LETTER "
-                    + "QUEUE — inspect, then retry with a NEW id if you choose; nothing is "
-                    + "retried silently."),
+                "No args. EVERY execution and what it became — named under its id, "
+                    + "unnamed under its minted pid — {executions:[{id, target, status, "
+                    + "attempts, retries, named, outcome?}]}, paged, scoped to what YOU "
+                    + "originated. Failed/timed_out/cancelled rows are the dead-letter "
+                    + "queue: inspect, then retry with a NEW id if you choose — nothing "
+                    + "is retried silently."),
             "cancel": .string(
                 "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
                     + "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
@@ -276,9 +287,11 @@ extension Kernel {
         }
         // Mint an id if caller didn't supply one. Convention from
         // Rust: <bundle>_<6 hex chars>.
+        // A supplied id — even "" — is the caller's choice and is validated as
+        // one by `guardAgentId`; only an ABSENT id is minted (python parity).
         let id: String
-        if let supplied = payload["id"].asString, !supplied.isEmpty {
-            id = supplied
+        if case .object(let o) = payload, let supplied = o["id"], supplied != .null {
+            id = supplied.asString ?? ""
         } else {
             id = mintId(hm)
         }
@@ -298,6 +311,14 @@ extension Kernel {
             for (k, v) in dict {
                 if k == "type" || k == "id" || k == "handler_module" || k == "parent_id" {
                     continue
+                }
+                // Reserved keys name substrate wiring; a record may not carry
+                // them (the loader refuses such a record on the next boot).
+                if reservedRecordKeys.contains(k) {
+                    return Refusal.bad(
+                        "create_agent", k,
+                        "absent — root_path/ctx/parent name substrate wiring the "
+                            + "record may not carry")
                 }
                 meta[k] = v
             }
@@ -380,12 +401,33 @@ extension Kernel {
     // ── delete_agent ────────────────────────────────────────────
 
     func deleteFromPayload(caller: Agent, payload: JSON) async -> JSON {
-        guard let idStr = payload["id"].asString else {
-            return .object(["error": .string("delete_agent requires id")])
+        guard let idStr = payload["id"].asString, !idStr.isEmpty else {
+            return Refusal.missing("delete_agent", "id")
         }
         let id = AgentId(idStr)
         guard let target = agent(id) else {
-            return .object(["error": .string("no agent \"\(idStr)\"")])
+            // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE
+            // id index to self-correct from, and `deleted:false` so a caller
+            // reading that field is not told a typo succeeded. The bare `{error}`
+            // this used to answer is the measured 34-retry case — a fact with
+            // nothing to act on.
+            var r = Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
+            r["deleted"] = .bool(false)
+            return r
+        }
+        // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
+        // every kernel verb, so cascading it empties the kernel and leaves a
+        // process with no control surface at all — `{"deleted": true}` and an
+        // empty tree (measured 2026-09-02).
+        if target.parentId == nil {
+            return Refusal.make(
+                Refusal.badArg,
+                "delete_agent: \(idStr) is the ROOT — it owns persistence and "
+                    + "answers the kernel verbs; deleting it would leave no kernel",
+                extra: [
+                    ("arg", .string("id")), ("id", .string(idStr)),
+                    ("deleted", .bool(false)),
+                ])
         }
         if let blocker = findLockedDescendant(of: target) {
             // THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: true`
@@ -475,10 +517,19 @@ extension Kernel {
             // halves of the gate, and a reboot silently corrects it from the
             // agent's position on disk. Reserved keys are refused for the same
             // reason — they name substrate wiring, not agent meta.
-            for (k, v) in dict
-            where k != "type" && k != "id" && k != "parent_id"
-                && !reservedRecordKeys.contains(k)
-            {
+            for (k, v) in dict where k != "type" && k != "id" && k != "parent_id" {
+                // REFUSED, not silently skipped. `handler_module` is fixed at
+                // create — swapping it would leave a live agent whose
+                // in-process state belongs to the OLD bundle. Reserved keys
+                // used to be dropped without a word, so the caller believed a
+                // change had landed that never did (2026-09-02).
+                if k == "handler_module" || reservedRecordKeys.contains(k) {
+                    return Refusal.bad(
+                        "update_agent", k,
+                        "absent — handler_module is fixed at create_agent, and "
+                            + "root_path/ctx/parent name substrate wiring the record "
+                            + "may not carry")
+                }
                 patch[k] = v
                 changed.append(k)
             }
@@ -524,7 +575,15 @@ extension Kernel {
                 "agent": recJson,
             ]))
 
-        return recJson
+        // PYTHON'S REPLY SHAPE. The bare record left a caller that branches on
+        // `updated` — the field the kernel_verbs doc teaches — reading nothing on
+        // this runtime for the call that succeeded, so a model read success as
+        // failure and retried.
+        return .object([
+            "updated": .bool(true),
+            "id": .string(target.id.value),
+            "agent": recJson,
+        ])
     }
 }
 

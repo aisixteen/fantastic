@@ -72,4 +72,25 @@ def validate_records(records: list[dict], *, version: int = CURRENT_VERSION) -> 
         pid = r.get("parent_id")
         if pid is not None and pid not in ids:
             raise SnapshotError(f"agent {r['id']!r} parent {pid!r} not in snapshot")
+    # REACHABILITY. Every parent resolving is not enough: a CYCLE (a -> b -> a)
+    # resolves on both ends and is unreachable from the root, so those records
+    # were silently dropped — a document that names five agents booted a kernel
+    # holding three, with no word about the other two. Caught HERE, with the
+    # other pre-teardown checks, so a bad snapshot never destroys a live tree.
+    kids: dict[str | None, list[str]] = {}
+    for r in records:
+        kids.setdefault(r.get("parent_id"), []).append(r["id"])
+    reached: set[str] = set()
+    stack = [roots[0]]
+    while stack:
+        node = stack.pop()
+        if node in reached:
+            continue
+        reached.add(node)
+        stack.extend(kids.get(node, ()))
+    if orphans := sorted(ids - reached):
+        raise SnapshotError(
+            f"snapshot has {len(orphans)} record(s) unreachable from the root "
+            f"{roots[0]!r} (a cycle or an orphaned parent chain): {orphans}"
+        )
     return roots[0]

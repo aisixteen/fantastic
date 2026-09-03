@@ -281,7 +281,10 @@ pub async fn forget(kernel: &Arc<Kernel>, agent: &Agent) -> KernelResult<()> {
     }
     let _ = Box::pin(crate::send::with_operator(kernel.send(vec![Item::new(
         store_id,
-        serde_json::json!({"type": "delete", "path": reldir}),
+        // `recursive` is REQUIRED: an agent's dir holds `agent.json` (and any
+        // sidecars), and a bare `delete` on a populated dir refuses — py parity
+        // (`kernel_state._forget_via_store` has always passed it).
+        serde_json::json!({"type": "delete", "path": reldir, "recursive": true}),
     )])))
     .await;
     Ok(())
@@ -370,7 +373,12 @@ pub fn load_children(
         let agent = Agent::new(
             AgentId(rec.id.clone()),
             rec.handler_module.clone(),
-            rec.parent_id.as_ref().map(|p| AgentId(p.clone())),
+            // DISK POSITION IS AUTHORITATIVE, not the field. A record whose
+            // `parent_id` disagrees with the directory it sits in would resolve
+            // `$parent` differently on the two halves of the gate, and a reboot
+            // would silently "correct" it either way (python's `read_tree`
+            // overwrites the field from the walk; rust trusted the field).
+            Some(parent.id.clone()),
             rec.meta.clone(),
             entry.clone(),
             false,

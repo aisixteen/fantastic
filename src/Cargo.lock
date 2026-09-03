@@ -504,7 +504,6 @@ name = "fantastic-file"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64",
  "fantastic-bundle",
  "fantastic-io-bridge",
  "fantastic-kernel",
@@ -529,11 +528,11 @@ dependencies = [
  "fantastic-scheduler",
  "fantastic-static-loader",
  "fantastic-terminal-backend",
+ "fantastic-text-file",
  "fantastic-tools",
  "fantastic-web",
  "fantastic-web-rest",
  "fantastic-web-ws",
- "fantastic-yaml-state",
  "keyring",
  "reqwest",
  "serde_json",
@@ -555,7 +554,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64",
  "dashmap",
  "futures-util",
  "libc",
@@ -651,6 +649,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-text-file"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-tools"
 version = "0.1.0"
 dependencies = [
@@ -713,17 +723,6 @@ dependencies = [
  "async-trait",
  "fantastic-kernel",
  "serde_json",
-]
-
-[[package]]
-name = "fantastic-yaml-state"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-kernel",
- "serde_json",
- "serde_yaml",
 ]
 
 [[package]]
@@ -1970,6 +1969,17 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

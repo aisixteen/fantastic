@@ -10,6 +10,7 @@ the SSH tunnel helpers, and the reflect dressing.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal as signal_mod
 import socket
@@ -18,6 +19,8 @@ from typing import Any
 
 from io_bridge import ConnectionClosed, _BaseTransport, decode_frame, encode_frame
 from io_bridge import _BridgeState
+
+logger = logging.getLogger(__name__)
 
 TUNNEL_READY_TIMEOUT = 5.0
 
@@ -54,14 +57,28 @@ class WSTransport(_BaseTransport):
             raise ConnectionClosed(str(e)) from e
 
     async def recv(self) -> dict:
+        """Next DECODABLE frame. A malformed frame is skipped, not fatal: the peer
+        is remote, so a short binary header or bad JSON is an input, not a bug —
+        raising here killed the engine read loop while `st.transport` stayed open,
+        leaving a bridge that reflects `connected:true` and answers every forward
+        with a 30s timeout that never names the dead reader."""
         import websockets
 
-        try:
-            raw = await self._ws.recv()
-        except websockets.ConnectionClosed as e:
-            raise ConnectionClosed(str(e)) from e
-        # str ⇒ text (JSON) frame; bytes ⇒ binary [len|header|body] frame.
-        return decode_frame(raw)
+        while True:
+            try:
+                raw = await self._ws.recv()
+            except websockets.ConnectionClosed as e:
+                raise ConnectionClosed(str(e)) from e
+            # str ⇒ text (JSON) frame; bytes ⇒ binary [len|header|body] frame.
+            try:
+                frame = decode_frame(raw)
+            except Exception as e:
+                logger.warning("ws_bridge: skipping malformed frame: %s", e)
+                continue
+            if not isinstance(frame, dict):
+                logger.warning("ws_bridge: skipping non-object frame")
+                continue
+            return frame
 
     async def close(self) -> None:
         try:
@@ -168,7 +185,11 @@ async def build_transport(
             raise ValueError("ssh+ws requires host, local_port, remote_port")
         tunnel = await _open_tunnel(host, local_port, int(remote_port_val))
         st.extra["tunnel_pid"] = tunnel.pid
-        st.cleanup = lambda: _kill_tunnel(tunnel)
+        # OFF the event loop: `_kill_tunnel` blocks up to 2s in `proc.wait` (plus a
+        # SIGKILL path) waiting on an ssh that ignores SIGTERM. Run on a thread, so a
+        # bridge shutdown/reconnect does not freeze every other agent, timer and WS
+        # client for that interval.
+        st.cleanup = lambda: asyncio.to_thread(_kill_tunnel, tunnel)
         try:
             return await WSTransport.connect(
                 f"ws://localhost:{local_port}/{peer_id}/ws"

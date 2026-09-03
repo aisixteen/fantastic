@@ -508,6 +508,9 @@ const EXEC_ID_HEADER: &str = "x-fantastic-execution-id";
 /// Python `web_rest/tools.py`.
 const OCTET_CT: &str = "application/octet-stream";
 /// Header carrying the JSON envelope on an octet-stream request/reply.
+/// The INGRESS credential on the http modality. The http envelope is the request
+/// HEADER, not the body — so the dispatched payload never carries the token.
+const AUTH_HEADER: &str = "x-fantastic-auth";
 const PAYLOAD_HEADER: &str = "x-fantastic-payload";
 /// Header naming the one bytes-valued field on an octet-stream request/reply.
 const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
@@ -611,6 +614,86 @@ async fn serve_ws_dynamic(
 #[derive(Clone)]
 struct RestOwner(AgentId);
 
+/// Track one in-flight `call` dispatch, PRUNING the finished ones first.
+///
+/// Nothing removed a finished handle until the socket closed, so the vector only
+/// ever grew: a dashboard tab polling `status` once a second accumulated ~86k
+/// JoinHandles over a day, none of them reachable or useful. Python discards its
+/// task in an `add_done_callback`; this is the same bound, applied at the ONE
+/// place the vector grows. The handles that remain are exactly the ones a
+/// disconnect still has to abort.
+fn track_call(
+    pending: &std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    let mut p = pending.lock().expect("pending poisoned");
+    p.retain(|h| !h.is_finished());
+    p.push(handle);
+}
+
+/// The INGRESS gate on a REST leg — python parity (`web_rest/tools.py::_gate`).
+///
+/// The rust REST routes used to dispatch straight into `with_sender(owner)` with
+/// no ingress check at all, so a leg carrying NO `ingress_rule` — sealed by
+/// default everywhere else in the io family — served every request. And when a
+/// call did fail it failed on the EGRESS side, naming a false cause
+/// ("web_rest_x may not call \"reflect\" on sibling") while the true one — this
+/// leg is sealed — was never stated.
+///
+/// Returns `Some(403)` to answer with, or `None` when the leg admits the call.
+fn rest_gate(
+    kernel: &Kernel,
+    owner: &AgentId,
+    target: &str,
+    verb: &str,
+    token: Option<&str>,
+) -> Option<Response> {
+    use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision, Denial};
+
+    let (primary, auth) = match kernel.agents.get(owner).map(|e| Arc::clone(&e)) {
+        Some(a) => {
+            let meta = a.meta.read().expect("meta poisoned");
+            (meta.get("ingress_rule").cloned(), meta.get("auth").cloned())
+        }
+        // No record for the mounting leg ⇒ nothing granted it anything. Sealed.
+        None => (None, None),
+    };
+    let spec = manifold_spec(primary.as_ref(), auth.as_ref(), "_ingress");
+    let decision = match ingress::resolve(spec.as_ref()) {
+        Ok(rule) => rule.authorize(&Action {
+            kind: "call",
+            target,
+            verb,
+            token,
+        }),
+        // A spec that will not parse is not an authorization.
+        Err(e) => Decision::Deny(Denial::new(format!("web_rest: bad ingress rule: {e}"))),
+    };
+    match decision {
+        Decision::Allow => None,
+        Decision::Deny(denial) => Some(deny_403(&denial)),
+    }
+}
+
+/// The 403 a sealed/gated REST leg answers with — the rule's own
+/// `reason`/`hint`/`see`, forwarded verbatim so discovery-through-denial works
+/// over http exactly as it does over the WS leg.
+fn deny_403(denial: &fantastic_io_bridge::authorizer::Denial) -> Response {
+    let mut body = json!({"error": denial.reason, "reason": "unauthorized"});
+    if !denial.hint.is_empty() {
+        body["hint"] = json!(denial.hint);
+    }
+    if !denial.see.is_empty() {
+        body["see"] = json!(denial.see);
+    }
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
 async fn serve_rest_post_dynamic(
     State(state): State<AppState>,
     axum::Extension(owner): axum::Extension<RestOwner>,
@@ -634,6 +717,7 @@ async fn serve_rest_post_dynamic(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let auth_token = headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok());
 
     // ── binary leg ──────────────────────────────────────────────────────
     // Content-Type: application/octet-stream ⇒ the raw body IS the blob; the
@@ -666,6 +750,10 @@ async fn serve_rest_post_dynamic(
                 json!({"error": "web_rest: X-Fantastic-Payload must be a JSON object"}).to_string(),
             )
                 .into_response();
+        }
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        if let Some(denial) = rest_gate(&state.kernel, &owner.0, &target_id, verb, auth_token) {
+            return denial;
         }
         let blob = body.to_vec();
         let (reply, out_body) = fantastic_kernel::send::with_sender(owner.0.clone(), async {
@@ -728,6 +816,10 @@ async fn serve_rest_post_dynamic(
         )
             .into_response();
     }
+    let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    if let Some(denial) = rest_gate(&state.kernel, &owner.0, &target_id, verb, auth_token) {
+        return denial;
+    }
     let reply = fantastic_kernel::send::with_sender(owner.0.clone(), async {
         let mut item = Item::new(target.clone(), payload);
         if let Some(id) = exec_id {
@@ -757,8 +849,18 @@ async fn serve_rest_reflect_root_dynamic(
     State(state): State<AppState>,
     axum::Extension(owner): axum::Extension<RestOwner>,
     Query(q): Query<ReflectQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let target = AgentId::from("kernel");
+    if let Some(denial) = rest_gate(
+        &state.kernel,
+        &owner.0,
+        "kernel",
+        "reflect",
+        headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok()),
+    ) {
+        return denial;
+    }
     let payload = serde_json::json!({
         "type": "reflect",
         "readme": q.readme.unwrap_or(0) != 0,
@@ -787,8 +889,18 @@ async fn serve_rest_reflect_dynamic(
     axum::Extension(owner): axum::Extension<RestOwner>,
     AxPath(target_id): AxPath<String>,
     Query(q): Query<ReflectQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let target = AgentId::from(target_id.as_str());
+    if let Some(denial) = rest_gate(
+        &state.kernel,
+        &owner.0,
+        &target_id,
+        "reflect",
+        headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok()),
+    ) {
+        return denial;
+    }
     let payload = serde_json::json!({
         "type": "reflect",
         "readme": q.readme.unwrap_or(0) != 0,
@@ -1409,7 +1521,7 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                         let _ = out.send(frame.to_string()).await;
                     }
                 });
-                pending_calls.lock().expect("pending poisoned").push(handle);
+                track_call(&pending_calls, handle);
             }
             "emit" => {
                 let Some(target) = target else { continue };

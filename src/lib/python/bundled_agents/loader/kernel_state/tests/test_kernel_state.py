@@ -276,3 +276,57 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     )[0]["result"]
     assert not term_dir.exists()
     assert canvas_dir.exists()  # sibling untouched
+
+
+async def test_a_record_commits_atomically_and_leaves_no_debris(
+    seeded_kernel, store_agent, tmp_path
+):
+    """A record is streamed to a tmp beside the target and RENAMED into place.
+
+    A `write_stream` that dies after truncating would otherwise leave a
+    half-written or empty `agent.json` — the record gone, and the next boot
+    hydrating a tree with a hole in it. The commit is the leg's own single atomic
+    op, so the outcomes are "the old record survives" or "the new one is
+    complete", never a torn file. What this pins is the visible half: the file
+    parses, and no `.tmp.` debris is left behind.
+    """
+    import json
+
+    rec = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "id": "atomic_probe",
+                        "handler_module": "file_bridge.tools",
+                        "display_name": "Atomic",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert rec.get("id") == "atomic_probe", rec
+    # Persist explicitly rather than racing the debounced auto-flush.
+    w = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": seeded_kernel.id,
+                    "payload": {"type": "persist_record", "record": rec},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert not (isinstance(w, dict) and w.get("error")), w
+
+    root = tmp_path / ".fantastic"
+    agent_dir = root / "agents" / "atomic_probe"
+    on_disk = agent_dir / "agent.json"
+    assert on_disk.exists(), sorted(p.name for p in agent_dir.iterdir())
+    parsed = json.loads(on_disk.read_text())
+    assert parsed["id"] == "atomic_probe" and parsed["display_name"] == "Atomic"
+    debris = [p.name for p in agent_dir.iterdir() if ".tmp." in p.name]
+    assert debris == [], f"the commit must leave no tmp behind: {debris}"
