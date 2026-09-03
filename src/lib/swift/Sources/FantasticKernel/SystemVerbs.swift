@@ -32,8 +32,6 @@ extension Kernel {
             return await deleteFromPayload(caller: target, payload: payload)
         case "update_agent":
             return await updateFromPayload(caller: target, payload: payload)
-        case "get":
-            return getAgentReply(payload: payload)
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.
@@ -114,7 +112,6 @@ extension Kernel {
                 "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, "
                     + "deepest first; refuses if any descendant carries `delete_lock`."),
             "list_agents": .string("No args. Every agent's record, flat. Paged."),
-            "get": .string("args: id:str. One agent's record — null if unknown."),
             "ps": .string(
                 "No args. The live kernel-wide TASK TABLE — {tasks:[{id, agent, parent, "
                     + "verb, started_at}]}, one row per in-flight dispatch. Paged."),
@@ -214,22 +211,6 @@ extension Kernel {
         ])
     }
 
-    // ── get ─────────────────────────────────────────────────────
-
-    private func getAgentReply(payload: JSON) -> JSON {
-        guard let idStr = payload["id"].asString else {
-            return .null
-        }
-        guard let a = agent(AgentId(idStr)) else {
-            return .null
-        }
-        guard let data = try? JSONEncoder().encode(a.record()),
-            let json = try? JSON.parse(data)
-        else {
-            return .null
-        }
-        return json
-    }
 
     // ── create_agent ────────────────────────────────────────────
 

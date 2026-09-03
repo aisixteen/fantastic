@@ -18,7 +18,6 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             | "delete_agent"
             | "update_agent"
             | "list_agents"
-            | "get"
             // The TASK TABLE — work in flight, universal. Baked into the
             // substrate, in no bundle's verb map: cancellation is a property of
             // the one primitive (`send`), so EVERY agent is cancelable and a
@@ -66,7 +65,6 @@ pub fn kernel_verb_docs() -> Value {
         "delete_agent": "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, \
     deepest first; refuses if any descendant carries `delete_lock`.",
         "list_agents": "No args. Every agent's record, flat. Paged.",
-        "get": "args: id:str. One agent's record — null if unknown.",
         // The verb lists EVERY row it holds, so the doc says so. It used to have
         // no entry here at all (python's and swift's both claimed NAMED-only
         // while their replies carried the unnamed rows too), which is the worst
@@ -225,13 +223,6 @@ pub(super) async fn handle_kernel_verb(
                 k.request_shutdown();
             });
             json!({ "type": "shutdown_kernel", "ok": true })
-        }
-        "get" => {
-            let id = payload.get("id").and_then(Value::as_str).map(AgentId::from);
-            match id.and_then(|i| kernel.agents.get(&i).map(|e| Arc::clone(&e))) {
-                Some(a) => serde_json::to_value(a.record()).unwrap_or(Value::Null),
-                None => Value::Null,
-            }
         }
         _ => unreachable!("is_kernel_verb gate"),
     }

@@ -474,9 +474,14 @@ struct TaskTableCancelTests {
             updateDoc.contains("REPLACED, NOT MERGED"),
             "replace-not-merge must precede the dash: \(updateDoc)")
 
-        for v in ["create_agent", "update_agent", "delete_agent", "list_agents", "get", "ps"] {
+        for v in ["create_agent", "update_agent", "delete_agent", "list_agents", "ps"] {
             #expect(kv[v].asString != nil, "missing kernel verb \(v)")
         }
+        // `get` is NOT one of them. Rust and swift answered it and advertised it
+        // here; python never had it, so a model reading a swift reflect learned a
+        // verb that does not exist on the reference runtime (seen in the reflect
+        // body of e2e `agentic.build:swift`, 2026-09-03).
+        #expect(kv["get"] == .null, "`get` is not a kernel verb — python has no such verb")
 
         // EVERY agent carries them, not just the root.
         let child = await kernel.send([Item(a, .object(["type": .string("reflect")]))])[0].result

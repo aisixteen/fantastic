@@ -110,3 +110,27 @@ async def test_a_refusal_is_not_decorated_into_a_reflect(seeded_kernel):
     assert r.get("verb") == "reflect", r
     for decoration in ("kernel_verbs", "tree", "more"):
         assert decoration not in r, (decoration, r)
+
+
+async def test_get_is_not_a_kernel_verb(seeded_kernel):
+    """`get` is NOT one of the kernel verbs — here, or in rust/swift.
+
+    Both ported runtimes answered it (returning the record, or `null` for an
+    unknown id) and advertised it in `kernel_verbs`, so a model reading one of
+    their reflects learned a verb this reference runtime does not have (seen in
+    the reflect body of e2e `agentic.build:rust`, 2026-09-03). A record is read
+    with `list_agents` or a `reflect`.
+    """
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "get", "id": seeded_kernel.id}}]
+        )
+    )[0]["result"]
+    assert r.get("reason") == "unhandled", r
+    assert r.get("verb") == "get", r
+    assert "id" not in r, r
+
+    kv = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
+    )[0]["result"]["kernel_verbs"]
+    assert "get" not in kv, kv

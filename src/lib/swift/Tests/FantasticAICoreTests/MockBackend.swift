@@ -243,6 +243,7 @@ final class PayloadRecorder: AgentBundle, @unchecked Sendable {
     let name = "mock_recorder"
     private let lock = NSLock()
     private var seen: [JSON] = []
+    private var blobs: [(JSON, Data)] = []
 
     private func record(_ payload: JSON) {
         lock.lock()
@@ -267,6 +268,23 @@ final class PayloadRecorder: AgentBundle, @unchecked Sendable {
             record(payload)
             return .object(["recorded": .bool(true)])
         }
+    }
+
+    /// The BINARY channel. A `send_binary` whose blob was lifted correctly lands
+    /// here; one that was not lands on `handle` with the program still stuck in
+    /// the JSON header, which is exactly the bug this records the difference for.
+    func handleBinary(
+        agentId: AgentId, header: JSON, blob: Data, kernel: Kernel
+    ) async throws -> (JSON?, Data) {
+        lock.withLock { blobs.append((header, blob)) }
+        return (.object(["written": .integer(Int64(blob.count))]), Data())
+    }
+
+    /// Every `(header, blob)` that reached the BINARY channel, in arrival order.
+    func binaries() -> [(JSON, Data)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return blobs
     }
 
     /// Every payload received (lifecycle + `reflect` excluded), in arrival order.

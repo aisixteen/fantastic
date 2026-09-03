@@ -367,7 +367,7 @@ extension Kernel {
     /// window COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Double?, taskId: TaskId, binary: Data? = nil
+        timeout: Double?, taskId: TaskId, binary: Data?
     ) async -> (JSON, Status) {
         guard let secs = timeout else {
             let r = await runDispatch(
@@ -387,8 +387,14 @@ extension Kernel {
                 await self.cancelTask(taskId)
             }
         }
+        // The BLOB rides the timed branch too. It did not until 2026-09-03:
+        // routing stamps the layer's deadline on EVERY item, so every model-issued
+        // `send_binary` took this branch, lost its bytes, and landed on the TEXT
+        // channel — `file_bridge` answered "bytes must be raw bytes on the binary
+        // channel" for a call that was correct (e2e `E10_dialog:swift`).
         let r = await runDispatch(
-            target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId)
+            target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
+            binary: binary)
         let fired = killer.isCancelled == false && r["cancelled"].asBool == true
         killer.cancel()
         if fired {
@@ -411,9 +417,12 @@ extension Kernel {
         return (r, .completed)
     }
 
+    /// `binary` has NO DEFAULT, deliberately: it defaulted to `nil` until
+    /// 2026-09-03 and the timed branch of `runDispatchOutcome` simply forgot to
+    /// pass it, which the compiler accepted. Every caller now states the channel.
     private func runDispatch(
-        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox? = nil,
-        taskId: TaskId? = nil, binary: Data? = nil
+        target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
+        taskId: TaskId?, binary: Data?
     ) async -> JSON {
         // My own task is in a subtree the kernel is killing: register no new work
         // and run no handler. The kernel is INERT to a killed task from the
@@ -553,7 +562,7 @@ extension Kernel {
     /// (the bare agent path inside `dispatch` handles bare reflect).
     static func isSystemVerb(_ verb: String) -> Bool {
         switch verb {
-        case "create_agent", "delete_agent", "update_agent", "list_agents", "get":
+        case "create_agent", "delete_agent", "update_agent", "list_agents":
             return true
         // NAMED and unnamed executions and what they became. Terminal
         // non-completed rows ARE the dead-letter queue.

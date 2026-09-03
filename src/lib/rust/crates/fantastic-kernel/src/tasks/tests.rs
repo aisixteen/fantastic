@@ -707,6 +707,14 @@ async fn every_reflect_advertises_the_kernel_verbs() {
     ] {
         assert!(kv[v].is_string(), "missing kernel verb {v}");
     }
+    // `get` is NOT one of them. Rust and swift answered it and advertised it
+    // here; python never had it, so a model reading a rust reflect learned a verb
+    // that does not exist on the reference runtime (seen in the reflect body of
+    // e2e `agentic.build:rust`, 2026-09-03).
+    assert!(
+        kv["get"].is_null(),
+        "`get` is not a kernel verb — python has no such verb"
+    );
 
     // Every agent carries them, not just the root.
     let child = kernel
