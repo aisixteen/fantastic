@@ -7,7 +7,6 @@ runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns
 limits:
-  max_tokens: 16384   # two-agent review: the reviewer's diff-read + verdict turn (thinking+text) overflowed 8192 (measured 2026-09-02)
   idle_seconds: 60
   max_turns: 16
   no_progress_turns: 8

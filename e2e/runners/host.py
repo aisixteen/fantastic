@@ -23,6 +23,7 @@ from pathlib import Path
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from backends import THINK_BUDGET
 from helpers import verdict  # noqa: E402
 from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime  # noqa: E402
 from helpers.proxy import DEFAULT_QUESTION_ANSWER, find_question  # noqa: E402
@@ -192,7 +193,8 @@ def main(scenario_id: str) -> int:
             endpoint=endpoint,
             model=model,
             file_bridge_id=store["id"],
-            max_tokens=int(limits.get("max_tokens", 4096)),
+            # ONE BUDGET (backends.THINK_BUDGET), not a second default here.
+            max_tokens=int(os.environ.get("MAX_TOKENS") or THINK_BUDGET),
             can_call=can_call,
             callable_by={**BASE, "rest": "*"},
         )

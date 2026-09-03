@@ -18,7 +18,6 @@ task: >-
 
 limits:
   max_turns: 14
-  max_tokens: 4096
   idle_seconds: 120
 
 # DERIVED OVERRIDE — the BUDGET differs, the work does not.

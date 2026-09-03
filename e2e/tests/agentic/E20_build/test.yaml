@@ -11,12 +11,6 @@ runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns
 limits:
-  # THE THINK BUDGET. This probe writes long turns — it is authoring a whole
-  # agent — and at the endpoint default it ran out mid-generation:
-  # `stop_reason='max_tokens' blocks=['thinking','text']` at 16,815 chars.
-  # Thought present, answer truncated. That is a budget problem wearing a model
-  # failure's clothes, and it is a per-test knob for exactly this reason.
-  max_tokens: 16384
   idle_seconds: 40
   max_turns: 40
   no_progress_turns: 10

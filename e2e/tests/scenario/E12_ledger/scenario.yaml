@@ -21,7 +21,6 @@ task: >-
 
 limits:
   max_turns: 14
-  max_tokens: 4096
   idle_seconds: 150
 
 roster:
