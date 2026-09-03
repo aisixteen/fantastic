@@ -152,6 +152,12 @@ async fn deliver(
     // level here until 2026-09-02, so every subscriber reading `ev.detail.reason`
     // saw nothing — the silent-death regression this announcement exists for,
     // wearing the announcement's own clothes.
+    trace(&format!(
+        "deliver -> {} status={:?} err={:?}",
+        target,
+        out.status,
+        out.result.get("error").and_then(Value::as_str)
+    ));
     let failed = !out.is_completed() || out.result.get("error").and_then(Value::as_str).is_some();
     if failed {
         let why = out
@@ -284,6 +290,20 @@ struct Unit {
     body: Option<String>,
 }
 
+/// TEMPORARY ROUTE TRACE. A chain that ends with no reply block and no error is
+/// unreadable from outside: `subai_graph:rust` died after well-formed turns with
+/// nothing on record (2026-09-03). Enabled only by `FANTASTIC_TRACE_ROUTE=1`, so
+/// a shipped kernel prints nothing.
+pub(crate) fn trace_pub(msg: &str) {
+    trace(msg)
+}
+
+fn trace(msg: &str) {
+    if std::env::var("FANTASTIC_TRACE_ROUTE").as_deref() == Ok("1") {
+        eprintln!("[route] {msg}");
+    }
+}
+
 /// One rendered reply block, owed to `dest`. [`deliver_grouped`] composes the tag
 /// — including the batch stamp, which lives INSIDE it.
 struct Block {
@@ -308,6 +328,11 @@ async fn route_reply_gated(
 ) {
     let sp = system_prompt.as_deref();
     let calls = extract_tool_calls(&text);
+    trace(&format!(
+        "enter self={} calls={}",
+        self_id.as_str(),
+        calls.len()
+    ));
 
     // Everything owed to ONE destination, in the order the model wrote it.
     // Grouping (not a message per call) is the whole point — see below.
@@ -535,7 +560,10 @@ async fn route_reply_gated(
     let outcomes = if items.is_empty() {
         Vec::new()
     } else {
-        kernel.send(items).await
+        trace(&format!("dispatching {} item(s)", items.len()));
+        let out = kernel.send(items).await;
+        trace(&format!("dispatch returned {} outcome(s)", out.len()));
+        out
     };
 
     // The result — INCLUDING an error — goes back. A call that failed silently
@@ -611,8 +639,15 @@ async fn route_reply_gated(
     if !nudging {
         silent_reset(&kernel, self_id.as_str(), &client_id);
     }
+    trace(&format!(
+        "blocks={} any_calls={} nudging={}",
+        blocks.len(),
+        any_calls,
+        nudging
+    ));
     if any_blocks {
         deliver_grouped(&kernel, blocks, &client_id, sp, route).await;
+        trace("delivered");
     }
     if done_called {
         return; // explicitly finished — nothing more runs, nothing reminds

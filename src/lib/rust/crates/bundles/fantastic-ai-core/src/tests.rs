@@ -2441,3 +2441,137 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
         n - 1
     );
 }
+
+/// SEVEN PARALLEL CALLS, NO `reply_to` — the shape that killed a live chain.
+///
+/// `subai_graph:rust` emitted one well-formed turn batching seven `reflect`
+/// sends with the key omitted, and NOTHING came back: no reply block, no error,
+/// no timeout, no cancel. The chain ended at pass 1 (measured 2026-09-03), and
+/// the same signature killed `agentic.build:rust` at pass 4 — also a turn whose
+/// calls carried no `reply_to`. An omitted key means the model gets its own
+/// answer back, so every one of these is owed a block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_of_calls_without_reply_to_all_come_back() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_batch").await;
+    // The follow-up turn is what proves delivery: the blocks arrive as ONE
+    // message and the model is asked again.
+    let sa = script(
+        &a,
+        vec![pass("seen <tool_call>{\"name\":\"done\"}</tool_call>")],
+        Duration::ZERO,
+    );
+    // Seven targets that all answer — the fixture's own file leg, reflected.
+    let leg = format!("ff_{}", a.as_str());
+    let text: String = (0..7)
+        .map(|_| call_envelope(&leg, json!({"type": "reflect"}), None))
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::route::route_reply(
+        a.clone(),
+        Arc::clone(&kernel),
+        text,
+        "probe".to_string(),
+        None,
+        None,
+        "[reply to x · y z]".to_string(),
+        30.0,
+        CallerRoute::CliRoundTrip,
+    )
+    .await;
+    assert!(
+        until_passes(&sa, 1).await,
+        "seven dispatched calls produced NO follow-up turn — the replies were dropped"
+    );
+    let turn = sa.request(0);
+    let blocks = turn.matches("[reply to ").count();
+    assert!(
+        blocks >= 7,
+        "every call is owed a block; got {blocks} in: {turn}"
+    );
+}
+
+/// THE REAL PATH: dispatch `send` at the agent and let ITS OWN routing run.
+///
+/// [`a_batch_of_calls_without_reply_to_all_come_back`] drives `route_reply`
+/// directly and passes. The live failure went through the `send` VERB, which
+/// drops the FIFO guard and spawns routing as a DETACHED task — so the chain
+/// depends on that task outliving the dispatch that spawned it. If it does not,
+/// the caller gets its reply and the model never sees one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routing_survives_the_dispatch_that_spawned_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_surv").await;
+    let leg = format!("ff_{}", a.as_str());
+    let first = (0..7)
+        .map(|_| call_envelope(&leg, json!({"type": "reflect"}), None))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sa = script(
+        &a,
+        vec![
+            pass(&first),
+            pass("seen <tool_call>{\"name\":\"done\"}</tool_call>"),
+        ],
+        Duration::ZERO,
+    );
+    // ONE send, exactly as a caller makes it. Turn 1 emits the batch; the
+    // follow-up turn only happens if the spawned routing delivered.
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "send", "text": "build it", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(
+        until_passes(&sa, 2).await,
+        "turn 2 never ran — the detached routing did not deliver after its \
+         dispatch returned (passes={})",
+        sa.passes_served()
+    );
+}
+
+/// SEVEN DIFFERENT TARGETS, ONE OF THEM ANOTHER AI — the live shape.
+///
+/// The two tests above batch calls at ONE plain target and pass. The turn that
+/// actually died reflected seven DISTINCT agents, and one of them (`brain`) is a
+/// second inference unit: dispatching it starts a generation of its own, and
+/// routing awaits the whole batch. If that peer's turn does not settle, the
+/// batch never completes and nothing is ever delivered — with no error to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_that_includes_a_peer_ai_still_delivers() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "rt_peer").await;
+    let brain = add_peer(&kernel, &tmp, &a).await;
+    let leg = format!("ff_{}", a.as_str());
+    // `brain` answers its own turn; the builder batches it alongside plain reads.
+    let _sb = script(&brain, vec![pass("brain says hi")], Duration::ZERO);
+    let mut envs: Vec<String> = (0..6)
+        .map(|_| call_envelope(&leg, json!({"type": "reflect"}), None))
+        .collect();
+    envs.push(call_envelope(
+        brain.as_str(),
+        json!({"type": "send", "text": "what shape?", "client_id": "probe"}),
+        None,
+    ));
+    let sa = script(
+        &a,
+        vec![
+            pass(envs.join("\n")),
+            pass("seen <tool_call>{\"name\":\"done\"}</tool_call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "send", "text": "explore", "client_id": "probe"}),
+        )])
+        .await;
+    assert!(
+        until_passes(&sa, 2).await,
+        "turn 2 never ran — a batch containing a peer AI delivered nothing \
+         (passes={})",
+        sa.passes_served()
+    );
+}

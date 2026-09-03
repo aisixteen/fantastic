@@ -34,6 +34,7 @@ use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -362,8 +363,7 @@ impl Provider for AnthropicProvider {
             break resp;
         };
 
-        let events = consume_sse(resp).await?;
-        Ok(Box::pin(futures_util::stream::iter(events)))
+        Ok(consume_sse(resp))
     }
 }
 
@@ -372,172 +372,234 @@ impl Provider for AnthropicProvider {
 /// dispatch on that. PURE RAW TEXT — both `text_delta` and `thinking_delta` are
 /// emitted (the latter wrapped in `<think>…</think>`); no
 /// native `tool_use` is read (ai-core parses the `<tool_call>` envelope).
-async fn consume_sse(
-    resp: reqwest::Response,
-) -> Result<Vec<Result<ProviderEvent, String>>, String> {
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut out: Vec<Result<ProviderEvent, String>> = Vec::new();
-    let mut stop = false;
-    let mut stop_reason: Option<String> = None;
-    // What the stream actually CONTAINED — the honest basis for terminality.
-    let mut saw_tool_use = false;
-    // The `tool_use` block being assembled, if any: Anthropic streams a block's
-    // arguments as `input_json_delta` fragments, so they are concatenated here
-    // and re-emitted as ONE text envelope when the block closes (#16).
-    let mut tool_name: Option<String> = None;
-    let mut tool_args = String::new();
-    // BOTH CHANNELS ARE READ. A reasoning model streams its thought as
-    // `thinking_delta` and its answer as `text_delta`; reading only the latter
-    // drops the thought entirely — and with it any tool call the model wrote
-    // MID-THOUGHT, which ai-core is explicitly built to still dispatch. Python
-    // and swift both surface it; this bundle was the only rust backend that did
-    // not (llamacpp, ollama and nvidia all use `ThinkWrap` already). The thought
-    // is wrapped once per turn in `<think>…</think>`: parsed for tool calls,
-    // stripped before the turn persists.
-    let mut wrap = fantastic_ai_core::think::ThinkWrap::new();
+/// Per-line SSE decode state — everything the old drain-to-`Vec` loop kept in
+/// locals, made explicit so the parse can run one line at a time.
+struct SseState {
+    buf: Vec<u8>,
+    stop: bool,
+    stop_reason: Option<String>,
+    saw_tool_use: bool,
+    tool_name: Option<String>,
+    tool_args: String,
+    wrap: fantastic_ai_core::think::ThinkWrap,
+}
 
-    while let Some(chunk_res) = stream.next().await {
-        let bytes = match chunk_res {
-            Ok(b) => b,
-            Err(e) => return Err(format!("stream: {e}")),
-        };
-        buf.extend_from_slice(&bytes);
-        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
-            let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
-            let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
-                .trim_end_matches('\r')
-                .to_string();
-            if !line.starts_with("data:") {
-                continue;
-            }
-            let data = line[5..].trim();
-            if data.is_empty() {
-                continue;
-            }
-            let obj: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            match obj.get("type").and_then(Value::as_str).unwrap_or("") {
-                // A tool_use block can arrive whether or not WE declared tools —
-                // some routes emit them regardless. Record what came, and let the
-                // terminality check read that rather than our own request flag.
-                "content_block_start" => {
-                    let cb = obj.get("content_block");
-                    if cb.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
-                        saw_tool_use = true;
-                        tool_name = Some(
-                            cb.and_then(|b| b.get("name"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("send")
-                                .to_string(),
-                        );
-                        tool_args.clear();
-                    }
-                }
-                "content_block_stop" => {
-                    // One `tool_use` block finished: re-emit it as the text
-                    // envelope `ai_core` parses — the same shape a raw-route
-                    // model would have written itself. TRANSLATE, never adopt.
-                    if let Some(name) = tool_name.take() {
-                        let args: Value = serde_json::from_str(if tool_args.is_empty() {
-                            "{}"
-                        } else {
-                            &tool_args
-                        })
-                        .unwrap_or_else(|_| json!({}));
-                        out.push(Ok(ProviderEvent::Token(format!(
-                            "<tool_call>{}</tool_call>",
-                            json!({"name": name, "arguments": args})
-                        ))));
-                        tool_args.clear();
-                    }
-                }
-                "content_block_delta" => {
-                    let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
-                    if delta.get("type").and_then(Value::as_str) == Some("input_json_delta") {
-                        if let Some(t) = delta.get("partial_json").and_then(Value::as_str) {
-                            tool_args.push_str(t);
-                        }
-                    }
-                    if delta.get("type").and_then(Value::as_str) == Some("thinking_delta") {
-                        if let Some(t) = delta.get("thinking").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                if let Some(m) = wrap.open_marker() {
-                                    out.push(Ok(ProviderEvent::Token(m.to_string())));
-                                }
-                                out.push(Ok(ProviderEvent::Token(t.to_string())));
-                            }
-                        }
-                    }
-                    if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
-                        if let Some(t) = delta.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                // Content starting IS the end of the thought.
-                                if let Some(m) = wrap.close_marker() {
-                                    out.push(Ok(ProviderEvent::Token(m.to_string())));
-                                }
-                                out.push(Ok(ProviderEvent::Token(t.to_string())));
-                            }
-                        }
-                    }
-                }
-                "error" => {
-                    let msg = obj
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("anthropic stream error");
-                    return Err(format!("stream: {msg}"));
-                }
-                "message_delta" => {
-                    stop_reason = obj
-                        .get("delta")
-                        .and_then(|d| d.get("stop_reason"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or(stop_reason);
-                }
-                "message_stop" => {
-                    // Balance a span the model never closed itself, so the text
-                    // the parser sees is well-formed.
-                    if let Some(m) = wrap.close_marker() {
-                        out.push(Ok(ProviderEvent::Token(m.to_string())));
-                    }
-                    stop = true;
-                    break;
-                }
-                _ => {} // message_start, ping — ignored
-            }
-        }
-        if stop {
-            break;
+impl SseState {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            stop: false,
+            stop_reason: None,
+            saw_tool_use: false,
+            tool_name: None,
+            tool_args: String::new(),
+            wrap: fantastic_ai_core::think::ThinkWrap::new(),
         }
     }
-    // A stream that did not END TURN did not finish — say so, loudly (py-canonical,
-    // measured 2026-08-07): a completion cut by max_tokens, a refusal, or a dropped
-    // connection was returned as if the model had finished; a create_agent turn
-    // stopped mid-`code`, the partial parsed as an unterminated envelope, and the
-    // chain died with no visible cause.
-    // TERMINALITY IS DECIDED BY WHAT THE STREAM CONTAINED, not by what we asked
-    // for. A `/cc`-style route returns `tool_use` blocks for a request carrying
-    // no `tools` key at all, so gating on our own flag failed EVERY such turn on
-    // arrival — the completion was whole and we threw it away.
-    match stop_reason.as_deref() {
-        Some("end_turn") | Some("stop_sequence") => Ok(out),
-        // The model stopped to CALL something. That is a finished turn, not a
-        // truncated one — the blocks are the answer.
-        Some("tool_use") if saw_tool_use => Ok(out),
-        Some(other) => Err(format!(
-            "anthropic stream ended without end_turn: stop_reason={other:?}"
-        )),
-        None => Err(
-            "anthropic stream ended without end_turn: no stop_reason seen \
-             (connection cut mid-stream)"
-                .to_string(),
-        ),
+
+    /// Terminality, decided by what the stream CONTAINED — not by what we asked
+    /// for (py-canonical, measured 2026-08-07): a completion cut by max_tokens, a
+    /// refusal, or a dropped connection was returned as if the model had
+    /// finished; a create_agent turn stopped mid-`code`, the partial parsed as an
+    /// unterminated envelope, and the chain died with no visible cause. A
+    /// `/cc`-style route returns `tool_use` blocks for a request carrying no
+    /// `tools` key at all, so gating on our own flag failed EVERY such turn.
+    fn terminality(&self) -> Option<String> {
+        match self.stop_reason.as_deref() {
+            Some("end_turn") | Some("stop_sequence") => None,
+            // The model stopped to CALL something. That is a finished turn, not
+            // a truncated one — the blocks are the answer.
+            Some("tool_use") if self.saw_tool_use => None,
+            Some(other) => Some(format!(
+                "anthropic stream ended without end_turn: stop_reason={other:?}"
+            )),
+            None => Some(
+                "anthropic stream ended without end_turn: no stop_reason seen \
+                 (connection cut mid-stream)"
+                    .to_string(),
+            ),
+        }
     }
+}
+
+/// Decode ONE `data:` line into the events it produces. `Err` is terminal.
+fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, String> {
+    let mut out: Vec<ProviderEvent> = Vec::new();
+    if !line.starts_with("data:") {
+        return Ok(out);
+    }
+    let data = line[5..].trim();
+    if data.is_empty() {
+        return Ok(out);
+    }
+    let Ok(obj) = serde_json::from_str::<Value>(data) else {
+        return Ok(out);
+    };
+    match obj.get("type").and_then(Value::as_str).unwrap_or("") {
+        // A tool_use block can arrive whether or not WE declared tools — some
+        // routes emit them regardless. Record what came, and let the terminality
+        // check read that rather than our own request flag.
+        "content_block_start" => {
+            let cb = obj.get("content_block");
+            if cb.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
+                st.saw_tool_use = true;
+                st.tool_name = Some(
+                    cb.and_then(|b| b.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("send")
+                        .to_string(),
+                );
+                st.tool_args.clear();
+            }
+        }
+        "content_block_stop" => {
+            // One `tool_use` block finished: re-emit it as the text envelope
+            // `ai_core` parses — the same shape a raw-route model would have
+            // written itself. TRANSLATE, never adopt.
+            if let Some(name) = st.tool_name.take() {
+                let args: Value = serde_json::from_str(if st.tool_args.is_empty() {
+                    "{}"
+                } else {
+                    &st.tool_args
+                })
+                .unwrap_or_else(|_| json!({}));
+                out.push(ProviderEvent::Token(format!(
+                    "<tool_call>{}</tool_call>",
+                    json!({"name": name, "arguments": args})
+                )));
+                st.tool_args.clear();
+            }
+        }
+        "content_block_delta" => {
+            let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
+            let dtype = delta.get("type").and_then(Value::as_str);
+            if dtype == Some("input_json_delta") {
+                if let Some(t) = delta.get("partial_json").and_then(Value::as_str) {
+                    st.tool_args.push_str(t);
+                }
+            }
+            // BOTH CHANNELS ARE READ. A reasoning model streams its thought as
+            // `thinking_delta` and its answer as `text_delta`; reading only the
+            // latter drops the thought entirely — and with it any tool call the
+            // model wrote MID-THOUGHT, which ai-core is built to still dispatch.
+            if dtype == Some("thinking_delta") {
+                if let Some(t) = delta.get("thinking").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        if let Some(m) = st.wrap.open_marker() {
+                            out.push(ProviderEvent::Token(m.to_string()));
+                        }
+                        out.push(ProviderEvent::Token(t.to_string()));
+                    }
+                }
+            }
+            if dtype == Some("text_delta") {
+                if let Some(t) = delta.get("text").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        // Content starting IS the end of the thought.
+                        if let Some(m) = st.wrap.close_marker() {
+                            out.push(ProviderEvent::Token(m.to_string()));
+                        }
+                        out.push(ProviderEvent::Token(t.to_string()));
+                    }
+                }
+            }
+        }
+        "error" => {
+            let msg = obj
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("anthropic stream error");
+            return Err(format!("stream: {msg}"));
+        }
+        "message_delta" => {
+            st.stop_reason = obj
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or(st.stop_reason.take());
+        }
+        "message_stop" => {
+            // Balance a span the model never closed itself, so the text the
+            // parser sees is well-formed.
+            if let Some(m) = st.wrap.close_marker() {
+                out.push(ProviderEvent::Token(m.to_string()));
+            }
+            st.stop = true;
+        }
+        _ => {} // message_start, ping — ignored
+    }
+    Ok(out)
+}
+
+/// The SSE body as a LIVE stream of events.
+///
+/// This used to drain the whole body into a `Vec` and hand it over only when the
+/// stream had ENDED — so nothing reached `text_so_far`, the `token` events, the
+/// `streaming` phase or any subscriber until the completion was already
+/// finished. A turn cut by the per-send ceiling therefore reported "0 chars
+/// written" no matter how much the model had actually produced, which made a
+/// long thought indistinguishable from a stalled request (measured 2026-09-04,
+/// `subai_graph:rust`). Python and swift both yield per delta; this was the only
+/// backend that did not.
+fn consume_sse(resp: reqwest::Response) -> ProviderStream {
+    let inner = resp.bytes_stream();
+    // `pending` holds the events decoded from ONE chunk: a chunk can carry
+    // several lines, and each line several tokens.
+    let init = (inner, SseState::new(), VecDeque::new(), false);
+    Box::pin(futures_util::stream::unfold(
+        init,
+        |(mut inner, mut st, mut pending, mut finished)| async move {
+            loop {
+                if let Some(ev) = pending.pop_front() {
+                    return Some((ev, (inner, st, pending, finished)));
+                }
+                if finished {
+                    return None;
+                }
+                // END OF BODY. The terminality verdict is the LAST event, so a
+                // truncated completion still fails loudly instead of reading as
+                // a finished turn.
+                let Some(chunk_res) = inner.next().await else {
+                    finished = true;
+                    if let Some(why) = st.terminality() {
+                        pending.push_back(Err(why));
+                    }
+                    continue;
+                };
+                match chunk_res {
+                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                    Err(e) => {
+                        finished = true;
+                        pending.push_back(Err(format!("stream: {e}")));
+                        continue;
+                    }
+                }
+                while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
+                    let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
+                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                        .trim_end_matches('\r')
+                        .to_string();
+                    match decode_sse_line(&mut st, &line) {
+                        Ok(events) => pending.extend(events.into_iter().map(Ok)),
+                        Err(e) => {
+                            finished = true;
+                            pending.push_back(Err(e));
+                            break;
+                        }
+                    }
+                    if st.stop {
+                        finished = true;
+                        if let Some(why) = st.terminality() {
+                            pending.push_back(Err(why));
+                        }
+                        break;
+                    }
+                }
+            }
+        },
+    ))
 }
 
 // ── bundle impl ─────────────────────────────────────────────────────

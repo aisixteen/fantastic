@@ -92,6 +92,17 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   and paste its `source` verbatim at the top of your program — it gives the program a
   `kernel` object (`send`/`emit`/`watch`/`on_message`). Hand-rolling the socket framing
   costs ten turns and gets the buffering wrong.
+- **ONLY AN `exec_bridge` AGENT CAN REACT. A plain agent has NO behaviour.**
+  An agent with no `handler_module` holds a record and answers nothing: it cannot
+  receive a tick and forward it, and it cannot own a job in any active sense.
+  There is no way to author one that can — you cannot add modules. So a "specialist
+  that owns a job and delegates to children" has no form here: the thing that ACTS
+  is the runner, and the clock aims at it DIRECTLY —
+  `schedule {target: <runner>, payload: {type:'start', command, args}}`, gated by
+  that runner's `allowed`. Point the clock at the runner and give the runner the
+  reach; do not build an inert parent to hold the job. (A model spent 26,000
+  characters of one turn deriving this from silence — measured 2026-09-04.)
+
 - **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that
   started it. Its reach is that runner's `can_call`; a target must list the runner in
   its `callable_by`. Grant the runner, not the program. Persist results THROUGH the
