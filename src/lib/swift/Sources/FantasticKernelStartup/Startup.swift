@@ -53,6 +53,10 @@ public func defaultBundleRegistry() -> BundleRegistry {
         r.register(DISPENSER_MODULE, DispenserProbe())
         r.register(PLANT_MODULE, PlantProbe())
         r.register(PURCHASE_MODULE, PurchaseProbe())
+        // THE HUMAN, as an agent. Every AI probe tasks its model through this
+        // one, so the task is a gated `user -> ai` send with a ledger row
+        // instead of an operator injection from outside the kernel.
+        r.register(USER_MODULE, UserProbe())
     #endif
     r.register("text_file.tools", TextFileBundle())
     r.register("proxy_agent.tools", ProxyAgentBundle())

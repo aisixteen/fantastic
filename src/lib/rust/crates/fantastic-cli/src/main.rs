@@ -49,6 +49,10 @@ fn register_default_bundles() -> BundleRegistry {
         reg.register(probes::DISPENSER_MODULE, probes::DispenserProbe::default());
         reg.register(probes::PLANT_MODULE, probes::PlantProbe::default());
         reg.register(probes::PURCHASE_MODULE, probes::PurchaseProbe::default());
+        // THE HUMAN, as an agent. Every AI probe tasks its model through this
+        // one, so the task is a gated `user -> ai` send with a ledger row
+        // instead of an operator injection from outside the kernel.
+        reg.register(probes::USER_MODULE, probes::UserProbe::default());
     }
     reg.register(
         fantastic_text_file::HANDLER_MODULE,

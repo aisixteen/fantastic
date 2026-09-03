@@ -795,28 +795,6 @@ struct RoutingTests {
             "two identical turns must be distinguishable at a glance")
     }
 
-    /// A question turn is a legitimate silent end, so detecting one SUPPRESSES the
-    /// nudge — which is exactly why it must be the JSON PAIR and not two loose
-    /// substrings. Rust/swift accepted `"type"` anywhere and `"question"` anywhere
-    /// until 2026-09-02, so a model writing prose about a "question" (while echoing
-    /// the prompt's own `"type"` example) ended its chain silently with the task
-    /// untouched. Python's `re.search(r'"type"\s*:\s*"question"')` is the contract.
-    @Test func questionDetectionRequiresTheJsonPair() {
-        #expect(
-            asksAQuestion(
-                #"{"type":"question","request_id":"r1","kind":"text","question":"which port?"}"#))
-        #expect(
-            asksAQuestion("{\"type\" \t: \n \"question\"}"),
-            "whitespace either side of the colon is python's `\\s*`")
-        #expect(
-            !asksAQuestion(#"I'll store the "question" for later; "type" is a field."#),
-            "prose about a question is not a question turn")
-        #expect(
-            !asksAQuestion(#"{"type":"send","payload":{"q":"question"}}"#),
-            "the pair must be `\"type\": \"question\"`, not any two words")
-        #expect(!asksAQuestion("plain prose, no calls, no question at all"))
-    }
-
     /// A FAILED HANDOFF is announced as an ordinary `status` event — `detail.reason`,
     /// the shape reflect's `emits` documents and a UI subscribes to. Rust/swift put
     /// `reason`/`error` at the TOP level until 2026-09-02, so every subscriber saw

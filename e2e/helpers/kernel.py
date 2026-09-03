@@ -38,10 +38,21 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     """
     rt = runtime_name()
     if rt == "python":
+        # TEST-ONLY BUNDLES, in process. A spawned kernel gets `e2e/probes` on
+        # its PYTHONPATH (see `helpers/host/driver.py`); the in-process one is
+        # this process, so the same directory goes on `sys.path` here. Without
+        # it `handler_module: user_probe.tools` is unimportable and the human
+        # loads as a bare record that answers nothing.
+        import sys
+
+        probes = str(e2e_root() / "probes")
+        if probes not in sys.path:
+            sys.path.insert(0, probes)
         os.chdir(tempfile.mkdtemp(prefix=prefix))
-        from _testkit import boot_root  # noqa: E402
-        from ai_core import core  # noqa: E402
-        from cli import Cli  # noqa: E402
+        from _testkit import boot_root
+        from ai_core import core
+
+        from cli import Cli
 
         root = boot_root()
         Cli(root.ctx, parent=root)
@@ -51,8 +62,8 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
 
         return root, core, close
 
-    from helpers.host.driver import HostKernel, ensure_runtime  # noqa: E402
-    from helpers.host.wire import WireRoot  # noqa: E402
+    from helpers.host.driver import HostKernel, ensure_runtime
+    from helpers.host.wire import WireRoot
 
     repo = e2e_root().parent
     spec = ensure_runtime(repo, rt)

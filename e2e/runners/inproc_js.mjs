@@ -239,6 +239,69 @@ for (const entry of sc.roster) {
     }));
     continue;
   }
+  if (entry.role === "user") {
+    // THE HUMAN, as an ordinary agent. Asking used to be a TEXT CONVENTION the
+    // harness scraped out of the model's output; here it is a call whose REPLY
+    // is the answer, and the task the model receives is a gated send from this
+    // agent — so `user` has an id, a record, a reflect entry and a ledger row
+    // like any other peer. The answer is POLICY ON THE RECORD, never code.
+    const KINDS = ["text", "single", "multi", "confirm"];
+    // HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
+    // the model's prose: a turn that talks about asking leaves the tally at zero.
+    const asks = { n: 0 };
+    sideEffects[entry.id] = asks;
+    k.registerBundle("user_probe.tools", async (id, p) => {
+      if (p.type === "question") {
+        const q = p.question;
+        if (typeof q !== "string" || !q.trim()) {
+          return { error: "user_probe: question: `question` must be a non-empty string",
+                   reason: "bad_arg", arg: "question" };
+        }
+        const kind = p.kind ?? "text";
+        if (!KINDS.includes(kind)) {
+          return { error: `user_probe: question: \`kind\` must be one of ${KINDS}`,
+                   reason: "bad_arg", arg: "kind" };
+        }
+        const answer = k.get(id)?.answer;
+        // NO DEFAULT — an unwired `user` says so rather than inventing a
+        // human's words.
+        if (typeof answer !== "string" || !answer) {
+          return { error: "user_probe: no `answer` on this agent's record — the operator wires what the human says",
+                   reason: "not_connected" };
+        }
+        asks.n += 1;
+        return { answer, request_id: p.request_id ?? null, asks: asks.n };
+      }
+      if (p.type === "asks") return { asks: asks.n };
+      if (p.type === "task") {
+        if (typeof p.target !== "string" || !p.target) {
+          return { error: "user_probe: task: `target` must be a non-empty string",
+                   reason: "bad_arg", arg: "target" };
+        }
+        if (typeof p.text !== "string" || !p.text) {
+          return { error: "user_probe: task: `text` must be a non-empty string",
+                   reason: "bad_arg", arg: "text" };
+        }
+        // The send is issued BY this agent, so it is gated and its ledger row
+        // names `user` as the sender.
+        const out = await k.send([{ target: p.target,
+          payload: { type: "send", text: p.text, client_id: p.client_id ?? "user" } }]);
+        return { tasked: p.target, result: out[0].result };
+      }
+      return { error: `user_probe: unknown verb ${p.type}`, reason: "unhandled", verb: p.type };
+    });
+    k.register(new Agent({
+      id: entry.id, parentId: "kernel_state", handlerModule: "user_probe.tools",
+      answer: entry.answer,
+      sentence: "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
+      verbs: {
+        question: "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, request_id:str?. Asks the human and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends.",
+        asks: "no args — how many times the human has been asked. The tally, not prose.",
+        task: "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
+      },
+    }));
+    continue;
+  }
   if (entry.role !== "memory") {
     console.log(`  role ${entry.role} unsupported by this runner`);
     console.log(`\n${MARKER} FAIL — unsupported role ${entry.role}`);

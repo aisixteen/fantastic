@@ -1,18 +1,25 @@
 """agentic_advanced/ask_user — the model asks the HUMAN, and the answer steers it.
 
-The ask protocol is prompt-taught: when the model cannot proceed without a human
-decision it emits `{"type":"question", ...}` as strict JSON on its own line and
-stops; the answer arrives as its next turn. Two arms, SAME task, different
-answers — that difference is the measurement:
+THE HUMAN IS AN AGENT. It has an id, a record, a reflect entry, a gate and a
+ledger row like any other peer — so the model DISCOVERS it rather than being
+told a convention, and asking is an ordinary `send` whose REPLY is the answer.
+Nothing suspends and nothing is scraped out of the model's prose.
+
+The task itself also comes FROM the human (`user -> ai`, gated, ledgered)
+instead of being injected by the harness as an ungated operator send, so the
+wiring this test exercises is the wiring a real deployment uses.
+
+Two arms, SAME task, different answers — that difference is the measurement:
 
   explicit   — the human answers "crimson"; the stored value must be EXACTLY that.
                (Unguessable, so a model that skipped the ask cannot pass this arm.)
-  judgement  — the human answers "do your best judgement" (the harness default);
-               the model must pick a value ITSELF and still finish the task.
+  judgement  — the human answers "do your best judgement"; the model must pick a
+               value ITSELF and still finish the task.
 
 Memory is FILES now: the answer lands in `prefs.md` through the `text_file`
 editor. Scored on the FILE, never on prose; both arms also require that a
-question was actually asked (the answer callback fired on a real ask).
+question was actually asked — read off the KERNEL LEDGER (`ai -> user`), which
+is the only evidence that cannot be faked by talking about asking.
 """
 
 from __future__ import annotations
@@ -32,7 +39,6 @@ sys.path.insert(
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
 from helpers.kernel import open_kernel
-from helpers.proxy import DEFAULT_QUESTION_ANSWER
 
 BK = _resolve_backend()
 
@@ -40,8 +46,9 @@ TASK = (
     "Record the user's favorite color: using the text editor agent `prefs` "
     "(reflect it for its verbs), write a file `prefs.md` containing one line "
     "`color: <the color>`. You do NOT know their favorite color and you must "
-    "not guess it — ask the user (emit the question JSON on its own line, then "
-    "stop; the answer arrives as your next message). If the answer names a "
+    "not guess it — ask the human: reflect the tree to find the agent that says "
+    "it is the human, and `send` it a `question`. The answer comes straight "
+    "back as that call's reply. If the answer names a "
     "color, record exactly that. If the answer leaves the choice to you, pick "
     "one yourself and record it. When the file is written, you are done — stop."
 )
@@ -49,7 +56,7 @@ TASK = (
 
 async def _arm(name: str, answer: str):
     """One fresh kernel + AI, driven through ask → answer → act. Returns
-    (questions_asked, file_content, cap_reason).
+    (times_asked, file_content, cap_reason).
 
     The AI id is UNIQUE PER ARM: ai_core keeps its FIFO lock / queue / provider
     maps keyed by bare agent id at module scope, so two in-process kernels that
@@ -57,7 +64,7 @@ async def _arm(name: str, answer: str):
     behind arm 1's dead lock and the chain reads as ended with zero turns."""
     aid = f"ai_{name}"
     root, core, close_kernel = await open_kernel(
-        f"ask_{name}_", reach=["prefs", "kernel_store", aid, "cli"]
+        f"ask_{name}_", reach=["prefs", "kernel_store", aid, "cli", "user"]
     )
     for payload in (
         {
@@ -68,6 +75,21 @@ async def _arm(name: str, answer: str):
             "root": ".",
             "ingress_rule": "allow_all_ingress",
             "callable_by": {"prefs": "*", aid: "*", "rest": "*", "web": "*"},
+        },
+        {
+            # THE HUMAN. `answer` is the whole policy — one bundle serves both
+            # arms, and a test chooses what the person says by writing a record.
+            # Its `callable_by` is the ingress half of the gate: without it the
+            # model's question is REFUSED, which is the correct behaviour for a
+            # human nobody wired.
+            "type": "create_agent",
+            "parent_id": root.id,
+            "handler_module": "user_probe.tools",
+            "id": "user",
+            "answer": answer,
+            "description": "The human this kernel belongs to.",
+            "can_call": {aid: "*"},
+            "callable_by": {aid: "*", "rest": "*", "web": "*"},
         },
         {
             "type": "create_agent",
@@ -83,23 +105,30 @@ async def _arm(name: str, answer: str):
         r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
         assert not r.get("error"), f"create {payload['id']}: {r}"
 
-    asked: list[dict] = []
-
-    def _answer(q: dict) -> str:
-        asked.append(q)
-        print(f"  [{name}] model asked: {q.get('question')!r} -> answering {answer!r}")
-        return answer
-
     conn = await connect(
         root,
         core,
         BK,
         agent_id=aid,
-        can_call={"prefs": "*", "cli": "*", "kernel_store": "*"},
+        can_call={"prefs": "*", "cli": "*", "kernel_store": "*", "user": "*"},
+        # THE OTHER HALF OF THE WIRE. The gate is two-sided and these two are
+        # SIBLINGS, so there is no baseline edge: without this the human's task
+        # is refused at the AI's ingress and the chain never starts at all
+        # (measured 2026-09-04: zero turns, a clean cap, nothing to read).
+        callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
         record={"file_bridge_id": "kernel_store"},
     )
-    capped = await drive(conn, TASK, client_id=name, on_question=_answer)
+    # THE TASK COMES FROM THE HUMAN, not from the harness.
+    capped = await drive(conn, TASK, client_id=name, via="user")
+    # DID IT ACTUALLY ASK? The HUMAN'S OWN TALLY, which only a real call can
+    # move. A turn that merely talks about asking leaves it at zero, and the
+    # ledger cannot serve here: its rows carry the target but not the verb, so a
+    # row on `user` cannot tell the operator's opening task from a question.
+    tally = (
+        await root.send([{"target": "user", "payload": {"type": "asks"}}])
+    )[0]["result"]
+    asked = int((tally or {}).get("asks") or 0)
     await conn.close()
     content = ""
     try:
@@ -107,7 +136,10 @@ async def _arm(name: str, answer: str):
     except OSError:
         pass
     await close_kernel()
-    print(f"  [{name}] asked={len(asked)} file={content!r} cap={capped or 'clean'}")
+    print(
+        f"  [{name}] asked={asked}x file={content!r} "
+        f"cap={capped or 'clean'}"
+    )
     return asked, content, capped
 
 
@@ -115,12 +147,12 @@ async def main():
     # Arm 1 — an EXPLICIT answer must be obeyed verbatim. "crimson" is not a
     # value a model guesses on its own, so passing this arm requires the ask.
     asked1, file1, _ = await _arm("explicit", "crimson")
-    ok1 = bool(asked1) and "crimson" in file1
+    ok1 = asked1 > 0 and "crimson" in file1
 
     # Arm 2 — "do your best judgement" hands the decision back: the model must
     # choose SOME value itself and still finish.
-    asked2, file2, _ = await _arm("judgement", DEFAULT_QUESTION_ANSWER)
-    ok2 = bool(asked2) and "color" in file2 and file2.strip() != ""
+    asked2, file2, _ = await _arm("judgement", "do your best judgement")
+    ok2 = asked2 > 0 and "color" in file2 and file2.strip() != ""
 
     print(f"\n  explicit : asked+recorded-verbatim -> {'OK' if ok1 else 'NO'}")
     print(f"  judgement: asked+chose-and-recorded -> {'OK' if ok2 else 'NO'}")

@@ -32,12 +32,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from helpers.proxy import (
-    DEFAULT_QUESTION_ANSWER,
-    Limits,
-    distinct_calls,
-    find_question,
-)
+from helpers.proxy import Limits, distinct_calls
 
 BASELINE = {"$self": "*", "$parent": "*", "$children": "*"}
 
@@ -267,18 +262,20 @@ async def _live_tasks(root, aid) -> list[dict]:
 
 
 async def drive(
-    conn: Connected, task: str, *, client_id: str = "probe", on_question=None
+    conn: Connected, task: str, *, client_id: str = "probe", via: str | None = None
 ) -> str:
     """Send the task and run until the chain ends, stalls, or trips.
 
-    Returns "" on a clean end, or the reason the run was cut. When the model asks
-    the human (`{"type":"question"}` on a line of its output), the harness ANSWERS
-    it so the chain resumes — `on_question(q) -> text`, or `DEFAULT_QUESTION_ANSWER`
-    ("do your best judgement") when unset. Options are ignored on purpose: a run is
-    never blocked on a decision that is the model's own to make.
+    Returns "" on a clean end, or the reason the run was cut.
+
+    THE HARNESS NO LONGER ANSWERS QUESTIONS. It used to scrape
+    `{"type":"question"}` out of the model's prose and post a reply back in from
+    outside the kernel, which is why the human had no id, no record, no gate and
+    no ledger row. The human is an AGENT now (`e2e/probes/user_probe`) — the
+    model calls it, the answer is the reply, and a fixture chooses what the human
+    says by writing that agent's `answer` field.
     """
     root, aid, L = conn.root, conn.id, conn.limits
-    answered: set = set()
     # THE TRANSCRIPT FOLLOWS THE DRIVEN CLIENT. The wire reader polls durable
     # history by client_id and was born defaulting to "probe" — a probe driving
     # any other client got an empty transcript, a blind no-progress loop, and
@@ -288,16 +285,22 @@ async def drive(
         conn.proxy.client_id = client_id
 
     # SURFACE A FAILED SEND — ai_core returns errors, it does not raise.
-    first = (
-        await root.send(
-            [
-                {
-                    "target": aid,
-                    "payload": {"type": "send", "text": task, "client_id": client_id},
-                }
-            ]
-        )
-    )[0]["result"]
+    # WHO GIVES THE MODEL ITS WORK. `via` names the HUMAN agent, and the task is
+    # then a gated `user -> ai` send with its own ledger row — the wiring
+    # production uses. Without it the task is an OPERATOR injection
+    # (`sender=None`, ungated), which is the shape the suite has always used and
+    # which no real deployment has.
+    #
+    # The operator still pokes the human once. That single step is the person
+    # pressing enter; it is the only out-of-band action left, and it is honest.
+    opening = (
+        {"target": via, "payload": {"type": "task", "target": aid, "text": task,
+                                    "client_id": client_id}}
+        if via
+        else {"target": aid,
+              "payload": {"type": "send", "text": task, "client_id": client_id}}
+    )
+    first = (await root.send([opening]))[0]["result"]
     if isinstance(first, dict) and first.get("error"):
         print(f"\n  ** FIRST SEND FAILED: {first['error']} **\n", flush=True)
 
@@ -305,27 +308,12 @@ async def drive(
     while idle < L.idle:
         await asyncio.sleep(2.0)
         calls = distinct_calls(conn.proxy.transcript)
-        # The model asked the human — answer so the chain RESUMES (once per
-        # question). Options ignored: the answer is the model's call to make.
-        q = find_question("".join(conn.proxy.transcript))
-        if q is not None:
-            rid = str(q.get("request_id") or q.get("question") or "q")
-            if rid not in answered:
-                answered.add(rid)
-                ans = on_question(q) if on_question else DEFAULT_QUESTION_ANSWER
-                await root.send(
-                    [
-                        {
-                            "target": aid,
-                            "payload": {
-                                "type": "send",
-                                "text": ans,
-                                "client_id": client_id,
-                            },
-                        }
-                    ]
-                )
-                last, idle = conn.proxy.n, 0.0
+        # NOTHING IS SCRAPED HERE ANY MORE. The harness used to read the model's
+        # own prose for `{"type":"question"}` and post an answer back in from
+        # outside the kernel — the human had no id, no record, no gate and no
+        # ledger row. The human is an AGENT now (`e2e/probes/user_probe`): the
+        # model calls it and the answer is the reply, so a question needs the
+        # driver no more than any other call does.
         if calls != seen_calls:
             seen_calls, stale = calls, 0
         elif conn.proxy.n != last:
