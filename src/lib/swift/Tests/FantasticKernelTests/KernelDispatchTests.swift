@@ -298,7 +298,10 @@ struct SystemVerbTests {
         #expect(updated["agent"]["color"].asString == "#ff00ff")
     }
 
-    @Test func getAgentReturnsRecord() async {
+    @Test func getIsNotAKernelVerb() async {
+        // It was, in rust and swift only — python has no `get` and answers the
+        // root bundle's UNHANDLED refusal. A record is read with `list_agents`
+        // or a `reflect`, both of which every runtime has.
         let kernel = makeKernel()
         _ = await kernel.send([Item("core", [
                 "type": "create_agent",
@@ -307,7 +310,8 @@ struct SystemVerbTests {
                 "id": "g1",
             ])])[0].result
         let reply = await kernel.send([Item("core", ["type": "get", "id": "g1"])])[0].result
-        #expect(reply["id"].asString == "g1")
-        #expect(reply["handler_module"].asString == "echo.tools")
+        #expect(reply["reason"].asString == "unhandled", "\(reply.serialize())")
+        #expect(reply["verb"].asString == "get", "the refusal names the verb")
+        #expect(reply["id"].asString == nil, "it must not answer with a record")
     }
 }

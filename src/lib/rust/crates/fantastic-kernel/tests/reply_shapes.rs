@@ -212,3 +212,19 @@ async fn ledger_rows_carry_no_verb_key() {
         }
     }
 }
+
+/// `get` is NOT a kernel verb. Rust and swift answered it (returning the record,
+/// or `null` for an unknown id) and advertised it in `kernel_verbs`; python has
+/// no such verb and answers the root bundle's UNHANDLED refusal. A model reading
+/// a rust reflect therefore learned a verb the reference runtime does not have
+/// (e2e `agentic.build:rust`, 2026-09-03). A record is read with `list_agents`
+/// or a `reflect`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_is_unhandled_not_a_kernel_verb() {
+    let (_t, kernel) = mk();
+    mk_child(&kernel, "g1").await;
+    let r = call(&kernel, "kernel", json!({"type": "get", "id": "g1"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+    assert_eq!(r["verb"], "get", "the refusal names the verb");
+    assert!(r["id"].is_null(), "it must not answer with a record: {r}");
+}

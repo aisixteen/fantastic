@@ -132,3 +132,32 @@ async fn a_named_binary_item_dedups_like_any_other() {
         "the handler must not have run a second time"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_binary_item_still_reaches_the_binary_channel() {
+    // The item's own DEADLINE must not cost it its bytes. Swift had two
+    // dispatch branches and only the untimed one forwarded the blob, so every
+    // item carrying a timeout fell silently to the TEXT channel — and AI
+    // routing stamps the layer's deadline on EVERY item, making that the only
+    // shape a model could produce (e2e `E10_dialog:swift`, 2026-09-03). Rust
+    // chooses the channel once, inside the spawned task, before the deadline
+    // race; this pins that structure.
+    let (_t, kernel, seen) = mk().await;
+    let payload = b"42\n".to_vec();
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from("sink"),
+            json!({"type": "write_stream", "path": "answer"}),
+        )
+        .with_timeout(5.0)
+        .with_binary(payload.clone())])
+        .await
+        .remove(0);
+    assert_eq!(out.status, Status::Completed, "{:?}", out.result);
+    assert_eq!(out.result["written"], payload.len(), "{}", out.result);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        payload,
+        "a deadline must not divert the blob"
+    );
+}

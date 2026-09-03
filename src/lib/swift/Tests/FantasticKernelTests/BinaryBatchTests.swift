@@ -93,4 +93,23 @@ struct BinaryBatchTests {
         #expect(again.result["written"].asInt == 3, "the recorded outcome, not a rerun")
         #expect(sink.received == first, "the handler must not have run a second time")
     }
+
+    @Test func aTimedBinaryItemStillReachesTheBinaryChannel() async {
+        // The item's own DEADLINE must not cost it its bytes. `runDispatchOutcome`
+        // had two branches and only the untimed one forwarded the blob, so every
+        // item carrying a timeout silently fell to the TEXT channel. AI routing
+        // stamps the layer's deadline on EVERY item, which made this the ONLY
+        // shape a model could ever produce (e2e `E10_dialog:swift`, 2026-09-03).
+        let (kernel, sink) = await mk()
+        let payload = Data("42\n".utf8)
+        let out = await kernel.send([
+            Item(
+                AgentId("sink"),
+                .object(["type": .string("write_stream"), "path": .string("answer")]),
+                timeout: 5.0, binary: payload)
+        ])[0]
+        #expect(out.status == .completed, "\(out.result.serialize())")
+        #expect(out.result["written"].asInt == Int64(payload.count), "\(out.result.serialize())")
+        #expect(sink.received == payload, "a deadline must not divert the blob")
+    }
 }
