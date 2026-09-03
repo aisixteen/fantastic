@@ -42,6 +42,11 @@ usage() {
 default_out() {
   [ -n "$OUT" ] || OUT="$REPO/dist/fantastic-$1-$PROFILE.${2:-tar.gz}"
   mkdir -p "$(dirname "$OUT")"
+  # ABSOLUTE, ALWAYS. A recipe may `cd` into its product dir to pack (swift has
+  # to, so the shell expands `*.bundle` there), and a relative `--out` would then
+  # be written somewhere nobody asked for. Resolve it once, here, rather than
+  # making every recipe remember.
+  OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 }
 
 say() { echo "build/$(basename "$0" .sh): $*"; }

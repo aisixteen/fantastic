@@ -342,6 +342,12 @@ pub async fn send(
             });
         }
     }
+    crate::route::trace_pub(&format!(
+        "send verb ENTER agent={} client={} text_len={}",
+        agent_id.as_str(),
+        client_id,
+        text.len()
+    ));
     let send_id = mint_send_id();
     let state = state_for(agent_id);
 
@@ -458,14 +464,45 @@ pub async fn send(
             json!({"error": e, "client_id": client_id})
         }
         Err(_elapsed) => {
+            // WHAT IT HAD WRITTEN WHEN THE CLOCK RAN OUT. The generation future
+            // is dropped here and its partial text goes with it, so a timeout
+            // used to report only that it happened — not whether the model had
+            // produced nothing, was mid-answer, or was looping. `text_so_far` is
+            // already accumulated per chunk; carrying its SIZE and both ENDS
+            // makes the three distinguishable without keeping the whole turn.
+            let (partial_chars, head, tail) = {
+                let cur = state.current_meta.lock().expect("current poisoned");
+                match cur.as_ref() {
+                    Some(c) => {
+                        let t = &c.text_so_far;
+                        let n = t.chars().count();
+                        (
+                            n,
+                            t.chars().take(300).collect::<String>(),
+                            t.chars().skip(n.saturating_sub(300)).collect::<String>(),
+                        )
+                    }
+                    None => (0, String::new(), String::new()),
+                }
+            };
             emit_status(kernel, &state, agent_id, &client_id, route, "done", {
                 let mut m = Map::new();
                 m.insert("reason".to_string(), json!("timeout"));
+                m.insert("partial_chars".to_string(), json!(partial_chars));
+                m.insert("partial_head".to_string(), json!(head));
+                m.insert("partial_tail".to_string(), json!(tail));
                 m
             })
             .await;
+            // The SIZE rides the error too. The status event carries the full
+            // detail, but a subscriber can be absent (measured 2026-09-04: the
+            // announcement never reached the harness), and the error string is
+            // the one thing that always lands in the caller's reply.
             json!({
-                "error": format!("send: timeout after {timeout_secs}s"),
+                "error": format!(
+                    "send: timeout after {timeout_secs}s (had written \
+                     {partial_chars} chars)"
+                ),
                 "client_id": client_id,
             })
         }
