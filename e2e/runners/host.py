@@ -24,9 +24,8 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from backends import THINK_BUDGET
-from helpers import verdict  # noqa: E402
-from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime  # noqa: E402
-from helpers.proxy import DEFAULT_QUESTION_ANSWER, find_question  # noqa: E402
+from helpers import verdict
+from helpers.host.driver import BASE, HostKernel, ensure_runtime, runtime
 
 REPO = E2E.parent
 
@@ -46,6 +45,11 @@ ROLE_BUNDLE = {
     "dispenser": "dispenser_probe.tools",
     "flaky_plant": "plant_probe.tools",
     "purchase_desk": "purchase_probe.tools",
+    # THE HUMAN. Every AI probe tasks its model THROUGH this agent, so the task
+    # is a gated `user -> ai` send with a ledger row rather than an operator
+    # injection from outside the kernel — and the model can discover in one
+    # reflect that a human peer exists to ask.
+    "user": "user_probe.tools",
 }
 
 
@@ -251,27 +255,15 @@ def main(scenario_id: str) -> int:
         deadline = time.monotonic() + float(
             os.environ.get("IDLE", limits.get("idle_seconds", 100))
         )
-        ok, seen, answered = False, {}, set()
+        # NOTHING IS SCRAPED HERE ANY MORE. This loop used to read the model's
+        # own prose for `{"type":"question"}` and post an answer back in from
+        # outside the kernel — which is why the human had no id, no record, no
+        # gate and no ledger row. The human is an AGENT now
+        # (`e2e/probes/user_probe`, role `user`): the model calls it and the
+        # answer is the reply, so a question needs this runner no more than any
+        # other call does.
+        ok, seen = False, {}
         while time.monotonic() < deadline:
-            # The model asked the human — answer so the chain RESUMES (once per
-            # question). Options ignored: the answer is the model's call to make.
-            h = k.send("ai", {"type": "history", "client_id": "probe"})
-            for m in reversed((h.get("messages") or []) if isinstance(h, dict) else []):
-                if m.get("role") == "assistant":
-                    q = find_question(str(m.get("content") or ""))
-                    if q:
-                        rid = str(q.get("request_id") or q.get("question") or "q")
-                        if rid not in answered:
-                            answered.add(rid)
-                            k.send(
-                                "ai",
-                                {
-                                    "type": "send",
-                                    "text": DEFAULT_QUESTION_ANSWER,
-                                    "client_id": "probe",
-                                },
-                            )
-                    break
             ok = True
             for check in sc.get("expect") or []:
                 if "human_double_click" in check:

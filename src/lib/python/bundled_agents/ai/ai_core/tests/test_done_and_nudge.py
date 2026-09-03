@@ -175,29 +175,11 @@ async def test_chat_turn_is_never_nudged(seeded_kernel):
         core._providers.pop(aid, None)
 
 
-async def test_a_question_turn_is_never_nudged(seeded_kernel):
-    """Ask + stop is the OTHER legitimate silent end — the human's answer
-    resumes the chain, so the runtime must not stomp the wait with a nudge."""
-    fp = _Script(
-        [
-            _call({"type": "reflect"}).replace('"echo"', '"kernel"'),
-            'I need a decision.\n{"type":"question","request_id":"q1","kind":"text","question":"which?"}',
-        ]
-    )
-    aid = "nd_q"
-    seeded_kernel.create(
-        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
-    )
-    core._providers[aid] = fp
-    try:
-        await seeded_kernel.send(
-            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
-        )
-        await _settle(fp, 2)
-        await asyncio.sleep(0.4)
-        assert fp.calls == 2, fp.incoming
-        assert not any(m.startswith("[no call was dispatched]") for m in fp.incoming), (
-            fp.incoming
-        )
-    finally:
-        core._providers.pop(aid, None)
+# THE QUESTION-TURN EXEMPTION IS GONE. `test_a_question_turn_is_never_nudged`
+# lived here: a turn whose prose carried `{"type":"question"}` ended the chain,
+# and the runtime had to RECOGNISE that text to avoid stomping the wait with a
+# nudge. Asking is a CALL now — the model `send`s the human agent and the answer
+# is the reply — so such a turn dispatches and is never silent in the first
+# place. The behaviour is covered by the ordinary dispatched-turn cases above;
+# the human itself is exercised in e2e, where its bundle lives (`e2e/probes/`),
+# exactly like the other test-only fixtures.

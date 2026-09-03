@@ -50,42 +50,6 @@ def distinct_calls(transcript: list[str]) -> int:
     return len(seen)
 
 
-#: what a harness answers when the model asks the human — options ignored, always
-#: the same, so a run is never blocked on a decision that is the model's to make.
-DEFAULT_QUESTION_ANSWER = "do your best judgement"
-
-
-def find_question(text: str) -> dict | None:
-    """The `{"type":"question", ...}` the model put on its own line, or None.
-
-    The ask is prompt-taught — STRICT JSON on a line, then no call — so it lives in
-    the raw output, not a wired event. A harness detects it HERE and answers to
-    resume the chain (see `DEFAULT_QUESTION_ANSWER`)."""
-    import json
-
-    for line in text.splitlines():
-        # Models routinely wrap the JSON line in a markdown code span
-        # (`{...}`) — measured 2026-08-31, E33: a real ask went undetected and
-        # the chain waited forever. The wrapper is formatting, not content.
-        line = line.strip().strip("`").strip()
-        if not (line.startswith("{") and '"question"' in line):
-            continue
-        try:
-            q = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(q, dict) and q.get("type") == "question":
-            # A TEMPLATE ECHO is not an ask: models sometimes restate the taught
-            # shape verbatim, placeholders intact ("<what you are asking>",
-            # request_id "<yours>"). A real question filled those in.
-            def _placeholder(v) -> bool:
-                return isinstance(v, str) and v.startswith("<") and v.endswith(">")
-
-            if _placeholder(q.get("question")) or _placeholder(q.get("request_id")):
-                continue
-            return q
-    return None
-
 
 @dataclass
 class Limits:
@@ -107,7 +71,7 @@ class Limits:
     @classmethod
     def from_env(cls, env, **defaults) -> Limits:
         d = {**defaults}
-        g = lambda k, cast, cur: cast(env.get(k, cur))  # noqa: E731
+        g = lambda k, cast, cur: cast(env.get(k, cur))
         return cls(
             idle=g("IDLE", float, d.get("idle", 25.0)),
             max_turns=g("MAX_TURNS", int, d.get("max_turns", 40)),

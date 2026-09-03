@@ -210,32 +210,6 @@ private struct RouteBlock {
     let body: String
 }
 
-/// Did this turn ASK a question — i.e. does the text carry the JSON PAIR
-/// `"type": "question"`? A hand-scan of python's
-/// `re.search(r'"type"\s*:\s*"question"')`.
-///
-/// Two independent substring checks (`"type"` anywhere AND `"question"` anywhere)
-/// is what rust/swift did until 2026-09-02, and it silently ended chains: a model
-/// that writes prose about a `"question"` while echoing the prompt's own `"type"`
-/// example was read as having asked, so the nudge never fired and the run stopped
-/// with the task untouched.
-func asksAQuestion(_ text: String) -> Bool {
-    let chars = Array(text)
-    let key = Array("\"type\"")
-    let want = Array("\"question\"")
-    guard chars.count >= key.count else { return false }
-    for start in 0...(chars.count - key.count) {
-        guard Array(chars[start..<(start + key.count)]) == key else { continue }
-        var j = start + key.count
-        while j < chars.count, chars[j].isWhitespace { j += 1 }
-        guard j < chars.count, chars[j] == ":" else { continue }
-        j += 1
-        while j < chars.count, chars[j].isWhitespace { j += 1 }
-        guard j + want.count <= chars.count else { continue }
-        if Array(chars[j..<(j + want.count)]) == want { return true }
-    }
-    return false
-}
 
 /// Honour where this pass's output goes.
 ///
@@ -505,7 +479,11 @@ func routeReply(
     let anyBlocks = !blocks.isEmpty
     let chained =
         incoming.hasPrefix("[reply to ") || incoming.hasPrefix("[no call was dispatched]")
-    let nudging = !anyCalls && !anyBlocks && chained && !asksAQuestion(text)
+    // ASKING IS A CALL NOW, so there is no question-turn exemption: a turn that
+    // asks the human DISPATCHES and is never silent. This used to scan the
+    // model's own prose for `{"type":"question"}` — a text convention the kernel
+    // had to recognise, with the human living outside it entirely.
+    let nudging = !anyCalls && !anyBlocks && chained
     // RESET BEFORE DELIVERING, which python gets for free and swift does not:
     // `_deliver_soon` only SCHEDULES the delivered turn, so python's trailing reset
     // still lands before that turn routes. Here `deliverTurn` awaits a `send` whose

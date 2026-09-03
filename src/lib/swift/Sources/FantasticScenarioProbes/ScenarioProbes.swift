@@ -157,3 +157,123 @@ public struct PurchaseProbe: AgentBundle {
 }
 
 public enum ProbeError: Error { case failed(String) }
+
+// ── the human ───────────────────────────────────────────────────────────────
+
+public let USER_MODULE = "user_probe.tools"
+
+/// `user` — THE HUMAN, as an ordinary agent.
+///
+/// Asking used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
+/// on a line and stopped, a harness regex found it, and the answer was posted
+/// back in from outside the kernel. The human had no id, no record, no reflect
+/// entry, no ledger row and no gate — a model could not discover that a human
+/// existed at all.
+///
+/// Here it is an agent. `task` hands work to another agent AS THIS AGENT, so the
+/// send is gated and its ledger row names `user` as the sender: the wiring the
+/// test exercises is the wiring production uses. `question` returns the answer
+/// AS ITS REPLY — an ordinary call, nothing suspends, nothing is scraped.
+///
+/// The answer is POLICY ON THE RECORD (`answer`), never code, so one bundle
+/// serves every arm. There is no default: an unwired `user` fails loud rather
+/// than inventing a human's words.
+public struct UserProbe: AgentBundle {
+    public let name = "user_probe"
+    /// HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
+    /// the model's prose: a turn that talks about asking leaves the tally at
+    /// zero, exactly as the other fixtures count their own side effects.
+    private let asks = Counter()
+    public init() {}
+
+    /// The four shapes a UI can render. Advisory for this human — it answers the
+    /// same way regardless — but validated so a model learns the vocabulary the
+    /// real HUD will enforce.
+    private static let kinds = ["text", "single", "multi", "confirm"]
+
+    private func bad(_ verb: String, _ msg: String, _ arg: String) -> JSON {
+        .object([
+            "error": .string("user_probe: \(verb): \(msg)"),
+            "reason": .string("bad_arg"), "arg": .string(arg),
+        ])
+    }
+
+    public func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
+        switch payload["type"].asString ?? "" {
+        case "boot", "shutdown": return nil
+        case "reflect":
+            return .object([
+                "id": .string(agentId.value),
+                "sentence": .string(
+                    "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply."
+                ),
+                "verbs": .object([
+                    "question": .string(
+                        "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, request_id:str?. Asks the human and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends."
+                    ),
+                    "asks": .string(
+                        "no args — how many times the human has been asked. The tally, not prose."
+                    ),
+                    "task": .string(
+                        "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender."
+                    ),
+                ]),
+                "asks": .integer(Int64(asks.value)),
+            ])
+        case "asks":
+            return .object(["asks": .integer(Int64(asks.value))])
+        case "question":
+            let q = payload["question"].asString ?? ""
+            if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return bad("question", "`question` must be a non-empty string", "question")
+            }
+            let kind = payload["kind"].asString ?? "text"
+            if !Self.kinds.contains(kind) {
+                return bad("question", "`kind` must be one of \(Self.kinds)", "kind")
+            }
+            let answer = kernel.agent(agentId)?.metaValue(forKey: "answer")?.asString
+            // NO DEFAULT. A human's words are never invented: an unwired `user`
+            // says so instead of fabricating consent.
+            guard let answer, !answer.isEmpty else {
+                return .object([
+                    "error": .string(
+                        "user_probe: no `answer` on this agent's record — the operator wires what the human says"
+                    ),
+                    "reason": .string("not_connected"),
+                ])
+            }
+            return .object([
+                "answer": .string(answer),
+                "request_id": payload["request_id"],
+                "asks": .integer(Int64(asks.bump())),
+            ])
+        case "task":
+            let target = payload["target"].asString ?? ""
+            let text = payload["text"].asString ?? ""
+            if target.isEmpty {
+                return bad("task", "`target` must be a non-empty string", "target")
+            }
+            if text.isEmpty {
+                return bad("task", "`text` must be a non-empty string", "text")
+            }
+            // THE SENDER IS THIS AGENT. A handler runs inside its own dispatch
+            // scope, so this is a gated `user -> <target>` send with its own
+            // ledger row — not an operator injection.
+            let client = payload["client_id"].asString ?? "user"
+            let out = await kernel.send([
+                Item(
+                    AgentId(target),
+                    .object([
+                        "type": .string("send"), "text": .string(text),
+                        "client_id": .string(client),
+                    ]))
+            ])[0]
+            return .object(["tasked": .string(target), "result": out.result])
+        case let other:
+            return .object([
+                "error": .string("user_probe: unknown verb \"\(other)\""),
+                "reason": .string("unhandled"), "verb": .string(other),
+            ])
+        }
+    }
+}

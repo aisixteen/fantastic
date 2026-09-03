@@ -630,7 +630,11 @@ async fn route_reply_gated(
     let any_blocks = !blocks.is_empty();
     let chained =
         incoming.starts_with("[reply to ") || incoming.starts_with("[no call was dispatched]");
-    let nudging = !any_calls && !any_blocks && chained && !asks_a_question(&text);
+    // ASKING IS A CALL NOW, so there is no question-turn exemption: a turn that
+    // asks the human DISPATCHES and is never silent. This used to scan the
+    // model's own prose for `{"type":"question"}` — a text convention the kernel
+    // had to recognise, with the human living outside it entirely.
+    let nudging = !any_calls && !any_blocks && chained;
     // RESET BEFORE DELIVERING, which python gets for free and rust does not:
     // `_deliver_soon` only SCHEDULES the delivered turn, so python's trailing reset
     // still lands before that turn routes. Here `deliver` awaits a `send` whose own
@@ -688,35 +692,6 @@ async fn route_reply_gated(
     if let Some(to) = send_to.as_deref() {
         deliver(&kernel, to, &text, &client_id, sp, route).await;
     }
-}
-
-/// Did this turn ASK a question — i.e. does the text carry the JSON PAIR
-/// `"type": "question"`? A hand-scan of python's `re.search(r'"type"\s*:\s*"question"')`.
-///
-/// Two independent substring checks (`"type"` anywhere AND `"question"` anywhere)
-/// is what rust/swift did until 2026-09-02, and it silently ended chains: a model
-/// that writes prose about a `"question"` while echoing the prompt's `"type"`
-/// example was read as having asked, so the nudge never fired and the run stopped
-/// with the task untouched.
-fn asks_a_question(text: &str) -> bool {
-    let b = text.as_bytes();
-    for (at, _) in text.match_indices("\"type\"") {
-        let mut j = at + 6;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if j >= b.len() || b[j] != b':' {
-            continue;
-        }
-        j += 1;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if text[j..].starts_with("\"question\"") {
-            return true;
-        }
-    }
-    false
 }
 
 /// ONE delivered message per destination: blocks joined by a blank line, each
@@ -826,39 +801,6 @@ mod tests {
             json!(bad[0].error),
             "the report the router delivers carries that exact sentence"
         );
-    }
-
-    /// A question turn is a legitimate silent end, so detecting one SUPPRESSES the
-    /// nudge — which is exactly why it must be the JSON PAIR and not two loose
-    /// substrings. Rust/swift accepted `"type"` anywhere and `"question"` anywhere
-    /// until 2026-09-02, so a model writing prose about a "question" (while echoing
-    /// the prompt's own `"type"` example) ended its chain silently with the task
-    /// untouched. Python's `re.search(r'"type"\s*:\s*"question"')` is the contract.
-    #[test]
-    fn question_detection_requires_the_json_pair() {
-        assert!(asks_a_question(
-            r#"{"type":"question","request_id":"r1","kind":"text","question":"which port?"}"#
-        ));
-        assert!(
-            asks_a_question("{\"type\" \t: \n \"question\"}"),
-            "whitespace either side of the colon is python's `\\s*`"
-        );
-        assert!(
-            !asks_a_question(r#"I'll store the "question" for later; "type" is a field."#),
-            "prose about a question is not a question turn"
-        );
-        assert!(
-            !asks_a_question(r#"{"type":"send","payload":{"q":"question"}}"#),
-            "the pair must be `\"type\": \"question\"`, not any two words"
-        );
-        assert!(!asks_a_question(
-            "plain prose, no calls, no question at all"
-        ));
-        // The one that ends the chain for real, quoted out of the how-to.
-        assert!(asks_a_question(
-            "Here it is:\n{\"type\": \"question\", \"kind\":\"confirm\", \
-             \"question\":\"proceed?\"}"
-        ));
     }
 
     /// `target` is accepted beside `target_id`, and the fall-through is python's
