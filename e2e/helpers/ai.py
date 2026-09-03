@@ -192,6 +192,23 @@ async def connect(
         print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
         conn.trips.append(f"turn failed: {msg}")
 
+    def _died(ev: dict, det: dict) -> bool:
+        """A turn that ENDED for any reason but `ok`.
+
+        `detail.error` alone is not enough: the AI layer's own 180s per-send
+        ceiling closes a turn with `done{reason:"timeout"}` and NO error key, and
+        a cancel closes it with `done{reason:"cancelled"}`. Both were invisible,
+        so a chain that died at the ceiling and a model that chose to stop wrote
+        the identical transcript — measured on `agentic.build:rust` and `:swift`,
+        2026-09-03, where the chain ended after 160s and 280s with no reason
+        recorded anywhere in the run.
+        """
+        return (
+            ev.get("type") == "status"
+            and ev.get("phase") == "done"
+            and det.get("reason") not in (None, "ok")
+        )
+
     if core is None:
         # THE SAME EVENTS, over the socket. A failed pass announces itself as a
         # `status` carrying `detail.error`; with nobody listening a chain that
@@ -206,6 +223,8 @@ async def connect(
                     det = ev.get("detail") or {}
                     if ev.get("type") == "status" and det.get("error"):
                         _failed(str(det["error"]))
+                    if _died(ev, det):
+                        _failed(f"turn ended: {det.get('reason')}")
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         _failed(f"context too_small: {det}")
             except Exception as e:  # the watcher must never kill the run
@@ -225,6 +244,8 @@ async def connect(
         while True:
             ev = await q.get()
             det = ev.get("detail") or {}
+            if _died(ev, det):
+                _failed(f"turn ended: {det.get('reason')}")
             if ev.get("type") == "status" and det.get("error"):
                 _failed(det["error"])
 
