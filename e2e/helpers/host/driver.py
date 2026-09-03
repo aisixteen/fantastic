@@ -27,6 +27,7 @@ REFUSED by name, never approximated.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import socket
@@ -167,6 +168,16 @@ class HostKernel:
         self.reach = list(reach or [])
         self.port: int | None = None
         self.proc: subprocess.Popen | None = None
+        #: The kernel's own stdout+stderr, on DISK.
+        #:
+        #: It used to go to `subprocess.PIPE` with nobody reading it. A pipe holds
+        #: ~64KB; past that the kernel BLOCKS on its next write, mid-request,
+        #: forever — no error, no exit, just a process that stops answering. That
+        #: is indistinguishable from a model that chose to stop, and it is the one
+        #: failure this harness must never confuse with a model's. A file cannot
+        #: fill, and it is the only record of what the kernel had to say.
+        self.klog_path = workdir / "kernel.out"
+        self.klog = None
 
     def seed(self) -> int:
         """Write the faces the driver needs, before the daemon starts.
@@ -234,9 +245,14 @@ class HostKernel:
 
     def boot(self) -> "HostKernel":
         self.port = self.seed()
+        self.klog = self.klog_path.open("wb")
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.workdir, env=self.env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout=self.klog, stderr=subprocess.STDOUT)
+        # AT EXIT, NOT AT `close`. Probes bind `close_kernel` and never call it —
+        # the kernel dies with the process — so a dump that lived only in `close`
+        # never ran and the capture was worth nothing (measured 2026-09-03).
+        atexit.register(self.dump)
         for _ in range(150):  # wait on the PORT, never on a guessed sleep
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", self.port)) == 0:
@@ -251,6 +267,24 @@ class HostKernel:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        self.dump()
+
+    def dump(self) -> None:
+        """The kernel's own words, INTO THE TEST LOG.
+
+        Leaving them in a temp dir the run does not keep is the same as not
+        capturing them. Idempotent — it runs from `close` and again at exit, and
+        the second call has nothing left to say.
+        """
+        if self.klog is None:
+            return
+        self.klog.close()
+        self.klog = None
+        raw = self.klog_path.read_bytes()
+        print(f"\n  ── kernel stdout+stderr · {len(raw)} bytes ──", flush=True)
+        if raw:
+            tail = raw[-4000:].decode("utf-8", "replace")
+            print(tail if len(raw) <= 4000 else "…\n" + tail, flush=True)
 
     def send(self, target: str, payload: dict, timeout: float = 300,
              exec_id: str | None = None) -> dict:
