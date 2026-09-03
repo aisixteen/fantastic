@@ -11,7 +11,6 @@ runner: probe.py
 runtimes: [python]
 costs: turns
 limits:
-  max_tokens: 8192
   idle_seconds: 60
   max_turns: 16
   no_progress_turns: 8

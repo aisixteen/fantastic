@@ -155,6 +155,15 @@ MINE = {
     "ai",
     "cli",
     EXECUTOR_LEG,
+    # The REST driver's own legs, written by `HostKernel.seed` so an HTTP client
+    # can reach in at all. They exist ONLY on a spawned kernel, which is why
+    # every rust and swift run reported `agents_made=3 ['web','rest','ws']` for a
+    # model that had created nothing (measured 2026-09-03) — the same
+    # harness-counts-its-own-furniture bug the `_fixture` docstring below
+    # describes, in a second place.
+    "web",
+    "rest",
+    "ws",
 }
 
 
@@ -277,6 +286,14 @@ def true_total() -> int:
     return total
 
 
+#: Files the KERNEL writes, never the model. They are skipped outright: the scan
+#: reports the first non-empty file it saw when the value is absent, and reporting
+#: one of these made a run read as though the model had stored junk —
+#: `stored='{"pid":9626}' key='.fantastic/lock.json'` on every spawned runtime,
+#: `.fantastic/readme.md` in process (measured 2026-09-03).
+_KERNEL_OWNED = {"agent.json", "lock.json", "readme.md"}
+
+
 async def find_value(root, mem_id: str, want: int):
     """Memory is FILES: does any document in the run's tree hold `want`?
     The task never dictates a path or format, so the check must not either —
@@ -301,7 +318,7 @@ async def find_value(root, mem_id: str, want: int):
             if (
                 name.endswith((".py", ".jsonl"))
                 or ".tmp." in name
-                or name == "agent.json"
+                or name in _KERNEL_OWNED
             ):
                 continue
             fp = Path(dirpath) / name
@@ -718,6 +735,16 @@ async def run(
                     f"head={d.get('last_turn_head')!r} **\n",
                     flush=True,
                 )
+            _d = ev.get("detail") or {}
+            if ev.get("type") == "status" and _d.get("reason") == "timeout":
+                # WHAT IT HAD WRITTEN. Distinguishes a model that produced
+                # nothing from one mid-answer from one looping.
+                print(
+                    f"\n  ** TIMEOUT: wrote {_d.get('partial_chars')} chars\n"
+                    f"     head={_d.get('partial_head')!r}\n"
+                    f"     tail={_d.get('partial_tail')!r} **\n",
+                    flush=True,
+                )
             if ev.get("type") == "status" and (ev.get("detail") or {}).get("error"):
                 msg = (ev.get("detail") or {}).get("error")
                 print(f"\n  ** TURN FAILED: {msg} **\n", flush=True)
@@ -731,6 +758,13 @@ async def run(
         def __init__(self, inner):
             self.inner = inner
             self.n = 0
+            # ONE SURFACE, BOTH FACES. `WireTranscript` carries its own
+            # `.transcript`; this reader appends to the enclosing list. Exposing
+            # that same list under the same name is what lets the scorer read
+            # `spy.transcript` without knowing which side of the wire it is on —
+            # and not knowing is exactly what left the spawned runtimes scored
+            # against an empty list.
+            self.transcript = transcript
 
         async def chat(self, messages):
             self.n += 1
@@ -863,7 +897,7 @@ async def run(
     seen_writes = -1
     while idle < IDLE:
         await asyncio.sleep(2.0)
-        writes = _progress_count(transcript)
+        writes = _progress_count(spy.transcript)
         if writes != seen_writes:
             seen_writes, stale = writes, 0
         elif spy.n != last:
@@ -972,9 +1006,35 @@ async def run(
                 idle = 0.0
     if capped:
         print(f"\n  ** CAPPED: {capped} · {spy.n} passes **")
+        # WHAT ACTUALLY RAN. A chain that ends with no reply block and no error
+        # is unreadable from the transcript alone: it cannot distinguish "the
+        # calls never dispatched" from "they ran and the replies were dropped".
+        # The LEDGER holds every execution and what it became, so it answers
+        # exactly that (subai_graph:rust died at pass 1 after seven well-formed
+        # reflects, 2026-09-03, and nothing on record said which).
+        _led = (
+            await root.send([{"target": "kernel", "payload": {"type": "ledger"}}])
+        )[0]["result"]
+        _rows = (_led or {}).get("executions") or []
+        print(f"  ── ledger · {len(_rows)} rows ──")
+        for _r in _rows[-25:]:
+            print(
+                f"    {_r.get('id') or _r.get('pid')} {_r.get('target')} "
+                f"{_r.get('verb')} -> {_r.get('status')}"
+            )
     print(f"\n  builder finished after {spy.n} passes — walking away now")
 
-    return await score(root, store["id"], total, total + CANARY_VALUE, transcript)
+    # THE TRANSCRIPT THE SCORER READS MUST BE THE ONE THAT WAS FILLED.
+    # `transcript` is this probe's own list, appended by the in-process provider
+    # wrapper above. On a SPAWNED kernel there is no provider to wrap: the reader
+    # is a `WireTranscript` holding its OWN list, and the local one stays empty —
+    # so every rust and swift run scored `read the docs: False`, `planning
+    # language: 0/4`, `final turn length: 0 chars` and `writes=0` no matter what
+    # the model did. Measured 2026-09-03: the rust lane's own turns mention the
+    # readme twice and the log holds nine of them, all of it scored as silence.
+    return await score(
+        root, store["id"], total, total + CANARY_VALUE, spy.transcript
+    )
 
 
 # Guarded so the harness selftest can IMPORT the fixture + scoring instead of

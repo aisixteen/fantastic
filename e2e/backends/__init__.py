@@ -19,6 +19,33 @@ variable, never a guess that quietly measures the wrong model.
 from __future__ import annotations
 
 import os
+
+#: THE THINK BUDGET — one constant, every test, every runtime.
+#:
+#: `max_tokens` is a property of the MODEL PLUG, not of a test: it bounds one
+#: completion (thinking + text), and a test has no way to know what its ask costs
+#: in tokens. It used to be a per-test knob, and 25 files carried their own value
+#: — 4096, 8192, 16384, 32768 — set by whoever last watched a lane truncate.
+#: `E32_graph_shape` had none at all, so it silently ran at the backend's 8192
+#: while the sibling it is the A/B CONTROL for ran at 32768: the two differed in
+#: think budget as well as in the ask, and that comparison was never valid
+#: (measured 2026-09-03). A budget nobody can see is a budget that decides
+#: results by accident.
+#:
+#: THIS IS THE OUTPUT RESERVE, NOT THE WINDOW. The endpoint enforces
+#: `max_tokens + prompt <= context` (262144 here), so the cap is a JOINT budget:
+#: at 260_000 only 2144 tokens are left for the prompt and EVERY turn 400s on the
+#: first send —
+#:   "you requested 260000 output tokens and your prompt contains at least 2145
+#:    input tokens, for a total of at least 262145"
+#: (measured 2026-09-03). A one-shot probe with a three-word prompt accepts
+#: 260_000, which is why the window looks like a valid cap and is not.
+#:
+#: 65536 sits comfortably above anything observed — the largest legitimate
+#: authoring turn measured ~34k CHARACTERS, on the order of 9k tokens — and still
+#: leaves ~196k for the conversation, more prompt room than any lane has used.
+#: The env var overrides for one deliberate run; nothing declares it per test.
+THINK_BUDGET = 65_536
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -148,8 +175,7 @@ def _anthropic() -> Backend:
     # the raw envelope regardless.
     if os.environ.get("TOOL_USE") == "1":
         extra["tool_use"] = True
-    if mt := int(os.environ.get("MAX_TOKENS", "0")):
-        extra["max_tokens"] = mt
+    extra["max_tokens"] = int(os.environ.get("MAX_TOKENS") or THINK_BUDGET)
     # Runner (sampling/budget) params from the JSON beside this file — see above.
     if sampling := _runner_params():
         extra["sampling"] = sampling

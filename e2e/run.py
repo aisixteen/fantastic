@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from backends import THINK_BUDGET
 from backends import backend as resolve_backend  # noqa: E402
 from helpers.verdict import MARKER  # noqa: E402
 
@@ -52,17 +53,36 @@ CWDS = {
 #: the real run and the virtual one — two copies would let `--dry-run` promise
 #: something the run does not do, which is the one thing a dry run must never do.
 #:
-#: `max_tokens` is the THINK BUDGET: a reasoning model can spend a whole turn
-#: thinking and return `stop_reason=max_tokens blocks=['thinking']` — thought
-#: present, answer empty. That is a budget problem wearing a model failure's
-#: clothes, so it is a per-test knob rather than a global.
+#: `max_tokens` is NOT here. The think budget is a property of the model plug and
+#: lives as ONE constant, `backends.THINK_BUDGET` — see the note there. It was a
+#: per-test knob and 25 files carried their own value; one carried none and
+#: silently invalidated its own A/B.
+def limit_env(t: dict) -> dict:
+    """A test's declared limits, rendered into the env its runner reads.
+
+    ONE builder for the real run and the virtual one. `run.py` promises a dry run
+    never advertises something the run does not do, and the two used to render the
+    env separately — so `MAX_TOKENS`, added to the real path only, was invisible in
+    `--dry-run` (measured 2026-09-03).
+    """
+    out = {k: str(v) for k, v in (t.get("env") or {}).items()}
+    lim = t.get("limits") or {}
+    for src_key, env_key in LIMIT_ENV:
+        if src_key in lim:
+            out[env_key] = str(lim[src_key])
+    # THE THINK BUDGET — one constant, every test (see `backends.THINK_BUDGET`).
+    # A test does not declare it; an explicit `MAX_TOKENS=…` in the environment
+    # still wins for one deliberate run.
+    out.setdefault("MAX_TOKENS", os.environ.get("MAX_TOKENS") or str(THINK_BUDGET))
+    return out
+
+
 LIMIT_ENV = (
     ("idle_seconds", "IDLE"),
     ("max_turns", "MAX_TURNS"),
     ("no_progress_turns", "NO_PROGRESS"),
     ("turn_chars", "TURN_CHARS"),
     ("turn_seconds", "TURN_SECONDS"),
-    ("max_tokens", "MAX_TOKENS"),
 )
 
 
@@ -306,11 +326,7 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
     async with sem:
         log = logdir / f"{name}.log"
         # The knobs a test owns, rendered into the env its runner already reads.
-        lim = t.get("limits") or {}
-        env = {**os.environ, **{k: str(v) for k, v in (t.get("env") or {}).items()}}
-        for src_key, env_key in LIMIT_ENV:
-            if src_key in lim:
-                env[env_key] = str(lim[src_key])
+        env = {**os.environ, **limit_env(t)}
         began = time.monotonic()
         results[name] = {"state": "running", "since": began}
         with log.open("w") as fh:
@@ -521,10 +537,7 @@ async def main() -> int:
             f"· {bk.name}/{bk.model}\n"
         )
         for t in picked:
-            env_over = dict(t.get("env") or {})
-            for src_key, env_key in LIMIT_ENV:
-                if src_key in (t.get("limits") or {}):
-                    env_over[env_key] = t["limits"][src_key]
+            env_over = limit_env(t)
             env_over.update({k: str(v) for k, v in (t.get("extra_env") or {}).items()})
             args = " ".join(str(x) for x in (t.get("args") or []))
             if t.get("cmd"):

@@ -32,6 +32,7 @@ import json
 import os
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -168,7 +169,7 @@ class HostKernel:
         self.reach = list(reach or [])
         self.port: int | None = None
         self.proc: subprocess.Popen | None = None
-        #: The kernel's own stdout+stderr, on DISK.
+        #: The kernel's own stdout+stderr, on DISK — and NOT under `workdir`.
         #:
         #: It used to go to `subprocess.PIPE` with nobody reading it. A pipe holds
         #: ~64KB; past that the kernel BLOCKS on its next write, mid-request,
@@ -176,7 +177,14 @@ class HostKernel:
         #: is indistinguishable from a model that chose to stop, and it is the one
         #: failure this harness must never confuse with a model's. A file cannot
         #: fill, and it is the only record of what the kernel had to say.
-        self.klog_path = workdir / "kernel.out"
+        #:
+        #: OUTSIDE THE TREE UNDER TEST. Probes scan the workdir for what the model
+        #: wrote; a capture file living there is scanned too. Put in `workdir` on
+        #: 2026-09-03, it was immediately reported as the model's stored answer
+        #: (`stored='fantastic_kernel: headless host up…' key='kernel.out'`). A
+        #: diagnostic that becomes evidence about itself is worse than none.
+        self.klog_path = Path(
+            tempfile.mkdtemp(prefix="fantastic-kernel-out-")) / "kernel.out"
         self.klog = None
 
     def seed(self) -> int:

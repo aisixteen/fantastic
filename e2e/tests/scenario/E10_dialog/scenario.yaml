@@ -18,7 +18,6 @@ task: >-
 
 limits:
   max_turns: 10
-  max_tokens: 4096
   idle_seconds: 100
 
 # The fixture, by ROLE rather than by bundle name: a compiled kernel can only
