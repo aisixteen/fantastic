@@ -22,7 +22,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -36,7 +36,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_fork_", reach=[FB, "ai", "ai_fork", "cli"]
+        prefix="coding_fork_", reach=[FB, "ai", "ai_fork", "cli", "user"]
     )
     try:
         secret = secrets.token_hex(4)
@@ -48,13 +48,17 @@ async def main():
         })
         assert not r.get("error"), f"create {FB}: {r}"
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+        await human(root)
+
         # ── the ORIGINAL learns a fact (persisted to its sidecar) ──
         a = await connect(root, core, BK, agent_id="ai",
-                          can_call={"cli": "*"},
+                          can_call={"cli": "*", "user": "*"},
+                          callable_by={"user": "*"},
                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
         await drive(a,
             f"Remember this for later — the vault code is `{secret}`. "
-            f"Acknowledge that you have it, then {DONE}.", client_id="c")
+            f"Acknowledge that you have it, then {DONE}.", client_id="c", via="user")
         await a.close()
 
         src = "agents/ai/chat_c.jsonl"

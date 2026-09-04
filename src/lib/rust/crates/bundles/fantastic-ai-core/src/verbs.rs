@@ -629,13 +629,37 @@ pub fn inquiry_close(out: Value, payload: &Value) -> Value {
         None => json!({
             "error": "you were sent an inquiry and did not answer it: emit \
                       <tool_call>{\"name\":\"inquiry_answer\",\"arguments\":\
-                      {\"answer\":\"...\"}}</tool_call>",
+                      {\"answer\":\"<what you concluded>\"}}</tool_call>",
             "reason": "unhandled",
             "request_id": payload.get("request_id"),
         }),
-        Some(c) => json!({
-            "answer": c.arguments.get("answer").and_then(Value::as_str).unwrap_or(""),
-            "request_id": payload.get("request_id"),
-        }),
+        Some(c) => {
+            let answer = c
+                .arguments
+                .get("answer")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the
+            // shape, and a model that could not answer once will copy that
+            // example back verbatim on the retry — measured 2026-09-04 on
+            // peer_review, where "..." was written into review.md as the verdict
+            // and scored as a reviewer that had judged. Same trap as
+            // `send_binary`'s literal "@body", and it earns the same refusal.
+            if answer.trim().trim_matches('.').is_empty() {
+                json!({
+                    "error": format!(
+                        "that is the PLACEHOLDER, not an answer — `answer` came back as {answer:?}. Say what you actually concluded."
+                    ),
+                    "reason": "bad_arg",
+                    "arg": "answer",
+                    "request_id": payload.get("request_id"),
+                })
+            } else {
+                json!({
+                    "answer": answer,
+                    "request_id": payload.get("request_id"),
+                })
+            }
+        }
     }
 }

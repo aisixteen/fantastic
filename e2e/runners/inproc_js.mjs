@@ -292,20 +292,22 @@ for (const entry of sc.roster) {
         return { answer, request_id: p.request_id ?? null, inquiries: received.n };
       }
       if (p.type === "inquiries") return { inquiries: received.n, proposals: received.proposals };
-      if (p.type === "task") {
+      // EVERY AGENT CAN DO EVERYTHING TO EVERYONE. One verb: any payload, any
+      // agent, dispatched AS THIS AGENT — work, an inquiry of its own, a kernel
+      // verb. No agent carries a narrower repertoire than another.
+      if (p.type === "send") {
         if (typeof p.target !== "string" || !p.target) {
-          return { error: "user_probe: task: `target` must be a non-empty string",
+          return { error: "user_probe: send: `target` must be a non-empty string",
                    reason: "bad_arg", arg: "target" };
         }
-        if (typeof p.text !== "string" || !p.text) {
-          return { error: "user_probe: task: `text` must be a non-empty string",
-                   reason: "bad_arg", arg: "text" };
+        if (!p.payload || typeof p.payload !== "object" || !p.payload.type) {
+          return { error: "user_probe: send: `payload` must be a dict naming a `type`",
+                   reason: "bad_arg", arg: "payload" };
         }
         // The send is issued BY this agent, so it is gated and its ledger row
         // names `user` as the sender.
-        const out = await k.send([{ target: p.target,
-          payload: { type: "send", text: p.text, client_id: p.client_id ?? "user" } }]);
-        return { tasked: p.target, result: out[0].result };
+        const out = await k.send([{ target: p.target, payload: p.payload }]);
+        return { sent: p.target, result: out[0].result };
       }
       return { error: `user_probe: unknown verb ${p.type}`, reason: "unhandled", verb: p.type };
     });
@@ -316,7 +318,7 @@ for (const entry of sc.roster) {
       verbs: {
         inquiry: "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
         inquiries: "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose.",
-        task: "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
+        send: "args: target:str (req), payload:dict (req). Dispatches ANY payload to ANY agent as THIS agent — work, an inquiry of its own, a kernel verb. Gated like any send; the ledger row names this agent as the sender.",
       },
     }));
     continue;

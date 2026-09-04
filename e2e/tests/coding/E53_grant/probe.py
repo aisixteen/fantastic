@@ -55,7 +55,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_grant_", reach=[FB, "vault", "ai", "cli"]
+        prefix="coding_grant_", reach=[FB, "vault", "ai", "cli", "user"]
     )
     try:
         r = await _call(

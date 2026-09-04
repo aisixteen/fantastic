@@ -21,7 +21,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -35,7 +35,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_fanout_", reach=[FB, "notes", "ai", "cli"]
+        prefix="coding_fanout_", reach=[FB, "notes", "ai", "cli", "user"]
     )
     try:
         words = [secrets.token_hex(2) for _ in range(5)]
@@ -68,11 +68,14 @@ async def main():
             "hyphens IN ORDER (part_0 first) to `answer.md`, nothing else. "
             f"When it is written, {DONE}."
         )
+        # THE HUMAN who wants the work done — the task comes FROM here.
+        await human(root)
         conn = await connect(
-            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*"},
+            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
         )
-        await drive(conn, task, client_id="fan")
+        await drive(conn, task, client_id="fan", via="user")
         await conn.close()
         # the batch tag lives in the DELIVERED reply turn — read the kernel's
         # own history, not the model-output transcript (E53's lesson).

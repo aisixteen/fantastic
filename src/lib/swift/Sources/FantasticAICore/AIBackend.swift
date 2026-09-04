@@ -305,13 +305,29 @@ enum AIPassOutcome {
                 "error": .string(
                     "you were sent an inquiry and did not answer it: emit "
                         + "<tool_call>{\"name\":\"inquiry_answer\",\"arguments\":"
-                        + "{\"answer\":\"...\"}}</tool_call>"),
+                        + "{\"answer\":\"<what you concluded>\"}}</tool_call>"),
                 "reason": .string("unhandled"),
                 "request_id": payload["request_id"],
             ])
         }
+        let answer = said.arguments["answer"].asString ?? ""
+        // THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the shape,
+        // and a model that could not answer once will copy that example back
+        // verbatim on the retry — measured 2026-09-04 on peer_review, where
+        // "..." was written into review.md as the verdict and scored as a
+        // reviewer that had judged. Same trap as `send_binary`'s literal
+        // "@body", and it earns the same refusal.
+        if answer.trimmingCharacters(in: CharacterSet(charactersIn: " .\t\n")).isEmpty {
+            return .object([
+                "error": .string(
+                    "that is the PLACEHOLDER, not an answer — `answer` came back as "
+                        + "\"\(answer)\". Say what you actually concluded."),
+                "reason": .string("bad_arg"), "arg": .string("answer"),
+                "request_id": payload["request_id"],
+            ])
+        }
         return .object([
-            "answer": .string(said.arguments["answer"].asString ?? ""),
+            "answer": .string(answer),
             "request_id": payload["request_id"],
         ])
     }

@@ -19,7 +19,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -33,7 +33,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_gw_", reach=[FB, "vault", "ai", "ai_rev", "cli", "kernel"]
+        prefix="coding_gw_", reach=[FB, "vault", "ai", "ai_rev", "cli", "kernel", "user"]
     )
     try:
         for payload in (
@@ -52,15 +52,18 @@ async def main():
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
         # ── 1. the writer is denied (ONE connection, reused for the retry) ──
+        # THE HUMAN who wants the work done — the task comes FROM here.
+        await human(root, ai=["ai", "ai_rev"])
         w = await connect(root, core, BK, agent_id="ai",
-                          can_call={"vault": "*", "cli": "*"},
+                          can_call={"vault": "*", "cli": "*", "user": "*"},
+                          callable_by={"user": "*"},
                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
         await drive(w,
             "Write a file `note.md` containing exactly `access: granted` through "
             "the editor `vault`'s `write` verb (reflect it for the shape). Your "
             "first attempt will be DENIED by the gate — when it is, do NOT retry "
             "blindly: stop and report that you were denied. "
-            f"{DONE}.", client_id="w")
+            f"{DONE}.", client_id="w", via="user")
         h1 = await _call(root, "ai", {"type": "history", "client_id": "w"})
         denied = "unauthorized" in str(h1.get("messages", h1))
 

@@ -24,7 +24,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -49,7 +49,7 @@ async def _call(root, target, payload):
 async def main():
     token = f"zx_{secrets.token_hex(4)}"  # minted NOW — unguessable
     root, core, close = await open_kernel(
-        prefix="coding_search_", reach=[XID, ED, STORE, "ai", "cli"]
+        prefix="coding_search_", reach=[XID, ED, STORE, "ai", "cli", "user"]
     )
     try:
         os.makedirs("src/sub", exist_ok=True)
@@ -90,15 +90,20 @@ async def main():
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+
+        await human(root)
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", ED: "*", "cli": "*", STORE: "*"},
+            can_call={XID: "*", ED: "*", "cli": "*", STORE: "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": STORE},
         )
-        await drive(conn, TASK, client_id="search")
+        await drive(conn, TASK, client_id="search", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 

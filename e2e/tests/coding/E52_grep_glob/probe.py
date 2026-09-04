@@ -24,7 +24,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -71,7 +71,7 @@ def _plant() -> tuple[str, int]:
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_gg_", reach=[XID, FB, "notes", "ai", "cli"]
+        prefix="coding_gg_", reach=[XID, FB, "notes", "ai", "cli", "user"]
     )
     try:
         real_path, line_no = _plant()
@@ -108,15 +108,20 @@ async def main():
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+
+        await human(root)
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={XID: "*", "notes": "*", "cli": "*"},
+            can_call={XID: "*", "notes": "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
-        await drive(conn, TASK, client_id="gg")
+        await drive(conn, TASK, client_id="gg", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 

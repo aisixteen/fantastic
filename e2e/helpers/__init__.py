@@ -16,9 +16,21 @@ import sys
 from pathlib import Path
 
 __all__ = [
-    "bootstrap", "e2e_root", "repo_root", "Watch",
-    "Limits", "ProxyReader", "box", "distinct_calls",
-    "connect", "drive", "Connected", "BASELINE", "verdict",
+    "BASELINE",
+    "HUMAN_ANSWER",
+    "Connected",
+    "Limits",
+    "ProxyReader",
+    "Watch",
+    "bootstrap",
+    "box",
+    "connect",
+    "distinct_calls",
+    "drive",
+    "e2e_root",
+    "human",
+    "repo_root",
+    "verdict",
 ]
 
 
@@ -60,6 +72,8 @@ _LAZY = {
     "Connected": "helpers.ai",
     "connect": "helpers.ai",
     "drive": "helpers.ai",
+    "human": "helpers.ai",
+    "HUMAN_ANSWER": "helpers.ai",
 }
 
 
@@ -67,7 +81,7 @@ _LAZY = {
 # resolves to the module once anything has imported it and to the function
 # otherwise — `from helpers import verdict` would mean two different things
 # depending on import order. It has no heavy dependencies, so it is just bound.
-from helpers.verdict import verdict  # noqa: E402
+from helpers.verdict import verdict
 
 
 def __getattr__(name: str):

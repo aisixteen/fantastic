@@ -22,7 +22,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -71,7 +71,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_mail_", reach=[RUNNER, FB, "ai", "cli"]
+        prefix="coding_mail_", reach=[RUNNER, FB, "ai", "cli", "user"]
     )
     try:
         Path("worker.py").write_text(WORKER)
@@ -104,11 +104,14 @@ async def main():
             "the running worker as MAIL. The worker writes the token and exits. "
             f"When you have sent the steer, {DONE}."
         )
+        # THE HUMAN who wants the work done — the task comes FROM here.
+        await human(root)
         conn = await connect(
-            root, core, BK, can_call={RUNNER: "*", "cli": "*"},
+            root, core, BK, can_call={RUNNER: "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ), record={"file_bridge_id": FB},
         )
-        await drive(conn, task, client_id="mail")
+        await drive(conn, task, client_id="mail", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 
