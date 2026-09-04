@@ -25,7 +25,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -52,7 +52,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_pytest_", reach=[RUNNER, FB, "editor", "ai", "cli"]
+        prefix="coding_pytest_", reach=[RUNNER, FB, "editor", "ai", "cli", "user"]
     )
     try:
         Path("prog.py").write_text(PROG_BUGGY)
@@ -91,15 +91,20 @@ async def main():
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+
+        await human(root)
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={RUNNER: "*", FB: "*", "editor": "*", "cli": "*"},
+            can_call={RUNNER: "*", FB: "*", "editor": "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
-        await drive(conn, TASK, client_id="fix")
+        await drive(conn, TASK, client_id="fix", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 

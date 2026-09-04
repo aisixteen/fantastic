@@ -542,9 +542,10 @@ appears in the ledger, and someone who cannot answer REFUSES rather than
 inventing one. The same shape reaches a HUMAN (reflect the tree for the agent
 whose sentence says so) and a PEER AI — consulting a person and consulting a
 colleague are one verb, not two. Reflect before assuming anyone is reachable.
+
 RECEIVING ONE IS THE OTHER HALF. When someone `send`s YOU an `inquiry`, the turn
 you run IS your reply — say what your answer is:
-<tool_call>{"name":"inquiry_answer","arguments":{"answer":"..."}}</tool_call>
+<tool_call>{"name":"inquiry_answer","arguments":{"answer":"<what you concluded>"}}</tool_call>
 That call is not a send and dispatches nothing; it hands your answer back to
 whoever sent it. A turn that never emits it did not answer, and they are told so —
 your prose is not harvested as an answer behind your back. Answer from what you
@@ -1756,14 +1757,31 @@ def _make_inquiry(cfg: Backend):
                 "error": (
                     "you were sent an inquiry and did not answer it: emit "
                     '<tool_call>{"name":"inquiry_answer","arguments":'
-                    '{"answer":"..."}}</tool_call>'
+                    '{"answer":"<what you concluded>"}}</tool_call>'
                 ),
                 "reason": "unhandled",
                 "request_id": payload.get("request_id"),
             }
         args = said[-1].get("arguments") or {}
+        answer = args.get("answer")
+        # THE PLACEHOLDER IS NOT AN ANSWER. The refusal above SHOWS the shape,
+        # `{"answer":"..."}`, and a model that could not answer once will copy
+        # that example back verbatim on the retry — measured 2026-09-04 on
+        # peer_review, where "..." was written into review.md as the verdict and
+        # scored as a reviewer that had judged. Same trap as `send_binary`'s
+        # literal "@body", and it earns the same loud refusal.
+        if not isinstance(answer, str) or answer.strip().strip(".") == "":
+            return {
+                "error": (
+                    "that is the PLACEHOLDER, not an answer — `answer` came "
+                    "back as %r. Say what you actually concluded." % answer
+                ),
+                "reason": "bad_arg",
+                "arg": "answer",
+                "request_id": payload.get("request_id"),
+            }
         return {
-            "answer": args.get("answer", ""),
+            "answer": answer,
             "request_id": payload.get("request_id"),
         }
 

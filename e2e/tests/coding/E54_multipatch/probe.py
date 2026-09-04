@@ -21,7 +21,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -49,7 +49,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_mp_", reach=[FB, "editor", "ai", "cli"]
+        prefix="coding_mp_", reach=[FB, "editor", "ai", "cli", "user"]
     )
     try:
         r = await _call(
@@ -83,15 +83,20 @@ async def main():
         Path("lib.py").write_text(LIB)
         Path("app.py").write_text(APP)
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+
+        await human(root)
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={FB: "*", "editor": "*", "cli": "*"},
+            can_call={FB: "*", "editor": "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
-        await drive(conn, TASK, client_id="mp")
+        await drive(conn, TASK, client_id="mp", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 

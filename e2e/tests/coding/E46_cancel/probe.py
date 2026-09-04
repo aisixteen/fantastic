@@ -23,7 +23,7 @@ sys.path.insert(
     ),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -57,7 +57,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_cancel_", reach=[RUNNER, FB, "ai", "cli", "kernel"]
+        prefix="coding_cancel_", reach=[RUNNER, FB, "ai", "cli", "kernel", "user"]
     )
     try:
         # The AI's chat leg — without one, history is RAM-empty (by design) and
@@ -98,15 +98,20 @@ async def main():
         )
         assert not r.get("error"), f"create {RUNNER}: {r}"
 
+        # THE HUMAN who wants the work done — the task comes FROM here.
+
+        await human(root)
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={RUNNER: "*", "cli": "*", "kernel": ["ps", "cancel", "reflect"]},
+            can_call={RUNNER: "*", "cli": "*", "kernel": ["ps", "cancel", "reflect"], "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             record={"file_bridge_id": FB},
         )
-        await drive(conn, TASK, client_id="cancel")
+        await drive(conn, TASK, client_id="cancel", via="user")
         transcript = "".join(conn.proxy.transcript)
         await conn.close()
 

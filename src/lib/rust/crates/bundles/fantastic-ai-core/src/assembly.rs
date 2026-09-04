@@ -109,6 +109,15 @@ inventing one. The same shape reaches a HUMAN (reflect the tree for the agent
 whose sentence says so) and a PEER AI — consulting a person and consulting a
 colleague are one verb, not two. Reflect before assuming anyone is reachable.
 
+RECEIVING ONE IS THE OTHER HALF. When someone `send`s YOU an `inquiry`, the turn
+you run IS your reply — say what your answer is:
+<tool_call>{"name":"inquiry_answer","arguments":{"answer":"<what you concluded>"}}</tool_call>
+That call is not a send and dispatches nothing; it hands your answer back to
+whoever sent it. A turn that never emits it did not answer, and they are told so —
+your prose is not harvested as an answer behind your back. Answer from what you
+know NOW: this one turn is the reply, so if you need to look something up
+first, say that instead of leaving them waiting.
+
 HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
 literally:

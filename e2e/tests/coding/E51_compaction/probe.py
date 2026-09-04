@@ -20,7 +20,7 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, verdict
+from helpers import Limits, connect, drive, human, verdict
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -35,7 +35,7 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_cmp_", reach=[FB, "notes", "ai", "cli"]
+        prefix="coding_cmp_", reach=[FB, "notes", "ai", "cli", "user"]
     )
     try:
         secret = secrets.token_hex(4)
@@ -71,14 +71,17 @@ async def main():
             "view, use `recall` (send yourself {type:'recall', query:'passphrase'}) "
             f"to page it back. Then {DONE}."
         )
+        # THE HUMAN who wants the work done — the task comes FROM here.
+        await human(root)
         conn = await connect(
-            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*"},
+            root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             # Tiny window forces compaction; own leg persists chat for recall.
             record={"file_bridge_id": FB, "context_window": 8000, "num_ctx": 8000,
                     "context_strategy": "truncate"},
         )
-        await drive(conn, task, client_id="cmp")
+        await drive(conn, task, client_id="cmp", via="user")
         await conn.close()
         # DURABLE proof, timing-independent: the model's own history (whole,
         # untrimmed). A recall REPLY that carries the passphrase proves BOTH

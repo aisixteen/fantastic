@@ -257,7 +257,7 @@ impl Bundle for UserProbe {
                 "verbs": {
                     "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
                     "inquiries": "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose.",
-                    "task": "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
+                    "send": "args: target:str (req), payload:dict (req). Dispatches ANY payload to ANY agent as THIS agent — work, an inquiry of its own, a kernel verb. Gated like any send; the ledger row names this agent as the sender.",
                 },
                 "inquiries": self.inquiries.get(),
             }),
@@ -347,29 +347,28 @@ impl Bundle for UserProbe {
                     }
                 }
             }
-            "task" => {
+            // EVERY AGENT CAN DO EVERYTHING TO EVERYONE. One verb: any payload,
+            // any agent, dispatched AS THIS AGENT — work, an inquiry of its own,
+            // a kernel verb. No agent carries a narrower repertoire than another.
+            "send" => {
                 let target = payload.get("target").and_then(Value::as_str).unwrap_or("");
-                let text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+                let body = payload.get("payload").filter(|v| v.is_object());
                 if target.is_empty() {
-                    json!({"error": "user_probe: task: `target` must be a non-empty string", "reason": "bad_arg", "arg": "target"})
-                } else if text.is_empty() {
-                    json!({"error": "user_probe: task: `text` must be a non-empty string", "reason": "bad_arg", "arg": "text"})
+                    json!({"error": "user_probe: send: `target` must be a non-empty string", "reason": "bad_arg", "arg": "target"})
+                } else if body.is_none_or(|b| b.get("type").is_none()) {
+                    json!({"error": "user_probe: send: `payload` must be a dict naming a `type`", "reason": "bad_arg", "arg": "payload"})
                 } else {
                     // THE SENDER IS THIS AGENT. A handler runs inside its own
                     // dispatch scope, so this is a gated `user -> <target>` send
                     // with its own ledger row — not an operator injection.
-                    let client = payload
-                        .get("client_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("user");
                     let out = kernel
                         .send(vec![fantastic_kernel::Item::new(
                             AgentId::from(target),
-                            json!({"type": "send", "text": text, "client_id": client}),
+                            body.cloned().unwrap_or(Value::Null),
                         )])
                         .await
                         .remove(0);
-                    json!({"tasked": target, "result": out.result})
+                    json!({"sent": target, "result": out.result})
                 }
             }
             other => {

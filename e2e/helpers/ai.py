@@ -261,6 +261,47 @@ async def _live_tasks(root, aid) -> list[dict]:
     return [t for t in rows if t.get("agent") == aid and t.get("verb") != "ps"]
 
 
+#: What the fixture human answers. One string, so no probe invents its own — a
+#: test that needs a DIFFERENT answer writes that agent's `answer` field.
+HUMAN_ANSWER = "do your best judgement"
+
+
+async def human(root, *, agent_id: str = "user", ai: str | list[str] = "ai",
+                answer: str = HUMAN_ANSWER, **meta) -> dict:
+    """Create THE HUMAN as an ordinary agent, both gate halves wired.
+
+    ONE definition. Sixteen probes each writing their own `create_agent` for the
+    person is sixteen copies to drift, and the wiring is the part that is easy to
+    get wrong: the AI and the human are SIBLINGS, so there is no baseline edge
+    between them and BOTH halves must be granted or the first task is refused at
+    ingress and the chain never starts (measured 2026-09-04 on the first
+    conversion: zero turns, a clean cap, nothing to read).
+
+    The probe still grants its AI `can_call: {"user": "*"}` and passes
+    `callable_by={"user": "*"}` to `connect` — that half belongs to the AI's own
+    record, which this helper does not own.
+    """
+    # EVERY AI IT MAY TASK, not just one. A probe with a second session (a cold
+    # agent, a reviewer) names its own ids; granting only `ai` left the second
+    # one unreachable and its chain never started — zero turns, a clean cap,
+    # nothing to read (measured 2026-09-04 on memory_distill).
+    ais = [ai] if isinstance(ai, str) else list(ai)
+    payload = {
+        "type": "create_agent",
+        "parent_id": root.id,
+        "handler_module": "user_probe.tools",
+        "id": agent_id,
+        "answer": answer,
+        "description": "The human this kernel belongs to.",
+        "can_call": {a: "*" for a in ais},
+        "callable_by": {**{a: "*" for a in ais}, "rest": "*", "web": "*"},
+        **meta,
+    }
+    r = (await root.send([{"target": root.id, "payload": payload}]))[0]["result"]
+    assert not r.get("error"), f"create {agent_id}: {r}"
+    return r
+
+
 async def drive(
     conn: Connected, task: str, *, client_id: str = "probe", via: str | None = None
 ) -> str:

@@ -232,8 +232,8 @@ public struct UserProbe: AgentBundle {
                     "inquiries": .string(
                         "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose."
                     ),
-                    "task": .string(
-                        "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender."
+                    "send": .string(
+                        "args: target:str (req), payload:dict (req). Dispatches ANY payload to ANY agent as THIS agent — work, an inquiry of its own, a kernel verb. Gated like any send; the ledger row names this agent as the sender."
                     ),
                 ]),
                 "inquiries": .integer(Int64(inquiries.value)),
@@ -294,28 +294,23 @@ public struct UserProbe: AgentBundle {
                 "request_id": payload["request_id"],
                 "inquiries": .integer(Int64(inquiries.bump())),
             ])
-        case "task":
+        // EVERY AGENT CAN DO EVERYTHING TO EVERYONE. One verb: any payload, any
+        // agent, dispatched AS THIS AGENT — work, an inquiry of its own, a
+        // kernel verb. No agent carries a narrower repertoire than another.
+        case "send":
             let target = payload["target"].asString ?? ""
-            let text = payload["text"].asString ?? ""
             if target.isEmpty {
-                return bad("task", "`target` must be a non-empty string", "target")
+                return bad("send", "`target` must be a non-empty string", "target")
             }
-            if text.isEmpty {
-                return bad("task", "`text` must be a non-empty string", "text")
+            guard case .object = payload["payload"], payload["payload"]["type"].asString != nil
+            else {
+                return bad("send", "`payload` must be a dict naming a `type`", "payload")
             }
             // THE SENDER IS THIS AGENT. A handler runs inside its own dispatch
             // scope, so this is a gated `user -> <target>` send with its own
             // ledger row — not an operator injection.
-            let client = payload["client_id"].asString ?? "user"
-            let out = await kernel.send([
-                Item(
-                    AgentId(target),
-                    .object([
-                        "type": .string("send"), "text": .string(text),
-                        "client_id": .string(client),
-                    ]))
-            ])[0]
-            return .object(["tasked": .string(target), "result": out.result])
+            let out = await kernel.send([Item(AgentId(target), payload["payload"])])[0]
+            return .object(["sent": .string(target), "result": out.result])
         case let other:
             return .object([
                 "error": .string("user_probe: unknown verb \"\(other)\""),
