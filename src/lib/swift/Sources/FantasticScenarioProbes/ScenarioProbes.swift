@@ -37,6 +37,20 @@ private final class Counter: @unchecked Sendable {
     }
 }
 
+/// Proposals the human is holding — the ordered list a runner reads back.
+private final class Held: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [JSON] = []
+    func add(_ j: JSON) {
+        lock.lock(); defer { lock.unlock() }
+        items.append(j)
+    }
+    var all: [JSON] {
+        lock.lock(); defer { lock.unlock() }
+        return items
+    }
+}
+
 private func token() -> String {
     String(UUID().uuidString.prefix(8)).lowercased()
 }
@@ -180,10 +194,14 @@ public let USER_MODULE = "user_probe.tools"
 /// than inventing a human's words.
 public struct UserProbe: AgentBundle {
     public let name = "user_probe"
-    /// HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
-    /// the model's prose: a turn that talks about asking leaves the tally at
-    /// zero, exactly as the other fixtures count their own side effects.
+    /// HOW MANY TIMES THIS AGENT WAS ACTUALLY ASKED. The scorer reads THIS,
+    /// never the model's prose: a turn that talks about asking leaves the tally
+    /// at zero, exactly as the other fixtures count their own side effects.
     private let asks = Counter()
+    /// PROPOSALS handed over. A question may carry an `action` the asker may not
+    /// perform itself — "buy this, if you agree". It is HELD, never run here;
+    /// pressing the button is a separate act by the person.
+    private let proposals = Held()
     public init() {}
 
     /// The four shapes a UI can render. Advisory for this human — it answers the
@@ -209,10 +227,10 @@ public struct UserProbe: AgentBundle {
                 ),
                 "verbs": .object([
                     "question": .string(
-                        "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, request_id:str?. Asks the human and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends."
+                        "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here."
                     ),
                     "asks": .string(
-                        "no args — how many times the human has been asked. The tally, not prose."
+                        "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose."
                     ),
                     "task": .string(
                         "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender."
@@ -221,7 +239,10 @@ public struct UserProbe: AgentBundle {
                 "asks": .integer(Int64(asks.value)),
             ])
         case "asks":
-            return .object(["asks": .integer(Int64(asks.value))])
+            return .object([
+                "asks": .integer(Int64(asks.value)),
+                "proposals": .array(proposals.all),
+            ])
         case "question":
             let q = payload["question"].asString ?? ""
             if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -242,6 +263,7 @@ public struct UserProbe: AgentBundle {
                     "reason": .string("not_connected"),
                 ])
             }
+            if case .object = payload["action"] { proposals.add(payload["action"]) }
             return .object([
                 "answer": .string(answer),
                 "request_id": payload["request_id"],

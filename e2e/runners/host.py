@@ -85,37 +85,6 @@ def substitute(sc: dict) -> dict:
     return _json.loads(raw)
 
 
-def _extract_action(text: str) -> dict | None:
-    """Pull the `action` object out of the model's proposal line.
-
-    Walks to the MATCHING brace rather than regexing to the first `}` — the
-    payload is nested, and a lazy match truncates it into unparseable JSON.
-    """
-    import json as _json
-
-    start = text.find("{")
-    if start < 0:
-        return None
-    depth = in_str = esc = 0
-    for i, c in enumerate(text[start:], start):
-        if esc:
-            esc = 0
-        elif c == "\\":
-            esc = 1
-        elif c == '"':
-            in_str ^= 1
-        elif not in_str:
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _json.loads(text[start : i + 1]).get("action")
-                    except Exception:
-                        return None
-    return None
-
 
 def main(scenario_id: str) -> int:
     sc = load(scenario_id)
@@ -176,6 +145,12 @@ def main(scenario_id: str) -> int:
                 # The text editor writes THROUGH the store — both gate halves.
                 meta["target_id"] = store["id"]
                 meta["can_call"] = {store["id"]: "*"}
+            if entry["role"] == "user":
+                # THE HUMAN'S WORDS ARE POLICY ON ITS RECORD. The scenario says
+                # what the person answers; without carrying it the human has no
+                # `answer` and REFUSES every question, which is correct
+                # behaviour for a human nobody wired and useless as a fixture.
+                meta["answer"] = entry["answer"]
             if entry["role"] == "compute":
                 # The COMMAND allowlist is the only gate — regexes over the
                 # full command line; the runner permits its own python.
@@ -225,18 +200,18 @@ def main(scenario_id: str) -> int:
             # divergence is real and is reported as such — but the assistant
             # turn reaches the chat store on every runtime, so reading it there
             # asks the same question of all three.
+            # READ THE PROPOSAL OFF THE HUMAN. It used to be scraped out of the
+            # model's prose; it is a real call now, so the human HOLDS what it
+            # was handed and the runner asks for it. "The person was asked" is
+            # then a fact the kernel witnessed, not a sentence the model wrote.
             action, waited = None, time.monotonic() + 60
             while action is None and time.monotonic() < waited:
-                h = k.send("ai", {"type": "history", "client_id": "probe"})
-                for m in reversed(
-                    (h.get("messages") or []) if isinstance(h, dict) else []
-                ):
-                    if m.get("role") == "assistant":
-                        action = _extract_action(str(m.get("content") or ""))
-                        if action:
-                            break
-                if action is None:
-                    time.sleep(2.0)
+                held = k.send("user", {"type": "asks"})
+                props = (held.get("proposals") or []) if isinstance(held, dict) else []
+                if props:
+                    action = props[-1]
+                    break
+                time.sleep(2.0)
             print(f"\n  proposal: {action}")
             if action and action.get("target") and action.get("id"):
                 for _ in range(2):

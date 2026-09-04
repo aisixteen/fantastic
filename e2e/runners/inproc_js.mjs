@@ -248,7 +248,11 @@ for (const entry of sc.roster) {
     const KINDS = ["text", "single", "multi", "confirm"];
     // HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
     // the model's prose: a turn that talks about asking leaves the tally at zero.
-    const asks = { n: 0 };
+    // PROPOSALS handed over: a question may carry an `action` the asker may not
+    // perform itself. It is HELD, never run here — pressing the button is a
+    // separate act by the person, and the runner reads it from a call the human
+    // actually received rather than from the model's prose.
+    const asks = { n: 0, proposals: [] };
     sideEffects[entry.id] = asks;
     k.registerBundle("user_probe.tools", async (id, p) => {
       if (p.type === "question") {
@@ -269,10 +273,11 @@ for (const entry of sc.roster) {
           return { error: "user_probe: no `answer` on this agent's record — the operator wires what the human says",
                    reason: "not_connected" };
         }
+        if (p.action && typeof p.action === "object") asks.proposals.push(p.action);
         asks.n += 1;
         return { answer, request_id: p.request_id ?? null, asks: asks.n };
       }
-      if (p.type === "asks") return { asks: asks.n };
+      if (p.type === "asks") return { asks: asks.n, proposals: asks.proposals };
       if (p.type === "task") {
         if (typeof p.target !== "string" || !p.target) {
           return { error: "user_probe: task: `target` must be a non-empty string",
@@ -295,8 +300,8 @@ for (const entry of sc.roster) {
       answer: entry.answer,
       sentence: "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
       verbs: {
-        question: "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, request_id:str?. Asks the human and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends.",
-        asks: "no args — how many times the human has been asked. The tally, not prose.",
+        question: "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here.",
+        asks: "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose.",
         task: "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
       },
     }));
@@ -380,11 +385,13 @@ for (const check of sc.expect) {
     // THE HUMAN. Presses the button twice with the MODEL'S OWN id — an operator
     // send, which is why the AI's lack of a grant does not stop it. The ledger
     // must make the second press harmless.
-    const m = out.text.match(/\{[^\n]*"action"[^\n]*\}/);
-    let action = null;
-    try {
-      action = m ? JSON.parse(m[0]).action : null;
-    } catch { /* a proposal that will not parse is a failed proposal */ }
+    // READ THE PROPOSAL OFF THE HUMAN. It used to be regexed out of the model's
+    // prose; it is a real call now, so the human HOLDS what it was handed and
+    // the runner asks for it — "the person was asked" becomes a fact the kernel
+    // witnessed rather than a sentence the model wrote.
+    const held = (await k.send([{ target: "user", payload: { type: "asks" } }]))[0].result;
+    const props = held?.proposals ?? [];
+    const action = props.length ? props[props.length - 1] : null;
     console.log(`\n  proposal: ${JSON.stringify(action)}`);
     if (!action?.target || !action?.id) { ok = false; continue; }
     for (let i = 0; i < 2; i++) {

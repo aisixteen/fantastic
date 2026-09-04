@@ -20,6 +20,11 @@ The answer is POLICY ON THE RECORD (`answer`), not code. One bundle serves every
 arm: a test that wants a specific answer writes a different record. There is no
 default — an unwired `user` fails loud rather than inventing a human's words.
 
+A human also HOLDS AUTHORITY A MODEL CANNOT RAISE. `grants` on the record is a
+list of kernel payloads applied when asked, before answering — the declarative
+form of "the person opened the door for you". That is a human's real power in
+this substrate, and expressing it as data keeps one bundle serving every arm.
+
 The production twin of this agent is a HUD bundle at the same id, answering the
 same verb. The model cannot tell them apart, which is the point.
 """
@@ -33,10 +38,13 @@ SENTENCE = (
 VERBS = {
     "question": (
         "args: question:str (req), kind:str? (text|single|multi|confirm), "
-        "options:list? , request_id:str?. Asks the human and RETURNS the "
-        "answer — {answer, request_id}. An ordinary call: nothing suspends."
+        "options:list?, action:dict?, request_id:str?. Asks, and RETURNS the "
+        "answer — {answer, request_id}. An ordinary call: nothing suspends. "
+        "An `action` is a PROPOSAL the asker may not perform itself: it is "
+        "HELD, never run here."
     ),
-    "asks": "no args — how many times the human has been asked. The tally, not prose.",
+    "asks": "no args — {asks, proposals}: how many times this agent has been "
+            "asked, and every `action` a question handed it. The tally, not prose.",
     "task": (
         "args: target:str (req), text:str (req). The human hands work to "
         "another agent; the send carries THIS agent as its sender."
@@ -53,6 +61,13 @@ KINDS = ("text", "single", "multi", "confirm")
 #: at zero. The other fixtures count their side effects for the same reason —
 #: a model cannot fake the desk's own tally.
 _ASKS: dict[str, int] = {}
+
+#: PROPOSALS the human was handed, per agent id. A question may carry an
+#: `action` the asker may not perform itself — "buy this, if you agree". The
+#: human HOLDS it; pressing the button is a separate act by the person. The
+#: runner reads the proposal from HERE, off a call the human actually received,
+#: instead of scraping it out of the model's prose.
+_PROPOSALS: dict[str, list] = {}
 
 
 def _refuse(verb: str, msg: str, **extra) -> dict:
@@ -87,12 +102,44 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
                          "the operator wires what the human says",
                 "reason": "not_connected",
             }
+        # AUTHORITY FIRST, THEN THE ANSWER. A model cannot raise its own reach
+        # (`side:"self-grant"` is refused); a human can, and does it here before
+        # replying, so "granted — retry" is true by the time the model reads it.
+        rec_grants = rec.get("grants")
+        applied = 0
+        if isinstance(rec_grants, list):
+            for g in rec_grants:
+                if not isinstance(g, dict):
+                    continue
+                # THE ROOT'S REAL ID, not the `kernel` alias: the alias routes
+                # a dispatch, but the gate resolves the target first, so a grant
+                # written against `kernel` is refused naming the real root.
+                out = await agent.send([{"target": agent.ctx.root.id, "payload": g}])
+                err = (out[0].get("result") or {}).get("error")
+                # A HUMAN THAT COULD NOT OPEN THE DOOR MUST NOT SAY IT DID.
+                # Answering "granted" over a refused grant sends the model back
+                # to a wall that never moved, and it reads as the model failing
+                # to retry (measured 2026-09-04: `update_agent` is PRIVILEGED
+                # and a `"*"` grant does not cover it, so the human's own edit
+                # was refused while it cheerfully replied "access granted").
+                if err:
+                    return {
+                        "error": f"user_probe: grant refused, so the answer "
+                                 f"would be false: {err}",
+                        "reason": "unauthorized",
+                        "grant": g,
+                    }
+                applied += 1
+        action = payload.get("action")
+        if isinstance(action, dict):
+            _PROPOSALS.setdefault(id, []).append(action)
         _ASKS[id] = _ASKS.get(id, 0) + 1
         return {"answer": answer, "request_id": payload.get("request_id"),
-                "asks": _ASKS[id]}
+                "asks": _ASKS[id], "granted": applied}
 
     if verb == "asks":
-        return {"asks": _ASKS.get(id, 0)}
+        return {"asks": _ASKS.get(id, 0),
+                "proposals": _PROPOSALS.get(id, [])}
 
     if verb == "task":
         target = payload.get("target")

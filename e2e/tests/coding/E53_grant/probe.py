@@ -1,10 +1,18 @@
 """coding/grant — the permission lifecycle, model-driven (C5).
 
-The two-sided gate DENIES the model's first write (the vault does not accept
-it on ingress). The measurement: the model reads the denial, asks the HUMAN
-for access (the question protocol), the operator opens the vault's
-`callable_by` and answers — and the model RETRIES and finishes. Scored on the
-FILE plus the transcript carrying the denial, the ask, and the success.
+The two-sided gate DENIES the model's first write (the vault does not accept it
+on ingress). The measurement: the model reads the denial, asks the HUMAN for
+access, the human OPENS the vault's `callable_by` and answers — and the model
+RETRIES and finishes. Scored on the FILE plus the transcript carrying the
+denial, the ask, and the success.
+
+THE HUMAN IS AN AGENT here, not a harness callback. That matters most in this
+test of all of them: what the human does is RAISE AUTHORITY THE MODEL CANNOT
+RAISE ITSELF (editing your own `can_call` is refused `side:"self-grant"`). It is
+declared as data — `grants` on the human's record, applied when asked, before
+answering — so "granted, retry" is true by the time the model reads it, and the
+ask itself is a gated call with a ledger row rather than JSON scraped out of the
+model's prose.
 """
 
 from __future__ import annotations
@@ -33,9 +41,10 @@ TASK = (
     "`note.md` containing exactly one line `access: granted` through `vault`'s "
     "`write` verb (reflect it for the shape). You are NOT authorized yet — "
     "your first call will be DENIED by the gate. When that happens, do not "
-    "retry blindly and do not give up: ask the user to open access for you "
-    "(emit the question JSON on its own line, then stop; the answer arrives "
-    "as your next message). After access is granted, retry the write. When "
+    "retry blindly and do not give up: ask the HUMAN to open access for you — "
+    "reflect the tree to find the agent that says it is the human, and `send` "
+    "it a `question`. The answer comes straight back as that call's reply. "
+    "After access is granted, retry the write. When "
     "the file is written, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
 )
 
@@ -81,44 +90,62 @@ async def main():
         )
         assert not r.get("error"), f"create vault: {r}"
 
+        # THE HUMAN, holding the authority the model cannot raise. `grants` is
+        # applied when it is asked, BEFORE it answers — so "granted, retry" is
+        # true by the time the model reads it. Policy as data: no callback, no
+        # code path special to this test.
+        r = await _call(
+            root,
+            root.id,
+            {
+                "type": "create_agent",
+                "parent_id": root.id,
+                "id": "user",
+                "handler_module": "user_probe.tools",
+                "answer": "access granted — retry your write now",
+                "grants": [
+                    {
+                        "type": "update_agent",
+                        "id": "vault",
+                        "callable_by": {"rest": "*", "web": "*", "ai": "*"},
+                    }
+                ],
+                "description": "The human this kernel belongs to.",
+                # TWO TRAPS IN ONE LINE, both measured 2026-09-04.
+                # `update_agent` is PRIVILEGED: never covered by a wildcard, so
+                # it must be NAMED. And the grant must name the ROOT'S REAL ID,
+                # not the `kernel` alias — the alias routes a dispatch but the
+                # gate resolves the target first, so `{"kernel": [...]}` refused
+                # with "user may not call 'update_agent' on kernel_state".
+                "can_call": {root.id: ["update_agent"], "ai": "*"},
+                "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+            },
+        )
+        assert not r.get("error"), f"create user: {r}"
+
         conn = await connect(
             root,
             core,
             BK,
-            can_call={"vault": "*", "cli": "*"},
+            can_call={"vault": "*", "cli": "*", "user": "*"},
+            # Two-sided gate, and these are SIBLINGS: without the ingress half
+            # the human's task is refused and the chain never starts.
+            callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
             # The chat leg — history persistence; chat rides operator context,
             # so the vault wall below is untouched by it.
             record={"file_bridge_id": FB},
         )
 
-        asked = {"n": 0}
-
-        def grant_access(q) -> str:
-            """THE HUMAN, saying yes: the operator opens the vault's ingress
-            (the authority the model itself can never raise), then answers."""
-            asked["n"] += 1
-
-            async def _open():
-                await _call(
-                    root,
-                    root.id,
-                    {
-                        "type": "update_agent",
-                        "id": "vault",
-                        "callable_by": {"rest": "*", "web": "*", "ai": "*"},
-                    },
-                )
-
-            asyncio.get_event_loop().create_task(_open())
-            return "access granted — retry your write now"
-
-        await drive(conn, TASK, client_id="grant", on_question=grant_access)
+        # The task comes FROM the human — gated, ledgered, a real sender.
+        await drive(conn, TASK, client_id="grant", via="user")
         await conn.close()
 
         # The denial lives in the DELIVERED reply turns — read the kernel's own
         # durable history, not the model-output transcript (which holds only
         # what the model emitted; measured on this test's second run).
+        # THE HUMAN'S OWN TALLY — only a real call moves it.
+        asked = int((await _call(root, "user", {"type": "asks"})).get("asks") or 0)
         hist = await _call(root, "ai", {"type": "history", "client_id": "grant"})
         joined = str(hist.get("messages", hist))
 
@@ -126,7 +153,7 @@ async def main():
         content = note.read_text() if note.exists() else "<missing>"
         checks = [
             ("the wall was real (a denial reached the model)", "unauthorized" in joined),
-            ("the model asked instead of hammering", asked["n"] >= 1),
+            ("the model asked instead of hammering", asked >= 1),
             ("the file landed after the grant", content.strip() == "access: granted"),
         ]
         for name, ok in checks:
