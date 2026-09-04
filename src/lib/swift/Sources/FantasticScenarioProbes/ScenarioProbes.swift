@@ -178,7 +178,7 @@ public let USER_MODULE = "user_probe.tools"
 
 /// `user` — THE HUMAN, as an ordinary agent.
 ///
-/// Asking used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
+/// An inquiry used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
 /// on a line and stopped, a harness regex found it, and the answer was posted
 /// back in from outside the kernel. The human had no id, no record, no reflect
 /// entry, no ledger row and no gate — a model could not discover that a human
@@ -194,11 +194,11 @@ public let USER_MODULE = "user_probe.tools"
 /// than inventing a human's words.
 public struct UserProbe: AgentBundle {
     public let name = "user_probe"
-    /// HOW MANY TIMES THIS AGENT WAS ACTUALLY ASKED. The scorer reads THIS,
-    /// never the model's prose: a turn that talks about asking leaves the tally
+    /// HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED. The scorer reads THIS,
+    /// never the model's prose: a turn that only talks about it leaves the tally
     /// at zero, exactly as the other fixtures count their own side effects.
-    private let asks = Counter()
-    /// PROPOSALS handed over. A question may carry an `action` the asker may not
+    private let inquiries = Counter()
+    /// PROPOSALS handed over. An inquiry may carry an `action` the sender may not
     /// perform itself — "buy this, if you agree". It is HELD, never run here;
     /// pressing the button is a separate act by the person.
     private let proposals = Held()
@@ -223,34 +223,34 @@ public struct UserProbe: AgentBundle {
             return .object([
                 "id": .string(agentId.value),
                 "sentence": .string(
-                    "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply."
+                    "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply."
                 ),
                 "verbs": .object([
-                    "question": .string(
-                        "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here."
+                    "inquiry": .string(
+                        "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here."
                     ),
-                    "asks": .string(
-                        "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose."
+                    "inquiries": .string(
+                        "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose."
                     ),
                     "task": .string(
                         "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender."
                     ),
                 ]),
-                "asks": .integer(Int64(asks.value)),
+                "inquiries": .integer(Int64(inquiries.value)),
             ])
-        case "asks":
+        case "inquiries":
             return .object([
-                "asks": .integer(Int64(asks.value)),
+                "inquiries": .integer(Int64(inquiries.value)),
                 "proposals": .array(proposals.all),
             ])
-        case "question":
-            let q = payload["question"].asString ?? ""
+        case "inquiry":
+            let q = payload["text"].asString ?? ""
             if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return bad("question", "`question` must be a non-empty string", "question")
+                return bad("inquiry", "`text` must be a non-empty string", "text")
             }
             let kind = payload["kind"].asString ?? "text"
             if !Self.kinds.contains(kind) {
-                return bad("question", "`kind` must be one of \(Self.kinds)", "kind")
+                return bad("inquiry", "`kind` must be one of \(Self.kinds)", "kind")
             }
             let answer = kernel.agent(agentId)?.metaValue(forKey: "answer")?.asString
             // NO DEFAULT. A human's words are never invented: an unwired `user`
@@ -263,11 +263,36 @@ public struct UserProbe: AgentBundle {
                     "reason": .string("not_connected"),
                 ])
             }
+            // AUTHORITY FIRST, THEN THE ANSWER. A model cannot raise its own
+            // reach; a human can, and does it here BEFORE replying, so
+            // "granted — retry" is true by the time it is read. A grant that was
+            // REFUSED must not be answered over: saying "granted" over a door
+            // that never opened sends the sender back to an unchanged wall.
+            if let grants = kernel.agent(agentId)?.metaValue(forKey: "grants")?.asArray {
+                guard let root = kernel.root?.id else {
+                    return .object([
+                        "error": .string("user_probe: no root to grant through"),
+                        "reason": .string("not_connected"),
+                    ])
+                }
+                for g in grants {
+                    guard case .object = g else { continue }
+                    let out = await kernel.send([Item(root, g)])[0]
+                    if let e = out.result["error"].asString {
+                        return .object([
+                            "error": .string(
+                                "user_probe: grant refused, so the answer would be false: \(e)"),
+                            "reason": .string("unauthorized"),
+                            "grant": g,
+                        ])
+                    }
+                }
+            }
             if case .object = payload["action"] { proposals.add(payload["action"]) }
             return .object([
                 "answer": .string(answer),
                 "request_id": payload["request_id"],
-                "asks": .integer(Int64(asks.bump())),
+                "inquiries": .integer(Int64(inquiries.bump())),
             ])
         case "task":
             let target = payload["target"].asString ?? ""

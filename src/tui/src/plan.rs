@@ -2,7 +2,7 @@
 //!
 //! A mind narrates its own loop by EMITTING events on itself; the TUI renders
 //! whatever arrives and hard-codes no loop of its own (exactly how
-//! [`crate::question_card`] works — the card is whatever a `{type:"question"}` says
+//! [`crate::question_card`] works — the card is whatever a `{type:"inquiry"}` says
 //! it is):
 //!
 //! - `{type:"plan", steps:[…], source, client_id}` → opens a [`PlanPanel`].

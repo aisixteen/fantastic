@@ -175,7 +175,7 @@ struct App {
     /// The current probe generation — bumped per probe so a stale result (after Esc
     /// / a restarted flow) is dropped instead of advancing the wrong flow.
     probe_gen: u64,
-    /// The LIVE question card, if a watched agent raised one (`{type:"question"}`).
+    /// The LIVE question card, if a watched agent raised one (`{type:"inquiry"}`).
     /// A modal: while `Some`, it owns the keys + floats over the chat; the answer
     /// `send`s back to the asking agent. One at a time (extra questions are ignored).
     question: Option<question_card::QuestionCard>,
@@ -3340,7 +3340,7 @@ mod e2e {
         );
         on_brain_event(
             &mut app,
-            json!({"type":"question","request_id":"q","kind":"text","question":"?","source":"m"}),
+            json!({"type":"inquiry","request_id":"q","kind":"text","question":"?","source":"m"}),
         );
         for (w, h) in [(10u16, 6u16), (16, 8), (30, 12), (80, 24)] {
             let mut term = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
@@ -3434,7 +3434,7 @@ mod e2e {
         );
         on_brain_event(
             &mut app,
-            json!({"type":"question","request_id":"q_1","kind":"single",
+            json!({"type":"inquiry","request_id":"q_1","kind":"single",
                    "question":"Which database?","source":"mind_ab12",
                    "options":[{"value":"Postgres"},{"value":"SQLite"}]}),
         );

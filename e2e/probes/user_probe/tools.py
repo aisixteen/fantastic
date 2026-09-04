@@ -1,19 +1,23 @@
 """The `user` role — THE HUMAN, as an ordinary agent.
 
 The premise is that AI and humans are first-class agents on one spine, and the
-human was the one party never modelled. Asking used to be a TEXT CONVENTION: the
-model printed `{"type":"question"}` on a line and stopped, a harness regex found
+human was the one party never modelled. An inquiry used to be a TEXT CONVENTION: the
+model printed `{"type":"inquiry"}` on a line and stopped, a harness regex found
 it (`e2e/helpers/proxy.py`), and the answer was posted back in from outside the
 kernel. The human had no id, no record, no reflect entry, no ledger row and no
 gate — a model could not even discover that a human existed.
 
 Here it is an agent:
 
-  * `task`     — the human gives the AI its work. The send is issued BY this
-                 agent, so it is gated and carries `user` as its sender: the
-                 wiring the test exercises is the wiring production uses.
-  * `question` — the AI asks, and the ANSWER IS THE REPLY. No suspend, no
-                 resume, no scraping: an ordinary call whose result the model
+  * `send`     — this agent dispatches ANYTHING to ANYONE, as itself. Work
+                 (`{type:"send", text}`), an inquiry of its own
+                 (`{type:"inquiry", text}`), a kernel verb — one verb, because
+                 every agent here is first-class and none is limited to a
+                 narrower repertoire than the others. Gated, and the ledger row
+                 names this agent: the wiring a test exercises is the wiring
+                 production uses.
+  * `inquiry`  — someone sends one, and the ANSWER IS THE REPLY. No suspend, no
+                 resume, no scraping: an ordinary call whose result the sender
                  reads in its next turn like any other.
 
 The answer is POLICY ON THE RECORD (`answer`), not code. One bundle serves every
@@ -21,7 +25,7 @@ arm: a test that wants a specific answer writes a different record. There is no
 default — an unwired `user` fails loud rather than inventing a human's words.
 
 A human also HOLDS AUTHORITY A MODEL CANNOT RAISE. `grants` on the record is a
-list of kernel payloads applied when asked, before answering — the declarative
+list of kernel payloads applied on an inquiry, before answering — the declarative
 form of "the person opened the door for you". That is a human's real power in
 this substrate, and expressing it as data keeps one bundle serving every arm.
 
@@ -32,22 +36,24 @@ same verb. The model cannot tell them apart, which is the point.
 from __future__ import annotations
 
 SENTENCE = (
-    "The human. Ask me when you cannot proceed without a decision that is "
-    "mine to make; the answer comes straight back as the reply."
+    "The human. Send me an inquiry when you cannot proceed without a decision "
+    "that is mine to make; the answer comes straight back as the reply."
 )
 VERBS = {
-    "question": (
-        "args: question:str (req), kind:str? (text|single|multi|confirm), "
-        "options:list?, action:dict?, request_id:str?. Asks, and RETURNS the "
+    "inquiry": (
+        "args: text:str (req), kind:str? (text|single|multi|confirm), "
+        "options:list?, action:dict?, request_id:str?. RETURNS the "
         "answer — {answer, request_id}. An ordinary call: nothing suspends. "
-        "An `action` is a PROPOSAL the asker may not perform itself: it is "
+        "An `action` is a PROPOSAL the sender may not perform itself: it is "
         "HELD, never run here."
     ),
-    "asks": "no args — {asks, proposals}: how many times this agent has been "
-            "asked, and every `action` a question handed it. The tally, not prose.",
-    "task": (
-        "args: target:str (req), text:str (req). The human hands work to "
-        "another agent; the send carries THIS agent as its sender."
+    "inquiries": "no args — {inquiries, proposals}: how many inquiries this "
+                 "agent has received, and every `action` one handed it. The "
+                 "tally, not prose.",
+    "send": (
+        "args: target:str (req), payload:dict (req). Dispatches ANY payload to "
+        "ANY agent as THIS agent — work, an inquiry of its own, a kernel verb. "
+        "Gated like any send; the ledger row names this agent as the sender."
     ),
 }
 
@@ -56,14 +62,14 @@ VERBS = {
 #: the real HUD will enforce.
 KINDS = ("text", "single", "multi", "confirm")
 
-#: HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED, per agent id. The scorer reads
-#: THIS, never the model's prose: a turn that talks about asking leaves the tally
-#: at zero. The other fixtures count their side effects for the same reason —
-#: a model cannot fake the desk's own tally.
-_ASKS: dict[str, int] = {}
+#: HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED, per agent id. The scorer
+#: reads THIS, never the model's prose: a turn that only talks about it leaves the
+#: tally at zero. The other fixtures count their side effects for the same
+#: reason — a model cannot fake the desk's own tally.
+_RECEIVED: dict[str, int] = {}
 
 #: PROPOSALS the human was handed, per agent id. A question may carry an
-#: `action` the asker may not perform itself — "buy this, if you agree". The
+#: `action` the sender may not perform itself — "buy this, if you agree". The
 #: human HOLDS it; pressing the button is a separate act by the person. The
 #: runner reads the proposal from HERE, off a call the human actually received,
 #: instead of scraping it out of the model's prose.
@@ -80,16 +86,16 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
         return None
     if verb == "reflect":
         return {"id": id, "sentence": SENTENCE, "verbs": VERBS,
-                "asks": _ASKS.get(id, 0)}
+                "inquiries": _RECEIVED.get(id, 0)}
 
-    if verb == "question":
-        q = payload.get("question")
+    if verb == "inquiry":
+        q = payload.get("text")
         if not isinstance(q, str) or not q.strip():
-            return _refuse("question", "`question` must be a non-empty string",
-                           arg="question")
+            return _refuse("inquiry", "`text` must be a non-empty string",
+                           arg="text")
         kind = payload.get("kind", "text")
         if kind not in KINDS:
-            return _refuse("question", f"`kind` must be one of {list(KINDS)}",
+            return _refuse("inquiry", f"`kind` must be one of {list(KINDS)}",
                            arg="kind")
         rec = agent.get(id) or {}
         answer = rec.get("answer")
@@ -133,32 +139,28 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
         action = payload.get("action")
         if isinstance(action, dict):
             _PROPOSALS.setdefault(id, []).append(action)
-        _ASKS[id] = _ASKS.get(id, 0) + 1
+        _RECEIVED[id] = _RECEIVED.get(id, 0) + 1
         return {"answer": answer, "request_id": payload.get("request_id"),
-                "asks": _ASKS[id], "granted": applied}
+                "inquiries": _RECEIVED[id], "granted": applied}
 
-    if verb == "asks":
-        return {"asks": _ASKS.get(id, 0),
+    if verb == "inquiries":
+        return {"inquiries": _RECEIVED.get(id, 0),
                 "proposals": _PROPOSALS.get(id, [])}
 
-    if verb == "task":
+    if verb == "send":
         target = payload.get("target")
-        text = payload.get("text")
+        body = payload.get("payload")
         if not isinstance(target, str) or not target:
-            return _refuse("task", "`target` must be a non-empty string",
+            return _refuse("send", "`target` must be a non-empty string",
                            arg="target")
-        if not isinstance(text, str) or not text:
-            return _refuse("task", "`text` must be a non-empty string",
-                           arg="text")
+        if not isinstance(body, dict) or not body.get("type"):
+            return _refuse("send", "`payload` must be a dict naming a `type`",
+                           arg="payload")
         # THE SENDER IS THIS AGENT. A handler runs with `_current_sender` set to
         # the agent it belongs to, so this is a gated `user -> <target>` send
         # with its own ledger row — not an operator injection from outside.
-        out = await agent.send([{
-            "target": target,
-            "payload": {"type": "send", "text": text,
-                        "client_id": payload.get("client_id", "user")},
-        }])
-        return {"tasked": target, "result": out[0].get("result")}
+        out = await agent.send([{"target": target, "payload": body}])
+        return {"sent": target, "result": out[0].get("result")}
 
     return {"error": f"user_probe: unknown verb {verb!r}", "reason": "unhandled",
             "verb": verb}

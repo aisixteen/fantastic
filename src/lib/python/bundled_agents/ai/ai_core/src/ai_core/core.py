@@ -532,16 +532,24 @@ Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
 once (a call decided in thinking does not execute unless the envelope is written
 out), so never leave a finished task unsignalled — call `done`.
 
-ASKING IS A CALL, and whoever you ask is AN AGENT LIKE ANY OTHER. When you cannot
-proceed without a decision that is not yours to make, `send` them
-`{"type":"question", "question":"...", "kind":"text|single|multi|confirm",
+AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When
+you cannot proceed without a decision that is not yours to make, `send` them
+`{"type":"inquiry", "text":"...", "kind":"text|single|multi|confirm",
 "options":[...]}` and the ANSWER COMES BACK AS THE REPLY, in your next turn,
 tagged with its pid like every other reply. Nothing suspends and nothing is
-scraped out of your prose: asking is an ordinary call, so it is gated, it appears
-in the ledger, and someone who cannot answer REFUSES rather than inventing one.
-The same shape reaches a HUMAN (reflect the tree for the agent whose sentence
-says so) and a PEER AI — asking a person and asking a colleague are one verb, not
-two. Reflect before assuming anyone is reachable.
+scraped out of your prose: an inquiry is an ordinary call, so it is gated, it
+appears in the ledger, and someone who cannot answer REFUSES rather than
+inventing one. The same shape reaches a HUMAN (reflect the tree for the agent
+whose sentence says so) and a PEER AI — consulting a person and consulting a
+colleague are one verb, not two. Reflect before assuming anyone is reachable.
+RECEIVING ONE IS THE OTHER HALF. When someone `send`s YOU an `inquiry`, the turn
+you run IS your reply — say what your answer is:
+<tool_call>{"name":"inquiry_answer","arguments":{"answer":"..."}}</tool_call>
+That call is not a send and dispatches nothing; it hands your answer back to
+whoever sent it. A turn that never emits it did not answer, and they are told so —
+your prose is not harvested as an answer behind your back. Answer from what you
+know NOW: this one turn is the reply, so if you need to look something up
+first, say that instead of leaving them waiting.
 
 HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
@@ -1012,8 +1020,11 @@ async def _route_reply(
         units.append((self_id, "-", "-", None, json.dumps(bad)))
     done_called = any(c.get("name") == "done" for c in calls)
     for call in calls:
-        if call.get("name") == "done":
-            # The EXPLICIT end — not a dispatch, not an error, never nudged.
+        if call.get("name") in ("done", "inquiry_answer"):
+            # CONTROL CALLS, not dispatches. `done` ends the chain;
+            # `inquiry_answer` hands this turn's answer back to whoever sent the
+            # inquiry (the `inquiry` verb reads it). Neither is a send, neither
+            # is an error, and neither is ever nudged.
             continue
         args = call.get("arguments") or {}
         target = args.get("target_id") or args.get("target")
@@ -1206,7 +1217,8 @@ async def _route_reply(
         # ASKING IS A CALL NOW, so there is no question-turn exemption here.
         # A turn that asks the human DISPATCHES (`send` to the human agent) and
         # is therefore never silent; the answer arrives as that call's reply.
-        # This used to scan the model's own prose for `{"type":"question"}` and
+        # This used to scan the model's own prose for the old
+        # `{"type":"question"}` line and
         # suppress the nudge on a hit — a text convention the kernel had to
         # recognise, with the human living outside it entirely.
         if chained:
@@ -1692,6 +1704,72 @@ def _make_reflect(cfg: Backend):
     return _reflect
 
 
+def _make_inquiry(cfg: Backend):
+    """`inquiry` on an AI: the same turn `send` runs, answered as the REPLY.
+
+    The human's bundle answers this verb from a record; an AI answers it by
+    THINKING. Same envelope, same reply shape (`{answer, request_id}`), so the
+    asker never branches on who is at the other end — which is the whole point
+    of making the human an agent rather than a protocol.
+    """
+    _send = _make_send(cfg)
+
+    async def _inquiry(id, payload, kernel):
+        """args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?, client_id:str?. Sends THIS agent an inquiry and returns {answer, request_id} — the answer is the one it emits with the `answer` tool. The same verb a human answers; a sender writes one call for either."""
+        q = payload.get("text")
+        if not isinstance(q, str) or not q.strip():
+            return {
+                "error": "inquiry: `text` must be a non-empty string",
+                "reason": "missing_arg",
+                "arg": "text",
+            }
+        # The inquiry IS the turn. `options`/`kind` ride in the text because a
+        # model reads prose, not a schema; `action` is carried verbatim so an
+        # answering AI can see what it is being asked to endorse.
+        text = q
+        opts = payload.get("options")
+        if isinstance(opts, list) and opts:
+            text += "\n\nOptions: " + ", ".join(str(o) for o in opts)
+        act = payload.get("action")
+        if isinstance(act, dict):
+            text += "\n\nProposed action: " + json.dumps(act)
+        out = await _send(
+            id,
+            {**payload, "type": "send", "text": text},
+            kernel,
+        )
+        if isinstance(out, dict) and out.get("error"):
+            return out
+        # THE MODEL DECIDES ITS ANSWER, explicitly. Taking the turn's prose
+        # would make every stray sentence an answer and would put the harness
+        # back in the business of reading minds off text. `answer` is a control
+        # call in the same class as `done`: the model says what its answer IS.
+        said = [
+            c for c in extract_tool_calls((out or {}).get("response") or "")
+            if c.get("name") == "inquiry_answer"
+        ]
+        if not said:
+            # NO FALLBACK to the raw text: a turn that never answered did not
+            # answer, and saying so teaches the shape. The asker reads a
+            # refusal it can act on rather than a paragraph it must parse.
+            return {
+                "error": (
+                    "you were sent an inquiry and did not answer it: emit "
+                    '<tool_call>{"name":"inquiry_answer","arguments":'
+                    '{"answer":"..."}}</tool_call>'
+                ),
+                "reason": "unhandled",
+                "request_id": payload.get("request_id"),
+            }
+        args = said[-1].get("arguments") or {}
+        return {
+            "answer": args.get("answer", ""),
+            "request_id": payload.get("request_id"),
+        }
+
+    return _inquiry
+
+
 def _make_send(cfg: Backend):
     async def _send(id, payload, kernel):
         """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_bridge_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `reply_to` inside its <tool_call>s. Returns {response, final, client_id}."""
@@ -2127,6 +2205,12 @@ def build(
     verbs: dict[str, Callable] = {
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
+        # ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `question` and so does
+        # a peer AI: the asker writes the same call either way and reads the
+        # answer off the same reply. Without this an AI asked a question got
+        # `unknown type 'question'`, so "ask whoever can answer" was true only
+        # for humans — and AI-to-AI inquiry had no shape at all.
+        "inquiry": _make_inquiry(cfg),
         "history": _make_history(cfg),
         **(extra_verbs or {}),
         "status": _status,

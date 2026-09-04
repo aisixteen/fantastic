@@ -224,7 +224,7 @@ async def test_python_mind_drives_backend_through_feedback_cycle(
 # ─── plan / execute + ask-the-human (the human-in-the-loop protocol) ──────────
 #
 # A richer mind: it lays out a PLAN, executes steps (a `CALL` tool dispatch OR an
-# `ASK` to the human), and on an ASK it emits a {type:"question"} event, SUSPENDS
+# `ASK` to the human), and on an ASK it emits a {type:"inquiry"} event, SUSPENDS
 # (emits NO `done`), and resumes when the matching {type:"answer"} arrives as the
 # next turn. This is the emergent side of the human-loop protocol — nothing in the
 # backend or kernel changes; the mind owns the ask. The question/answer SHAPES
@@ -273,7 +273,7 @@ def run_turn(text, cid):
             spec = json.loads(body[4:])
             _n[0] += 1
             rid = "q_" + str(_n[0])
-            q = {"type": "question", "request_id": rid,
+            q = {"type": "inquiry", "request_id": rid,
                  "kind": spec.get("kind", "text"), "question": spec.get("question", ""),
                  "source": kernel.self_id, "client_id": cid}
             if spec.get("options"): q["options"] = spec["options"]

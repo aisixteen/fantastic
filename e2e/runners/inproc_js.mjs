@@ -240,30 +240,30 @@ for (const entry of sc.roster) {
     continue;
   }
   if (entry.role === "user") {
-    // THE HUMAN, as an ordinary agent. Asking used to be a TEXT CONVENTION the
+    // THE HUMAN, as an ordinary agent. An inquiry used to be a TEXT CONVENTION the
     // harness scraped out of the model's output; here it is a call whose REPLY
     // is the answer, and the task the model receives is a gated send from this
     // agent — so `user` has an id, a record, a reflect entry and a ledger row
     // like any other peer. The answer is POLICY ON THE RECORD, never code.
     const KINDS = ["text", "single", "multi", "confirm"];
-    // HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
-    // the model's prose: a turn that talks about asking leaves the tally at zero.
-    // PROPOSALS handed over: a question may carry an `action` the asker may not
+    // HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED. The scorer reads THIS, never
+    // the model's prose: a turn that only talks about it leaves the tally at zero.
+    // PROPOSALS handed over: an inquiry may carry an `action` the sender may not
     // perform itself. It is HELD, never run here — pressing the button is a
     // separate act by the person, and the runner reads it from a call the human
     // actually received rather than from the model's prose.
-    const asks = { n: 0, proposals: [] };
-    sideEffects[entry.id] = asks;
+    const received = { n: 0, proposals: [] };
+    sideEffects[entry.id] = received;
     k.registerBundle("user_probe.tools", async (id, p) => {
-      if (p.type === "question") {
-        const q = p.question;
+      if (p.type === "inquiry") {
+        const q = p.text;
         if (typeof q !== "string" || !q.trim()) {
-          return { error: "user_probe: question: `question` must be a non-empty string",
-                   reason: "bad_arg", arg: "question" };
+          return { error: "user_probe: inquiry: `text` must be a non-empty string",
+                   reason: "bad_arg", arg: "text" };
         }
         const kind = p.kind ?? "text";
         if (!KINDS.includes(kind)) {
-          return { error: `user_probe: question: \`kind\` must be one of ${KINDS}`,
+          return { error: `user_probe: inquiry: \`kind\` must be one of ${KINDS}`,
                    reason: "bad_arg", arg: "kind" };
         }
         const answer = k.get(id)?.answer;
@@ -273,11 +273,25 @@ for (const entry of sc.roster) {
           return { error: "user_probe: no `answer` on this agent's record — the operator wires what the human says",
                    reason: "not_connected" };
         }
-        if (p.action && typeof p.action === "object") asks.proposals.push(p.action);
-        asks.n += 1;
-        return { answer, request_id: p.request_id ?? null, asks: asks.n };
+        // AUTHORITY FIRST, THEN THE ANSWER. A grant that was REFUSED must not
+        // be answered over: saying "granted" over a door that never opened
+        // sends the sender back to an unchanged wall.
+        const grants = k.get(id)?.grants;
+        if (Array.isArray(grants)) {
+          for (const g of grants) {
+            if (!g || typeof g !== "object") continue;
+            const out = (await k.send([{ target: "kernel_state", payload: g }]))[0].result;
+            if (out?.error) {
+              return { error: `user_probe: grant refused, so the answer would be false: ${out.error}`,
+                       reason: "unauthorized", grant: g };
+            }
+          }
+        }
+        if (p.action && typeof p.action === "object") received.proposals.push(p.action);
+        received.n += 1;
+        return { answer, request_id: p.request_id ?? null, inquiries: received.n };
       }
-      if (p.type === "asks") return { asks: asks.n, proposals: asks.proposals };
+      if (p.type === "inquiries") return { inquiries: received.n, proposals: received.proposals };
       if (p.type === "task") {
         if (typeof p.target !== "string" || !p.target) {
           return { error: "user_probe: task: `target` must be a non-empty string",
@@ -298,10 +312,10 @@ for (const entry of sc.roster) {
     k.register(new Agent({
       id: entry.id, parentId: "kernel_state", handlerModule: "user_probe.tools",
       answer: entry.answer,
-      sentence: "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
+      sentence: "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
       verbs: {
-        question: "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here.",
-        asks: "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose.",
+        inquiry: "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
+        inquiries: "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose.",
         task: "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
       },
     }));
@@ -387,9 +401,9 @@ for (const check of sc.expect) {
     // must make the second press harmless.
     // READ THE PROPOSAL OFF THE HUMAN. It used to be regexed out of the model's
     // prose; it is a real call now, so the human HOLDS what it was handed and
-    // the runner asks for it — "the person was asked" becomes a fact the kernel
+    // the runner reads it — "the person was consulted" becomes a fact the kernel
     // witnessed rather than a sentence the model wrote.
-    const held = (await k.send([{ target: "user", payload: { type: "asks" } }]))[0].result;
+    const held = (await k.send([{ target: "user", payload: { type: "inquiries" } }]))[0].result;
     const props = held?.proposals ?? [];
     const action = props.length ? props[props.length - 1] : null;
     console.log(`\n  proposal: ${JSON.stringify(action)}`);

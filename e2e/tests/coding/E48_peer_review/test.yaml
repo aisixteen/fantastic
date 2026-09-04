@@ -4,7 +4,9 @@ id: peer_review
 group: coding
 title: a reviewer agent catches the flaw in a coder agent's diff
 runner: probe.py
-runtimes: [python, rust, swift]
+# PYTHON ONLY while the ask verb rolls out — `question` on an AI agent exists
+# in the python ai_core first; rust and swift rejoin when theirs carries it.
+runtimes: [python]
 costs: turns
 limits:
   idle_seconds: 60

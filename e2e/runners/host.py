@@ -48,7 +48,7 @@ ROLE_BUNDLE = {
     # THE HUMAN. Every AI probe tasks its model THROUGH this agent, so the task
     # is a gated `user -> ai` send with a ledger row rather than an operator
     # injection from outside the kernel — and the model can discover in one
-    # reflect that a human peer exists to ask.
+    # reflect that a human peer exists to consult.
     "user": "user_probe.tools",
 }
 
@@ -187,7 +187,7 @@ def main(scenario_id: str) -> int:
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
         print(f"\n  pass 1: {str(first)[:300]}")
 
-        # THE HUMAN, where a scenario asks for one. Presses the button TWICE
+        # THE HUMAN, where a scenario declares one. Presses the button TWICE
         # with the id the MODEL minted. The AI holds no grant on the desk — that
         # it cannot buy is half the measurement — so this goes through `rest`,
         # and the ledger must make the second press harmless.
@@ -199,14 +199,14 @@ def main(scenario_id: str) -> int:
             # `{queued, stream_id, message_id}` and the text lands later. That
             # divergence is real and is reported as such — but the assistant
             # turn reaches the chat store on every runtime, so reading it there
-            # asks the same question of all three.
+            # poses the same problem to all three.
             # READ THE PROPOSAL OFF THE HUMAN. It used to be scraped out of the
             # model's prose; it is a real call now, so the human HOLDS what it
-            # was handed and the runner asks for it. "The person was asked" is
+            # was handed and the runner reads it. "The person was consulted" is
             # then a fact the kernel witnessed, not a sentence the model wrote.
             action, waited = None, time.monotonic() + 60
             while action is None and time.monotonic() < waited:
-                held = k.send("user", {"type": "asks"})
+                held = k.send("user", {"type": "inquiries"})
                 props = (held.get("proposals") or []) if isinstance(held, dict) else []
                 if props:
                     action = props[-1]
@@ -231,7 +231,7 @@ def main(scenario_id: str) -> int:
             os.environ.get("IDLE", limits.get("idle_seconds", 100))
         )
         # NOTHING IS SCRAPED HERE ANY MORE. This loop used to read the model's
-        # own prose for `{"type":"question"}` and post an answer back in from
+        # own prose for `{"type":"inquiry"}` and post an answer back in from
         # outside the kernel — which is why the human had no id, no record, no
         # gate and no ledger row. The human is an AGENT now
         # (`e2e/probes/user_probe`, role `user`): the model calls it and the
@@ -252,7 +252,7 @@ def main(scenario_id: str) -> int:
                         ok = False
                     continue
                 if "side_effects" in check:
-                    # Ask the ROLE its own tally. Every probe answers `count`
+                    # Read the ROLE's own tally. Every probe answers `count`
                     # precisely so an assertion can read the side effect rather
                     # than the model's prose — a model that claims it bought once
                     # cannot fake the desk's counter.
@@ -282,7 +282,7 @@ def main(scenario_id: str) -> int:
             time.sleep(2.0)
 
         # THE TRANSCRIPT. The chain ran where this runner could not see it, so a
-        # failure reads as silence unless the agent is asked for its own history.
+        # failure reads as silence unless the agent's own history is read.
         hist = k.send("ai", {"type": "history", "client_id": "probe"})
         msgs = hist.get("messages") if isinstance(hist, dict) else None
         if isinstance(msgs, list):

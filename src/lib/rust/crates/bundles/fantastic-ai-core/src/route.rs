@@ -376,8 +376,11 @@ async fn route_reply_gated(
     let mut items: Vec<Item> = Vec::new();
 
     for call in calls {
-        if call.name == "done" {
-            // The EXPLICIT end — not a dispatch, not an error, never nudged.
+        if call.name == "done" || call.name == "inquiry_answer" {
+            // CONTROL CALLS, not dispatches. `done` ends the chain;
+            // `inquiry_answer` hands this turn's answer back to whoever sent the
+            // inquiry (the `inquiry` verb reads it). Neither is a send, neither
+            // is an error, and neither is ever nudged.
             continue;
         }
         let args = &call.arguments;
@@ -625,14 +628,14 @@ async fn route_reply_gated(
     // no <tool_call> envelope" about a turn that did, and then handing that turn's
     // text to `send_to` on top.
     //
-    // A question turn is the OTHER legitimate silent end (ask + stop; the human's
+    // An inquiry turn was the OTHER legitimate silent end (emit + stop; the human's
     // answer resumes the chain) — nudging it would stomp the wait.
     let any_blocks = !blocks.is_empty();
     let chained =
         incoming.starts_with("[reply to ") || incoming.starts_with("[no call was dispatched]");
-    // ASKING IS A CALL NOW, so there is no question-turn exemption: a turn that
-    // asks the human DISPATCHES and is never silent. This used to scan the
-    // model's own prose for `{"type":"question"}` — a text convention the kernel
+    // AN INQUIRY IS A CALL NOW, so there is no silent-turn exemption: a turn that
+    // consults someone DISPATCHES and is never silent. This used to scan the
+    // model's own prose for the old `{"type":"question"}` line — a text convention
     // had to recognise, with the human living outside it entirely.
     let nudging = !any_calls && !any_blocks && chained;
     // RESET BEFORE DELIVERING, which python gets for free and rust does not:

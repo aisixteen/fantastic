@@ -64,7 +64,7 @@ async def _orc_handler(id, payload, kernel):
         return {
             "ticket": t["result"],
             "question": {
-                "type": "question",
+                "type": "inquiry",
                 "kind": "confirm",
                 "question": "send the email?",
                 "action": {

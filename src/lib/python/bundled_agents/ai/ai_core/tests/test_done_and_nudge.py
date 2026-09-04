@@ -176,7 +176,7 @@ async def test_chat_turn_is_never_nudged(seeded_kernel):
 
 
 # THE QUESTION-TURN EXEMPTION IS GONE. `test_a_question_turn_is_never_nudged`
-# lived here: a turn whose prose carried `{"type":"question"}` ended the chain,
+# lived here: a turn whose prose carried `{"type":"inquiry"}` ended the chain,
 # and the runtime had to RECOGNISE that text to avoid stomping the wait with a
 # nudge. Asking is a CALL now — the model `send`s the human agent and the answer
 # is the reply — so such a turn dispatches and is never silent in the first

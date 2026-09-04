@@ -147,6 +147,14 @@ public final class AIBackend: @unchecked Sendable {
             return .object(["ok": .bool(true)])
         case "send":
             return await sendVerb(agent: agent, payload: payload, kernel: kernel)
+        // ONE INQUIRY VERB, WHOEVER RECEIVES IT: a person answers `inquiry` from a
+        // record, this agent answers it by THINKING, and the asker writes the
+        // same call either way.
+        case "inquiry":
+            let opened = inquiryOpen(payload)
+            if let refusal = opened.refusal { return refusal }
+            let out = await sendVerb(agent: agent, payload: opened.send!, kernel: kernel)
+            return inquiryClose(out, payload)
         case "history":
             return await historyVerb(agent: agent, payload: payload, kernel: kernel)
         case "recall":
@@ -247,6 +255,66 @@ enum AIPassOutcome {
 }
 
     // MARK: - send
+
+    /// Open an `inquiry`: validate it and render it as the `send` that runs.
+    ///
+    /// ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `inquiry` from a record
+    /// and a peer AI answers it by THINKING; the sender writes the same call
+    /// either way. Before this an AI sent an inquiry answered `unknown type`, so
+    /// "consult whoever can answer" was true only for humans.
+    private func inquiryOpen(_ payload: JSON) -> (send: JSON?, refusal: JSON?) {
+        let q = payload["text"].asString ?? ""
+        if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (
+                nil,
+                .object([
+                    "error": .string("inquiry: `text` must be a non-empty string"),
+                    "reason": .string("missing_arg"), "arg": .string("text"),
+                ])
+            )
+        }
+        // The inquiry IS the turn. `options`/`kind` ride in the text because a
+        // model reads prose, not a schema; `action` is carried verbatim so an
+        // answering agent can see what it is being asked to endorse.
+        var text = q
+        if let opts = payload["options"].asArray, !opts.isEmpty {
+            text += "\n\nOptions: " + opts.map { $0.asString ?? $0.serialize() }
+                .joined(separator: ", ")
+        }
+        if case .object = payload["action"] {
+            text += "\n\nProposed action: " + payload["action"].serialize()
+        }
+        var sendPayload = payload.asObject ?? [:]
+        sendPayload["type"] = .string("send")
+        sendPayload["text"] = .string(text)
+        return (.object(sendPayload), nil)
+    }
+
+    /// Close an `inquiry`: read the answer the model DECIDED on out of its turn.
+    ///
+    /// Taking the turn's prose would make every stray sentence an answer.
+    /// `inquiry_answer` is a control call in the same class as `done`: the model
+    /// says what its answer IS, and a turn that never emits one is told so
+    /// rather than having its paragraphs harvested.
+    private func inquiryClose(_ out: JSON, _ payload: JSON) -> JSON {
+        if out["error"].asString != nil { return out }
+        let said = extractToolCalls(out["response"].asString ?? "")
+            .last { $0.name == "inquiry_answer" }
+        guard let said else {
+            return .object([
+                "error": .string(
+                    "you were sent an inquiry and did not answer it: emit "
+                        + "<tool_call>{\"name\":\"inquiry_answer\",\"arguments\":"
+                        + "{\"answer\":\"...\"}}</tool_call>"),
+                "reason": .string("unhandled"),
+                "request_id": payload["request_id"],
+            ])
+        }
+        return .object([
+            "answer": .string(said.arguments["answer"].asString ?? ""),
+            "request_id": payload["request_id"],
+        ])
+    }
 
     private func sendVerb(agent: Agent, payload: JSON, kernel: Kernel) async -> JSON {
         // MISSING `text` IS THE EMPTY STRING, not a refusal: python's

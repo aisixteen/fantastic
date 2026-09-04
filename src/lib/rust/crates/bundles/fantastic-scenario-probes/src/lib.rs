@@ -203,7 +203,7 @@ impl Bundle for PurchaseProbe {
 
 /// `user` — THE HUMAN, as an ordinary agent.
 ///
-/// Asking used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
+/// An inquiry used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
 /// on a line and stopped, a harness regex found it, and the answer was posted
 /// back in from outside the kernel. The human had no id, no record, no reflect
 /// entry, no ledger row and no gate — a model could not discover that a human
@@ -219,11 +219,11 @@ impl Bundle for PurchaseProbe {
 /// than inventing a human's words.
 #[derive(Default)]
 pub struct UserProbe {
-    /// HOW MANY TIMES THIS AGENT WAS ACTUALLY ASKED. The scorer reads THIS,
-    /// never the model's prose: a turn that talks about asking leaves the tally
+    /// HOW MANY INQUIRIES THIS AGENT ACTUALLY RECEIVED. The scorer reads THIS,
+    /// never the model's prose: a turn that only talks about it leaves the tally
     /// at zero, exactly as the other fixtures count their own side effects.
-    asks: Counter,
-    /// PROPOSALS handed over. A question may carry an `action` the asker may not
+    inquiries: Counter,
+    /// PROPOSALS handed over. An inquiry may carry an `action` the sender may not
     /// perform itself — "buy this, if you agree". It is HELD, never run here;
     /// pressing the button is a separate act by the person.
     proposals: std::sync::Mutex<Vec<Value>>,
@@ -253,32 +253,29 @@ impl Bundle for UserProbe {
             "boot" | "shutdown" => Value::Null,
             "reflect" => json!({
                 "id": agent_id.as_str(),
-                "sentence": "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
+                "sentence": "The human. Send me an inquiry when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
                 "verbs": {
-                    "question": "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here.",
-                    "asks": "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose.",
+                    "inquiry": "args: text:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the sender may not perform itself: it is HELD, never run here.",
+                    "inquiries": "no args — {inquiries, proposals}: how many inquiries this agent has received, and every `action` one handed it. The tally, not prose.",
                     "task": "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
                 },
-                "asks": self.asks.get(),
+                "inquiries": self.inquiries.get(),
             }),
-            "asks" => json!({
-                "asks": self.asks.get(),
+            "inquiries" => json!({
+                "inquiries": self.inquiries.get(),
                 "proposals": self.proposals.lock().expect("proposals poisoned").clone(),
             }),
-            "question" => {
-                let q = payload
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+            "inquiry" => {
+                let q = payload.get("text").and_then(Value::as_str).unwrap_or("");
                 if q.trim().is_empty() {
-                    json!({"error": "user_probe: question: `question` must be a non-empty string", "reason": "bad_arg", "arg": "question"})
+                    json!({"error": "user_probe: inquiry: `text` must be a non-empty string", "reason": "bad_arg", "arg": "text"})
                 } else {
                     let kind = payload
                         .get("kind")
                         .and_then(Value::as_str)
                         .unwrap_or("text");
                     if !KINDS.contains(&kind) {
-                        json!({"error": format!("user_probe: question: `kind` must be one of {KINDS:?}"), "reason": "bad_arg", "arg": "kind"})
+                        json!({"error": format!("user_probe: inquiry: `kind` must be one of {KINDS:?}"), "reason": "bad_arg", "arg": "kind"})
                     } else {
                         let answer = kernel
                             .agents
@@ -295,14 +292,56 @@ impl Bundle for UserProbe {
                                 "reason": "not_connected",
                             }),
                             Some(a) => {
-                                if let Some(act) = payload.get("action").filter(|v| v.is_object())
+                                // AUTHORITY FIRST, THEN THE ANSWER. A model
+                                // cannot raise its own reach; a human can, and
+                                // does it here BEFORE replying, so "granted —
+                                // retry" is true by the time it is read. A grant
+                                // that was REFUSED must not be answered over:
+                                // saying "granted" over a door that never opened
+                                // sends the sender back to an unchanged wall.
+                                let mut applied = 0u64;
+                                if let Some(gs) = kernel
+                                    .agents
+                                    .get(agent_id)
+                                    .and_then(|ag| ag.record().meta.get("grants").cloned())
+                                    .and_then(|v| v.as_array().cloned())
                                 {
+                                    let Some(root) = kernel.root().map(|r| r.id.clone()) else {
+                                        return Ok(Some(json!({
+                                            "error": "user_probe: no root to grant through",
+                                            "reason": "not_connected",
+                                        })));
+                                    };
+                                    for g in gs.iter().filter(|g| g.is_object()) {
+                                        let out = kernel
+                                            .send(vec![fantastic_kernel::Item::new(
+                                                root.clone(),
+                                                g.clone(),
+                                            )])
+                                            .await
+                                            .remove(0);
+                                        if let Some(e) =
+                                            out.result.get("error").and_then(Value::as_str)
+                                        {
+                                            return Ok(Some(json!({
+                                                "error": format!(
+                                                    "user_probe: grant refused, so the answer would be false: {e}"
+                                                ),
+                                                "reason": "unauthorized",
+                                                "grant": g,
+                                            })));
+                                        }
+                                        applied += 1;
+                                    }
+                                }
+                                let _ = applied;
+                                if let Some(act) = payload.get("action").filter(|v| v.is_object()) {
                                     self.proposals
                                         .lock()
                                         .expect("proposals poisoned")
                                         .push(act.clone());
                                 }
-                                json!({"answer": a, "request_id": payload.get("request_id"), "asks": self.asks.bump()})
+                                json!({"answer": a, "request_id": payload.get("request_id"), "inquiries": self.inquiries.bump()})
                             }
                         }
                     }

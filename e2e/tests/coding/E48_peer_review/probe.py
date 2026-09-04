@@ -1,10 +1,19 @@
-"""coding/peer_review — a reviewer AGENT catches the flaw in a coder's diff.
+"""coding/peer_review — one AI SENDS ANOTHER AN INQUIRY, and the answer decides the verdict.
 
 Codex `auto_review.rs`: a second agent reviews the first's work. Two real AI
-agents, sequential and deterministic: the `coder` applies a change that
-VIOLATES the spec (a planted discrepancy it writes itself), then the
-`reviewer` reads `git diff` + the spec and must REJECT it, naming the offending
-value. Scored on the reviewer's verdict file + both agents appearing.
+agents — but the harness no longer drives them in turn. THE HUMAN tasks the
+coder, the coder applies a change that VIOLATES the spec, and then the CODER
+SENDS THE REVIEWER AN INQUIRY, the same verb a person answers. The reviewer
+reads `spec.md` and `git diff` itself and answers by THINKING; its answer comes
+back as the reply, and the coder records it.
+
+That is the whole point of ONE INQUIRY VERB: `send(<anyone>, {type:"inquiry"})`
+reaches a human who answers from a record and a peer AI who answers from a
+turn, and the sender never branches on which. Before this an AI sent an inquiry
+got `unknown type 'inquiry'` — inquiry between agents had no shape at all.
+
+Scored on the verdict file, the reviewer's own tally of turns, and the ledger
+edge proving `ai -> ai_rev` actually happened.
 """
 
 from __future__ import annotations
@@ -41,7 +50,7 @@ def _git(*args):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_pr_", reach=[FB, RUNNER, "editor", "ai", "ai_rev", "cli"]
+        prefix="coding_pr_", reach=[FB, RUNNER, "editor", "ai", "ai_rev", "cli", "user"]
     )
     try:
         Path("spec.md").write_text(SPEC)
@@ -66,42 +75,74 @@ async def main():
             r = await _call(root, root.id, payload)
             assert not r.get("error"), f"create {payload['id']}: {r}"
 
+        # THE HUMAN who wants the work done. The task originates here, so the
+        # coder's first turn arrives as a gated `user -> ai` send with a ledger
+        # row rather than an operator injection from outside the kernel.
+        r = await _call(root, root.id, {
+            "type": "create_agent", "parent_id": root.id, "id": "user",
+            "handler_module": "user_probe.tools",
+            "answer": "do your best judgement",
+            "description": "The human this kernel belongs to.",
+            "can_call": {"ai": "*"},
+            "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+        })
+        assert not r.get("error"), f"create user: {r}"
+
+        # THE REVIEWER, wired to RECEIVE INQUIRIES. It needs the spec and the diff to
+        # answer, and the coder needs egress to it; the gate is two-sided and
+        # these are siblings, so both halves are written here.
+        rv = await connect(root, core, BK, agent_id="ai_rev",
+                           can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*"},
+                           callable_by={"ai": "*"},
+                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+
         coder_task = (
             "In `config.py`, change `timeout = 30` to `timeout = 300` using the "
             "editor `editor`'s `patch` verb (reflect it for the shape) — change "
-            f"nothing else. When applied, {DONE}."
+            "nothing else. THEN GET IT REVIEWED: `ai_rev` is a colleague, "
+            "another agent like you. `send` it an `inquiry` on whether the "
+            "change satisfies `spec.md`, telling it to read the spec through "
+            "the editor `editor` and the working-tree diff by running "
+            "`git diff` on the runner `pr_runner`, and to answer with APPROVE "
+            "or REJECT followed by the offending value. Its answer comes back "
+            "as that call's reply. Write the answer VERBATIM to `review.md` "
+            f"through the editor — do not judge it yourself. Then {DONE}."
         )
         c = await connect(root, core, BK, agent_id="ai",
-                          can_call={FB: "*", "editor": "*", "cli": "*"},
+                          can_call={FB: "*", "editor": "*", "cli": "*", "ai_rev": "*"},
+                          callable_by={"user": "*"},
                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
-        await drive(c, coder_task, client_id="coder")
+        # THE TASK COMES FROM THE HUMAN — gated, ledgered, a real sender.
+        await drive(c, coder_task, client_id="coder", via="user")
         tr_coder = "".join(c.proxy.transcript)
         await c.close()
 
-        review_task = (
-            "A change was just made to `config.py`. Read `spec.md` (through the "
-            "editor `editor`) and the working-tree diff by running `git diff` "
-            "via the runner `pr_runner` (reflect it for the exact allowed "
-            "command; start a job, poll {type:'status', job_id}). Decide whether "
-            "the change satisfies the spec. Write your verdict to `review.md`: "
-            "the FIRST word must be exactly APPROVE or REJECT, followed by the "
-            f"offending value if any. Then {DONE}."
-        )
-        rv = await connect(root, core, BK, agent_id="ai_rev",
-                           can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*"},
-                           limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
-        await drive(rv, review_task, client_id="rev")
-        tr_rev = "".join(rv.proxy.transcript)
+        # THE REVIEWER'S OWN RECORD OF WORK. It was never driven by the harness,
+        # so its turns exist only because the coder inquired: reading its history
+        # is how we know a second mind actually ran.
+        # THE DEFAULT CLIENT: the coder's question carried no `client_id`, so the
+        # reviewer's turns live under ai_core's default — reading them under the
+        # coder's own client name found an empty history and scored a second
+        # mind that had plainly worked as never having run (measured 2026-09-04).
+        rev_hist = await _call(root, "ai_rev", {"type": "history", "client_id": "cli"})
+        tr_rev = str(rev_hist.get("messages", rev_hist))
         await rv.close()
 
         review = Path("review.md").read_text() if Path("review.md").exists() else ""
         applied = "timeout = 300" in Path("config.py").read_text()
         rejected = review.strip().upper().startswith("REJECT")
+        # THE INQUIRY ITSELF, off the ledger: an `ai -> ai_rev` execution is proof
+        # a second mind was consulted. Prose claiming "I consulted the reviewer"
+        # leaves no row.
+        led = await _call(root, "kernel", {"type": "ledger"})
+        inquired_peer = [r for r in (led.get("executions") or [])
+                      if r.get("target") == "ai_rev"]
         checks = [
             ("the coder applied the flawed change", applied),
+            ("the coder INQUIRED of the reviewer (ledger row)", bool(inquired_peer)),
             ("the reviewer REJECTED it", rejected),
             ("the reviewer named the offending value", "300" in review),
-            ("both agents did real work", "editor" in tr_coder and RUNNER in tr_rev),
+            ("both minds did real work", "editor" in tr_coder and RUNNER in tr_rev),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

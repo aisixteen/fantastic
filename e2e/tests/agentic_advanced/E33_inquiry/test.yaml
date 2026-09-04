@@ -1,11 +1,11 @@
 # WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
 # or a backend name — those live in e2e/backends/, so this same file runs
 # against any plug and the results stay comparable.
-id: ask_user
+id: inquiry
 group: agentic_advanced
-title: it asks the human, and the ANSWER steers what it does
+title: it sends the human an inquiry, and the ANSWER steers what it does
 runner: probe.py
-# The ask protocol is taught in every runtime's prompt, but the subject here is
+# The inquiry protocol is taught in every runtime's prompt, but the subject here is
 # the protocol + the harness's answer path, which are runtime-shared — one
 # runtime keeps the two paid arms affordable.
 runtimes: [python]
