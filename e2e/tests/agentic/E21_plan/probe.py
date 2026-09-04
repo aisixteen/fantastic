@@ -186,7 +186,7 @@ async def main():
     # ABOVE and cannot raise their own authority. Ignored in process.
     root, core, close_kernel = await open_kernel(
         "plan_",
-        reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "probe_web"]
+        reach=["kernel_store", "yaml_store", "shell", "ai", "cli", "probe_web", "user"]
         + ["assets", "transcripts", "secrets"],
     )
 
@@ -215,6 +215,19 @@ async def main():
     mem = (
         await root.send(
             [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "user_probe.tools",
+                        "id": "user",
+                        "answer": "do your best judgement",
+                        "description": "The human this kernel belongs to.",
+                        "can_call": {"ai": "*"},
+                        "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                    },
+                },
                 {
                     "target": root.id,
                     "payload": {
@@ -339,6 +352,9 @@ async def main():
         # rust/swift: core).
         root.id: ["*", "create_agent", "update_agent", "delete_agent"],
         "cli": "*",
+        # THE HUMAN. The egress must exist or "consult me" is a sentence the
+        # gate refuses.
+        "user": "*",
         mem["id"]: "*",
         store["id"]: "*",
     }
@@ -367,7 +383,10 @@ async def main():
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
     conn = await connect(
-        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA
+        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA,
+        # The other half of the gate: SIBLINGS have no baseline edge, so without
+        # it the human's task is refused at ingress and the chain never starts.
+        callable_by={"user": "*"},
     )
     aid, spy = conn.id, conn.proxy
     runaway, transcript = conn.trips, spy.transcript
@@ -386,12 +405,20 @@ async def main():
     # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
     # the run scored as "0 chars, read the docs: False" — a harness failure wearing
     # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
+    # THE TASK COMES FROM THE HUMAN: `user` dispatches it as itself, so it is
+    # gated and the ledger names a real sender rather than an operator injection.
     _first = (
         await root.send(
             [
                 {
-                    "target": aid,
-                    "payload": {"type": "send", "text": TASK, "client_id": "probe"},
+                    "target": "user",
+                    "payload": {
+                        "type": "send",
+                        "target": aid,
+                        "payload": {
+                            "type": "send", "text": TASK, "client_id": "probe",
+                        },
+                    },
                 }
             ]
         )

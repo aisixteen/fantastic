@@ -364,7 +364,7 @@ async def run(
     # probe IS the operator and the list is ignored.
     root, core, close_kernel = await open_kernel(
         "build_",
-        reach=["kernel_store", "readings", "totals", EXECUTOR_LEG, "ai", "cli"],
+        reach=["kernel_store", "readings", "totals", EXECUTOR_LEG, "ai", "cli", "user"],
     )
 
     store = (
@@ -424,6 +424,30 @@ async def run(
             ]
         )
     )[0]["result"]
+    # THE HUMAN who wants the work done. The task originates HERE, so the model's
+    # first turn arrives as a gated `user -> ai` send with its own ledger row
+    # rather than an operator injection from outside the kernel — the wiring a
+    # real deployment has. It answers "do your best judgement", so a model that
+    # consults it is unblocked rather than stalled.
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "user_probe.tools",
+                        "id": "user",
+                        "answer": "do your best judgement",
+                        "description": "The human this kernel belongs to.",
+                        "can_call": {"ai": "*"},
+                        "callable_by": {"ai": "*", "rest": "*", "web": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     mem = (
         await root.send(
             [
@@ -475,6 +499,9 @@ async def run(
         "cli": "*",
         "readings": "*",
         "totals": "*",
+        # THE HUMAN. The task says a person is reachable, so the egress must
+        # exist or "consult me" is a sentence the gate refuses.
+        "user": "*",
         EXECUTOR_LEG: "*",  # to reflect its `allowed` gate + start the program
         store["id"]: "*",
     }
@@ -500,7 +527,10 @@ async def run(
     # their own copy of all that, and every copy was behind the others.
     watch = Watch()
     conn = await connect(
-        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA
+        root, core, BK, can_call=CAN_CALL, limits=LIM, watch=watch, record=EXTRA,
+        # The other half of the gate: these two are SIBLINGS, so without it the
+        # human's task is refused at ingress and the chain never starts.
+        callable_by={"user": "*"},
     )
     aid, spy = conn.id, conn.proxy
     runaway, transcript = conn.trips, spy.transcript
@@ -517,12 +547,22 @@ async def run(
     # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
     # the run scored as "0 chars, read the docs: False" — a harness failure wearing
     # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
+    # THE TASK COMES FROM THE HUMAN, not from the harness: `user` dispatches it
+    # as itself, so it is gated and the ledger names a real sender. The operator
+    # still pokes the human once — that is the person pressing enter, and it is
+    # the only out-of-band step left.
     _first = (
         await root.send(
             [
                 {
-                    "target": aid,
-                    "payload": {"type": "send", "text": task, "client_id": "probe"},
+                    "target": "user",
+                    "payload": {
+                        "type": "send",
+                        "target": aid,
+                        "payload": {
+                            "type": "send", "text": task, "client_id": "probe",
+                        },
+                    },
                 }
             ]
         )

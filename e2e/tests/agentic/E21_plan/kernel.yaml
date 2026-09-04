@@ -4,6 +4,15 @@ roster:
   parent_id: <root.id>
   callable_by:
     ai: '*'
+- id: user
+  handler_module: user_probe.tools
+  parent_id: <root.id>
+  can_call:
+    ai: '*'
+  callable_by:
+    ai: '*'
+    rest: '*'
+    web: '*'
 - id: yaml_store
   handler_module: text_file.tools
   parent_id: <root.id>
@@ -31,4 +40,4 @@ roster:
   created_by: helpers.ai.connect
   can_call: '<{''$self'': ''*'', ''$parent'': ''*'', ''$children'': ''*'', root.id:
     [''*'', ''create_agent'', ''update_agent'', ''delete_agent''], ''cli'': ''*'',
-    mem[''id'']: ''*'', store[''id'']: ''*''}>'
+    ''user'': ''*'', mem[''id'']: ''*'', store[''id'']: ''*''}>'
