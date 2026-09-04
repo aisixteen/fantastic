@@ -8,7 +8,8 @@ runner: probe.py
 # ONE probe, three kernels. `RUNTIME` is the plug the probe reads; the same
 # assertions run against each. python is in-process (its asserts read the live
 # tree); rust and swift are spawned and driven over REST.
-runtimes: [python, rust, swift]
+# PYTHON ONLY while the human-as-agent conversion rolls out.
+runtimes: [python]
 costs: turns
 limits:
   idle_seconds: 60
