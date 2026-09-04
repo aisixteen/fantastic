@@ -117,11 +117,15 @@ TASK = (
     "stream, an ordinary agent your structures can send to and wire in, not you and "
     "not another builder. There is also a scheduler (`clock`), a directory of sensor "
     "readings (`readings`), and a durable store (`totals`). I am going to walk "
-    "away.\n\n"
-    "Build me a small SPECIALISED AGENT that lives here and owns one job: keeping the "
-    "total of those readings up to date. Give it its own CHILD worker agent (or "
-    "several) that do the actual computing, so the specialist owns the job and the "
-    "children do the work. Then wire it to the clock so it re-checks on its own.\n\n"
+    "away — but I am an AGENT here too, so if you genuinely cannot proceed without "
+    "a decision that is mine to make, reflect the tree, find me, and send me an "
+    "`inquiry`. Do not stall on a question you could have put to me.\n\n"
+    "Build me a standing WORKER that keeps the total of those readings up to date, "
+    "and wire the clock at it so it re-checks on its own. Only an agent that RUNS "
+    "SOMETHING can react to a tick — a plain agent holds a record and answers "
+    "nothing — so the thing the clock aims at is a command runner with a program "
+    "you wrote, and any helpers it needs are its own children. Do not build an "
+    "inert parent to hold the job.\n\n"
     "One thing about this kernel you must account for: NOTHING can call anything "
     "by default. Creating an agent does not connect it — an agent that has not "
     "been given the authority to call a peer simply cannot, and the call is "
@@ -154,6 +158,7 @@ MINE = {
     "totals",
     "ai",
     "cli",
+    "user",
     EXECUTOR_LEG,
     # The REST driver's own legs, written by `HostKernel.seed` so an HTTP client
     # can reach in at all. They exist ONLY on a spawned kernel, which is why
@@ -207,6 +212,9 @@ def _ai_meta(
             "totals": "*",
             "clock": "*",
             "brain": "*",
+            # THE HUMAN. The task says the person is reachable, so the egress
+            # must exist or "consult me" is a sentence the gate refuses.
+            "user": "*",
             EXECUTOR_LEG: "*",
             store["id"]: "*",
         },
@@ -230,6 +238,7 @@ def _ai_meta(
             # defect E20's fixture comment records.
             "ai": "*",
             "brain": "*",
+            "user": "*",
             "rest": "*",
             "web": "*",
         },
@@ -449,6 +458,32 @@ async def build_fixture(root, *, interpreter: str | None = None):
             ]
         )
     )[0]["result"]
+    # THE HUMAN, present as an agent. The builder is told it may consult me; a
+    # kernel where the person is only prose is one where "I am going to walk
+    # away" is the last thing the model can act on. Answering `do your best
+    # judgement` keeps the run unblocked while making the consultation REAL —
+    # a gated call with a ledger row and the human's own tally.
+    (
+        await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "user_probe.tools",
+                        "id": "user",
+                        "answer": "do your best judgement",
+                        "description": "The human this kernel belongs to.",
+                        "can_call": {"ai": "*"},
+                        "callable_by": {
+                            "ai": "*", "brain": "*", "rest": "*", "web": "*",
+                        },
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
     (
         await root.send(
             [
@@ -569,7 +604,14 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
     # `parent_id`, so reading it off the node silently yields no parents at all.
     parents = {records.get(n["id"], {}).get("parent_id") for n in scripts}
     sub_ai = [n for n in made if n["id"] in parents]
-    c1 = bool(scripts) and bool(sub_ai)
+    # A RUNNER THE MODEL MADE IS THE STRUCTURE. It used to demand a PARENT above
+    # it as well — "the specialist owns the job, the children do the work" — but
+    # a plain agent in this kernel has no handler and cannot react to a tick, so
+    # that tier had no expressible form and the ask was unsatisfiable as written
+    # (a model spent 26,000 characters of one turn deriving exactly that,
+    # measured 2026-09-04). The thing the clock aims at is the runner; helpers
+    # under it are the model's own business, reported but not required.
+    c1 = bool(scripts)
     print(
         f"    1. structure                {'OK' if c1 else 'NO'} "
         f"agents_made={len(made)} scripts={[n['id'] for n in scripts]} "
