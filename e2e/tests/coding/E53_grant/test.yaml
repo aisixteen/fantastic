@@ -4,7 +4,10 @@ id: grant
 group: coding
 title: denied by the gate, the model asks the HUMAN for access, then finishes
 runner: probe.py
-runtimes: [python, rust, swift]
+# PYTHON ONLY while the human-as-agent conversion rolls out. The `grants`
+# policy this arm needs exists in the python probe first; rust and swift come
+# back once their bundle carries it too.
+runtimes: [python]
 costs: turns
 limits:
   idle_seconds: 60

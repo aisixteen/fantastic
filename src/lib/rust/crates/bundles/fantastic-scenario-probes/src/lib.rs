@@ -219,10 +219,14 @@ impl Bundle for PurchaseProbe {
 /// than inventing a human's words.
 #[derive(Default)]
 pub struct UserProbe {
-    /// HOW MANY TIMES THE HUMAN WAS ACTUALLY ASKED. The scorer reads THIS, never
-    /// the model's prose: a turn that talks about asking leaves the tally at
-    /// zero, exactly as the other fixtures count their own side effects.
+    /// HOW MANY TIMES THIS AGENT WAS ACTUALLY ASKED. The scorer reads THIS,
+    /// never the model's prose: a turn that talks about asking leaves the tally
+    /// at zero, exactly as the other fixtures count their own side effects.
     asks: Counter,
+    /// PROPOSALS handed over. A question may carry an `action` the asker may not
+    /// perform itself — "buy this, if you agree". It is HELD, never run here;
+    /// pressing the button is a separate act by the person.
+    proposals: std::sync::Mutex<Vec<Value>>,
 }
 
 pub const USER_MODULE: &str = "user_probe.tools";
@@ -251,13 +255,16 @@ impl Bundle for UserProbe {
                 "id": agent_id.as_str(),
                 "sentence": "The human. Ask me when you cannot proceed without a decision that is mine to make; the answer comes straight back as the reply.",
                 "verbs": {
-                    "question": "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, request_id:str?. Asks the human and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends.",
-                    "asks": "no args — how many times the human has been asked. The tally, not prose.",
+                    "question": "args: question:str (req), kind:str? (text|single|multi|confirm), options:list?, action:dict?, request_id:str?. Asks, and RETURNS the answer — {answer, request_id}. An ordinary call: nothing suspends. An `action` is a PROPOSAL the asker may not perform itself: it is HELD, never run here.",
+                    "asks": "no args — {asks, proposals}: how many times this agent has been asked, and every `action` a question handed it. The tally, not prose.",
                     "task": "args: target:str (req), text:str (req). The human hands work to another agent; the send carries THIS agent as its sender.",
                 },
                 "asks": self.asks.get(),
             }),
-            "asks" => json!({ "asks": self.asks.get() }),
+            "asks" => json!({
+                "asks": self.asks.get(),
+                "proposals": self.proposals.lock().expect("proposals poisoned").clone(),
+            }),
             "question" => {
                 let q = payload
                     .get("question")
@@ -288,6 +295,13 @@ impl Bundle for UserProbe {
                                 "reason": "not_connected",
                             }),
                             Some(a) => {
+                                if let Some(act) = payload.get("action").filter(|v| v.is_object())
+                                {
+                                    self.proposals
+                                        .lock()
+                                        .expect("proposals poisoned")
+                                        .push(act.clone());
+                                }
                                 json!({"answer": a, "request_id": payload.get("request_id"), "asks": self.asks.bump()})
                             }
                         }

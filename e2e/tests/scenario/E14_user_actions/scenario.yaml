@@ -1,9 +1,15 @@
 # THE SCENARIO — shared data, one copy, every runtime.
 #
 # The model may PROPOSE a purchase but must not make one: it holds no grant on
-# the desk. A simulated human then presses the button TWICE — the clumsy
+# the desk. THE HUMAN IS AN AGENT — the model CALLS it with the proposal and the
+# human holds it. The person then presses the button TWICE — the clumsy
 # double-click — using the execution id the model minted, and the ledger must
 # make that buy exactly once.
+#
+# The proposal used to be a JSON line the runner scraped out of the model's
+# prose. It is a real call now: the human has an id, a record, a gate and a
+# ledger row, so "I asked the person" is a fact the kernel witnessed rather than
+# a sentence the model wrote.
 #
 # Two properties pull in opposite directions here, deliberately: the model must
 # name an execution it will never run itself, and the SUBSTRATE must honour that
@@ -13,9 +19,11 @@ id: user_actions
 title: proposed, clicked twice, bought once — user actions are idempotent
 
 task: >-
-  The user wants to buy one rocket from the `purchase` desk. You may NOT buy it
-  yourself — only the person can press the button. PROPOSE the action instead:
-  emit a single line of JSON of the form
+  A HUMAN owns this kernel and is present as an agent — reflect the tree to find
+  the one whose sentence says it is the human. They want to buy one rocket from
+  the `purchase` desk. You may NOT buy it yourself: you hold no grant on the
+  desk, and only the person can press the button. ASK THEM instead — `send` the
+  human a `question` of the form
   {"type":"question","kind":"confirm","question":"<what you are asking>",
   "action":{"target":"purchase","payload":{"type":"buy","item":"rocket"},"id":"<an execution id you mint>"}}
   and then stop. The button may be pressed more than once by accident, so the id
@@ -34,16 +42,20 @@ roster:
       write: "args: path, bytes — stores the document"
   - role: purchase_desk
     id: purchase
+  - role: user
+    id: user
+    answer: "yes — go ahead and buy it"
   - role: render_sink
     id: cli
 
 # NOTE the asymmetry: `purchase` is deliberately ABSENT. The AI must not be able
 # to buy — that it holds no grant on the desk is half the measurement.
 grants:
-  ai_can_call: [cli, yaml_store]
+  ai_can_call: [cli, yaml_store, user]
 
-# The runner presses the button twice with the model's own id, then checks the
-# desk sold exactly one.
+# The person presses the button twice with the model's own id, then the desk is
+# checked for exactly one sale. The proposal is read off the HUMAN — a call it
+# actually received — not off the model's prose.
 expect:
   - human_double_click: {from_proposal: true}
   - side_effects: {agent: purchase, exactly: 1}
