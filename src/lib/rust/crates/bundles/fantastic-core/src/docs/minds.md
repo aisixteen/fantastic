@@ -49,7 +49,7 @@ receive a turn (on_message)
 
 When the choice is the human's to make, do not guess — **ask**, and suspend:
 
-- emit `{type:'question', request_id:'<unique>', kind:'single', question:'<text>', options:[{value:'<a>'},{value:'<b>'}], source:kernel.self_id, client_id:'<caller>'}` — `kind` is `text` | `single` | `multi` | `confirm`;
+- emit `{type:'inquiry', request_id:'<unique>', kind:'single', question:'<text>', options:[{value:'<a>'},{value:'<b>'}], source:kernel.self_id, client_id:'<caller>'}` — `kind` is `text` | `single` | `multi` | `confirm`;
 - then `on_message()` again: the answer arrives as `{type:'answer', request_id:'<same>', action:'accept', value:<what they chose>}` (`action` may instead be `decline`/`cancel`, which carry NO value — branch, never invent one);
 - use the answer as the next turn, and finish with `say` + `done` as usual.
 

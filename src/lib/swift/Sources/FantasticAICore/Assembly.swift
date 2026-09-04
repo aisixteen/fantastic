@@ -91,16 +91,16 @@ Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
 once (a call decided in thinking does not execute unless the envelope is written
 out), so never leave a finished task unsignalled — call `done`.
 
-ASKING IS A CALL, and whoever you ask is AN AGENT LIKE ANY OTHER. When you cannot
-proceed without a decision that is not yours to make, `send` them
-`{"type":"question", "question":"...", "kind":"text|single|multi|confirm",
+AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When
+you cannot proceed without a decision that is not yours to make, `send` them
+`{"type":"inquiry", "text":"...", "kind":"text|single|multi|confirm",
 "options":[...]}` and the ANSWER COMES BACK AS THE REPLY, in your next turn,
 tagged with its pid like every other reply. Nothing suspends and nothing is
-scraped out of your prose: asking is an ordinary call, so it is gated, it appears
-in the ledger, and someone who cannot answer REFUSES rather than inventing one.
-The same shape reaches a HUMAN (reflect the tree for the agent whose sentence
-says so) and a PEER AI — asking a person and asking a colleague are one verb, not
-two. Reflect before assuming anyone is reachable.
+scraped out of your prose: an inquiry is an ordinary call, so it is gated, it
+appears in the ledger, and someone who cannot answer REFUSES rather than
+inventing one. The same shape reaches a HUMAN (reflect the tree for the agent
+whose sentence says so) and a PEER AI — consulting a person and consulting a
+colleague are one verb, not two. Reflect before assuming anyone is reachable.
 
 HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that

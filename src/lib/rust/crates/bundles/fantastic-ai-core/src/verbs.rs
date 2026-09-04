@@ -559,3 +559,83 @@ pub async fn send(
     }
     reply
 }
+
+// ── inquiry ─────────────────────────────────────────────────────────────────
+
+/// Open an `inquiry`: validate it and render it as the `send` payload that runs.
+///
+/// ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `inquiry` from a record and
+/// a peer AI answers it by THINKING; the sender writes the same call either way
+/// and reads the answer off the same reply. Before this an AI sent an inquiry
+/// answered `unknown type` — so "consult whoever can answer" was true only for
+/// humans, and inquiry between agents had no shape at all.
+///
+/// `Err` is the refusal to return as-is.
+pub fn inquiry_open(payload: &Value) -> Result<Value, Value> {
+    let q = payload.get("text").and_then(Value::as_str).unwrap_or("");
+    if q.trim().is_empty() {
+        return Err(json!({
+            "error": "inquiry: `text` must be a non-empty string",
+            "reason": "missing_arg",
+            "arg": "text",
+        }));
+    }
+    // The inquiry IS the turn. `options`/`kind` ride in the text because a model
+    // reads prose, not a schema; `action` is carried verbatim so an answering
+    // agent can see what it is being asked to endorse.
+    let mut text = q.to_string();
+    if let Some(opts) = payload.get("options").and_then(Value::as_array) {
+        if !opts.is_empty() {
+            let rendered: Vec<String> = opts
+                .iter()
+                .map(|o| {
+                    o.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| o.to_string())
+                })
+                .collect();
+            text.push_str("\n\nOptions: ");
+            text.push_str(&rendered.join(", "));
+        }
+    }
+    if let Some(act) = payload.get("action").filter(|v| v.is_object()) {
+        text.push_str("\n\nProposed action: ");
+        text.push_str(&act.to_string());
+    }
+    let mut send_payload = payload.clone();
+    if let Some(o) = send_payload.as_object_mut() {
+        o.insert("type".into(), json!("send"));
+        o.insert("text".into(), json!(text));
+    }
+    Ok(send_payload)
+}
+
+/// Close an `inquiry`: read the answer the model DECIDED on out of its turn.
+///
+/// Taking the turn's prose would make every stray sentence an answer and would
+/// put the runtime back in the business of reading minds off text.
+/// `inquiry_answer` is a control call in the same class as `done`: the model
+/// says what its answer IS. A turn that never emits one did not answer, and the
+/// asker is told so rather than handed a paragraph to parse.
+pub fn inquiry_close(out: Value, payload: &Value) -> Value {
+    if out.get("error").is_some() {
+        return out;
+    }
+    let text = out.get("response").and_then(Value::as_str).unwrap_or("");
+    let said = crate::tool_parse::extract_tool_calls(text)
+        .into_iter()
+        .rfind(|c| c.name == "inquiry_answer");
+    match said {
+        None => json!({
+            "error": "you were sent an inquiry and did not answer it: emit \
+                      <tool_call>{\"name\":\"inquiry_answer\",\"arguments\":\
+                      {\"answer\":\"...\"}}</tool_call>",
+            "reason": "unhandled",
+            "request_id": payload.get("request_id"),
+        }),
+        Some(c) => json!({
+            "answer": c.arguments.get("answer").and_then(Value::as_str).unwrap_or(""),
+            "request_id": payload.get("request_id"),
+        }),
+    }
+}

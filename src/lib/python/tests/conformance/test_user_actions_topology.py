@@ -95,7 +95,7 @@ class _Mind:
                 "I need your approval:\n"
                 + json.dumps(
                     {
-                        "type": "question",
+                        "type": "inquiry",
                         "request_id": "buy-rocket",
                         "kind": "confirm",
                         "question": "Buy one rocket?",

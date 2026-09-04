@@ -249,7 +249,7 @@ async def connect(
 
 
 async def _live_tasks(root, aid) -> list[dict]:
-    """The AI's in-flight rows, asked of the ROOT — `ps` is a kernel verb."""
+    """The AI's in-flight rows, read from the ROOT — `ps` is a kernel verb."""
     rows = (
         (
             (await root.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0][
@@ -269,7 +269,7 @@ async def drive(
     Returns "" on a clean end, or the reason the run was cut.
 
     THE HARNESS NO LONGER ANSWERS QUESTIONS. It used to scrape
-    `{"type":"question"}` out of the model's prose and post a reply back in from
+    `{"type":"inquiry"}` out of the model's prose and post a reply back in from
     outside the kernel, which is why the human had no id, no record, no gate and
     no ledger row. The human is an AGENT now (`e2e/probes/user_probe`) — the
     model calls it, the answer is the reply, and a fixture chooses what the human
@@ -294,8 +294,9 @@ async def drive(
     # The operator still pokes the human once. That single step is the person
     # pressing enter; it is the only out-of-band action left, and it is honest.
     opening = (
-        {"target": via, "payload": {"type": "task", "target": aid, "text": task,
-                                    "client_id": client_id}}
+        {"target": via, "payload": {"type": "send", "target": aid,
+                                    "payload": {"type": "send", "text": task,
+                                                "client_id": client_id}}}
         if via
         else {"target": aid,
               "payload": {"type": "send", "text": task, "client_id": client_id}}
@@ -309,7 +310,7 @@ async def drive(
         await asyncio.sleep(2.0)
         calls = distinct_calls(conn.proxy.transcript)
         # NOTHING IS SCRAPED HERE ANY MORE. The harness used to read the model's
-        # own prose for `{"type":"question"}` and post an answer back in from
+        # own prose for `{"type":"inquiry"}` and post an answer back in from
         # outside the kernel — the human had no id, no record, no gate and no
         # ledger row. The human is an AGENT now (`e2e/probes/user_probe`): the
         # model calls it and the answer is the reply, so a question needs the

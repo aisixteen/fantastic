@@ -10,7 +10,7 @@ that make it C1 rather than "just chat":
   1. work done BEFORE the ask happened exactly once and is NOT re-run on resume
      (the ledger's dedup is what makes this assertable, not just observable);
   2. the resumed turn CONTINUES — the post-answer side effect lands after it;
-  3. the structured question shape (`{type:'question', request_id, kind, ...}`)
+  3. the structured question shape (`{type:'inquiry', request_id, kind, ...}`)
      survives to the asker verbatim, so a UI can render it and correlate.
 
 The script-mind variant of C1 was already pinned in `test_mind_plumbed` (the
@@ -27,7 +27,7 @@ import pytest
 from ai_core import core
 
 QUESTION = {
-    "type": "question",
+    "type": "inquiry",
     "request_id": "q-color",
     "kind": "single",
     "question": "Which label do I write?",

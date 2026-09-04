@@ -260,6 +260,13 @@ impl Bundle for OllamaBackendBundle {
                 Value::Null
             }
             "send" => send_reply(agent_id, payload, kernel).await,
+            // ONE ASK VERB, WHOEVER IS ASKED: a person answers `inquiry` from a
+            // record, this agent answers it by THINKING, and the asker writes
+            // the same call either way.
+            "inquiry" => match verbs::inquiry_open(payload) {
+                Err(refusal) => refusal,
+                Ok(sp) => verbs::inquiry_close(send_reply(agent_id, &sp, kernel).await, payload),
+            },
             "list_models" => list_models_reply(agent_id, payload, kernel).await,
             "history" => verbs::history(agent_id, payload, kernel).await,
             "recall" => verbs::recall(agent_id, payload, kernel).await,

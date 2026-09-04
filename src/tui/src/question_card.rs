@@ -1,5 +1,5 @@
 //! The LIVE **question card** — a small modal a mind raises by emitting a
-//! `{type:"question", …}` event on its own agent. The TUI mirrors that event into
+//! `{type:"inquiry", …}` event on its own agent. The TUI mirrors that event into
 //! its brain inbox; this module turns it into an interactive card, collects the
 //! human's answer, and yields a `{type:"answer", …}` payload the shell `send`s back
 //! to the asking agent.
@@ -71,7 +71,7 @@ pub struct QuestionCard {
 }
 
 impl QuestionCard {
-    /// Parse a `{type:"question", …}` event into a card. `None` if it isn't a
+    /// Parse a `{type:"inquiry", …}` event into a card. `None` if it isn't a
     /// question, if `request_id` is missing/empty, if `source` is missing/empty (we
     /// couldn't answer without a target), or if a `single`/`multi` carries no
     /// options. `confirm` synthesizes a Yes/No list; `default` prefills the state.
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn from_event_parses_single() {
         let card = q(json!({
-            "type":"question","request_id":"q_1","kind":"single",
+            "type":"inquiry","request_id":"q_1","kind":"single",
             "question":"Which auth method?","header":"Auth",
             "options":[
                 {"value":"oauth","label":"OAuth","description":"Browser consent"},
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn from_event_parses_text() {
         let mut card = q(json!({
-            "type":"question","request_id":"q3","kind":"text",
+            "type":"inquiry","request_id":"q3","kind":"text",
             "question":"Name?","source":"m"
         }))
         .unwrap();
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn from_event_parses_confirm_and_accepts_bool() {
         let mut card = q(json!({
-            "type":"question","request_id":"q4","kind":"confirm",
+            "type":"inquiry","request_id":"q4","kind":"confirm",
             "question":"Proceed?","source":"m"
         }))
         .unwrap();
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn multi_toggle_yields_array_value() {
         let mut card = q(json!({
-            "type":"question","request_id":"q2","kind":"multi",
+            "type":"inquiry","request_id":"q2","kind":"multi",
             "question":"Pick some","source":"m",
             "options":[{"value":"a"},{"value":"b"},{"value":"c"}]
         }))
@@ -542,12 +542,12 @@ mod tests {
     #[test]
     fn none_without_source() {
         assert!(q(json!({
-            "type":"question","request_id":"q","kind":"text","question":"?"
+            "type":"inquiry","request_id":"q","kind":"text","question":"?"
         }))
         .is_none());
         // Empty source is unanswerable too.
         assert!(q(json!({
-            "type":"question","request_id":"q","kind":"text","question":"?","source":""
+            "type":"inquiry","request_id":"q","kind":"text","question":"?","source":""
         }))
         .is_none());
     }
@@ -555,13 +555,13 @@ mod tests {
     #[test]
     fn none_when_choice_options_empty() {
         assert!(q(json!({
-            "type":"question","request_id":"q","kind":"single",
+            "type":"inquiry","request_id":"q","kind":"single",
             "question":"?","source":"m","options":[]
         }))
         .is_none());
         // Options key missing on a choice kind → None.
         assert!(q(json!({
-            "type":"question","request_id":"q","kind":"multi","question":"?","source":"m"
+            "type":"inquiry","request_id":"q","kind":"multi","question":"?","source":"m"
         }))
         .is_none());
     }
@@ -570,7 +570,7 @@ mod tests {
     fn none_on_wrong_type_or_missing_request_id() {
         assert!(q(json!({"type":"answer","request_id":"q","source":"m"})).is_none());
         assert!(q(json!({
-            "type":"question","kind":"text","question":"?","source":"m"
+            "type":"inquiry","kind":"text","question":"?","source":"m"
         }))
         .is_none());
     }
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn cancel_never_carries_value() {
         let card = q(json!({
-            "type":"question","request_id":"q5","kind":"text","question":"?","source":"m"
+            "type":"inquiry","request_id":"q5","kind":"text","question":"?","source":"m"
         }))
         .unwrap();
         let c = card.cancel_payload();
@@ -595,14 +595,14 @@ mod tests {
     fn default_prefills_single_and_multi() {
         // single: the cursor lands on the option whose value matches `default`.
         let s = q(json!({
-            "type":"question","request_id":"q","kind":"single","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"single","question":"?","source":"m",
             "options":[{"value":"a"},{"value":"b"},{"value":"c"}],"default":"b"
         }))
         .unwrap();
         assert_eq!(s.accept_payload()["value"], "b");
         // multi: the listed values are pre-checked (in option order).
         let m = q(json!({
-            "type":"question","request_id":"q","kind":"multi","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"multi","question":"?","source":"m",
             "options":[{"value":"a"},{"value":"b"},{"value":"c"}],"default":["a","c"]
         }))
         .unwrap();
@@ -612,14 +612,14 @@ mod tests {
     #[test]
     fn default_prefills_text_and_confirm() {
         let t = q(json!({
-            "type":"question","request_id":"q","kind":"text","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"text","question":"?","source":"m",
             "default":"seed"
         }))
         .unwrap();
         assert_eq!(t.accept_payload()["value"], "seed");
         // confirm default false → No (index 1) → false.
         let c = q(json!({
-            "type":"question","request_id":"q","kind":"confirm","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"confirm","question":"?","source":"m",
             "default":false
         }))
         .unwrap();
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn on_key_navigates_and_accepts() {
         let mut card = q(json!({
-            "type":"question","request_id":"q","kind":"single","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"single","question":"?","source":"m",
             "options":[{"value":"a"},{"value":"b"}]
         }))
         .unwrap();
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn on_key_esc_cancels_without_value() {
         let mut card = q(json!({
-            "type":"question","request_id":"q","kind":"text","question":"?","source":"m"
+            "type":"inquiry","request_id":"q","kind":"text","question":"?","source":"m"
         }))
         .unwrap();
         match card.on_key(KeyCode::Esc) {
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn on_key_space_toggles_multi_but_types_in_text() {
         let mut multi = q(json!({
-            "type":"question","request_id":"q","kind":"multi","question":"?","source":"m",
+            "type":"inquiry","request_id":"q","kind":"multi","question":"?","source":"m",
             "options":[{"value":"a"}]
         }))
         .unwrap();
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(multi.accept_payload()["value"], json!(["a"]));
 
         let mut text = q(json!({
-            "type":"question","request_id":"q","kind":"text","question":"?","source":"m"
+            "type":"inquiry","request_id":"q","kind":"text","question":"?","source":"m"
         }))
         .unwrap();
         text.on_key(KeyCode::Char(' ')); // a literal space in text
