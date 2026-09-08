@@ -372,6 +372,60 @@ class Kernel:
     # tree's own auto-flush law. Called (sync, cheap) at every settle.
     ledger_flusher: "Callable[[], None] | None" = None
 
+    # THE ROW STORE — an agent's CONVERSATION, kernel-held. One row per turn (a
+    # message, a delivered reply, a fold mark, a recall decision), id-addressed in
+    # the SAME id space as executions (`mint_task_id`), append-only: a row is never
+    # edited or removed by this API. Dehydrated reply bodies live in `bodies` under
+    # their pid; an agent's current VIEW (the ordered ids it sees, each at a
+    # resolution) in `views`. Rows outlive `delete_agent`: agent id is conversation
+    # id, and a re-created id continues where it left off — a clean slate is a new
+    # id. Retention: process lifetime, unbounded; persistence (a `rows.json`
+    # beside `ledger.json`) is the later increment, riding the same flush seam.
+    rows: dict[str, dict] = field(default_factory=dict)
+    bodies: dict[str, bytes] = field(default_factory=dict)
+    views: dict[str, dict] = field(default_factory=dict)
+    _rows_by_agent: dict[str, list[str]] = field(default_factory=dict)
+
+    def rows_put(self, agent_id: str, row: dict) -> str:
+        """Append one row for `agent_id`; mint its id when absent. Bookkeeping from
+        above — the same standing as `ledger_put` — never gated."""
+        rid = row.get("id") or self.mint_task_id(agent_id)
+        stored = {**row, "id": rid, "agent": agent_id}
+        stored.setdefault("ts", time.time())
+        self.rows[rid] = stored
+        self._rows_by_agent.setdefault(agent_id, []).append(rid)
+        return rid
+
+    def rows_for(self, agent_id: str) -> list[dict]:
+        """That agent's rows, in append order."""
+        return [
+            self.rows[i]
+            for i in self._rows_by_agent.get(agent_id, ())
+            if i in self.rows
+        ]
+
+    def rows_get(self, ids: list[str]) -> list[dict]:
+        """Rows by id, any agent, in the order asked. The `messages` verb gates."""
+        return [self.rows[i] for i in ids if i in self.rows]
+
+    def body_put(self, pid: str, data: bytes) -> None:
+        self.bodies[pid] = bytes(data)
+
+    def body_get(self, pid: str, offset: int, length: int):
+        """One page of a stored body: (bytes, next_offset, eof, size), or None."""
+        b = self.bodies.get(pid)
+        if b is None:
+            return None
+        chunk = b[offset : offset + max(1, length)]
+        nxt = offset + len(chunk)
+        return chunk, nxt, nxt >= len(b), len(b)
+
+    def view_put(self, agent_id: str, doc: dict) -> None:
+        self.views[agent_id] = dict(doc)
+
+    def view_get(self, agent_id: str) -> dict | None:
+        return self.views.get(agent_id)
+
     def ledger_settled(self) -> None:
         if self.ledger_flusher is not None:
             self.ledger_flusher()

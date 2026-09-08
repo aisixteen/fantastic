@@ -63,6 +63,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ai_core.context import (
+    BUDGET_FLOOR,
+    CHARS_PER_TOKEN,
     ProjectionCtx,
     budget,
     estimate_one,
@@ -70,6 +72,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
+from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
 
@@ -90,7 +93,7 @@ from ai_core.tool_parse import (
     extract_tool_calls,
     malformed_calls,
 )
-from kernel import current_task, operator_context
+from kernel import current_task
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -124,6 +127,19 @@ _projection: dict[str, dict] = {}
 # durable store + which client's thread it was, so `_derive_reaction` can scan from there
 # for the model's recall/persist reaction. Internal; never surfaced in a verb reply.
 _compaction_mark: dict[str, dict] = {}
+
+# Where the last `_assemble` took its view from — "array" or "store…". Diagnostics only.
+_view_source: dict[str, str] = {}
+# Agents whose next turn must open with `context_recall` (enough folds landed).
+_recall_due: set[str] = set()
+_folds_since: dict[str, int] = {}
+RECALL_EVERY = 3  # fold rows between recalls
+# INCARNATION per agent id, bumped on every boot. A reply dispatched under one
+# incarnation must not become a live turn of the next: after a reboot the rebuilt agent
+# would be woken by answers to calls it no longer remembers making. Measured
+# 2026-09-06 (reboot_continuity): the rebooted agent received phase-one read replies,
+# went back to "verifying" work already folded, and never did the new instruction.
+_incarnation: dict[str, int] = {}
 
 # ─── shared constants ───────────────────────────────────────────
 
@@ -323,7 +339,7 @@ def _render_for_model(messages: list[dict]) -> list[dict]:
     return out
 
 
-# ─── persistence (routed through file_bridge_id) ────────────────
+# ─── persistence (the KERNEL ROW STORE — this bundle owns no files) ─────────
 
 
 def _safe_client(client_id: str) -> str:
@@ -333,116 +349,163 @@ def _safe_client(client_id: str) -> str:
     return "".join(c if (c.isalnum() or c in "._-") else "_" for c in s)
 
 
-def _file_bridge_id(self_id: str, kernel) -> str | None:
-    """The agent's file leg: chat history persists through it (the JSONL sidecar
-    below), and the nvidia backend reads its api_key sidecar through it."""
-    rec = kernel.get(self_id) or {}
-    return rec.get("file_bridge_id")
+def _ctx(kernel):
+    """The kernel behind this agent. A handler's `kernel` is the Agent; `.ctx` is the
+    Kernel that holds the row store. Test fakes may hand the store object directly."""
+    return getattr(kernel, "ctx", kernel)
 
 
-def _chat_path(self_id: str, client_id: str) -> str:
-    """The chat sidecar's path on the agent's OWN file leg — one JSONL file per
-    client, one JSON line per turn. The encoding is ai_core's PRIVATE choice as
-    a consumer (this code is its only reader; models get turns through the
-    `history`/`recall` verbs) — the substrate imposes no format on anyone."""
-    return f"agents/{self_id}/chat_{_safe_client(client_id)}.jsonl"
+def _mint_row_id(self_id: str, kernel) -> str:
+    """ONE ID SPACE. Rows are minted by the kernel's own allocator, so a row id and a
+    pid are the same kind of thing and never collide."""
+    return _ctx(kernel).mint_task_id(self_id)
 
 
-async def _load_history(self_id: str, kernel, client_id: str) -> list[dict]:
-    """The client's conversation, read from the JSONL sidecar on the agent's
-    file leg. LINE INDEX == STORE INDEX — `recall.before` and the compaction
-    cursor page by it, so the identity is load-bearing. No leg wired, or no
-    sidecar yet, reads as empty (writes are the loud half)."""
-    fb = _file_bridge_id(self_id, kernel)
-    if not fb:
-        return []
-    path = _chat_path(self_id, client_id)
-    chunks: list[bytes] = []
-    offset = 0
-    while True:
-        # BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the loader's
-        # persist_blob and the old chat-store create: the agent does not choose
-        # to have a conversation log. Confused-deputy-safe by construction: the
-        # target is the record's OWN `file_bridge_id` (operator-set), the verb
-        # is literal, and the path is self-scoped (`agents/<self>/…`, client
-        # sanitized) — no caller can aim it at anyone else's namespace.
-        with operator_context():
-            r = (
-                await kernel.send(
-                    [
-                        {
-                            "target": fb,
-                            "payload": {
-                                "type": "read_stream",
-                                "path": path,
-                                "offset": offset,
-                                "length": 65536,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
-        if not isinstance(r, dict) or r.get("error"):
-            return []  # no sidecar yet = no history
-        b = r.get("bytes") or b""
-        chunks.append(bytes(b))
-        if r.get("eof") or not b:
-            break
-        offset = r.get("next_offset", offset + len(b))
-    out: list[dict] = []
-    for line in b"".join(chunks).decode("utf-8", "replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            turn = json.loads(line)
-        except ValueError:
-            # A torn tail line (a crash mid-append) is the ONE legal defect in
-            # an append-only log; skipping it loses at most that turn and never
-            # shifts the index of the lines before it.
-            continue
-        if isinstance(turn, dict):
-            out.append(turn)
-    return out
+# EVERY ROW HAS AN ADDRESS. `id` is `<agent>:<hex>` — the same allocator the kernel uses
+# for pids, so calls and rows share one id space. `parent` is CAUSALITY (the row this one
+# responds to); a thread is the parent chain, derived when needed. `reply_to` on a send
+# is DELIVERY and is left alone. Measured 2026-09-06: the model attributed rows 5/5
+# through 64 interleaved chains from `parent` alone.
+_TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑(\S+)[^\]]*\]")
 
 
-async def _save_history(
-    self_id: str, kernel, client_id: str, new_turns: list[dict]
-) -> None:
-    """APPEND this turn's new messages to the JSONL sidecar — one line per turn,
-    one `write_stream` append per turn (absent offset = append-at-end; creates
-    the file). The durable record is never trimmed; the projection only shapes
-    what the model sees. Ordering: the per-agent FIFO lock serializes an
-    agent's sends, which is what makes the leg's stat-then-seek append safe —
-    an EXTERNAL concurrent writer to the same sidecar would not be.
-    No `file_bridge_id` wired ⇒ nothing persists — and stays loudly absent
-    from `history`, never silently in RAM."""
-    if not new_turns:
-        return
-    fb = _file_bridge_id(self_id, kernel)
-    if not fb:
-        return
-    path = _chat_path(self_id, client_id)
+def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[str, str | None]:
+    """(id, parent) for an incoming turn. A delivered reply turn names the assistant
+    turn that made the calls (`↑`) on its first tag; anything else is a ROOT — a fresh
+    message from a person or a peer."""
+    rid = _mint_row_id(self_id, kernel)
+    m = _TAG_LINKS.match(text or "")
+    return rid, (m.group(1) if m else None)
+
+
+def _reply_tag(pid, target, verb, title, turn_id, n, m_total, batch) -> str:
+    """The one line a reply is known by, forever — in the durable store, in `recall`
+    pages, and as the stub a stripped body leaves behind:
+        [reply to <pid> · <target> <verb> · "<title>" · ↑<turn> · N of M in batch <b>]
+    Optional segments are appended in that order; `_REPLY_TAG` absorbs them all."""
+    tag = f"[reply to {pid} · {target} {verb}"
+    if title:
+        tag += f' · "{title}"'
+    if turn_id:
+        tag += f" · ↑{turn_id}"
+    if m_total > 1:
+        tag += f" · {n} of {m_total} in batch {batch}"
+    return tag + "]"
+
+
+def _res_of(row: dict) -> str:
+    """The resolution a rendered row is at: a fold, a stripped stub, or the row itself."""
+    if row.get("kind") == "fold":
+        return "fold"
+    c = row.get("content")
+    if isinstance(c, str) and "(stripped:" in c and c.startswith("[reply to "):
+        return "stub"
+    return "full"
+
+
+async def _load_history(self_id: str, kernel) -> list[dict]:
+    """The agent's conversation — every row, in order — from the KERNEL ROW STORE.
+    AGENT ID IS CONVERSATION ID: a second conversation is a second agent. Nothing is
+    read from disk here; persistence of the store is the kernel's concern (later, on
+    the ledger's own flush seam), never this bundle's."""
+    return list(_ctx(kernel).rows_for(self_id))
+
+
+async def _save_history(self_id: str, kernel, new_turns: list[dict]) -> None:
+    """APPEND this turn's rows to the kernel row store. Bookkeeping from above — the
+    same standing as the ledger's own `ledger_put`; no grant, no gate, no disk."""
     for turn in new_turns:
-        line = (json.dumps(turn, ensure_ascii=False) + "\n").encode("utf-8")
-        # PROCESSED FROM ABOVE — see `_load_history`: own leg, literal verb,
-        # self-scoped path. Without this every fixture would need a
-        # can_call/callable_by pair just so an AI can keep its own history.
-        with operator_context():
-            (
-                await kernel.send(
-                    [
-                        {
-                            "target": fb,
-                            "payload": {
-                                "type": "write_stream",
-                                "path": path,
-                                "bytes": line,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
+        _ctx(kernel).rows_put(self_id, turn)
+
+
+async def _store_reply(self_id: str, kernel, pid: str, body: str) -> bool:
+    """FULL ASYNC: a reply too big to hand the model as a turn is kept in the kernel's
+    body store under its pid and the model is handed its DIGEST; it pulls pages when
+    and if it wants them."""
+    _ctx(kernel).body_put(pid, body.encode("utf-8"))
+    return True
+
+
+async def _load_reply(self_id: str, kernel, pid: str, offset: int, length: int):
+    """One page of a stored reply body: (text, next_offset, eof, total) or None."""
+    got = _ctx(kernel).body_get(pid, offset, length)
+    if got is None:
+        return None
+    chunk, nxt, eof, size = got
+    return chunk.decode("utf-8", "replace"), nxt, eof, size
+
+
+def _inline_cap(rec: dict) -> int:
+    """Tokens a reply may occupy INLINE in the model's next turn. Above this it is
+    stored and digested. An eighth of the input budget: a 12k window inlines ~1.4k
+    tokens (a reflect, an error, a short read) and digests a 6.8KB file body."""
+    return max(BUDGET_FLOOR, budget(rec) // 8)
+
+
+def _fit_reply(
+    items: list, cap_tokens: int, limit: int | None = None
+) -> tuple[list, bool]:
+    """THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the
+    inline cap, or its answer is stored and digested and the model pulls its own reply
+    (measured 2026-09-06: a 4788-byte grep result came back as a receipt; the run
+    drowned in pulls). Keep items from the front while the rendered reply fits.
+    Returns (kept, truncated)."""
+    # MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb wraps
+    # around these items (`total`, `next`, …). JSON escaping inflates raw text by up to
+    # ~30% on newline-heavy bodies; the margin is what keeps "fits" true at the seam.
+    cap = int(cap_tokens * 0.8)
+    kept: list = []
+    for it in items:
+        if limit is not None and len(kept) >= limit:
+            return kept, True
+        trial = kept + [it]
+        if (
+            estimate_one({"role": "user", "content": json.dumps(trial, default=str)})
+            > cap
+        ):
+            return kept, True
+        kept = trial
+    return kept, False
+
+
+def _pull_cap_chars(rec: dict) -> int:
+    """The most a single `pull` may return — EXACTLY the inline cap, in chars.
+
+    It was half the window, and that ate its own tail: a full page was larger than the
+    inline cap, so the page itself got stored and digested, so the model pulled the
+    pull, forever, and never saw a byte. A pull page must ALWAYS inline; making the two
+    caps one number makes that arithmetic rather than a special case. More pages at a
+    tiny window is the price, and it is the right one."""
+    return _inline_cap(rec) * CHARS_PER_TOKEN
+
+
+async def _save_view(
+    self_id: str, kernel, ids: list[dict], *, budget_: int, why: str
+) -> bool:
+    """The agent's STATE: the ordered ids it sees, each at a resolution. Kernel-held."""
+    _ctx(kernel).view_put(
+        self_id, {"v": 1, "ts": time.time(), "budget": budget_, "why": why, "ids": ids}
+    )
+    return True
+
+
+async def _load_view(self_id: str, kernel) -> dict | None:
+    doc = _ctx(kernel).view_get(self_id)
+    return doc if isinstance(doc, dict) and isinstance(doc.get("ids"), list) else None
+
+
+def _apply_res(row: dict, res: str) -> dict:
+    """Render a stored row at the resolution the view array asks for."""
+    if res == "stub":
+        from ai_core.strategies.strip import (
+            _blocks,
+            _stub,
+        )  # lazy: package import order
+
+        c = row.get("content")
+        if isinstance(c, str) and c.startswith("[reply to "):
+            return {**row, "content": "\n\n".join(_stub(b) for b in _blocks(c))}
+    return row
 
 
 async def _get_provider(self_id: str, kernel, cfg: Backend):
@@ -485,6 +548,41 @@ nothing is ever truly lost.
   tool — that is how they survive beyond this window.
 - To inspect your budget + the last compaction + your own last reaction:
   `send('<your_own_id>', {type:'context_status'})`.
+"""
+
+
+def _clean_title(t) -> str | None:
+    """A title lives INSIDE the reply tag, so it may not contain the one character that
+    closes it, nor a newline that would end the tag line. Capped: it is a sentence."""
+    if not isinstance(t, str) or not t.strip():
+        return None
+    return re.sub(r"[\]\r\n]+", " ", t).strip()[:140] or None
+
+
+_TITLES_HOWTO = """## Titling your calls
+Every call carries a one-sentence `title` beside `target_id` and `payload`:
+<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{...},"title":"<why this call>"}}</tool_call>
+The title rides on the reply's tag and is what remains once the reply BODY is stripped
+from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
+for the audit marker"), and after a reply SAY WHAT IT TOLD YOU in one sentence — the body
+will go; your sentence will not.
+"""
+
+
+_ASYNC_HOWTO = """## Replies are rows, not turns
+A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
+tag, your title, size — with the body stored:
+[reply to <pid> · notes read · "survey filler_2"]
+(settled, 6812 bytes — NOT inlined. To find a line in it: send yourself {type:'grep', query:'<substring>', ids:['<pid>']}. To read it: {type:'pull', pid:'<pid>', offset:0})
+GREP BEFORE YOU PAGE: {type:'grep', query:'<substring>'} on yourself finds the line —
+in a stored body, a folded stretch, an old turn — with its id and line; pull only what
+matched. A `pull` page always fits inline; `next_offset` continues it, `eof` ends it.
+FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N refs]
+"<title>"` plus a short summary. Nothing is deleted — grep or pull with the fold's id to
+look inside. After a fold, and on boot with a history, `context_recall` fits the head of
+your conversation to your budget and asks you what to keep in full; a `[recall …]` line
+is your own earlier decision and names the LIVE task. You may call
+{type:'context_recall'} on yourself any time.
 """
 
 
@@ -611,6 +709,7 @@ again — it is cheap and always current, and re-reading beats guessing.
 
 
 def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
+    born = _incarnation.get(target, 0)
     """Hand `text` to `target` as a fresh turn, WITHOUT waiting for that turn.
 
     THIS IS WHY IT MUST NOT BE AWAITED INLINE. A send to an AI agent takes its
@@ -634,7 +733,9 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
     the same contract `exec_bridge` uses for a forked job. Fire-and-forget without
     that is the orphan bug.
     """
-    task = asyncio.create_task(_deliver(kernel, target, text, client_id, system_prompt))
+    task = asyncio.create_task(
+        _deliver(kernel, target, text, client_id, system_prompt, born=born)
+    )
     try:
         kernel.ctx.spawn_task(target, "deliver_reply", task)
     except Exception:  # noqa: BLE001 — a stub kernel in tests has no ctx
@@ -647,7 +748,9 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
 _ORPHAN_DELIVERIES: set = set()
 
 
-async def _deliver(kernel, target, text, client_id, system_prompt) -> None:
+async def _deliver(
+    kernel, target, text, client_id, system_prompt, *, born: int | None = None
+) -> None:
     """Hand `text` to `target` as a fresh turn. AWAITS the whole turn — call
     `_deliver_soon` unless you specifically need to block on it.
 
@@ -667,6 +770,26 @@ async def _deliver(kernel, target, text, client_id, system_prompt) -> None:
     a cli, a test harness, a panel — sees it. We do NOT raise: the dispatch that
     routed this reply is a detached task, and raising there kills a chain that may
     have other live branches."""
+    if born is not None and _incarnation.get(target, 0) != born:
+        # A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data, in
+        # the ledger and in the store — but it does not wake a turn: the agent that
+        # made the call is gone, and the one that replaced it is on other work.
+        rid = _mint_row_id(target, kernel)
+        await _save_history(
+            target,
+            kernel,
+            [
+                {
+                    "role": "user",
+                    "id": rid,
+                    "parent": None,
+                    "kind": "late",
+                    "content": "[late reply — answered a call made before this agent last "
+                    "booted; recorded, not acted on]\n" + text,
+                }
+            ],
+        )
+        return
     payload = {"type": "send", "text": text, "client_id": client_id}
     if system_prompt is not None:
         payload["system_prompt"] = system_prompt
@@ -727,13 +850,25 @@ THINK_CLOSE = "</think>"
 # history keeps every turn, so the trace stays complete.
 _WHOLE_STATE_READS = frozenset({"reflect", "list_agents", "ps", "keys"})
 # `[^\]]*` absorbs the optional ` · N of M in batch <token>` suffix.
-_REPLY_TAG = re.compile(r"^\[reply to \S+ · (\S+) (\S+)[^\]]*\]")
+#
+# The verb group is `[^\]\s]+`, NOT `\S+`. With `\S+` the group is greedy and `]` is
+# not excluded from it, so on `[reply to x · notes reflect]\n{"verbs":["read"]}` it took
+# `reflect]` and let `[^\]]*\]` close on a bracket INSIDE THE BODY. The verb then read
+# `reflect]`, which is in no vocabulary — so `dedupe_stale_reads` matched nothing and
+# `drop_answered_reflects` stubbed nothing for ANY reply whose body contains a `]`.
+# Reflect bodies are rendered with `json.dumps`, so every list-valued field puts one
+# there: the trimmer documented as reclaiming 42% of the window was inert in practice.
+# Measured 2026-09-04. Every fixture had used a body with no bracket (`"\nbody"`), in
+# all three runtimes, which is why parity tests agreed with each other and with nothing.
+_REPLY_TAG = re.compile(r"^\[reply to \S+ · (\S+) ([^\]\s]+)[^\]]*\]")
 # A delivered turn carries ONE OR MORE reply blocks — a batch arrives whole, one
 # block per call, joined by a blank line. The trimmers below work on the BLOCK,
 # the unit they were written for; treating the whole turn as one reply either
 # deleted siblings (drop_answered_reflects) or trimmed nothing (a count guard
 # that skipped every multi-reply turn — tried 2026-08-25, superseded same day).
 _BLOCK_SPLIT = re.compile(r"\n\n(?=\[reply to \S+ · )")
+# The pid off a block's first line — what `grep` and `strip` address a body by.
+_PID_TAG = re.compile(r"^\[reply to (\S+) · ")
 
 
 def _reply_blocks(content: str) -> list[str]:
@@ -812,7 +947,9 @@ def drop_answered_reflects(history: list[dict]) -> list[dict]:
         if trimmed == blocks:
             out.append(turn)
         else:
-            out.append({"role": "user", "content": "\n\n".join(trimmed)})
+            # KEEP THE ROW'S KEYS. `id`/`parent`/`refs` ride the view; rebuilding the
+            # turn as a bare {role, content} silently unlinked every trimmed row.
+            out.append({**turn, "content": "\n\n".join(trimmed)})
     return out
 
 
@@ -845,9 +982,7 @@ def dedupe_stale_reads(history: list[dict]) -> list[dict]:
         if not changed:
             keep_rev.append(turn)
         else:
-            keep_rev.append(
-                {"role": "user", "content": "\n\n".join(reversed(kept_rev))}
-            )
+            keep_rev.append({**turn, "content": "\n\n".join(reversed(kept_rev))})
     return list(reversed(keep_rev))
 
 
@@ -979,7 +1114,16 @@ _NO_CALL_NUDGE = (
 
 
 async def _route_reply(
-    self_id, kernel, text, client_id, send_to, system_prompt, send_timeout, incoming
+    self_id,
+    kernel,
+    text,
+    client_id,
+    send_to,
+    system_prompt,
+    send_timeout,
+    incoming,
+    *,
+    turn_id: str | None = None,
 ):
     """Honour where this pass's output goes. Runs DETACHED, after the lock is
     released.
@@ -1134,9 +1278,25 @@ async def _route_reply(
                                         "the program between column-0 marker lines "
                                         "inside the same <tool_call>: the JSON line, "
                                         "then `*** Begin Bytes`, the program verbatim, "
-                                        "then `*** End Bytes`."
+                                        "then `*** End Bytes`. For a SHORT text (a few "
+                                        "lines) skip the fence: an ordinary `send` with "
+                                        "the text as a JSON string in that field."
                                     ),
                                     "target": target,
+                                    "example": {
+                                        "name": "send",
+                                        "arguments": {
+                                            "target_id": target,
+                                            "payload": {
+                                                **{
+                                                    k: v
+                                                    for k, v in payload.items()
+                                                    if k != field
+                                                },
+                                                field: "<the text, as a JSON string>",
+                                            },
+                                        },
+                                    },
                                 }
                             ),
                         )
@@ -1146,6 +1306,18 @@ async def _route_reply(
                 payload[field] = val.encode("utf-8")
         # The model's own `timeout` overrides the layer default; the kernel
         # validates it, so a bad value comes back as a readable refusal.
+        # A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched here,
+        # AFTER the turn closed and `_current` was cleared — so a verb that resolves
+        # its conversation from the in-flight entry (`recall`, `grep`, `history`,
+        # `pull` of a fold) saw the DEFAULT client and searched an empty store.
+        # Measured 2026-09-06: every model-issued grep in three e2e runs returned
+        # total=0; the model fell back to paging (21 pulls where one grep would do).
+        if (
+            target == self_id
+            and isinstance(payload, dict)
+            and "client_id" not in payload
+        ):
+            payload = {**payload, "client_id": client_id}
         item = {"target": target, "payload": payload, "timeout": send_timeout}
         if "timeout" in args:
             item["timeout"] = args.get("timeout")
@@ -1159,7 +1331,14 @@ async def _route_reply(
         items.append(item)
         if reply_to:
             units.append(
-                (reply_to, target, payload.get("type", "?"), len(items) - 1, None)
+                (
+                    reply_to,
+                    target,
+                    payload.get("type", "?"),
+                    len(items) - 1,
+                    None,
+                    _clean_title(args.get("title")),
+                )
             )
         # fire-and-forget: dispatched, counted nowhere, nobody awaits the answer
     outcomes = await kernel.send(items) if items else []
@@ -1168,16 +1347,23 @@ async def _route_reply(
         # glance (measured 2026-08-24: bare "1 of 3" labels collided across
         # turns and the model re-read one file forever). The PID still
         # identifies the individual call and is the `ps`/`cancel` handle.
-        batch = secrets.token_hex(2)
+        # The batch token IS the assistant row's hex, so `in batch <b>` and `↑<turn>`
+        # name the same thing and the model can see the row every reply points at.
+        batch = turn_id.split(":", 1)[1] if turn_id else secrets.token_hex(2)
         groups: dict[str, list[str]] = {}
         order: list[str] = []
-        for dest, target, verb, idx, body in units:
+        for dest, target, verb, idx, body, *_ in units:
             if dest not in groups:
                 groups[dest] = []
                 order.append(dest)
             groups[dest].append("")  # reserve the slot; fill below with n/M known
         counts = {d: 0 for d in groups}
-        for dest, target, verb, idx, body in units:
+        _get = getattr(kernel, "get", None)  # a bare test kernel has no record
+        rec_ = (_get(self_id) if _get else None) or {}
+        async_on = bool(rec_.get("context_async"))
+        cap = _inline_cap(rec_)
+        for dest, target, verb, idx, body, *rest in units:
+            title = rest[0] if rest else None
             if idx is not None:
                 out = outcomes[idx]
                 pid = out["pid"] or "-"
@@ -1186,12 +1372,32 @@ async def _route_reply(
                 # the distillation notice.
                 if verb == "reflect":
                     body += _REFLECT_NUDGE
+                # FULL ASYNC. A reply is DATA, not a question — the model needs to
+                # be able to see it, not forced to swallow it whole as its next
+                # turn. Anything over the inline cap is stored under its pid and
+                # replaced by its digest; the model pulls pages when it wants them.
+                # This is what makes an unbounded reply (a 240KB ledger dump)
+                # non-fatal: it becomes a row to page, never a turn to fit.
+                if (
+                    async_on
+                    and pid != "-"
+                    and estimate_one({"role": "user", "content": body}) > cap
+                ):
+                    size = len(body)
+                    if await _store_reply(self_id, kernel, pid, body):
+                        # THE STUB NAMES GREP FIRST. It used to offer only `pull`, and
+                        # a model hunting one line paged 16 bodies (measured 2026-09-06,
+                        # recall_after_fold: 24 pulls, 0 greps, marker not found).
+                        body = (
+                            f"(settled, {size} bytes — NOT inlined. To find a line in it: "
+                            f"send yourself {{type:'grep', query:'<substring>', ids:['{pid}']}}. "
+                            f"To read it: {{type:'pull', pid:'{pid}', offset:0}})"
+                        )
             else:
                 pid = "-"
             n = counts[dest] = counts[dest] + 1
             m_total = sum(1 for u in units if u[0] == dest)
-            tag = f"[reply to {pid} · {target} {verb}"
-            tag += f" · {n} of {m_total} in batch {batch}]" if m_total > 1 else "]"
+            tag = _reply_tag(pid, target, verb, title, turn_id, n, m_total, batch)
             groups[dest][n - 1] = tag + "\n" + body
         for dest in order:
             _deliver_soon(
@@ -1243,6 +1449,43 @@ async def _route_reply(
         _deliver_soon(kernel, send_to, text, client_id, system_prompt)
 
 
+async def _default_system_content(self_id: str, kernel) -> str:
+    """The deterministic substrate prompt — rebuilt every turn from the live tree. Shared
+    by `_assemble` and `context_recall` (which needs its size to know the body budget)."""
+    primer = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {"type": "reflect", "tree": "ids", "bundles": "ids"},
+                }
+            ]
+        )
+    )[0]["result"]
+    me = (
+        await kernel.send(
+            [{"target": self_id, "payload": {"type": "reflect", "tree": "none"}}]
+        )
+    )[0]["result"]
+    blocks = [
+        _render_reflect(primer),
+        f"You are `{self_id}`. " + _render_reflect(me),
+        _SEND_TO_HOWTO,
+        _CONTEXT_HOWTO,
+    ]
+    # OPT-IN, on the record. The `facts` verb exists on every AI, but teaching it
+    # costs every agent prompt tokens for a discipline most runs never need — and a
+    # block like this changes behavior just by being read. `context_facts` turns it
+    # on INDEPENDENTLY of `context_strategy`, so a comparison can hold the model's
+    # behavior fixed and vary only what the strategy does with the dumps.
+    rec_ = kernel.get(self_id) or {}
+    if rec_.get("context_titles"):
+        blocks.append(_TITLES_HOWTO)
+    if rec_.get("context_async"):
+        blocks.append(_ASYNC_HOWTO)
+    return "\n\n".join(blocks)
+
+
 async def _assemble(
     self_id: str,
     user_text: str,
@@ -1272,29 +1515,7 @@ async def _assemble(
         # the backend's — see `_CONTEXT_HOWTO`). NO agent menu, NO tool howto — this
         # backend does not run a tool loop; a caller that wants tool-calling supplies
         # its own `system_prompt` teaching its convention + whatever menu it built.
-        primer = (
-            await kernel.send(
-                [
-                    {
-                        "target": "kernel",
-                        "payload": {"type": "reflect", "tree": "ids", "bundles": "ids"},
-                    }
-                ]
-            )
-        )[0]["result"]
-        me = (
-            await kernel.send(
-                [{"target": self_id, "payload": {"type": "reflect", "tree": "none"}}]
-            )
-        )[0]["result"]
-        sys_content = "\n\n".join(
-            [
-                _render_reflect(primer),
-                f"You are `{self_id}`. " + _render_reflect(me),
-                _SEND_TO_HOWTO,
-                _CONTEXT_HOWTO,
-            ]
-        )
+        sys_content = await _default_system_content(self_id, kernel)
     # System block is rebuilt on EVERY user turn; chat.json holds only
     # the user/assistant turns. The howto is not persisted — it always
     # reflects the latest state at send-time.
@@ -1308,9 +1529,32 @@ async def _assemble(
         # Trimmed VIEW, not a rewrite of the store (durable history keeps every turn,
         # so the trace stays complete): stale whole-state reads deduped, and answered
         # reflects reduced to a stub — the model's own distillation carries the facts.
-        hist = await _load_history(self_id, kernel, client_id)
+        hist = await _load_history(self_id, kernel)
         store_len = len(hist)
-        messages.extend(drop_answered_reflects(dedupe_stale_reads(hist)))
+        # THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
+        # resolves, the model sees exactly those rows at exactly those resolutions —
+        # the same bytes before and after a restart. Otherwise (no array yet, or an
+        # id that no longer resolves) the view is the trimmed store, as before.
+        view = await _load_view(self_id, kernel)
+        by_id = {r.get("id"): r for r in hist if r.get("id")}
+        if view and view["ids"] and all(e.get("id") in by_id for e in view["ids"]):
+            messages.extend(
+                _apply_res(by_id[e["id"]], e.get("res", "full")) for e in view["ids"]
+            )
+            # THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every row
+            # appended since — the model's own turns, the replies that landed — rides
+            # behind it in full. Measured 2026-09-06 (recall_after_fold): served the
+            # array alone, the model never saw the read it had just made and restarted
+            # the survey from filler_0, sixty turns in a circle.
+            idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
+            newest = max(idx[e["id"]] for e in view["ids"])
+            messages.extend(
+                drop_answered_reflects(dedupe_stale_reads(hist[newest + 1 :]))
+            )
+            _view_source[self_id] = "array"
+        else:
+            messages.extend(drop_answered_reflects(dedupe_stale_reads(hist)))
+            _view_source[self_id] = "store" if view is None else "store (stale array)"
     messages.append({"role": "user", "content": user_text})
     return messages, store_len
 
@@ -1407,13 +1651,23 @@ def _make_summarizer(provider):
         async for chunk in provider.chat(prompt):
             if isinstance(chunk, str):
                 parts.append(chunk)
-        return "".join(parts)
+        # A REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 across two
+        # e2e runs: 172 of 172 model-written folds carried a title beginning
+        # `<think>The user wants me to summarize…` — the summary was buried under the
+        # reasoning and every fold read as noise. Side calls strip like the main turn.
+        return without_thinking("".join(parts))
 
     return _summarize
 
 
 def _context_notice(
-    strategy: str, summary: str | None, omitted_marker: bool, dropped_n: int
+    strategy: str,
+    summary: str | None,
+    omitted_marker: bool,
+    dropped_n: int,
+    pinned: list[str] | None = None,
+    stripped: int = 0,
+    stripped_bytes: int = 0,
 ) -> dict:
     """The ONE canonical inbound context-notice — composed at the SEAM from a strategy's
     `Projection` artifact (no strategy fabricates its own turn anymore). A `role:user`
@@ -1428,6 +1682,22 @@ def _context_notice(
         lines.append("Summary of the dropped span:\n" + summary)
     elif omitted_marker:
         lines.append("An earlier span was omitted in place.")
+    if stripped:
+        lines.append(
+            f"{stripped} reply bod(ies) were STRIPPED to their tag+title line "
+            f"({stripped_bytes} bytes left your view); every one is still in durable "
+            "storage — recall it by the pid on its line."
+        )
+    if pinned:
+        # POINT AT THE BLOCK, DO NOT REPEAT IT. The facts live in their own stable message
+        # ABOVE this notice, in the cached prefix. Embedding them here would put the one
+        # append-only thing in the system inside the most volatile one — the notice is
+        # rebuilt with a fresh `dropped_n` at every cut, so a fact block carried in it
+        # would be rewritten every time and take the whole cached prefix with it.
+        lines.append(
+            f"Your {len(pinned)} checkpointed fact(s) are in the FACTS block above, "
+            "unchanged — they still bind."
+        )
     lines.append(
         "The full transcript is intact in durable storage. To page dropped turns back, "
         "send {type:'recall', query?, limit?} to your OWN id. If the dropped span holds "
@@ -1514,10 +1784,36 @@ async def _project_context(
         summarize=_make_summarizer(provider),
         self_id=self_id,
         kernel=kernel,
+        client_id=client_id,
     )
     proj = await strat(body, system_block, rec, ctx)
     notice = _context_notice(
-        strat_name, proj.summary, proj.omitted_marker, len(body) - len(proj.body)
+        strat_name,
+        proj.summary,
+        proj.omitted_marker,
+        len(body) - len(proj.body),
+        proj.pinned,
+        proj.stripped,
+        proj.stripped_bytes,
+    )
+    # THE STABLE PREFIX. System block, then the fact block, then everything volatile.
+    # MEASURED on this stack (vLLM prefix cache, /metrics deltas): an APPEND after the
+    # prefix reuses it in full (4752 of 6559 tokens, 72.3%), while any edit inside it —
+    # or a cut taken from the front of it — reuses nothing and recomputes everything.
+    # `halve` cuts from the front of the BODY every time it fires, so the only way any
+    # prefix survives a run is if everything above the cut is append-only. That is what
+    # this ordering buys, and it is why the block is its own message rather than part of
+    # the notice.
+    fact_block = (
+        [
+            {
+                "role": "user",
+                "content": "FACTS (checkpointed by you; append-only, later "
+                "lines supersede earlier):\n" + "\n".join(proj.pinned),
+            }
+        ]
+        if proj.pinned
+        else []
     )
     # Single budget authority: the strategy reserved the notice envelope, but guard the
     # final fit anyway — trim oldest body turns (tool-pairing-safe). Never drop the last
@@ -1530,12 +1826,13 @@ async def _project_context(
     # up. Measured 2026-08-28: with a snug window the goal sentence was absent
     # from the projection entirely, in both strategies.
     out_body = proj.body
-    while len(out_body) > 2 and estimate_tokens(system_block + [notice] + out_body) > b:
+    stable = system_block + fact_block
+    while len(out_body) > 2 and estimate_tokens(stable + [notice] + out_body) > b:
         out_body = drop_orphan_tools([out_body[0]] + out_body[2:])
     # Last resort, and only when nothing else is left to give: [goal, live] still
     # over budget. The live turn is what the model must answer, so the goal is
     # what goes — loudly, in the notice's own count, not silently.
-    while len(out_body) > 1 and estimate_tokens(system_block + [notice] + out_body) > b:
+    while len(out_body) > 1 and estimate_tokens(stable + [notice] + out_body) > b:
         out_body = drop_orphan_tools(out_body[1:])
     dropped_n = max(0, len(body) - len(out_body))
     _projection[self_id] = {
@@ -1544,7 +1841,34 @@ async def _project_context(
         "kept_turns": len(out_body),
         "dropped_turns": dropped_n,
         "summarized": proj.summary is not None,
+        "pinned_facts": len(proj.pinned),
+        "stripped": proj.stripped,
+        "stripped_bytes": proj.stripped_bytes,
+        "folded": proj.folded,
+        # What the model actually sees this turn — so "after reload it sees only the
+        # fold" is measured from the view, never self-reported.
+        "view_ids": [m.get("id") for m in out_body if m.get("id")][:200],
+        "view_ids_truncated": sum(1 for m in out_body if m.get("id")) > 200,
     }
+    # THE VIEW ARRAY, written by every projection: what the model sees, at what
+    # resolution — so the next turn (and the next process) rebuilds the same bytes.
+    await _save_view(
+        self_id,
+        kernel,
+        [{"id": m["id"], "res": _res_of(m)} for m in out_body if m.get("id")],
+        budget_=b,
+        why=f"projection: {strat_name}",
+    )
+    if proj.folded:
+        # "When it feels it folded, it runs context_recall" — at the start of the
+        # next turn, over the new head. DEBOUNCED: a recall is a model call, and a
+        # recall after EVERY fold batch doubled the turn price (measured 2026-09-06:
+        # 11 folds, 5 recalls in 60 turns). Every RECALL_EVERY-th batch, or when a
+        # batch folded a lot at once.
+        _folds_since[self_id] = _folds_since.get(self_id, 0) + proj.folded
+        if _folds_since[self_id] >= RECALL_EVERY:
+            _folds_since[self_id] = 0
+            _recall_due.add(self_id)
     # PRIVATE reaction cursor: the store index where THIS turn's new turns (incl. any
     # recall/memory reactions) will land — `_derive_reaction` scans from here.
     #
@@ -1553,10 +1877,7 @@ async def _project_context(
     # dropped whole turns the view index is short by that many, so the scan started
     # BEFORE the notice and scored an assistant turn the model wrote earlier as its
     # reaction to a compaction it had not yet seen.
-    _compaction_mark[self_id] = {
-        "fired_at_index": store_len,
-        "client_id": client_id,
-    }
+    _compaction_mark[self_id] = {"fired_at_index": store_len}
     await _to_caller(
         kernel,
         self_id,
@@ -1571,10 +1892,14 @@ async def _project_context(
                 "dropped_turns": dropped_n,
                 "kept_turns": len(out_body),
                 "summarized": proj.summary is not None,
+                "pinned_facts": len(proj.pinned),
+                "stripped": proj.stripped,
+                "stripped_bytes": proj.stripped_bytes,
+                "folded": proj.folded,
             },
         },
     )
-    return system_block + [notice] + out_body
+    return stable + [notice] + out_body
 
 
 async def _run(
@@ -1593,9 +1918,18 @@ async def _run(
         return {
             "error": cfg.provider_missing_error or f"{cfg.name}: provider unavailable"
         }
+    if self_id in _recall_due and not stateless:
+        _recall_due.discard(self_id)
+        await _context_recall(self_id, {}, kernel, cfg)
     messages, store_len = await _assemble(
         self_id, user_text, kernel, client_id, system_prompt, messages_override
     )
+    # ROW IDS for this turn: the incoming row (a root, or a delivered reply turn that
+    # names its parent on its tag) and the assistant row that answers it. The batch
+    # token on this turn's reply tags is the assistant row's own hex, so `↑` on every
+    # reply points at something the model can see.
+    in_id, in_parent = _row_ids_for_incoming(self_id, user_text, kernel)
+    turn_id = _mint_row_id(self_id, kernel)
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
     # window via the agent's `context_strategy` (default compact). Skipped when the
     # caller supplies its own `messages` (stateless — it owns the context). Done ONCE
@@ -1655,13 +1989,28 @@ async def _run(
     # FULL conversation so context management (compaction/recall) works next turn.
     if not stateless:
         new_turns = [
-            {"role": "user", "content": user_text},
+            {
+                "role": "user",
+                "content": user_text,
+                "id": in_id,
+                "parent": in_parent,
+            },
             # STRIPPED — the deliberation is not part of the conversation. The raw
             # text (with thinking) already went to `_route_reply` for parsing.
-            {"role": "assistant", "content": without_thinking(last_text)},
+            {
+                "role": "assistant",
+                "content": without_thinking(last_text),
+                "id": turn_id,
+                "parent": in_id,
+            },
         ]
-        await _save_history(self_id, kernel, client_id, new_turns)
-    return {"response": last_text, "final": last_text, "client_id": client_id}
+        await _save_history(self_id, kernel, new_turns)
+    return {
+        "response": last_text,
+        "final": last_text,
+        "client_id": client_id,
+        "turn_id": turn_id,
+    }
 
 
 # ─── verb factories (close over the per-backend cfg) ────────────
@@ -1669,14 +2018,13 @@ async def _run(
 
 def _make_reflect(cfg: Backend):
     async def _reflect(id, payload, kernel):
-        """Identity + model + endpoint + generating flag + file_bridge_id binding. No args."""
+        """Identity + model + endpoint + generating flag + context posture. No args."""
         rec = kernel.get(id) or {}
         out = {
             "id": id,
             "sentence": cfg.sentence,
             "model": rec.get("model", cfg.default_model),
             "endpoint": rec.get("endpoint", cfg.default_endpoint),
-            "file_bridge_id": rec.get("file_bridge_id"),
             "context_window": resolve_context_window(rec),
             "context_strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
             "verbs": {
@@ -1746,7 +2094,8 @@ def _make_inquiry(cfg: Backend):
         # back in the business of reading minds off text. `answer` is a control
         # call in the same class as `done`: the model says what its answer IS.
         said = [
-            c for c in extract_tool_calls((out or {}).get("response") or "")
+            c
+            for c in extract_tool_calls((out or {}).get("response") or "")
             if c.get("name") == "inquiry_answer"
         ]
         if not said:
@@ -1790,7 +2139,7 @@ def _make_inquiry(cfg: Backend):
 
 def _make_send(cfg: Backend):
     async def _send(id, payload, kernel):
-        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless, no file_bridge_id needed). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `reply_to` inside its <tool_call>s. Returns {response, final, client_id}."""
+        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `reply_to` inside its <tool_call>s. Returns {response, final, client_id}."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
         # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
@@ -1935,6 +2284,7 @@ def _make_send(cfg: Backend):
                     # The text this turn ANSWERED — what tells routing whether
                     # this was a chain turn (a delivered reply) or a chat turn.
                     text,
+                    turn_id=reply.get("turn_id"),
                 )
             )
             kernel.ctx.spawn_task(id, "route_reply", task)
@@ -1945,11 +2295,34 @@ def _make_send(cfg: Backend):
 
 def _make_history(cfg: Backend):
     async def _history(id, payload, kernel):
-        """args: client_id:str? (default 'cli'). Returns {messages:[...], client_id} — that client's full conversation from the chat store (the durable record)."""
-        client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
+        """args: limit:int? (default: as many as fit inline), after:str? (a row id — page forward from it). The conversation at DIGEST resolution — {id, parent, kind, role, head, bytes} per row, oldest first, paged. Bodies are behind `pull`; a row's text is behind `recall`. Returns {rows, next, total}."""
+        rows = await _load_history(id, kernel)
+        digest = [
+            {
+                "id": r.get("id"),
+                "parent": r.get("parent"),
+                "kind": r.get("kind") or r.get("role"),
+                "role": r.get("role"),
+                "head": (str(r.get("content", ""))[:120]).replace("\n", " "),
+                "bytes": len(str(r.get("content", ""))),
+            }
+            for r in rows
+            if r.get("id")
+        ]
+        try:
+            limit = int(payload.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        after = payload.get("after")
+        if isinstance(after, str) and after:
+            ids = [d["id"] for d in digest]
+            digest = digest[ids.index(after) + 1 :] if after in ids else []
+        cap = _inline_cap(kernel.get(id) or {})
+        kept, truncated = _fit_reply(digest, cap, limit or None)
         return {
-            "messages": await _load_history(id, kernel, client_id),
-            "client_id": client_id,
+            "rows": kept,
+            "next": kept[-1]["id"] if truncated and kept else None,
+            "total": len(rows),
         }
 
     return _history
@@ -2022,27 +2395,8 @@ def _recall_render(m: dict) -> str:
 
 
 async def _recall(id, payload, kernel):
-    """args: client_id?:str (default: the conversation this call was issued FROM, else
-    'cli'), query?:str (case-insensitive substring over the serialized turn — matches tool
-    args/replies too), limit?:int (default 20, max 100), before?:int (store index — page
-    backward). Pages turns back from the DURABLE chat store (the FULL conversation, never
-    trimmed — so anything compaction dropped is one call away). Read-only. Returns
-    {messages:[{index,role,content}], total, truncated, client_id, note?} — `note` states
-    WHY an empty page is empty (nothing compacted / query matched nothing)."""
-    explicit = payload.get("client_id")
-    # No explicit client: the model calls recall MID-GENERATION, and that generation
-    # knows which conversation it is (`_current[id].client_id`). Resolving from it is
-    # reading a fact about the in-flight turn, not a default. Measured 2026-08-07
-    # (combined probe, opus): the builder ran under client 'probe', called bare
-    # `recall`, the old code defaulted to 'cli', got the empty thread of a client that
-    # never spoke, and concluded its own history was gone — then stopped working and
-    # asked a question into a walked-away conversation. DEFAULT_CLIENT_ID remains only
-    # for external callers with no generation in flight (the headless/REPL contract,
-    # same as `history`).
-    client_id = _safe_client(
-        explicit or _current.get(id, {}).get("client_id") or DEFAULT_CLIENT_ID
-    )
-    full = await _load_history(id, kernel, client_id)
+    """args: query?:str (case-insensitive substring over the serialized turn — matches tool args/replies too), limit?:int (default 20, max 100), before?:int (store index — page backward). Pages turns back from the DURABLE store (the FULL conversation, never trimmed — so anything compaction dropped is one call away). Read-only. A page always fits INLINE (the cap); trimmed from the oldest end when it would not, with the index to continue from. Returns {messages:[{index,role,content}], total, truncated, note?}."""
+    full = await _load_history(id, kernel)
     q = str(payload.get("query") or "").lower().strip()
     try:
         limit = int(payload.get("limit") or 20)
@@ -2059,24 +2413,57 @@ async def _recall(id, payload, kernel):
         ]
     truncated = len(indexed) > limit
     page = indexed[-limit:]
+    # A PAGE MUST FIT THE WINDOW IT IS GOING INTO. Measured 2026-09-05: the default 20
+    # turns of 6.8KB reads came back as one 14,786-token reply against a 12,000 window;
+    # `too_small` fired as a failfast and the chain died. The page is trimmed from the
+    # OLDEST end (the newest of what was asked for is kept) and says so, with the index
+    # to page further back from — the caller loses a page, never the run.
+    get = getattr(kernel, "get", None)
+    cap = _inline_cap((get(id) if get else None) or {})
+    trimmed = 0
+
+    def _serialized(pg) -> int:
+        # THE UNIT THE DELIVERY MEASURES: the whole reply, serialized, as one user turn
+        # (`_route_reply` dehydrates on exactly that). Sizing the inner messages alone
+        # let a 5,243-byte recall slip past the cap and come back as a stub (measured
+        # 2026-09-06, recall_after_fold). Margin as in `_fit_reply`.
+        body = json.dumps(
+            {
+                "messages": [
+                    {"index": i, "role": m.get("role"), "content": _recall_render(m)}
+                    for i, m in pg
+                ],
+                "total": len(indexed),
+                "truncated": True,
+                "note": "page trimmed by 999 older turn(s) to fit your window (cap "
+                f"{cap} tok); pass before=999999 to page further back.",
+            },
+            default=str,
+        )
+        return estimate_one({"role": "user", "content": body})
+
+    while len(page) > 1 and _serialized(page) > int(cap * 0.8):
+        page = page[1:]
+        trimmed += 1
     reply = {
         "messages": [
             {"index": i, "role": m.get("role"), "content": _recall_render(m)}
             for i, m in page
         ],
         "total": len(indexed),
-        "truncated": truncated,
-        "client_id": client_id,
+        "truncated": truncated or trimmed > 0,
     }
+    if trimmed:
+        reply["note"] = (
+            f"page trimmed by {trimmed} older turn(s) to fit your window (cap "
+            f"{cap} tok); pass before={page[0][0]} to page further back."
+        )
     if not page:
         # An empty page with no reason reads as "your history is lost" — the opposite of
         # what it usually means. Say why, so the caller can tell the cases apart.
         proj = _projection.get(id)
         if q and full:
-            reply["note"] = (
-                f"query {q!r} matched none of the {len(full)} stored turns "
-                f"for client {client_id!r}."
-            )
+            reply["note"] = f"query {q!r} matched none of the {len(full)} stored turns."
         elif not (proj or {}).get("fired"):
             reply["note"] = (
                 "nothing has been compacted away — recall pages back turns that "
@@ -2084,10 +2471,7 @@ async def _recall(id, payload, kernel):
                 "your live context already holds the whole conversation."
             )
         else:
-            reply["note"] = (
-                f"no stored turns for client {client_id!r} in this page; the durable "
-                "thread is keyed per client_id — name one to read another thread."
-            )
+            reply["note"] = "no stored turns in this page."
     return reply
 
 
@@ -2102,8 +2486,7 @@ async def _derive_reaction(id, kernel) -> dict | None:
     if not proj or not proj.get("fired") or not mark:
         return None
     idx = mark.get("fired_at_index", 0)
-    client_id = mark.get("client_id", DEFAULT_CLIENT_ID)
-    store = await _load_history(id, kernel, client_id)
+    store = await _load_history(id, kernel)
     recalled = persisted = False
     recall_count = 0
     for m in store[idx:]:
@@ -2127,6 +2510,433 @@ async def _derive_reaction(id, kernel) -> dict | None:
     return {"recalled": recalled, "persisted": persisted, "recall_count": recall_count}
 
 
+# TODO(large bodies): a stored body is bounded by nothing. Paging keeps any ONE reply
+# from overflowing the window, but the model can still overflow itself from the
+# retrieval side — pulling many pages of a 240KB body back into view, or a digest list
+# that itself grows past the window. And the field data says models do not page at all
+# (arXiv 2608.26130: pagination rate zero across four harnesses), so linear `offset`
+# paging may simply go unused. Candidates, in the order I would try them:
+#   1. GREP IN BODY — `pull` takes `query` and returns matching lines with N lines of
+#      context, not a byte range. Turns "page through 240KB" into "find the line" —
+#      the operation the model actually wants, and the one it demonstrably performs.
+#   2. MULTILEVEL COMPACT — a stored body gets its own digest tree (head/tail per
+#      section, sizes) so the model can descend rather than scan.
+#   3. HARD CHAR LIMIT on what any one verb may return, at the source, as a last line.
+#   4. A HELPER LANE — spawn a sub-agent with the body as ITS context and ask it by
+#      `inquiry`; the answer comes back as one small reply and the main window never
+#      sees the body. Every primitive exists already. Two costs: the helper has the
+#      same window problem underneath (a big-window model, or grep/paging anyway —
+#      but its context is disposable, so a cut there is free), and it is one more GPU
+#      lane per lookup, so it must be BY CHOICE like `pull`, never automatic.
+# MEASURED 2026-09-06 (implicit_constraint, async arm, 12k window): the model spent
+# four ~10k-token thinking turns (68% duplicate sentences — a real loop) byte-scanning
+# one filler in 300-char windows, hunting for a single line, and ran out of turns.
+# Two causes, both ours:
+#   a. WHAT IS STORED IS THE ENVELOPE, NOT THE TEXT. `_store_reply` writes
+#      `json.dumps(result)` — a read comes back as `{"lines":[…]}` with `\n` escaped,
+#      so byte offsets do not line up with lines and the model cannot see structure.
+#      Store the reply's TEXT for text-shaped results (a read's lines joined), and
+#      the envelope only when there is nothing better.
+#   b. (1) above is not optional — "find the line that mentions X" is the operation
+#      it performed 30 pulls to approximate. One `pull {query}` would have been one call.
+# Also for the proxy owner: four EXACT repeats of a 20-word sentence should not survive
+# `no_repeat_ngram_size=3`; suspect it is not applied to thinking tokens on this route.
+# None built. The per-page cap is the only guard today.
+async def _pull(id, payload, kernel):
+    """args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`."""
+    pid = payload.get("pid")
+    if not isinstance(pid, str) or not pid.strip():
+        return {
+            "error": "pull: `pid` is required — it is on the reply's tag line",
+            "reason": "bad_arg",
+            "arg": "pid",
+        }
+    rec = kernel.get(id) or {}
+    cap = _pull_cap_chars(rec)
+    try:
+        offset = max(0, int(payload.get("offset") or 0))
+        length = int(payload.get("length") or cap)
+    except (TypeError, ValueError):
+        return {"error": "pull: offset/length must be integers", "reason": "bad_arg"}
+    if length > cap:
+        return {
+            "error": f"pull: length {length} exceeds the {cap}-char page cap — a page must "
+            "fit INLINE where it is going; ask for less and page",
+            "reason": "bad_arg",
+            "arg": "length",
+        }
+    got = await _load_reply(id, kernel, pid.strip(), offset, max(1, length))
+    if got is None:
+        # A fold id: its body is on the row itself.
+        for r in await _load_history(id, kernel):
+            if r.get("kind") == "fold" and r.get("id") == pid.strip():
+                text = str(r.get("body") or "")
+                return {
+                    "pid": pid,
+                    "offset": 0,
+                    "text": text[:length],
+                    "next_offset": min(length, len(text)),
+                    "eof": length >= len(text),
+                    "refs": r.get("refs") or [],
+                    "title": r.get("title"),
+                }
+    if got is None:
+        return {
+            "error": f"pull: no stored body for pid {pid!r} — only replies too large "
+            "to inline are stored; small ones were already in your turn",
+            "reason": "not_found",
+        }
+    text, nxt, eof, total = got
+    cap_tok = _inline_cap(rec)
+
+    def reply(t: str, n: int, e: bool) -> dict:
+        return {
+            "pid": pid,
+            "offset": offset,
+            "text": t,
+            "next_offset": n,
+            "eof": e,
+            **({"total": total} if total is not None else {}),
+        }
+
+    # A PAGE FITS INLINE, MEASURED SERIALIZED. Measured 2026-09-06: raw pages sized to
+    # the cap in chars came back over it once JSON-escaped (newlines, quotes) and were
+    # dehydrated — the model pulled its own pull. Shrink until the reply itself fits.
+    out = reply(text, nxt, eof)
+    while (
+        len(text) > 64
+        and estimate_one({"role": "user", "content": json.dumps(out, default=str)})
+        > cap_tok
+    ):
+        text = text[: int(len(text) * 0.8)]
+        out = reply(text, offset + len(text), False)
+    return out
+
+
+async def _grep(id, payload, kernel):
+    """args: query:str (req — case-insensitive substring), ids:list[str]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."""
+    # THE SUPER SIMPLE ONE, deliberately. Measured 2026-09-06: the model spent four
+    # ~10k-token thinking turns byte-scanning one 6.8KB body in 300-char pages to find a
+    # single line. "Find the line that mentions X" is the operation it wanted, and this
+    # is it — substring, case-insensitive, over rows and stored bodies, capped. The
+    # advanced machinery (a fold's refs as scope, regex, context lines, ranking) lands on
+    # top of this; the shape of the reply does not change.
+    q = str(payload.get("query") or "").strip().lower()
+    if not q:
+        return {
+            "error": "grep: `query` is required",
+            "reason": "bad_arg",
+            "arg": "query",
+        }
+    try:
+        limit = max(1, min(int(payload.get("limit") or 100), 100))
+    except (TypeError, ValueError):
+        limit = 100
+    ids = payload.get("ids")
+    if ids is not None and (
+        not isinstance(ids, list) or any(not isinstance(x, str) for x in ids)
+    ):
+        return {
+            "error": "grep: `ids` must be a list of row ids / pids",
+            "reason": "bad_arg",
+            "arg": "ids",
+        }
+    matches: list[dict] = []
+    total = 0
+    seen_lines: set[str] = set()
+
+    def scan(rid: str, text: str) -> None:
+        # IDENTICAL LINES ONCE. A task the human repeats per delivery ("find the audit
+        # marker…") matched 28 times in one run and pushed the one body hit past the
+        # inline cap (measured 2026-09-06, recall_after_fold: grep "audit marker" →
+        # total 28, the marker line cut). The first occurrence keeps its address.
+        nonlocal total
+        for n, line in enumerate(text.splitlines(), 1):
+            if q in line.lower():
+                key = " ".join(line.split())
+                if key in seen_lines:
+                    continue
+                seen_lines.add(key)
+                total += 1
+                if len(matches) < limit:
+                    matches.append({"id": rid, "line": n, "text": line.strip()[:200]})
+
+    rows = await _load_history(id, kernel)
+    # A fold id in `ids` is a DESCENT: it expands to the rows it collapsed.
+    scope = set(expand_fold_ids(rows, ids)) if ids else None
+    pids: list[str] = []
+    for m in rows:
+        if m.get("role") == "user":
+            content = m.get("content")
+            text = (
+                content
+                if isinstance(content, str)
+                else json.dumps(content, default=str)
+            )
+            for block in _reply_blocks(text):
+                pm = _PID_TAG.match(block)
+                if pm:
+                    pids.append(pm.group(1))
+    # STORED BODIES FIRST: what a grep is for is the line inside a body never pulled —
+    # rows that merely mention the query (the task, the model's own plan) come after,
+    # so the content hit is never the one the inline cap cuts. A pid with a stored body
+    # is greppable without pulling it: those this conversation received (pids on its
+    # reply tags), or the ids the caller named.
+    for pid in list(scope) if scope else pids:
+        got = await _load_reply(id, kernel, pid, 0, 4 * 1024 * 1024)
+        if got is None:
+            continue
+        scan(pid, got[0])
+    for i, m in enumerate(rows):
+        rid = m.get("id") or f"row:{i}"
+        if scope is None or rid in scope:
+            content = m.get("content")
+            text = (
+                content
+                if isinstance(content, str)
+                else json.dumps(content, default=str)
+            )
+            scan(rid, text)
+    kept, cut = _fit_reply(matches, _inline_cap(kernel.get(id) or {}), limit)
+    more = cut or total > len(kept)
+    return {
+        "matches": kept,
+        "total": total,
+        "truncated": more,
+        **(
+            {"next": {"id": kept[-1]["id"], "line": kept[-1]["line"]}}
+            if more and kept
+            else {}
+        ),
+    }
+
+
+async def _compose(provider, prompt: str) -> str:
+    """One plain completion, reasoning stripped (see `_make_summarizer`)."""
+    parts: list[str] = []
+    async for chunk in provider.chat([{"role": "user", "content": prompt}]):
+        if isinstance(chunk, str):
+            parts.append(chunk)
+    return without_thinking("".join(parts))
+
+
+def _first_json(text: str) -> dict | None:
+    i = text.find("{")
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(text)):
+        depth += (text[j] == "{") - (text[j] == "}")
+        if depth == 0:
+            try:
+                out = json.loads(text[i : j + 1])
+            except ValueError:
+                return None
+            return out if isinstance(out, dict) else None
+    return None
+
+
+_RECALL_PROMPT = """You are rebuilding your own working context. Below is the HEAD of your
+conversation as one line per row: id · kind · title · size · ↑parent. Fold rows stand for
+finished stretches (their members are one descent away). Everything is currently at
+DIGEST resolution; your budget for the body is {budget} tokens and the digests use
+{used}. Replies ALREADY IN THIS HISTORY (their calls need not be repeated; the task itself may be unfinished):
+{done}
+Choose which rows you want IN FULL next turn (expansions cost their size) and say in one
+sentence why. Reply JSON only:
+{{"expand": ["<id>", ...], "why": "<one sentence>"}}
+
+{lines}"""
+
+
+async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
+    """args: dry:bool? (mechanical fit only — no model call). Rebuild this agent's VIEW from its store: fit the head to the budget at digest resolution, then ask the model which rows it wants in full, persist the id list, log the decision as a row, and drop RAM scratch. Runs on boot, after a fold batch, or on request. Returns {kept, expanded, dropped, budget, why, degraded}."""
+    from ai_core.folds import render as fold_render
+    from ai_core.strategies.strip import LOW as _LOW, _stripped as _strip_state
+
+    rec = kernel.get(id) or {}
+    rows = await _load_history(id, kernel)
+    if not rows:
+        return {
+            "kept": 0,
+            "expanded": 0,
+            "dropped": 0,
+            "why": "empty store",
+            "degraded": False,
+        }
+    sys_tokens = estimate_one(
+        {"role": "system", "content": await _default_system_content(id, kernel)}
+    )
+    body_budget = max(BUDGET_FLOOR, budget(rec) - sys_tokens - NOTICE_ENVELOPE_RESERVE)
+    target = int(body_budget * _LOW)
+    view = [r for r in fold_render(rows) if r.get("id")]
+    if not view:
+        return {
+            "kept": 0,
+            "expanded": 0,
+            "dropped": 0,
+            "why": "no addressable rows",
+            "degraded": False,
+        }
+
+    def digest(r: dict) -> dict:
+        return (
+            _apply_res(r, "stub")
+            if _res_of(r) == "full"
+            and str(r.get("content", "")).startswith("[reply to ")
+            else r
+        )
+
+    def cost(r: dict) -> int:
+        return estimate_one(
+            {"role": r.get("role", "user"), "content": r.get("content", "")}
+        )
+
+    # 1. MECHANICAL FIT — never fails. The goal turn always in; then newest first.
+    picked = {0}
+    used = cost(digest(view[0]))
+    for i in range(len(view) - 1, 0, -1):
+        c = cost(digest(view[i]))
+        if used + c > target:
+            break
+        picked.add(i)
+        used += c
+    head = sorted(picked)
+    # 2. ONE MODEL CALL — the model chooses expansions; a bad answer changes nothing.
+    why, degraded, expand = "mechanical fit", True, set()
+    provider = _providers.get(id)
+    if provider is None and cfg is not None and not payload.get("dry"):
+        try:
+            provider = await _get_provider(id, kernel, cfg)
+        except Exception:
+            provider = None
+    if provider is not None and not payload.get("dry"):
+        lines = []
+        for i in head:
+            r = view[i]
+            m = re.search(r'· "([^"]{1,140})"', str(r.get("content", "")))
+            title = r.get("title") or (
+                m.group(1) if m else str(r.get("content", ""))[:80].replace("\n", " ")
+            )
+            lines.append(
+                f'{r["id"]} · {r.get("kind") or r.get("role")} · "{title}" · '
+                f"{len(str(r.get('content', '')))}B · ↑{r.get('parent') or '-'}"
+            )
+        # what the store already answers: every reply row names the call it closed,
+        # so a rebooted model does not re-run reads whose results it is about to see
+        done: list[str] = []
+        for r in view:
+            m = _REPLY_TAG.match(str(r.get("content", "")))
+            if not m:
+                continue
+            t = re.search(r'· "([^"]{1,140})"', str(r.get("content", "")))
+            line = f"{m.group(1)} {m.group(2)}" + (f' · "{t.group(1)}"' if t else "")
+            if line not in done:
+                done.append(line)
+        done_text = "\n".join(done[-40:]) or "(nothing yet)"
+        try:
+            ans = _first_json(
+                await _compose(
+                    provider,
+                    _RECALL_PROMPT.format(
+                        budget=body_budget,
+                        used=used,
+                        done=done_text,
+                        lines="\n".join(lines),
+                    ),
+                )
+            )
+        except Exception:
+            ans = None
+        if ans:
+            head_ids = {view[i]["id"] for i in head}
+            want = [
+                x
+                for x in (ans.get("expand") or [])
+                if isinstance(x, str) and x in head_ids
+            ]
+            why = str(ans.get("why") or "")[:300] or "chosen"
+            degraded = False
+            # charge each expansion at full size, newest first; drop what does not fit
+            total = used
+            for x in reversed(want):
+                r = next(v for v in view if v["id"] == x)
+                extra = cost(r) - cost(digest(r))
+                if total + extra <= body_budget:
+                    expand.add(x)
+                    total += extra
+    ids = []
+    for i in head:
+        r = view[i]
+        res = (
+            "fold"
+            if r.get("kind") == "fold"
+            else (
+                "full"
+                if (
+                    r["id"] in expand
+                    or not str(r.get("content", "")).startswith("[reply to ")
+                )
+                else "stub"
+            )
+        )
+        ids.append({"id": r["id"], "res": res})
+    await _save_view(id, kernel, ids, budget_=body_budget, why=why)
+    # the decision is a ROW — the next reload reads why the last recall chose as it did
+    rid = _mint_row_id(id, kernel)
+    # THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the top, and
+    # after a recall a model with several roots re-answered the FIRST one and called
+    # done (measured 2026-09-06, fold_paging: TASK 0 re-answered at turn 88 with
+    # TASK 15 and a FINAL pending). The newest root is what is live; say so.
+    # Over the STORE, not the folded render: a root that a fold collapsed is still the
+    # live one if nothing newer came (measured 2026-09-06, folds_x_chains: TASK C folded,
+    # the row named TASK A).
+    live = next(
+        (
+            r
+            for r in reversed(rows)
+            if r.get("role") == "user"
+            and not r.get("parent")
+            and r.get("kind") in (None, "", "user")
+            and not _REPLY_TAG.match(str(r.get("content", "")))
+        ),
+        None,
+    )
+    live_txt = (
+        f' · live task: {live["id"]} "'
+        + " ".join(str(live.get("content", "")).split())[:100]
+        + '"'
+        if live
+        else ""
+    )
+    await _save_history(
+        id,
+        kernel,
+        [
+            {
+                "role": "user",
+                "id": rid,
+                "parent": None,
+                "kind": "recall",
+                "title": why,
+                "content": f"[recall {rid} · kept {len(ids)} rows, {len(expand)} in full] {why}{live_txt}",
+            }
+        ],
+    )
+    # RAM is scratch, reconstructible by definition; the store is never cleared.
+    _projection.pop(id, None)
+    _compaction_mark.pop(id, None)
+    _strip_state.pop(id, None)
+    return {
+        "kept": len(ids),
+        "expanded": len(expand),
+        "dropped": len(view) - len(ids),
+        "budget": body_budget,
+        "why": why,
+        "degraded": degraded,
+    }
+
+
 async def _context_status(id, payload, kernel):
     """No args. The context-budget posture + the last overflow projection + the model's
     derived reaction to it. Returns {context_window, output_reserve, budget, strategy,
@@ -2140,12 +2950,28 @@ async def _context_status(id, payload, kernel):
         "strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
         "last_projection": _projection.get(id),
         "last_reaction": await _derive_reaction(id, kernel),
+        "view_source": _view_source.get(id),
     }
 
 
-async def _boot(id, payload, kernel):
-    """No-op. Returns None."""
-    return
+def _make_context_recall(cfg: Backend):
+    async def _verb(id, payload, kernel):
+        return await _context_recall(id, payload, kernel, cfg)
+
+    _verb.__doc__ = _context_recall.__doc__
+    return _verb
+
+
+def _make_boot(cfg: Backend):
+    async def _boot(id, payload, kernel):
+        """On boot, an agent with a store REBUILDS ITS VIEW — `context_recall`. A fresh
+        agent has nothing to recall and returns None."""
+        _incarnation[id] = _incarnation.get(id, 0) + 1
+        if await _load_history(id, kernel):
+            return await _context_recall(id, {}, kernel, cfg)
+        return None
+
+    return _boot
 
 
 # ─── the closure factory ────────────────────────────────────────
@@ -2234,7 +3060,12 @@ def build(
         "status": _status,
         "context_status": _context_status,
         "recall": _recall,
-        "boot": _boot,
+        # FULL ASYNC: page a stored reply body by pid, or FIND the line first.
+        "pull": _pull,
+        "grep": _grep,
+        # Rebuild the view from the store: on boot, after folds, on request.
+        "context_recall": _make_context_recall(cfg),
+        "boot": _make_boot(cfg),
     }
     cfg._verbs = verbs  # type: ignore[attr-defined]  # reflect lists these
 

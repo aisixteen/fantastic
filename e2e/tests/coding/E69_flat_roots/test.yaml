@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: flat_roots
+group: coding
+title: "24 tiny root tasks — folds of folds appear and the final answer needs all of them"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 140
+  no_progress_turns: 10
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

@@ -23,6 +23,11 @@ from ai_core.core import _compaction_mark, _project_context, _projection
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import STUB_SUMMARY, Projection
 
+from _fake import FakeCtx  # noqa: E402
+
+_NoLegKernel = FakeCtx
+_FakeKernel = FakeCtx
+
 
 def _turn(role: str, content: str) -> dict:
     return {"role": role, "content": content}
@@ -39,34 +44,21 @@ async def _fake_summary(_msgs) -> str:
     return "SUMMARY"
 
 
-def _ctx(bud: int, recent_n: int = 4, summarize=_fake_summary) -> ProjectionCtx:
+def _ctx(
+    bud: int, recent_n: int = 4, summarize=_fake_summary, kernel=None
+) -> ProjectionCtx:
     return ProjectionCtx(
-        budget=bud, recent_n=recent_n, summarize=summarize, self_id="ai", kernel=None
+        budget=bud,
+        recent_n=recent_n,
+        summarize=summarize,
+        self_id="ai",
+        kernel=kernel if kernel is not None else _NoLegKernel(),
     )
 
 
 class _FakeProvider:
     async def chat(self, messages):
         yield "FAKESUMMARY"
-
-
-class _FakeKernel:
-    """Captures `_to_caller` routing: cli events land in `sent`, browser events in
-    `emitted`. (`_project_context` only touches the kernel via `_to_caller`.)"""
-
-    def __init__(self):
-        self.sent: list[tuple] = []
-        self.emitted: list[tuple] = []
-
-    async def send(self, items):
-        outs = []
-        for it in items:
-            self.sent.append((it["target"], it["payload"]))
-            outs.append({"pid": None, "status": "completed", "result": {}})
-        return outs
-
-    async def emit(self, target, payload):
-        self.emitted.append((target, payload))
 
 
 def _cfg():
@@ -97,7 +89,7 @@ def test_budget_floor():
 
 def test_registry_no_memgpt():
     # memgpt collapsed into the universal seam notice — it is no longer a strategy.
-    assert set(strategy_names()) == {"compact", "truncate"}
+    assert set(strategy_names()) == {"compact", "truncate", "strip", "fold"}
     assert DEFAULT_STRATEGY == "compact"
     assert get_strategy("memgpt") is None
     assert get_strategy("nope") is None  # unknown ⇒ None (caller errors), no default
@@ -227,7 +219,6 @@ async def test_seam_fires_prepends_notice_and_emits_event():
     # public projection record stays a clean summary — no internal scan bookkeeping
     assert "fired_at_index" not in proj and "client_id" not in proj
     # the private reaction cursor holds the bookkeeping instead
-    assert _compaction_mark["ai"]["client_id"] == "cli"
     assert "fired_at_index" in _compaction_mark["ai"]
     # the context:compacted event reached the caller (cli → kernel.send)
     ctx_events = [p for t, p in k.sent if p.get("type") == "context"]
@@ -322,14 +313,14 @@ async def test_recall_filters_paginates_and_caps(monkeypatch):
         _turn("user", "what about codename again"),
     ]
 
-    async def fake_load(self_id, kernel, client_id):
+    async def fake_load(self_id, kernel):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
 
     # substring query (case-insensitive) finds both codename turns
     r = await core._recall("ai", {"query": "codename"}, None)
-    assert r["total"] == 2 and r["client_id"] == "cli"
+    assert r["total"] == 2
     assert all("codename" in m["content"].lower() for m in r["messages"])
     assert r["messages"][0]["index"] == 0  # store index preserved
 
@@ -350,59 +341,24 @@ async def test_recall_filters_paginates_and_caps(monkeypatch):
     assert len(rbig["messages"][0]["content"]) == 5000, "recall returns the turn whole"
 
 
-async def test_recall_resolves_the_calling_conversations_client(monkeypatch):
-    """Bare `recall` mid-generation reads the thread the call was issued FROM.
-
-    The combined probe measured the old behaviour: builder under client 'probe',
-    bare recall defaulted to 'cli', empty reply, and the model concluded its own
-    history was gone. `_current[id].client_id` is a fact about the in-flight turn.
-    """
-    seen = []
-
-    async def fake_load(self_id, kernel, client_id):
-        seen.append(client_id)
-        return [_turn("user", "the ask")] if client_id == "probe" else []
-
-    monkeypatch.setattr(core, "_load_history", fake_load)
-    core._current["ai"] = {"client_id": "probe"}
-    try:
-        r = await core._recall("ai", {}, None)
-        assert r["client_id"] == "probe" and r["total"] == 1
-        # an explicit client_id still wins over the in-flight one
-        r2 = await core._recall("ai", {"client_id": "cli"}, None)
-        assert r2["client_id"] == "cli"
-    finally:
-        core._current.pop("ai", None)
-    assert seen == ["probe", "cli"]
-
-
 async def test_recall_empty_page_says_why(monkeypatch):
     """An empty page carries a `note` naming the reason — the bare `{total: 0}` was
     read by a live model as "there is no durable transcript" when the truth was
     "nothing has been compacted"."""
-    store = {"probe": [_turn("user", "hello")]}
+    store: list[dict] = []
 
-    async def fake_load(self_id, kernel, client_id):
-        return store.get(client_id, [])
+    async def fake_load(self_id, kernel):
+        return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
     _projection.pop("ai", None)
     # no compaction ever fired ⇒ the note says the live context is complete
-    r = await core._recall("ai", {"client_id": "cli"}, None)
+    r = await core._recall("ai", {}, None)
     assert r["total"] == 0 and "compacted" in r["note"]
-    # query matched nothing in a NON-empty thread ⇒ the note says that instead
-    rq = await core._recall("ai", {"client_id": "probe", "query": "zzz"}, None)
+    # query matched nothing in a NON-empty store ⇒ the note says that instead
+    store.append(_turn("user", "hello"))
+    rq = await core._recall("ai", {"query": "zzz"}, None)
     assert rq["total"] == 0 and "matched none" in rq["note"]
-    # compaction HAS fired but the named thread is empty ⇒ points at per-client keying
-    _projection["ai"] = {"fired": True}
-    try:
-        re_ = await core._recall("ai", {"client_id": "cli"}, None)
-        assert "client" in re_["note"]
-    finally:
-        _projection.pop("ai", None)
-    # a non-empty page carries no note at all
-    rf = await core._recall("ai", {"client_id": "probe"}, None)
-    assert rf["total"] == 1 and "note" not in rf
 
 
 # ── context_status.last_reaction (derived 'ack') ────────────────────
@@ -427,7 +383,7 @@ async def test_derive_reaction_detects_recall_and_persist(monkeypatch):
         _turn("assistant", "It's HALCYON."),
     ]
 
-    async def fake_load(self_id, kernel, client_id):
+    async def fake_load(self_id, kernel):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -445,7 +401,7 @@ async def test_reaction_counts_text_file_write_and_patch_not_dead_kv_verbs(monke
     `{type:'write', path:'facts.md'}` was scored as not having reacted at all."""
     thread: list[dict] = []
 
-    async def fake_load(self_id, kernel, client_id):
+    async def fake_load(self_id, kernel):
         return thread
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -485,7 +441,7 @@ async def test_the_reaction_cursor_is_the_store_index_not_the_deduped_view(monke
         _send_turn("notes", {"type": "write", "path": "facts.md", "text": "HALCYON"}),
     ]
 
-    async def fake_load(self_id, kernel, client_id):
+    async def fake_load(self_id, kernel):
         return store
 
     monkeypatch.setattr(core, "_load_history", fake_load)
@@ -714,7 +670,7 @@ def test_a_turn_whose_every_block_is_superseded_drops_entirely():
 # ── the SEAM must not undo what the strategies pinned ────────────────
 
 
-@pytest.mark.parametrize("strategy", ["compact", "truncate"])
+@pytest.mark.parametrize("strategy", sorted(strategy_names()))
 @pytest.mark.parametrize("window", [300, 400, 500, 700, 900, 1200])
 async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
     """`test_every_strategy_keeps_the_goal_when_the_body_overflows` calls the
@@ -748,3 +704,43 @@ async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
         f"{strategy}@{window}: the pinned goal turn was dropped by the seam — "
         f"kept {[m.get('role') for m in out]}"
     )
+
+
+# ── the reply tag must not swallow a bracket from the BODY ───────────
+#
+# MEASURED 2026-09-04. `_REPLY_TAG`'s verb group was `\S+`, which does not exclude `]`,
+# so on a reply whose body contains a bracket the group took `reflect]` and `[^\]]*\]`
+# closed on the body's bracket instead of the tag's. The verb then read `reflect]` —
+# in no vocabulary — so BOTH trimmers silently did nothing. Reflect bodies are rendered
+# with `json.dumps`, so a list-valued field (`verbs=[…]`, always present) puts a bracket
+# in every one of them: the reflect dedup documented above as reclaiming 42% of the
+# window was inert on exactly the replies it exists for.
+#
+# It survived because every fixture in all three runtimes used a bracket-free body
+# ("\nbody"). The runtimes agreed with each other, and none of them with reality.
+def test_the_verb_group_stops_at_the_tags_own_bracket():
+    from ai_core.core import _REPLY_TAG
+
+    real = '[reply to notes:aa · notes reflect]\nverbs=["read", "write"]  root=.'
+    assert _REPLY_TAG.match(real).group(2) == "reflect"
+    stamped = '[reply to notes:aa · notes reflect · 2 of 3 in batch ab12]\nv=["x"]'
+    assert _REPLY_TAG.match(stamped).group(2) == "reflect"
+    assert (
+        _REPLY_TAG.match("[reply to a:1 · notes read]\nplain body").group(2) == "read"
+    )
+    assert _REPLY_TAG.match("[reply to a:1 notes reflect]") is None
+
+
+def test_a_stale_reflect_whose_body_has_a_bracket_still_dedupes():
+    """The end-to-end shape of the same bug: two reflects of one agent, JSON-ish bodies.
+    Before the fix BOTH survived into the model's view, every run, forever."""
+    body = 'verbs=["read", "write", "patch"]  root=.'
+    out = core.dedupe_stale_reads(
+        [
+            _turn("user", f"[reply to notes:aa · notes reflect]\n{body}"),
+            _turn("assistant", "SEEN notes"),
+            _turn("user", f"[reply to notes:bb · notes reflect]\n{body}"),
+        ]
+    )
+    kept = [m for m in out if body in (m.get("content") or "")]
+    assert len(kept) == 1, f"the stale whole-state reflect was not dropped: {out}"

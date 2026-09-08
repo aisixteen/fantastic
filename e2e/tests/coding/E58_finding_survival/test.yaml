@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: finding_survival
+group: coding
+title: a FINDING the model must notice, checkpoint unprompted, and report after its read is gone
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

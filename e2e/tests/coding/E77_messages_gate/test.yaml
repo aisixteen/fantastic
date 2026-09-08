@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: messages_gate
+group: coding
+title: "conversation rows are read by id through the kernel; a peer sees them only when the owner names it"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 6
+  no_progress_turns: 4
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

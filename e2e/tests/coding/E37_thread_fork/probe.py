@@ -1,12 +1,11 @@
-"""coding/thread_fork — a forked agent inherits the pre-fork thread. LLM-driven.
+"""coding/thread_fork — a forked agent inherits the pre-fork conversation. LLM-driven.
 
-Codex `fork_thread.rs` / `multi_agent_*`. A "thread" IS the JSONL sidecar
-`agents/<id>/chat_<client>.jsonl` on the agent's leg. Fork = create a clone +
-`pump` (server-side copy) the sidecar across. The clone wakes with the
-original's full history and answers a question only that history can answer.
-No new primitive — create_agent + pump + sidecars, which already exist. (The
-operator orchestrates the fork here; the model-forks-itself variant is a
-follow-on.)
+Codex `fork_thread.rs` / `multi_agent_*`. A conversation IS the agent's rows in the
+kernel's row store (agent id is conversation id). Fork = create a clone + copy the rows
+under the clone's id from above (`rows_for` → `rows_put`, re-minted, parents re-linked).
+The clone wakes with the original's full history and answers a question only that
+history can answer. No new primitive — create_agent + the row store. (The operator
+orchestrates the fork here; the model-forks-itself variant is a follow-on.)
 """
 
 from __future__ import annotations
@@ -23,10 +22,10 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
+from helpers.facts_arm import copy_rows, store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-FB = "fork_fb"
 DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
 
 
@@ -36,57 +35,41 @@ async def _call(root, target, payload):
 
 async def main():
     root, core, close = await open_kernel(
-        prefix="coding_fork_", reach=[FB, "ai", "ai_fork", "cli", "user"]
+        prefix="coding_fork_", reach=["ai", "ai_fork", "cli", "user"]
     )
     try:
         secret = secrets.token_hex(4)
-        r = await _call(root, root.id, {
-            "type": "create_agent", "parent_id": root.id, "id": FB,
-            "handler_module": "file_bridge.tools", "root": ".",
-            "ingress_rule": "allow_all_ingress",
-            "callable_by": {"ai": "*", "ai_fork": "*", "rest": "*", "web": "*"},
-        })
-        assert not r.get("error"), f"create {FB}: {r}"
 
         # THE HUMAN who wants the work done — the task comes FROM here.
         await human(root)
 
-        # ── the ORIGINAL learns a fact (persisted to its sidecar) ──
+        # ── the ORIGINAL learns a fact (a row in the kernel's store) ──
         a = await connect(root, core, BK, agent_id="ai",
                           can_call={"cli": "*", "user": "*"},
                           callable_by={"user": "*"},
-                          limits=Limits.from_env(os.environ), record={"file_bridge_id": FB})
+                          limits=Limits.from_env(os.environ))
         await drive(a,
             f"Remember this for later — the vault code is `{secret}`. "
             f"Acknowledge that you have it, then {DONE}.", client_id="c", via="user")
         await a.close()
+        before = await store_rows(root, core, "ai")
 
-        src = "agents/ai/chat_c.jsonl"
-        dst = "agents/ai_fork/chat_c.jsonl"
-        # the sidecar lives under the leg's root (cwd = "."); path is store-relative
-        # to FB. Confirm the original wrote it (through the leg, not the disk guess).
-        rd = await _call(root, FB, {"type": "list", "path": "agents/ai"})
-
-        # ── FORK: clone the agent + pump its thread into the clone's sidecar ──
+        # ── FORK: clone the agent + copy its rows under the clone's id ──
         made = await _call(root, root.id, {
             "type": "create_agent", "parent_id": root.id, "id": "ai_fork",
             **BK.record(),
-            "file_bridge_id": FB, "context_window": 32768,
+            "context_window": 32768,
             "can_call": {"cli": "*"},
             "callable_by": {"$self": "*", "$parent": "*", "$children": "*",
                             "rest": "*", "web": "*"},
         })
         assert not made.get("error"), f"fork create: {made}"
-        pumped = await _call(root, FB, {
-            "type": "pump", "source": FB, "source_path": src,
-            "sink": FB, "sink_path": dst,
-        })
-        assert not pumped.get("error"), f"pump: {pumped}"
+        copied = await copy_rows(root, "ai", "ai_fork")
 
-        # ── the CLONE answers from the inherited thread (same client_id) ──
+        # ── the CLONE answers from the inherited conversation ──
         # ai_fork already exists; drive it as OPERATOR (one send) and read back
-        # its history — it loads the PUMPED sidecar + this question, and can only
-        # answer from the thread it inherited.
+        # its rows — it assembles from the copied history + this question, and can
+        # only answer from what it inherited.
         _ = await _call(root, "ai_fork", {
             "type": "send",
             "text": ("What vault code did I give you earlier in this "
@@ -94,19 +77,20 @@ async def main():
             "client_id": "c",
         })
         await asyncio.sleep(1.0)
-        hist = await _call(root, "ai_fork", {"type": "history", "client_id": "c"})
-        joined = str(hist.get("messages", hist))
+        after = await store_rows(root, core, "ai_fork")
+        answer = str([r.get("content") for r in after[copied:] if r.get("role") == "assistant"])
 
-        listing = str(rd)
         checks = [
-            ("the original wrote its thread sidecar", "chat_c.jsonl" in listing),
+            ("the original wrote its conversation", any(secret in str(r.get("content")) for r in before)),
             ("the fork is a distinct agent", made.get("id") == "ai_fork"),
-            ("the fork inherited the fact from the pumped thread", secret in joined),
+            ("every row was copied under the fork's id", copied == len(before) and all(r["id"].startswith("ai_fork:") for r in after)),
+            ("the fork's copy keeps the original's rows intact", len(await store_rows(root, core, "ai")) == len(before)),
+            ("the fork answered the pre-fork fact from the copied rows", secret in answer),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")
         allok = all(ok for _, ok in checks)
-        verdict(allok, "forked the thread — the clone knows the pre-fork fact"
+        verdict(allok, "forked the conversation — the clone knows the pre-fork fact"
                 if allok else "a thread_fork check failed")
     finally:
         await close()

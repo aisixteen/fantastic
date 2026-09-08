@@ -97,3 +97,6 @@ class ProjectionCtx:
     summarize: Callable[[list[dict]], Awaitable[str]] | None
     self_id: str
     kernel: Any
+    # The conversation this projection is for. `fold` is the one strategy that WRITES
+    # (fold rows are marks that must persist); it needs to know which store.
+    client_id: str | None = None

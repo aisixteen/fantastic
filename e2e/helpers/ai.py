@@ -49,6 +49,12 @@ class Connected:
     proxy: Any
     limits: Limits
     trips: list[str] = field(default_factory=list)
+    #: Every `context:compacted` event this agent pushed, in order — the ONLY
+    #: non-racy record that compaction actually happened. `context_status` reports
+    #: the LAST projection, which is overwritten every turn: a run that compacted
+    #: five times and then ended on a turn that fit reads `fired: False` there. A
+    #: probe that scores what survived compaction must first prove there WAS one.
+    compactions: list[dict] = field(default_factory=list)
     _tasks: list = field(default_factory=list)
 
     @property
@@ -222,6 +228,8 @@ async def connect(
                         _failed(f"turn ended: {det.get('reason')}")
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         _failed(f"context too_small: {det}")
+                    if ev.get("type") == "context" and ev.get("phase") == "compacted":
+                        conn.compactions.append(det)
             except Exception as e:  # the watcher must never kill the run
                 print(f"  ** event watch unavailable: {e} **", flush=True)
             finally:
@@ -243,6 +251,10 @@ async def connect(
                 _failed(f"turn ended: {det.get('reason')}")
             if ev.get("type") == "status" and det.get("error"):
                 _failed(det["error"])
+            if ev.get("type") == "context" and ev.get("phase") == "too_small":
+                _failed(f"context too_small: {det}")
+            if ev.get("type") == "context" and ev.get("phase") == "compacted":
+                conn.compactions.append(det)
 
     conn._tasks.append(asyncio.create_task(_errspy()))
     return conn
@@ -266,8 +278,14 @@ async def _live_tasks(root, aid) -> list[dict]:
 HUMAN_ANSWER = "do your best judgement"
 
 
-async def human(root, *, agent_id: str = "user", ai: str | list[str] = "ai",
-                answer: str = HUMAN_ANSWER, **meta) -> dict:
+async def human(
+    root,
+    *,
+    agent_id: str = "user",
+    ai: str | list[str] = "ai",
+    answer: str = HUMAN_ANSWER,
+    **meta,
+) -> dict:
     """Create THE HUMAN as an ordinary agent, both gate halves wired.
 
     ONE definition. Sixteen probes each writing their own `create_agent` for the
@@ -335,12 +353,19 @@ async def drive(
     # The operator still pokes the human once. That single step is the person
     # pressing enter; it is the only out-of-band action left, and it is honest.
     opening = (
-        {"target": via, "payload": {"type": "send", "target": aid,
-                                    "payload": {"type": "send", "text": task,
-                                                "client_id": client_id}}}
+        {
+            "target": via,
+            "payload": {
+                "type": "send",
+                "target": aid,
+                "payload": {"type": "send", "text": task, "client_id": client_id},
+            },
+        }
         if via
-        else {"target": aid,
-              "payload": {"type": "send", "text": task, "client_id": client_id}}
+        else {
+            "target": aid,
+            "payload": {"type": "send", "text": task, "client_id": client_id},
+        }
     )
     first = (await root.send([opening]))[0]["result"]
     if isinstance(first, dict) and first.get("error"):

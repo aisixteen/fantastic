@@ -22,6 +22,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
+from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -79,7 +80,7 @@ async def main():
         await conn.close()
         # the batch tag lives in the DELIVERED reply turn — read the kernel's
         # own history, not the model-output transcript (E53's lesson).
-        hist = await _call(root, "ai", {"type": "history", "client_id": "fan"})
+        hist = {"messages": await store_rows(root, core, "ai")}
         joined = str(hist.get("messages", hist))
 
         got = Path("answer.md").read_text().strip() if Path("answer.md").exists() else ""

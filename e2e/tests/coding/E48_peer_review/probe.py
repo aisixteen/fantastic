@@ -30,6 +30,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
+from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -124,7 +125,7 @@ async def main():
         # reviewer's turns live under ai_core's default — reading them under the
         # coder's own client name found an empty history and scored a second
         # mind that had plainly worked as never having run (measured 2026-09-04).
-        rev_hist = await _call(root, "ai_rev", {"type": "history", "client_id": "cli"})
+        rev_hist = {"messages": await store_rows(root, core, "ai_rev")}
         tr_rev = str(rev_hist.get("messages", rev_hist))
         await rv.close()
 

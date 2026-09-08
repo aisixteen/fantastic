@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: spread_rules
+group: coding
+title: rules arriving in THREE files across a 12-filler run — checkpointing must keep happening after cuts start
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

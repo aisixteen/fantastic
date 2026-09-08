@@ -86,17 +86,24 @@ pub fn parse_reply_tag(s: &str) -> Option<(&str, &str)> {
     let (agent, rest) = take_run(rest)?;
     let rest = rest.strip_prefix(' ')?;
     let (verb_run, tail) = take_run(rest)?;
-    // `[^\]]*\]` matches whatever follows as long as a `]` exists ahead, so the
-    // greedy `\S+` keeps the whole run whenever the tail carries the bracket.
-    if tail.contains(']') {
-        return Some((agent, verb_run));
+    // The verb group is `[^\]\s]+`, so a `]` ENDS it: the first bracket in the run is
+    // the tag's own closer, never one carried in from the body. It was `\S+` until
+    // 2026-09-04, which on `[reply to x · notes reflect]\n{"verbs":["read"]}` took
+    // `reflect]` and let `[^\]]*\]` close on a bracket inside the BODY — the verb then
+    // read `reflect]`, matched no vocabulary, and both trimmers silently did nothing for
+    // every reply containing a bracket (which is every reflect: bodies are JSON).
+    if let Some(i) = verb_run.find(']') {
+        if i == 0 {
+            return None; // `[^\]\s]+` must match at least one char
+        }
+        return Some((agent, &verb_run[..i]));
     }
-    // Otherwise the regex backtracks INTO the run, to the last `]` inside it.
-    let i = verb_run.rfind(']')?;
-    if i == 0 {
-        return None; // `\S+` must match at least one char
+    // No bracket in the run: the tag can still close later (the ` · N of M in batch`
+    // suffix), but there must BE a `]` ahead or the regex would not have matched.
+    if !tail.contains(']') {
+        return None;
     }
-    Some((agent, &verb_run[..i]))
+    Some((agent, verb_run))
 }
 
 /// True when `s` OPENS with a reply tag's head (`[reply to \S+ · `) — the
@@ -281,6 +288,37 @@ mod tests {
 
     fn text(t: &Value) -> &str {
         t.get("content").and_then(Value::as_str).unwrap_or("")
+    }
+
+    /// MEASURED 2026-09-04, in all three runtimes at once. The verb group was `\S+`,
+    /// which does not exclude `]`, so on a reply whose BODY carries a bracket the run
+    /// kept `reflect]` and the regex closed on the body's bracket. The verb then read
+    /// `reflect]`, matched no vocabulary, and BOTH trimmers silently did nothing —
+    /// on every reflect, since reflect bodies are JSON and always contain one.
+    ///
+    /// It survived because every fixture here, in python and in swift, used a
+    /// bracket-free body. The three runtimes agreed with each other and with nothing.
+    #[test]
+    fn the_verb_stops_at_the_tags_own_bracket_not_the_bodys() {
+        let real = "[reply to notes:aa \u{b7} notes reflect]\nverbs=[\"read\"]  root=.";
+        assert_eq!(parse_reply_tag(real), Some(("notes", "reflect")));
+        let stamped =
+            "[reply to notes:aa \u{b7} notes reflect \u{b7} 2 of 3 in batch ab12]\nv=[\"x\"]";
+        assert_eq!(parse_reply_tag(stamped), Some(("notes", "reflect")));
+        assert_eq!(parse_reply_tag("[reply to a:1 notes reflect]"), None);
+    }
+
+    #[test]
+    fn a_stale_reflect_whose_body_has_a_bracket_still_dedupes() {
+        let body = "verbs=[\"read\", \"write\"]  root=.";
+        let hist = [
+            turn("user", &format!("[reply to n:aa · notes reflect]\n{body}")),
+            turn("assistant", "SEEN notes"),
+            turn("user", &format!("[reply to n:bb · notes reflect]\n{body}")),
+        ];
+        let out = dedupe_stale_reads(&hist);
+        let kept = out.iter().filter(|t| text(t).contains(body)).count();
+        assert_eq!(kept, 1, "stale whole-state reflect not dropped: {out:?}");
     }
 
     #[test]

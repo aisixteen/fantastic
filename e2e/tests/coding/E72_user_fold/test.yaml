@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: user_fold
+group: coding
+title: "the human folds the agent's finished work mid-run through the verb — and the rules still hold"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 80
+  no_progress_turns: 10
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

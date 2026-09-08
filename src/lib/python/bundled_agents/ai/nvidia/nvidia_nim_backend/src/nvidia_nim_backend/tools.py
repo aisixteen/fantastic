@@ -42,7 +42,6 @@ from ai_core.core import (  # noqa: F401 — re-exported test seams + the cancel
     _assemble,
     _current,
     _emit_status,
-    _file_bridge_id,
     _locks,
     _providers,
     _queue,

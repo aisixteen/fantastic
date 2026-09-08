@@ -30,8 +30,10 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -204,7 +206,8 @@ class HostKernel:
         if not (w / "agent.json").exists():
             seed = subprocess.Popen(self.cmd, cwd=self.workdir, env=self.env,
                                     stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+                                    stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
             for _ in range(100):
                 if (w / "agent.json").exists():
                     break
@@ -252,15 +255,25 @@ class HostKernel:
         return port
 
     def boot(self) -> "HostKernel":
+        # A SIGTERM (run.py killing the lane, a pkill) must run the exit hooks, or the
+        # kernel group below outlives the probe; python's default handler skips them.
+        if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, None):
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
         self.port = self.seed()
         self.klog = self.klog_path.open("wb")
+        # ITS OWN PROCESS GROUP, KILLED AS A GROUP. A kernel is a daemon by design —
+        # it keeps serving when its parent dies — so every probe that ended without
+        # reaching `close` (a lane timeout, a pkill, a harness crash) left one behind:
+        # 29 orphans, 835 MB, measured 2026-09-07. `close` and the exit hook now kill
+        # the group, which also takes any child the kernel spawned.
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.workdir, env=self.env,
-            stdout=self.klog, stderr=subprocess.STDOUT)
+            stdout=self.klog, stderr=subprocess.STDOUT,
+            start_new_session=True)
         # AT EXIT, NOT AT `close`. Probes bind `close_kernel` and never call it —
         # the kernel dies with the process — so a dump that lived only in `close`
         # never ran and the capture was worth nothing (measured 2026-09-03).
-        atexit.register(self.dump)
+        atexit.register(self.close)
         for _ in range(150):  # wait on the PORT, never on a guessed sleep
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", self.port)) == 0:
@@ -269,13 +282,25 @@ class HostKernel:
         raise SystemExit(f"kernel did not serve on :{self.port}")
 
     def close(self) -> None:
-        if self.proc:
-            self.proc.terminate()
+        """Stop the kernel's whole process group, then dump. Idempotent — it runs
+        from the probe's `finally` and again at exit."""
+        if self.proc and self.proc.poll() is None:
+            self._signal_group(signal.SIGTERM)
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                self._signal_group(signal.SIGKILL)
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
         self.dump()
+
+    def _signal_group(self, sig: int) -> None:
+        try:
+            os.killpg(os.getpgid(self.proc.pid), sig)
+        except ProcessLookupError:
+            pass
 
     def dump(self) -> None:
         """The kernel's own words, INTO THE TEST LOG.

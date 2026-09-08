@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: recall_through_folds
+group: coding
+title: "after several folds, recall reaches the very first instruction and grep reaches inside a fold"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 80
+  no_progress_turns: 10
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

@@ -20,6 +20,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, human, verdict
+from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -64,7 +65,7 @@ async def main():
             "first attempt will be DENIED by the gate — when it is, do NOT retry "
             "blindly: stop and report that you were denied. "
             f"{DONE}.", client_id="w", via="user")
-        h1 = await _call(root, "ai", {"type": "history", "client_id": "w"})
+        h1 = {"messages": await store_rows(root, core, "ai")}
         denied = "unauthorized" in str(h1.get("messages", h1))
 
         # ── 2. the reviewer opens the gate (authority the writer lacks) ──

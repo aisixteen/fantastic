@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: recall_after_fold
+group: coding
+title: "every fold batch is followed by a recall; grep answers inline; the marker under a fold comes back"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 60
+  no_progress_turns: 10
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}
