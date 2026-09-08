@@ -18,10 +18,9 @@ from ai_core.core import (
     _save_view,
     _store_reply,
 )
-from ai_core.folds import make_fold
 from ai_core.strategies.strip import _stripped
 
-from test_folds import _K, _chain, _row  # noqa: E402
+from test_folds import _K, _chain, _fold, _id, _row  # noqa: E402
 
 
 def _cfg():
@@ -156,7 +155,7 @@ async def test_a_stale_array_falls_back_to_the_store_and_says_so(monkeypatch):
 
 
 def test_res_of_classifies_rows():
-    assert _res_of(make_fold("ai", ["x:1", "x:2"], "t", "b", False)) == "fold"
+    assert _res_of(_fold("ai", ["x:1", "x:2"], "t", "b", False)) == "fold"
     assert (
         _res_of(
             {
@@ -186,7 +185,7 @@ async def test_recall_mechanical_fit_is_under_budget_and_persists_a_view_and_a_r
     r = await _context_recall("ai", {"dry": True}, k)
     assert r["degraded"] is True and r["kept"] >= 1
     v = await _load_view("ai", k)
-    assert v and v["ids"][0]["id"] == "user:goal", "the goal turn is always in"
+    assert v and v["ids"][0]["id"] == _id("user:goal"), "the goal turn is always in"
     total = sum(estimate_one({"role": "user", "content": "x" * (0)}) for _ in ())  # noqa: F841
     rows = await core._load_history("ai", k)
     rec = [x for x in rows if x.get("kind") == "recall"]
@@ -206,21 +205,24 @@ async def test_recall_asks_the_model_and_expands_only_what_fits(monkeypatch):
 
     monkeypatch.setattr(core, "_default_system_content", fake_sys)
 
+    reply_ids = {r["id"] for r in a if str(r["content"]).startswith("[reply to ")}
+
     class _P:
         async def chat(self, messages):
             head_ids = [
-                ln.split(" · ")[0]
+                int(ln.split(" · ")[0])
                 for ln in messages[0]["content"].splitlines()
-                if " · " in ln and ":" in ln.split(" · ")[0]
+                if " · " in ln and ln.split(" · ")[0].isdigit()
             ]
-            want = [i for i in head_ids if i.endswith("r")][-2:] + ["ghost:0000"]
+            want = [i for i in head_ids if i in reply_ids][-2:] + [999999999]
             yield json.dumps({"expand": want, "why": "the last two replies matter"})
 
     core._providers["ai"] = _P()
     r = await _context_recall("ai", {}, k)
     assert r["degraded"] is False and r["why"] == "the last two replies matter"
     v = await _load_view("ai", k)
-    full_replies = [e for e in v["ids"] if e["res"] == "full" and e["id"].endswith("r")]
+    reply_ids = {r["id"] for r in a if str(r["content"]).startswith("[reply to ")}
+    full_replies = [e for e in v["ids"] if e["res"] == "full" and e["id"] in reply_ids]
     assert 1 <= len(full_replies) <= 2, (
         "expansions are the model's, capped by budget; a ghost id is ignored"
     )
@@ -353,7 +355,9 @@ async def test_rows_appended_after_the_array_ride_behind_it(monkeypatch):
     msgs, _ = await core._assemble("ai", "live", k, "c")
     ids = [m.get("id") for m in msgs[1:-1]]
     assert ids[:2] == [a[0]["id"], a[2]["id"]], "the array first"
-    assert ids[-2:] == ["ai:new1", "ai:new2"], "then everything appended since"
+    assert ids[-2:] == [_id("ai:new1"), _id("ai:new2")], (
+        "then everything appended since"
+    )
     assert core._view_source["ai"] == "array"
 
 
@@ -361,9 +365,9 @@ async def test_the_recall_row_names_the_newest_root(monkeypatch):
     k = _K()
     await _seed(
         k,
-        [_row("user", "TASK 0: first", "user:a")]
+        [_row("user", "TASK 0: first", "user:t0")]
         + _chain("a", 2)
-        + [_row("user", "TASK 1: latest work", "user:b")],
+        + [_row("user", "TASK 1: latest work", "user:t1")],
     )
 
     async def fake_sys(self_id, kernel):
@@ -374,24 +378,26 @@ async def test_the_recall_row_names_the_newest_root(monkeypatch):
     rec = [x for x in await core._load_history("ai", k) if x.get("kind") == "recall"][
         -1
     ]
-    assert 'live task: user:b "TASK 1: latest work"' in rec["content"], rec["content"]
+    assert f'live task: {_id("user:t1")} "TASK 1: latest work"' in rec["content"], rec[
+        "content"
+    ]
 
 
 async def test_the_live_root_is_found_even_when_a_fold_collapsed_it(monkeypatch):
     k = _K()
     b = _chain("b", 2)
     rows = (
-        [_row("user", "TASK 0: first", "user:a")]
+        [_row("user", "TASK 0: first", "user:t0")]
         + _chain("a", 2)
-        + [_row("user", "TASK 1: latest work", "user:b")]
+        + [_row("user", "TASK 1: latest work", "user:t1")]
         + b
     )
     await _seed(k, rows)
     await _seed(
         k,
         [
-            make_fold(
-                "ai", ["user:b"] + [r["id"] for r in b], "task 1 folded", "body", False
+            _fold(
+                "ai", ["user:t1"] + [r["id"] for r in b], "task 1 folded", "body", False
             )
         ],
     )
@@ -404,4 +410,5 @@ async def test_the_live_root_is_found_even_when_a_fold_collapsed_it(monkeypatch)
     rec = [x for x in await core._load_history("ai", k) if x.get("kind") == "recall"][
         -1
     ]
-    assert "live task: user:b" in rec["content"], rec["content"]
+    # chain b's own root ("task b") is the newest root and the fold collapsed it too
+    assert f"live task: {_id('user:b')}" in rec["content"], rec["content"]

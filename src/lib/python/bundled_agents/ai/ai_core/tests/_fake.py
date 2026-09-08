@@ -7,7 +7,6 @@ that swallows dispatches (reflects, deliveries) while remembering them."""
 
 from __future__ import annotations
 
-import secrets
 import time
 
 
@@ -18,23 +17,54 @@ class FakeCtx:
             if record is not None
             else {"context_window": window, "output_reserve": 0}
         )
-        self.rows: dict[str, dict] = {}
-        self.bodies: dict[str, bytes] = {}
+        self.rows: dict[int, dict] = {}
+        self.bodies: dict[int, bytes] = {}
         self.views: dict[str, dict] = {}
-        self._by_agent: dict[str, list[str]] = {}
+        self._by_agent: dict[str, list[int]] = {}
         self.sent: list = []
         self.emitted: list = []
         self.tasks: dict = {}
+        self.next_id = 1
+        # TEST CONVENIENCE: a fixture may name rows with tags ("user:goal", "ai:a0")
+        # and the fake translates each tag to a real int id on first sight, so a
+        # test reads as prose while the store holds what the kernel holds. `id(tag)`
+        # returns the int a tag became (minting it if unseen).
+        self._alias: dict[str, int] = {}
 
     # ── the Kernel surface a bundle uses ─────────────────────────────────
-    def mint_task_id(self, agent_id: str) -> str:
-        while True:
-            tid = f"{agent_id}:{secrets.token_hex(4)}"
-            if tid not in self.rows and tid not in self.tasks:
-                return tid
+    def mint_id(self) -> int:
+        n = self.next_id
+        self.next_id = n + 1
+        return n
 
-    def rows_put(self, agent_id: str, row: dict) -> str:
-        rid = row.get("id") or self.mint_task_id(agent_id)
+    def id(self, tag) -> int:
+        if isinstance(tag, int) and not isinstance(tag, bool):
+            return tag
+        if tag not in self._alias:
+            self._alias[tag] = self.mint_id()
+        return self._alias[tag]
+
+    def _translate(self, row: dict) -> dict:
+        out = dict(row)
+        if isinstance(out.get("id"), str):
+            out["id"] = self.id(out["id"])
+        if isinstance(out.get("parent"), str):
+            out["parent"] = self.id(out["parent"])
+        if isinstance(out.get("refs"), list):
+            out["refs"] = [self.id(x) if isinstance(x, str) else x for x in out["refs"]]
+        return out
+
+    def rows_put(self, agent_id: str, row: dict) -> int:
+        row = self._translate(row)
+        rid = row.get("id")
+        if rid is None:
+            rid = self.mint_id()
+        elif rid in self.rows:
+            raise ValueError(f"rows_put: id already stored, got {rid!r}")
+        else:
+            # A fixture may hand a row an int it chose (a fold built by hand): the
+            # fake treats it as pre-minted and keeps the counter above it.
+            self.next_id = max(self.next_id, rid + 1)
         stored = {**row, "id": rid, "agent": agent_id}
         stored.setdefault("ts", time.time())
         self.rows[rid] = stored
@@ -46,14 +76,14 @@ class FakeCtx:
             self.rows[i] for i in self._by_agent.get(agent_id, ()) if i in self.rows
         ]
 
-    def rows_get(self, ids: list[str]) -> list[dict]:
+    def rows_get(self, ids: list[int]) -> list[dict]:
         return [self.rows[i] for i in ids if i in self.rows]
 
-    def body_put(self, pid: str, data: bytes) -> None:
-        self.bodies[pid] = bytes(data)
+    def body_put(self, pid, data: bytes) -> None:
+        self.bodies[self.id(pid)] = bytes(data)
 
     def body_get(self, pid: str, offset: int, length: int):
-        b = self.bodies.get(pid)
+        b = self.bodies.get(self.id(pid))
         if b is None:
             return None
         chunk = b[offset : offset + max(1, length)]

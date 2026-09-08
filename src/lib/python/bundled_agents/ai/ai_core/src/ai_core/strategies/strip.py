@@ -54,7 +54,14 @@ _PID = re.compile(r"^\[reply to (\S+) · ")
 # Per-agent set of stripped pids. In-memory, process-lifetime — the same standing as
 # `_projection`/`_compaction_mark`: a strip is a VIEW decision, the durable store is
 # untouched, so losing this on restart costs one re-strip and nothing else.
-_stripped: dict[str, set[str]] = {}
+_stripped: dict[str, set[int | str]] = {}
+
+
+def _pid_of(pm) -> int | str:
+    """The pid on a tag as the STORE keys it: an int when it is one (the kernel's
+    counter), the raw token otherwise (a `-`, a foreign tag)."""
+    tok = pm.group(1)
+    return int(tok) if tok.isdigit() else tok
 
 
 def _blocks(content: str) -> list[str]:
@@ -87,7 +94,7 @@ def _render(body: list[dict], stripped: set[str]) -> tuple[list[dict], int, int]
         parts = []
         for b in _blocks(m["content"]):
             pm = _PID.match(b)
-            if pm and pm.group(1) in stripped:
+            if pm and _pid_of(pm) in stripped:
                 parts.append(_stub(b))
                 n += 1
                 saved += len(b) - len(parts[-1])
@@ -111,7 +118,7 @@ async def strip(
         # prefix bytes are the same before and after it.
         from ai_core.core import _load_view
 
-        seed: set[str] = set()
+        seed: set[int | str] = set()
         view = await _load_view(ctx.self_id, ctx.kernel)
         if view:
             stubbed = {e.get("id") for e in view["ids"] if e.get("res") == "stub"}
@@ -120,7 +127,7 @@ async def strip(
                     for b in _blocks(m["content"]):
                         pm = _PID.match(b)
                         if pm:
-                            seed.add(pm.group(1))
+                            seed.add(_pid_of(pm))
         _stripped[ctx.self_id] = seed
     done = _stripped.setdefault(ctx.self_id, set())
     budget = ctx.budget - NOTICE_ENVELOPE_RESERVE
@@ -136,7 +143,7 @@ async def strip(
             for b in _blocks(m["content"]):
                 pm = _PID.match(b)
                 if pm:
-                    done.add(pm.group(1))
+                    done.add(_pid_of(pm))
             rendered, n, saved = _render(body, done)
     cut = False
     if estimate_tokens(rendered) > budget:

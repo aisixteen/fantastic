@@ -195,7 +195,7 @@ async def test_a_chain_suspends_on_a_question_and_the_answer_resumes_it(wired):
     led = (await kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
-    rows = {r["id"]: r for r in led["executions"]}
+    rows = {r.get("name"): r for r in led["executions"] if r.get("name")}
     assert rows["c1-step1"]["attempts"] == 1, "suspension re-ran completed work"
     assert rows["c1-step2"]["status"] == "completed"
     # and the resume turn saw its full pre-suspension history

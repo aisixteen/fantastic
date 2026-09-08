@@ -22,7 +22,7 @@ hunk before writing anything. The residual failure is a stream call dying
 mid-sequence: rare, and biased SAFE by ordering — the crash leaves visible
 tmp/`.ckpt` debris, never lost data or a half-written target.
 
-Checkpoint ids ARE the dispatch's kernel task pid (`<agent>:<hex8>`) — one id
+Checkpoint ids ARE the dispatch's kernel task pid (a message id, an int) — one id
 space with `ps`, the trace, and the chat turn that caused the mutation.
 POSIX-legal verbatim as a filename (this project does not target Windows).
 """
@@ -97,9 +97,10 @@ def _version(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def _pid() -> str:
-    """This dispatch's kernel task pid — the checkpoint id space."""
-    return current_task() or "op:00000000"
+def _pid() -> int:
+    """This dispatch's kernel task pid (a message id) — the checkpoint id space.
+    0 outside any dispatch (an operator call): never minted, so never a clash."""
+    return current_task() or 0
 
 
 # ─── per-document serialization ─────────────────────────────────
@@ -208,7 +209,7 @@ async def _write_chunks(kernel, fb: str, path: str, data: bytes):
 async def _write_atomic(kernel, fb: str, path: str, data: bytes):
     """The COMMIT: write to a tmp sibling, then the leg's one atomic `rename`.
     A crash before the rename leaves only tmp debris."""
-    tmp = f"{path}.tmp.{_pid().replace(':', '_')}"
+    tmp = f"{path}.tmp.{_pid()}"
     if err := await _write_chunks(kernel, fb, tmp, data):
         return err
     r = (
@@ -226,7 +227,7 @@ async def _write_atomic(kernel, fb: str, path: str, data: bytes):
     return None
 
 
-def _ckpt_path(path: str, ckpt_id: str) -> str:
+def _ckpt_path(path: str, ckpt_id: int | str) -> str:
     # `/` in the document path would nest under .ckpt; flatten it so every
     # pre-image of one document lives in ONE listable dir.
     return f"{CKPT_DIR}/{path.replace('/', '__')}/{ckpt_id}"
@@ -697,7 +698,10 @@ async def _checkpoints(id, payload, kernel):
         # no dir yet = no checkpoints, honestly empty
         return {"path": path, "ckpts": []}
     ckpts = [
-        {"id": f["name"], "size": f.get("size")}
+        {
+            "id": int(f["name"]) if f["name"].isdigit() else f["name"],
+            "size": f.get("size"),
+        }
         for f in r.get("files") or []
         if f.get("type") == "file" and not f["name"].endswith(".absent")
     ]

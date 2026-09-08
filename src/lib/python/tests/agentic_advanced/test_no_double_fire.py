@@ -172,6 +172,8 @@ async def test_one_resume_does_not_fire_the_other_pending_question(kernel):
     led = (await kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
-    ids = {r["id"] for r in led["executions"]}
+    ids = {
+        r.get("name") for r in led["executions"]
+    }  # caller names, not the kernel's ids
     assert "act-a" in ids
     assert "act-b" not in ids, "an un-approved proposal reached the ledger"

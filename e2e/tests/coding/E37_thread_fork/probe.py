@@ -83,7 +83,7 @@ async def main():
         checks = [
             ("the original wrote its conversation", any(secret in str(r.get("content")) for r in before)),
             ("the fork is a distinct agent", made.get("id") == "ai_fork"),
-            ("every row was copied under the fork's id", copied == len(before) and all(r["id"].startswith("ai_fork:") for r in after)),
+            (f"every row was copied under a new id ({copied} copied, {len(before)} before, {len(after)} after)", copied == len(before) and not ({r["id"] for r in after} & {r["id"] for r in before})),
             ("the fork's copy keeps the original's rows intact", len(await store_rows(root, core, "ai")) == len(before)),
             ("the fork answered the pre-fork fact from the copied rows", secret in answer),
         ]

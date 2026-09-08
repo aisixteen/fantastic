@@ -161,7 +161,7 @@ def _state(id: str) -> _BridgeState:
 
 def _next_corr(id: str, st: _BridgeState) -> str:
     st.corr_counter += 1
-    # DASH, not colon: since the wire's frame id IS the execution id, a ":"
+    # DASH, not colon (kept): the wire's frame id is the execution's NAME; a ":"
     # here would land in the kernel-minted pid namespace and be refused on
     # the serving side. Bridge-minted correlators are caller-chosen ids like
     # any other — fresh per forward, so each forward is its own intent.

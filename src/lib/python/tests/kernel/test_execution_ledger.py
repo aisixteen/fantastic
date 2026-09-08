@@ -105,7 +105,8 @@ async def test_concurrent_same_id_runs_the_body_once(seeded_kernel):
     )
     assert len(_runs) == 1, f"the body ran {len(_runs)} times"
     assert o1 == o2
-    assert o1["pid"] == "once" and o1["status"] == "completed"
+    assert o1["name"] == "once" and isinstance(o1["pid"], int)
+    assert o1["status"] == "completed"
     assert o1["result"] == {"run": 1}
 
 
@@ -214,7 +215,7 @@ async def test_no_id_means_independent_executions(seeded_kernel):
 
 async def test_bad_ids_are_refused_before_dispatch(seeded_kernel):
     a = await _mk(seeded_kernel, "lp_bad")
-    for bad in ("", 7, "has:colon"):
+    for bad in ("", 7, [1], True):  # empty name · an int naming nothing · not an id
         out = (
             await seeded_kernel.send(
                 [{"target": a, "payload": {"type": "work"}, "id": bad}]
@@ -256,7 +257,7 @@ async def test_a_joiners_timeout_bounds_its_wait_not_the_execution(seeded_kernel
     assert joiner["status"] == "timed_out"
     assert "keeps running" in joiner["result"]["error"]
     rows = await _rows(seeded_kernel)
-    assert any(t["id"] == "jt1" for t in rows), "the execution must SURVIVE"
+    assert any(t["id"] == joiner["pid"] for t in rows), "the execution must SURVIVE"
     # clean up: the owner's slow task
     await seeded_kernel.send(
         [{"target": "kernel", "payload": {"type": "cancel", "task_id": "jt1"}}]
@@ -277,7 +278,7 @@ async def test_a_named_kernel_reflect_is_ledgered_not_ignored(seeded_kernel):
             [{"target": "kernel", "payload": {"type": "reflect"}, "id": "kr1"}]
         )
     )[0]
-    assert o1["pid"] == "kr1" and o1["status"] == "completed"
+    assert o1["name"] == "kr1" and o1["status"] == "completed"
     assert o2 == o1
 
 
@@ -429,6 +430,7 @@ async def test_ledger_lists_named_executions_with_outcomes(seeded_kernel):
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}])
     )[0]["result"]
     rows = {r["id"]: r for r in led["executions"]}
+    rows.update({r["name"]: r for r in led["executions"] if r.get("name")})
     minted = outs[2]["pid"]
     assert {"lv_ok", "lv_dead", minted} <= set(rows), "LEDGER-ALL: unnamed too"
     assert rows[minted]["named"] is False and rows["lv_ok"]["named"] is True
@@ -461,6 +463,7 @@ async def test_ledger_shows_in_flight_and_pages(seeded_kernel):
             "result"
         ]
         rows.update({r["id"]: r for r in led["executions"]})
+        rows.update({r["name"]: r for r in led["executions"] if r.get("name")})
         if not led["next"]:
             break
         payload = {"type": "ledger", "after": led["next"]}
@@ -483,7 +486,7 @@ async def test_a_minted_pid_is_referencable_for_refetch(seeded_kernel):
     a = await _mk(seeded_kernel, "lp_ref")
     first = (await seeded_kernel.send([{"target": a, "payload": {"type": "work"}}]))[0]
     pid = first["pid"]
-    assert ":" in pid
+    assert isinstance(pid, int)
     again = (
         await seeded_kernel.send(
             [{"target": a, "payload": {"type": "work"}, "id": pid}]
@@ -493,7 +496,9 @@ async def test_a_minted_pid_is_referencable_for_refetch(seeded_kernel):
     assert again["result"] == first["result"]
     ghost = (
         await seeded_kernel.send(
-            [{"target": a, "payload": {"type": "work"}, "id": "no:such"}]
+            [
+                {"target": a, "payload": {"type": "work"}, "id": 999999999}
+            ]  # minted-shaped, unknown
         )
     )[0]
     assert ghost["status"] == "failed"
@@ -520,7 +525,9 @@ async def test_the_ring_evicts_oldest_settled_unnamed_first(seeded_kernel):
             )[0]
             pids.append(o["pid"])
         led = seeded_kernel.ctx.executions
-        assert "keepme" in led, "a named row must outlive unnamed churn"
+        assert "keepme" in seeded_kernel.ctx.names, (
+            "a named row must outlive unnamed churn"
+        )
         assert len(led) == 3
         assert pids[0] not in led and pids[1] not in led, "oldest evicted"
         assert pids[-1] in led
@@ -589,13 +596,13 @@ async def test_ledger_view_is_origin_scoped(seeded_kernel):
                 [{"target": "kernel", "payload": {"type": "ledger"}}]
             )
         )[0]["result"]
-    seen = {r["id"] for r in led["executions"]}
+    seen = {r.get("name") or r["id"] for r in led["executions"]}
     assert "spy_own" in seen
     assert "op_secret" not in seen, "another origin's results leaked"
     op = (
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}])
     )[0]["result"]
-    assert {"op_secret", "spy_own"} <= {r["id"] for r in op["executions"]}
+    assert {"op_secret", "spy_own"} <= {r.get("name") for r in op["executions"]}
 
 
 # ─── C9 ACROSS RESTART: the durable half ────────────────────────
@@ -675,6 +682,7 @@ async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatc
         "result"
     ]
     rows = {r["id"]: r for r in led["executions"]}
+    rows.update({r["name"]: r for r in led["executions"] if r.get("name")})
     assert rows["dead-1"]["status"] == "failed" and rows["dead-1"]["attempts"] == 2
     again = (
         await k2.send(
@@ -753,7 +761,7 @@ async def test_an_in_flight_minted_pid_can_be_joined(seeded_kernel):
     )
     await asyncio.sleep(0.05)
     pid = next(t["id"] for t in await _rows(seeded_kernel) if t["agent"] == a)
-    assert ":" in pid
+    assert isinstance(pid, int)
     joined = (
         await seeded_kernel.send(
             [{"target": a, "payload": {"type": "work"}, "id": pid}]

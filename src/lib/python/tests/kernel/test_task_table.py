@@ -152,15 +152,12 @@ async def test_ps_shows_the_tree_of_a_nested_send(seeded_kernel):
     parent = await _row_for(seeded_kernel, a, "chain")
     child = await _row_for(seeded_kernel, b, "slow")
     assert parent is not None and child is not None
-    # Task id IS a pid: "<agent_id>:<token>" — the agent it belongs to, then an
-    # OPAQUE token. Deliberately not a visible counter: the sequence advances on
-    # every dispatch to that agent (boots, internal sends, other callers), so a
-    # number invites an ordering inference that is false. Ordering lives in
-    # `started_at`; the id's job is to be unique and matchable.
+    # A task id IS the message id of the call that started it: an int from the
+    # kernel's one counter, so `a < b` means "a was created first", kernel-wide.
+    # The agent is a FIELD on the row, never parsed out of the id.
     for row, agent in ((parent, a), (child, b)):
-        aid, sep, token = row["id"].rpartition(":")
-        assert aid == agent and sep == ":"
-        assert token and all(c in "0123456789abcdef" for c in token)
+        assert isinstance(row["id"], int) and row["agent"] == agent
+    assert child["id"] > parent["id"], "the child call was minted after its parent"
     # The tree: b's dispatch is a child of a's dispatch. a's caller is the test
     # coroutine — not a dispatch — so a's task is a root (init-owned).
     assert child["parent"] == parent["id"]

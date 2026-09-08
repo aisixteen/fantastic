@@ -39,10 +39,10 @@ def test_rows_put_mints_in_the_execution_id_space_and_keeps_order(root):
     k = root.ctx
     a = k.rows_put("ai", {"role": "user", "content": "hello"})
     b = k.rows_put("ai", {"role": "assistant", "content": "hi", "parent": a})
-    assert a.startswith("ai:") and len(a) == len("ai:") + 8 and a != b
+    assert isinstance(a, int) and b == a + 1, "the one counter, in order"
     assert [r["id"] for r in k.rows_for("ai")] == [a, b]
     assert k.rows_for("nobody") == []
-    assert k.rows_get([b, "gone:0000", a]) == [k.rows[b], k.rows[a]]
+    assert k.rows_get([b, 999999, a]) == [k.rows[b], k.rows[a]]
     assert k.rows[a]["agent"] == "ai" and "ts" in k.rows[a]
 
 
@@ -54,10 +54,10 @@ def test_a_row_id_never_collides_with_a_live_task(root):
 
 def test_bodies_page_and_views_round_trip(root):
     k = root.ctx
-    k.body_put("notes:0001", b"0123456789")
-    assert k.body_get("notes:0001", 0, 4) == (b"0123", 4, False, 10)
-    assert k.body_get("notes:0001", 8, 4) == (b"89", 10, True, 10)
-    assert k.body_get("nope", 0, 4) is None
+    k.body_put(1, b"0123456789")
+    assert k.body_get(1, 0, 4) == (b"0123", 4, False, 10)
+    assert k.body_get(1, 8, 4) == (b"89", 10, True, 10)
+    assert k.body_get(999, 0, 4) is None
     k.view_put("ai", {"v": 1, "ids": [{"id": "x", "res": "full"}]})
     assert k.view_get("ai")["ids"][0]["id"] == "x" and k.view_get("zz") is None
 
@@ -85,8 +85,8 @@ async def test_messages_operator_sees_all_and_answers_digests_not_bodies(root):
             "content": "[fold]",
         },
     )
-    r = await _send(root, "kernel", {"type": "messages", "ids": [a, f, "ghost:0"]})
-    assert r["refused"] == ["ghost:0"]
+    r = await _send(root, "kernel", {"type": "messages", "ids": [a, f, 999999]})
+    assert r["refused"] == [999999]
     assert [d["id"] for d in r["rows"]] == [a, f]
     assert r["rows"][0]["bytes"] == 5000 and len(r["rows"][0]["head"]) <= 120
     assert (

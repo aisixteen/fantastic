@@ -91,12 +91,17 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
     ids = [rows[i].get("id") for i in idxs]
     lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
     title, text, degraded = await _summarize(ctx, rows, idxs)
+    from ai_core.core import _ctx  # lazy: core imports this package
+
+    if ctx.kernel is None:
+        raise RuntimeError("fold: no kernel to mint the fold's id from")
     fr = make_fold(
         ctx.self_id,
         ids,
         title,
         text,
         degraded,
+        id=_ctx(ctx.kernel).mint_id(),
         lvl=lvl,
         parent=rows[idxs[0]].get("parent"),
     )
