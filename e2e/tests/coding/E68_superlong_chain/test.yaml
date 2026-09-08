@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: superlong_chain
+group: coding
+title: "one chain, 40 reads at a 12k window — it folds its own past in spans and the view holds only folds + tail"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 120
+  no_progress_turns: 10
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

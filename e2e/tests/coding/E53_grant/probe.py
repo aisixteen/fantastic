@@ -31,6 +31,7 @@ sys.path.insert(
 )
 from backends import backend as _resolve_backend
 from helpers import Limits, connect, drive, verdict
+from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -146,7 +147,7 @@ async def main():
         # what the model emitted; measured on this test's second run).
         # THE HUMAN'S OWN TALLY — only a real call moves it.
         received = int((await _call(root, "user", {"type": "inquiries"})).get("inquiries") or 0)
-        hist = await _call(root, "ai", {"type": "history", "client_id": "grant"})
+        hist = {"messages": await store_rows(root, core, "ai")}
         joined = str(hist.get("messages", hist))
 
         note = Path("note.md")

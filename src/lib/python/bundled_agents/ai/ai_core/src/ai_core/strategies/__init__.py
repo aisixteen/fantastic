@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from ai_core.strategies.base import STRATEGY
 from ai_core.strategies.compact import compact
+from ai_core.strategies.fold import fold
+from ai_core.strategies.strip import strip
 from ai_core.strategies.truncate import truncate
 
 # NOTE: `memgpt` was removed. Its only distinct behavior was injecting a memory-pressure
@@ -17,6 +19,14 @@ DEFAULT_STRATEGY = "compact"
 _STRATEGIES: dict[str, STRATEGY] = {
     "compact": compact,
     "truncate": truncate,
+    # `strip` keeps every turn and drops reply BODIES instead — the ledger at mixed
+    # resolution. The model's call titles ride on the stubs, its own prose after each
+    # reply survives as the distillation, and the cut is only the second stage.
+    "strip": strip,
+    # `fold` leaves MARKS: closed chains collapse to an appended fold row (summary +
+    # refs) the model can descend into; then strip, then cut. The only strategy that
+    # writes, because a mark that does not persist is a prefix that rewrites every turn.
+    "fold": fold,
 }
 
 

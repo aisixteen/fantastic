@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import secrets
 import sys
@@ -109,6 +110,11 @@ _SYSTEM_VERBS = frozenset(
         # named work BECAME. Terminal non-completed rows ARE the dead-letter
         # queue: parked, inspectable, never silently retried.
         "ledger",
+        # THE ROW STORE's read surface — conversation rows by id, at DIGEST
+        # resolution. Gated INSIDE the handler (root verbs skip ingress): an
+        # agent reads its own rows; anyone else's only when that owner's
+        # `callable_by` names the caller for `messages`; the operator sees all.
+        "messages",
         # Root-only control verb — gated inside its handler to the tree
         # root (a non-root agent answers with an error). Stops the whole
         # kernel process gracefully; see `_verb_shutdown_kernel`.
@@ -166,6 +172,13 @@ _SYSTEM_VERB_DOCS = {
         "originated. Failed/timed_out/cancelled rows are the dead-letter queue: "
         "inspect, then retry with a NEW id if you choose — nothing is retried "
         "silently."
+    ),
+    "messages": (
+        "args: ids:list[str] (req), limit:int?, after:str?. Conversation rows by id, "
+        "at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, bytes, "
+        "title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another "
+        "agent's only if its callable_by names you for `messages`. Bodies are behind "
+        "that agent's `pull`."
     ),
     "cancel": (
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
@@ -1936,6 +1949,8 @@ class Agent:
             return self._verb_ps(payload)
         if verb == "ledger":
             return self._verb_ledger(payload)
+        if verb == "messages":
+            return self._verb_messages(payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
         if verb == "shutdown_kernel":
@@ -1950,6 +1965,98 @@ class Agent:
         too — it is itself a dispatch."""
         tasks, nxt = page(self.ctx.task_rows(), payload, key=lambda r: r["id"])
         return {"tasks": tasks, "next": nxt}
+
+    def _verb_messages(self, payload: dict) -> dict:
+        """args: ids:list[str] (req), limit:int?, after:str?. Rows by id at DIGEST
+        resolution, gated INSIDE: the caller's own rows always; another agent's only
+        when that owner's `callable_by` names the caller for `messages` (the same
+        ingress check `_gate` runs, re-run here against the OWNER because a root verb
+        skips ingress); the operator sees all. Refused ids are LISTED, never silently
+        dropped. Bodies stay behind the owner's `pull`."""
+        ids = payload.get("ids")
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or any(not isinstance(x, str) for x in ids)
+        ):
+            return refusal(
+                BAD_ARG,
+                "messages: `ids` must be a non-empty list of row ids",
+                arg="ids",
+            )
+        caller = _current_origin.get()
+        root_id = self._root().id
+        allowed_owner: dict[str, bool] = {}
+
+        def may_read(owner_id: str) -> bool:
+            if caller is None or caller == owner_id:
+                return True
+            if owner_id in allowed_owner:
+                return allowed_owner[owner_id]
+            owner = self.ctx.agents.get(owner_id)
+            if owner is None:
+                allowed_owner[owner_id] = False
+                return False
+            d = authorize_call(
+                owner._meta.get("callable_by") or {},
+                "messages",
+                caller,
+                holder_id=owner.id,
+                holder_parent=owner.parent.id if owner.parent is not None else None,
+                holder_children=frozenset(owner._children),
+                loader_id=root_id,
+                enforce_privileged=False,
+            )
+            allowed_owner[owner_id] = bool(d.allowed)
+            return allowed_owner[owner_id]
+
+        after = payload.get("after")
+        if isinstance(after, str) and after in ids:
+            ids = ids[ids.index(after) + 1 :]
+        out, refused = [], []
+        for rid in ids:
+            row = self.ctx.rows.get(rid)
+            if row is None:
+                refused.append(rid)
+                continue
+            if not may_read(row.get("agent", "")):
+                refused.append(rid)
+                continue
+            content = str(row.get("content", ""))
+            d = {
+                "id": rid,
+                "agent": row.get("agent"),
+                "parent": row.get("parent"),
+                "kind": row.get("kind") or row.get("role"),
+                "role": row.get("role"),
+                "head": content[:120].replace("\n", " "),
+                "bytes": len(content),
+            }
+            if row.get("title"):
+                d["title"] = row["title"]
+            if row.get("level"):
+                d["level"] = row["level"]
+            if row.get("refs"):
+                d["refs"] = len(row["refs"])
+            out.append(d)
+        # DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
+        try:
+            limit = int(payload.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        cap_bytes = 32 * 1024
+        kept: list[dict] = []
+        used = 0
+        for d in out:
+            if limit and len(kept) >= limit:
+                break
+            n = len(json.dumps(d))
+            if used + n > cap_bytes:
+                break
+            kept.append(d)
+            used += n
+        nxt = kept[-1]["id"] if len(kept) < len(out) and kept else None
+        return {"rows": kept, "refused": refused, "next": nxt}
 
     def _verb_ledger(self, payload: dict) -> dict:
         """No args. EVERY execution and what it became — named under its id,
@@ -1990,6 +2097,14 @@ class Agent:
             if fut.done():
                 out = fut.result()
                 entry["status"] = out["status"]
+                # TODO(ledger digest): this is the FULL result body of every execution,
+                # with no default `limit` (page(): absent ⇒ everything) and a docstring
+                # that says "No args." — so one call returns more than the caller's
+                # whole window and the turn dies on `too_small`. Measured 2026-09-05:
+                # 34k–127k tokens against a 12k window, 5 of 6 e2e arms killed. Fix:
+                # digest rows {id, target, verb, status, attempts, bytes, head, title}
+                # here, full body only via {type:'ledger', id}. Same in rust and swift.
+                # Kernel change — waiting on explicit approval, python first.
                 entry["outcome"] = out
             else:
                 entry["status"] = "in_flight"

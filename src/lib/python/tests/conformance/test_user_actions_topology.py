@@ -224,7 +224,7 @@ def test_c3_reject_the_wall_refusal_is_model_visible(wired):
                     [
                         {
                             "target": "ua_ai",
-                            "payload": {"type": "history", "client_id": "tab1"},
+                            "payload": {"type": "recall", "client_id": "tab1"},
                         }
                     ]
                 )

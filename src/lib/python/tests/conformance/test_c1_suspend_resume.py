@@ -163,9 +163,11 @@ async def test_a_chain_suspends_on_a_question_and_the_answer_resumes_it(wired):
 
     # the structured question reached the asker verbatim (renderable + correlatable)
     assert first is not None
-    hist = (await kernel.send([{"target": "c1_ai", "payload": {"type": "history"}}]))[
-        0
-    ]["result"]["messages"]
+    hist = (
+        await kernel.send(
+            [{"target": "c1_ai", "payload": {"type": "recall", "limit": 100}}]
+        )
+    )[0]["result"]["messages"]
     ask_texts = [m["content"] for m in hist if m["role"] == "assistant"]
     ask = next((t for t in ask_texts if "request_id" in t), None)
     assert ask, f"no structured question in: {ask_texts}"

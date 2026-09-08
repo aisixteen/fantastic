@@ -86,12 +86,20 @@ func parseReplyTag(_ s: String) -> (agent: String, verb: String)? {
     guard rest.hasPrefix(" ") else { return nil }
     rest = rest.dropFirst()
     guard let (verbRun, tail) = takeRun(rest) else { return nil }
-    // `[^\]]*\]` matches whatever follows as long as a `]` exists ahead, so the
-    // greedy `\S+` keeps the whole run whenever the tail carries the bracket.
-    if tail.contains("]") { return (String(agent), String(verbRun)) }
-    // Otherwise the regex backtracks INTO the run, to the last `]` inside it.
-    guard let i = verbRun.lastIndex(of: "]"), i != verbRun.startIndex else { return nil }
-    return (String(agent), String(verbRun[verbRun.startIndex..<i]))
+    // The verb group is `[^\]\s]+`, so a `]` ENDS it: the first bracket in the run is
+    // the tag's own closer, never one carried in from the body. It was `\S+` until
+    // 2026-09-04, which on `[reply to x · notes reflect]\n{"verbs":["read"]}` took
+    // `reflect]` and let `[^\]]*\]` close on a bracket inside the BODY — the verb then
+    // read `reflect]`, matched no vocabulary, and both trimmers silently did nothing for
+    // every reply containing a bracket (which is every reflect: bodies are JSON).
+    if let i = verbRun.firstIndex(of: "]") {
+        if i == verbRun.startIndex { return nil }
+        return (String(agent), String(verbRun[verbRun.startIndex..<i]))
+    }
+    // No bracket in the run: the tag can still close later (the ` · N of M in batch`
+    // suffix), but there must BE a `]` ahead or the regex would not have matched.
+    if !tail.contains("]") { return nil }
+    return (String(agent), String(verbRun))
 }
 
 /// True when `s` OPENS with a reply tag's head (`[reply to \S+ · `) — the

@@ -16,7 +16,7 @@ leading `role:tool` messages so the projected body is always wire-valid.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ai_core.context import ProjectionCtx, estimate_one
 
@@ -29,6 +29,16 @@ class Projection:
     body: list[dict]  # projected conversation body — NO notice turn, NO system block
     summary: str | None = None  # compact: the LLM summary text; truncate/none: None
     omitted_marker: bool = False  # truncate: True (an earlier span was elided in place)
+    # `halve`: the agent's live FACT BLOCK, rendered. Carried as an ARTIFACT for the
+    # same reason `summary` is — a strategy states what it retained, the seam is the one
+    # place that turns it into a turn. Empty for every other strategy.
+    pinned: list[str] = field(default_factory=list)
+    # `strip`: reply blocks reduced to their stub this projection, and the bytes that
+    # left the view with them. Reported in the artifact so a probe can prove the
+    # mechanism ran, separately from whether the run succeeded.
+    stripped: int = 0
+    stripped_bytes: int = 0
+    folded: int = 0  # `fold`: fold rows written this projection
 
 
 # A fixed token budget reserved at the seam for the notice WRAPPER prose (everything in

@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: pull_by_choice
+group: coding
+title: "eight bodies digested, the spec names the one that matters — pull only that one"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 40
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

@@ -435,7 +435,7 @@ def _send_binary_raw(inner: str) -> dict | None:
 FENCE_OPEN = "*** Begin Bytes"
 FENCE_CLOSE = "*** End Bytes"
 _FENCE_OPEN_RE = re.compile(r"^\*\*\* Begin Bytes[ \t]*\r?\n", re.M)
-_FENCE_CLOSE_RE = re.compile(r"^\*\*\* End Bytes[ \t]*$", re.M)
+_FENCE_CLOSE_RE = re.compile(r"^\*\*\* End Bytes[ \t]*\r?$", re.M)
 
 
 def _split_fence(inner: str, m: re.Match) -> tuple[str, str]:

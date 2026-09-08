@@ -137,6 +137,33 @@ struct HistoryViewTests {
         #expect(out.count == 3, "the emptied turn leaves no husk behind")
     }
 
+    /// MEASURED 2026-09-04, in all three runtimes at once. The verb group was `\S+`,
+    /// which does not exclude `]`, so on a reply whose BODY carries a bracket the run
+    /// kept `reflect]` and the regex closed on the body's bracket. The verb then read
+    /// `reflect]`, matched no vocabulary, and BOTH trimmers silently did nothing — on
+    /// every reflect, since reflect bodies are JSON and always contain one.
+    ///
+    /// It survived because every fixture here, in python and in rust, used a
+    /// bracket-free body. The three runtimes agreed with each other and with nothing.
+    @Test func theVerbStopsAtTheTagsOwnBracketNotTheBodys() {
+        let real = #"[reply to notes:aa · notes reflect]\nverbs=["read"]  root=."#
+        #expect(parseReplyTag(real)?.verb == "reflect")
+        let stamped = #"[reply to notes:aa · notes reflect · 2 of 3 in batch ab12]\nv=["x"]"#
+        #expect(parseReplyTag(stamped)?.verb == "reflect")
+    }
+
+    @Test func aStaleReflectWhoseBodyHasABracketStillDedupes() {
+        let body = #"verbs=["read", "write"]  root=."#
+        let hist: [JSON] = [
+            ["role": "user", "content": .string("[reply to n:aa · notes reflect]\n" + body)],
+            ["role": "assistant", "content": "SEEN notes"],
+            ["role": "user", "content": .string("[reply to n:bb · notes reflect]\n" + body)],
+        ]
+        let out = dedupeStaleReads(hist)
+        let kept = out.filter { ($0["content"].asString ?? "").contains(body) }.count
+        #expect(kept == 1, "stale whole-state reflect not dropped")
+    }
+
     /// The tag matcher is python's regex, hand-scanned — including the `[^\]]*` that
     /// absorbs the batch suffix, and the fail-closed `SEEN` word boundary.
     @Test func theTagMatcherAndTheSeenBoundaryArePythons() {

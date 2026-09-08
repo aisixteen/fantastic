@@ -47,7 +47,7 @@ async def test_persistence_routing_through_loader(seeded_kernel, store_agent):
     finally:
         ot._providers.pop(ob, None)
     data = (
-        (await seeded_kernel.send([{"target": ob, "payload": {"type": "history"}}]))[0][
+        (await seeded_kernel.send([{"target": ob, "payload": {"type": "recall"}}]))[0][
             "result"
         ]
     )["messages"]

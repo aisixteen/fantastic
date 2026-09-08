@@ -1,0 +1,15 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: fold_paging
+group: coding
+title: "many small tasks → many folds; find the one that matters, open only it"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 60
+  max_turns: 120
+  no_progress_turns: 8
+  turn_chars: 60000
+  turn_seconds: 300
+env: {}

@@ -78,14 +78,14 @@ async def _accept(kernel, target: str, caller: str, verbs="*") -> None:
     )[0]["result"]
 
 
-async def test_reflect_includes_file_bridge_id_and_no_history(
+async def test_reflect_carries_no_file_bridge_id_and_no_history(
     seeded_kernel, store_agent
 ):
     oid = await _make_ollama(seeded_kernel, store_agent)
     r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}]))[
         0
     ]["result"]
-    assert r["file_bridge_id"] == store_agent
+    assert "file_bridge_id" not in r
     assert "send" in r["verbs"]
 
 
@@ -108,10 +108,10 @@ async def test_send_works_without_file_bridge_id(seeded_kernel, store_agent):
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel)
-    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
-        0
-    ]["result"]
-    assert r["messages"] == [] and r["client_id"] == "cli"
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
+        "result"
+    ]
+    assert r["messages"] == []
 
 
 async def test_history_returns_messages(seeded_kernel, store_agent):
@@ -126,62 +126,10 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
         )[0]["result"]
     finally:
         ot._providers.pop(oid, None)
-    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
-        0
-    ]["result"]
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
+        "result"
+    ]
     assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
-    assert r["client_id"] == "cli"
-
-
-async def test_history_per_client(seeded_kernel, store_agent):
-    """Two clients = two separate threads; history reads only the asked-for one."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider([["A-reply"], ["B-reply"]])
-    ot._providers[oid] = fp
-    try:
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": oid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi from alice",
-                            "client_id": "alice",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": oid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi from bob",
-                            "client_id": "bob",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    finally:
-        ot._providers.pop(oid, None)
-    a = (
-        await seeded_kernel.send(
-            [{"target": oid, "payload": {"type": "history", "client_id": "alice"}}]
-        )
-    )[0]["result"]
-    b = (
-        await seeded_kernel.send(
-            [{"target": oid, "payload": {"type": "history", "client_id": "bob"}}]
-        )
-    )[0]["result"]
-    assert a["messages"][-1]["content"] == "A-reply"
-    assert b["messages"][-1]["content"] == "B-reply"
-    assert a["client_id"] == "alice" and b["client_id"] == "bob"
 
 
 async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
@@ -326,64 +274,14 @@ async def test_run_persists_history(seeded_kernel, store_agent):
     finally:
         ot._providers.pop(oid, None)
     data = (
-        (await seeded_kernel.send([{"target": oid, "payload": {"type": "history"}}]))[
-            0
-        ]["result"]
+        (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
+            "result"
+        ]
     )["messages"]
-    assert data[-2] == {"role": "user", "content": "hi"}
-    assert data[-1] == {"role": "assistant", "content": "reply"}
+    assert (data[-2]["role"], data[-2]["content"]) == ("user", "hi")
+    assert (data[-1]["role"], data[-1]["content"]) == ("assistant", "reply")
     # System prompt is NEVER persisted — rebuilt fresh each turn from the live menu.
     assert all(m.get("role") != "system" for m in data)
-
-
-async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
-    """Two client_ids → two distinct threads in the chat JSONL sidecar."""
-    oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider([["A-reply"], ["B-reply"]])
-    ot._providers[oid] = fp
-    try:
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": oid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi A",
-                            "client_id": "alice",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": oid,
-                        "payload": {"type": "send", "text": "hi B", "client_id": "bob"},
-                    }
-                ]
-            )
-        )[0]["result"]
-    finally:
-        ot._providers.pop(oid, None)
-    a = (
-        (
-            await seeded_kernel.send(
-                [{"target": oid, "payload": {"type": "history", "client_id": "alice"}}]
-            )
-        )[0]["result"]
-    )["messages"]
-    b = (
-        (
-            await seeded_kernel.send(
-                [{"target": oid, "payload": {"type": "history", "client_id": "bob"}}]
-            )
-        )[0]["result"]
-    )["messages"]
-    assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
-    assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
 
 
 async def test_unknown_verb_errors(seeded_kernel, store_agent):

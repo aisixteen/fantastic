@@ -110,14 +110,14 @@ async def _make_nvidia(kernel, file_bridge_id=None, with_key: str | None = None)
 # ─── reflect / failfast ────────────────────────────────────────
 
 
-async def test_reflect_includes_file_bridge_id_and_no_history(
+async def test_reflect_carries_no_file_bridge_id_and_no_history(
     seeded_kernel, store_agent
 ):
     nid = await _make_nvidia(seeded_kernel, store_agent)
     r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "reflect"}}]))[
         0
     ]["result"]
-    assert r["file_bridge_id"] == store_agent
+    assert "file_bridge_id" not in r
     assert "send" in r["verbs"]
     # The key-storage verbs are GONE — the key is read from the environment.
     assert "set_api_key" not in r["verbs"]
@@ -171,9 +171,9 @@ async def test_send_requires_api_key(seeded_kernel, store_agent):
 
 async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
     nid = await _make_nvidia(seeded_kernel, store_agent)
-    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
-        0
-    ]["result"]
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "recall"}}]))[0][
+        "result"
+    ]
     assert r["messages"] == []
 
 
@@ -197,60 +197,10 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
         )[0]["result"]
     finally:
         nt._providers.pop(nid, None)
-    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
-        0
-    ]["result"]
+    r = (await seeded_kernel.send([{"target": nid, "payload": {"type": "recall"}}]))[0][
+        "result"
+    ]
     assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
-    assert r["client_id"] == "cli"
-
-
-async def test_history_per_client(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    fp = _FakeProvider([["A-reply"], ["B-reply"]])
-    nt._providers[nid] = fp
-    try:
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": nid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi from alice",
-                            "client_id": "alice",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": nid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi from bob",
-                            "client_id": "bob",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-    finally:
-        nt._providers.pop(nid, None)
-    a = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "history", "client_id": "alice"}}]
-        )
-    )[0]["result"]
-    b = (
-        await seeded_kernel.send(
-            [{"target": nid, "payload": {"type": "history", "client_id": "bob"}}]
-        )
-    )[0]["result"]
-    assert a["messages"][-1]["content"] == "A-reply"
-    assert b["messages"][-1]["content"] == "B-reply"
 
 
 # ─── _run multi-step / persistence ────────────────────────────
@@ -287,61 +237,12 @@ async def test_run_persists_history(seeded_kernel, store_agent):
     finally:
         nt._providers.pop(nid, None)
     data = (
-        (await seeded_kernel.send([{"target": nid, "payload": {"type": "history"}}]))[
-            0
-        ]["result"]
+        (await seeded_kernel.send([{"target": nid, "payload": {"type": "recall"}}]))[0][
+            "result"
+        ]
     )["messages"]
-    assert data[-2] == {"role": "user", "content": "hi"}
-    assert data[-1] == {"role": "assistant", "content": "reply"}
-
-
-async def test_run_persists_per_client_threads(seeded_kernel, store_agent):
-    nid = await _make_nvidia(seeded_kernel, store_agent, with_key="nvapi-x")
-    fp = _FakeProvider([["A-reply"], ["B-reply"]])
-    nt._providers[nid] = fp
-    try:
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": nid,
-                        "payload": {
-                            "type": "send",
-                            "text": "hi A",
-                            "client_id": "alice",
-                        },
-                    }
-                ]
-            )
-        )[0]["result"]
-        (
-            await seeded_kernel.send(
-                [
-                    {
-                        "target": nid,
-                        "payload": {"type": "send", "text": "hi B", "client_id": "bob"},
-                    }
-                ]
-            )
-        )[0]["result"]
-    finally:
-        nt._providers.pop(nid, None)
-    a = (
-        (
-            await seeded_kernel.send(
-                [{"target": nid, "payload": {"type": "history", "client_id": "alice"}}]
-            )
-        )[0]["result"]
-    )["messages"]
-    b = (
-        (
-            await seeded_kernel.send(
-                [{"target": nid, "payload": {"type": "history", "client_id": "bob"}}]
-            )
-        )[0]["result"]
-    )["messages"]
-    assert a[-2]["content"] == "hi A" and a[-1]["content"] == "A-reply"
-    assert b[-2]["content"] == "hi B" and b[-1]["content"] == "B-reply"
+    assert (data[-2]["role"], data[-2]["content"]) == ("user", "hi")
+    assert (data[-1]["role"], data[-1]["content"]) == ("assistant", "reply")
 
 
 async def test_cli_caller_routes_to_cli_only(seeded_kernel, store_agent):

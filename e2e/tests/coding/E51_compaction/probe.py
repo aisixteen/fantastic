@@ -20,7 +20,8 @@ sys.path.insert(
     str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
 )
 from backends import backend as _resolve_backend
-from helpers import Limits, connect, drive, human, verdict
+from helpers import Limits, connect, ctx_score, drive, human, verdict
+from helpers.facts_arm import store_rows
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
@@ -77,25 +78,37 @@ async def main():
             root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
             callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
-            # Tiny window forces compaction; own leg persists chat for recall.
-            record={"file_bridge_id": FB, "context_window": 8000, "num_ctx": 8000,
+            # SMALL ENOUGH TO COMPACT, BIG ENOUGH TO RUN. It was 8000, and at 8000 the
+            # system block alone measured 4176 tokens — so what fired was the `too_small`
+            # FAILFAST, not compaction, and the run died with `context_insufficient`
+            # while still scoring PASS (runs/20260904-043318, python). A window has to
+            # leave room for one filler reply (~2400 tok) plus the notice envelope.
+            record={"file_bridge_id": FB, "context_window": 12000, "num_ctx": 12000,
                     "context_strategy": "truncate"},
         )
         await drive(conn, task, client_id="cmp", via="user")
         await conn.close()
         # DURABLE proof, timing-independent: the model's own history (whole,
-        # untrimmed). A recall REPLY that carries the passphrase proves BOTH
-        # that compaction dropped it AND that recall paged it back from the
-        # durable store — the end-of-run context_status.fired is a race (the
-        # final turn may not itself overflow), so it is observed, not asserted.
-        hist = await _call(root, "ai", {"type": "history", "client_id": "cmp"})
+        # untrimmed). Scored by `ctx_score`, which reads calls off the ASSISTANT
+        # turns and attributes a fact to the reply block that carried it.
+        hist = {"messages": await store_rows(root, core, "ai")}
         msgs = hist.get("messages") if isinstance(hist, dict) else None
-        joined = str(msgs if msgs is not None else hist)
         got = Path("answer.md").read_text() if Path("answer.md").exists() else ""
 
-        called_recall = '"recall"' in joined or "'recall'" in joined
-        # a recall reply that returned the secret (the store had it, whole)
-        recall_returned = called_recall and secret in joined
+        # WHAT THE MODEL DID, not what the task said. Both checks here used to be
+        # tautologies satisfied before the model acted: `"recall" in joined` matched the
+        # TASK TEXT (which quotes `{type:'recall', query:'passphrase'}`, and the task is
+        # a user turn in this very store), and `secret in joined` matched the Step-1 read
+        # reply. Measured on runs/20260904-044955 (swift): recall returned
+        # `{"messages":[],"total":0}`, the chain died, answer.md was never written — and
+        # the test scored PASS. `ctx_score` reads the ASSISTANT turns for the call and
+        # attributes the secret to the REPLY BLOCK that carried it.
+        called_recall, recall_returned = ctx_score.recalled(msgs or [], "ai", secret)
+        # AND PROVE THERE WAS A COMPACTION AT ALL. `context_status.last_projection` is
+        # the LAST turn's projection and is overwritten every turn, so a run that
+        # compacted and then ended on a turn that fit reads `fired: False` — which is
+        # why it was never assertable. The pushed `context:compacted` events are.
+        compacted = ctx_score.fired(conn)
         answered = secret in got or (msgs and secret in str(msgs[-2:]))
         # THE CLAIM: compaction dropped the early fact, and recall paged it back
         # from the whole durable store — checks 1+2. Whether the model then
@@ -103,8 +116,9 @@ async def main():
         # capability, so it is OBSERVED, not gated (measured: rust/swift models
         # recall the secret then wander on the final write).
         checks = [
-            ("the model called recall after the notice", called_recall),
-            ("recall paged the dropped passphrase back from the durable store",
+            ("compaction actually fired (pushed context:compacted event)", compacted),
+            ("the model called recall on itself after the notice", called_recall),
+            ("recall's OWN REPLY carried the dropped passphrase back",
              recall_returned),
         ]
         for name, ok in checks:
@@ -112,6 +126,9 @@ async def main():
         print(f"  observed — passphrase reached answer.md: {bool(answered)}")
         cs = await _call(root, "ai", {"type": "context_status"})
         print(f"  observed context_status.last_projection = {cs.get('last_projection')}")
+        print(f"  observed context_status.last_reaction   = {cs.get('last_reaction')}")
+        print(f"  observed compactions = {len(conn.compactions)} "
+              f"dropping {ctx_score.dropped_total(conn)} turns total")
         allok = all(ok for _, ok in checks)
         verdict(allok, "compacted, recalled, answered from the durable transcript"
                 if allok else "a compaction check failed")

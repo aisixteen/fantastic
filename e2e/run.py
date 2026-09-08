@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import re
 import sys
 import time
@@ -373,8 +374,18 @@ async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: di
                 env=env,
                 stdout=fh,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,  # a lane is a process group: killed whole, never orphaned
             )
-            rc = await proc.wait()
+            try:
+                rc = await proc.wait()
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # THE LANE DIES WITH THE RUN. Ctrl-C or a cancelled batch used to leave
+                # the probe and its spawned kernel running (measured 2026-09-07).
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                raise
         took = time.monotonic() - began
         body = log.read_text()
         # Every scenario runner now reports through the shared verdict marker,

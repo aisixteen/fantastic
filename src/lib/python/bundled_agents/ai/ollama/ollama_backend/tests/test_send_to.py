@@ -165,7 +165,9 @@ async def test_model_call_is_dispatched_and_the_result_returns(
         await asyncio.sleep(0.2)
         assert fp.calls == 2, "the done-signalled follow-up ended the chain"
         turn2 = str(fp.requests[1])
-        assert "· kernel_state list_agents]" in turn2, f"untagged reply: {turn2[-400:]}"
+        assert "· kernel_state list_agents · ↑" in turn2, (
+            f"untagged reply: {turn2[-400:]}"
+        )
         assert "agents" in turn2, "the real list_agents result must be in the turn"
     finally:
         ot._providers.pop(oid, None)
@@ -357,7 +359,7 @@ async def test_a_verb_named_tool_reaches_the_agent(seeded_kernel, store_agent):
         )[0]["result"]
         assert await _until_calls(fp, 2), "the reflect never came back"
         turn2 = str(fp.requests[1])
-        assert "· totals reflect]" in turn2, turn2[-300:]
+        assert "· totals reflect · ↑" in turn2, turn2[-300:]
         assert "no payload" not in turn2 and "NoneType" not in turn2
     finally:
         ot._providers.pop(oid, None)
@@ -572,6 +574,6 @@ async def test_thinking_is_parsed_but_not_persisted(seeded_kernel, store_agent):
             )
         )[0]["result"]
         assert await _until_calls(fp, 2), "a call inside thinking must still dispatch"
-        assert "· kernel_state list_agents]" in str(fp.requests[1])
+        assert "· kernel_state list_agents · ↑" in str(fp.requests[1])
     finally:
         ot._providers.pop(oid, None)

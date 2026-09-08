@@ -1,0 +1,69 @@
+"""coding/recall_through_folds — the durable store is whole under the folds.
+
+The very first instruction carries a code. Sixteen reads later, several folds in, the
+model is asked to quote it — recall pages the store where every row and every fold still
+lives — and to find a marker that sits inside a folded read, by grep.
+"""
+from __future__ import annotations
+
+import asyncio
+import secrets
+import sys
+from pathlib import Path
+
+sys.path.insert(
+    0,
+    str(next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())),
+)
+from backends import backend as _resolve_backend
+from helpers import verdict
+from helpers.facts_arm import (
+    FOLD_ARMS,
+    base_checks,
+    both_arms,
+    conclude,
+    fixture,
+    plant_fillers,
+    report,
+)
+from helpers.kernel import open_kernel
+
+BK = _resolve_backend()
+DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+FOLD_ONLY = (FOLD_ARMS[1],)
+
+FB = "recall_fb"
+N = 16
+
+
+async def main():
+    root, core, close = await open_kernel(prefix="coding_recall_", reach=[FB, "notes", "ai_recency", "ai_fold", "cli", "user"])
+    try:
+        code = secrets.token_hex(4); marker = secrets.token_hex(4)
+        task = (f"Session code: {code}. Read `filler_0.txt` … `filler_{N - 1}.txt` through `notes`, ONE PER TURN. "
+                f"Then write `final.md` through `notes` with two lines: `code: <the session code from your very first "
+                f"instruction — use recall if it is no longer in view>` and `marker: <the audit marker value one filler "
+                f"carried — grep for it>`. Then {DONE}.")
+        plant_fillers(N, marker_in=2, marker=marker)
+        await fixture(root, FB, arms=FOLD_ARMS)
+        recency, fold = await both_arms(root, core, BK, FB, task, "final.md", arms=FOLD_ARMS)
+        from helpers import ctx_score
+        recalled = len(ctx_score.calls_made(fold["msgs"], target="ai_fold", verb="recall"))
+        report((recency, fold), lambda a: f"code={code in a['body']}  marker={marker in a['body']}")
+        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+            (f"folds fired ({fold['folded']})", fold["folded"] >= 1),
+            # the claim is REACH, not method: the store under the folds answered, by
+            # recall or by grep — either proves nothing was lost
+            (f"the store was reached through the folds (recall={recalled}, greps={fold['greps']})",
+             recalled >= 1 or fold["greps"] >= 1),
+            ("the session code came back exactly", f"code: {code}" in fold["body"]),
+            ("the marker came back exactly", f"marker: {marker}" in fold["body"]),
+        ]
+        allok, note = conclude(recency, fold, checks, "recalled the first row and grepped through folds", "a recall_through_folds check failed")
+        verdict(allok, note)
+    finally:
+        await close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
