@@ -34,10 +34,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hashlib
 import importlib
 import json
-import secrets
 import sys
 import time
 from dataclasses import dataclass, field
@@ -65,7 +63,7 @@ _current_sender: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # PARENT — which is what makes the table a tree. None outside any dispatch
 # (the WS/REST surface, `fantastic <id> <verb>`, the REPL, a test) — such a
 # task is a root of the table, like a process spawned by init.
-_current_task: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_current_task: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_current_task", default=None
 )
 
@@ -102,9 +100,9 @@ def current_origin() -> str | None:
     return _current_origin.get()
 
 
-def current_task() -> str | None:
-    """The TASK id of the dispatch running right now (`"<agent_id>:<token>"`), or
-    None outside any dispatch.
+def current_task() -> int | None:
+    """The TASK id of the dispatch running right now — the MESSAGE id of the call
+    that started it (an int from the one counter) — or None outside any dispatch.
 
     The PUBLIC, non-underscore read of `_current_task` — the twin of
     `sender_context`/`_current_sender`. A bundle that must know WHICH task it
@@ -139,7 +137,11 @@ def page(items: list, payload: dict, *, key=None) -> tuple[list, str | None]:
     """
     ident = key or (lambda x: x)
     after = payload.get("after")
-    if isinstance(after, str) and after:
+    # An int cursor (a message id) and its decimal string are the same cursor.
+    if isinstance(after, bool):
+        after = None
+    if after is not None and after != "":
+        after = str(after)
         for i, item in enumerate(items):
             if str(ident(item)) == after:
                 items = items[i + 1 :]
@@ -214,7 +216,7 @@ CANCELLED = "cancelled"
 TIMED_OUT = "timed_out"
 
 
-def outcome(pid: str | None, status: str, result: dict | None) -> dict:
+def outcome(pid: int | None, status: str, result: dict | None) -> dict:
     """The one shape a batch item settles to: {pid, status, result}."""
     return {"pid": pid, "status": status, "result": result}
 
@@ -331,7 +333,7 @@ class Kernel:
     # ONE in-flight dispatch — not an agent: an agent may have many tasks
     # running at once, and each is separately addressable.
     #
-    #   task id  = "<agent_id>:<token>"   (a pid; n is a per-agent counter)
+    #   task id  = the MESSAGE id (an int from the one counter, `mint_id`)
     #   entry    = {id, agent, parent, verb, started_at, _task: asyncio.Task}
     #
     # Tasks form a TREE through the send chain: a `send` issued INSIDE a
@@ -340,12 +342,16 @@ class Kernel:
     # tree is what makes `cancel` a process-GROUP kill rather than a single
     # abort. `_task` is the abort handle (a real asyncio.Task) and never
     # leaves the kernel — `ps` serves the five public fields only.
-    tasks: dict[str, dict] = field(default_factory=dict)
+    tasks: dict[int, dict] = field(default_factory=dict)
 
-    # Per-agent task counter (the `n` in "<agent_id>:<token>"). Monotonic for
-    # the process lifetime: an id is never reused, so a stale id cancels
-    # nothing rather than killing an innocent task.
-    task_seq: dict[str, int] = field(default_factory=dict)
+    # THE ONE COUNTER. Every id in the kernel — a conversation row, a call (one
+    # per batch item), a forked task, a reply body's pid, a checkpoint — is the
+    # next value of this int64. Kernel-wide and monotonic for the process
+    # lifetime: `a < b` means "a was created before b", across agents, and an
+    # id is never reused (a stale `cancel` kills nothing). Not persisted by the
+    # kernel: a loader that hydrates messages restores it as `max(id) + 1`
+    # (see `kernel_state` — the kernel never guesses a counter).
+    next_id: int = 1
 
     # THE EXECUTION LEDGER — caller-NAMED executions (a batch item's `id`).
     # `send([{.., id:"job-42"}])` means ENSURE that execution exists (the same
@@ -353,10 +359,17 @@ class Kernel:
     # and record; id in flight ⇒ JOIN it (no second run — C10); id settled ⇒ the
     # recorded outcome returns and no handler runs (C9/C11 idempotency). The id
     # is the SAME identifier `ps`/`cancel`/reply tags carry — one id space.
-    # Entry: {"target": <resolved agent id>, "fut": Future[outcome]}.
-    # Retention: session lifetime, unbounded — a durable ledger (C9 across
-    # restart, C12 dead-letter) is the later increment on this dict.
-    executions: dict[str, dict] = field(default_factory=dict)
+    # THE MESSAGE IS THE ROW; this dict is the PROCESS side of a call: its
+    # future, the payload a retry re-issues, the attempt count. The call's
+    # message row (`kind:"call"`, in `rows`) carries what outlives the process.
+    # Entry: {"target", "fut": Future[outcome], "payload", "timeout",
+    #         "retries", "attempts", "named", "name", "origin"}.
+    executions: dict[int, dict] = field(default_factory=dict)
+
+    # Caller NAMES → message id. A batch item's `id` is a NAME (ensure
+    # semantics: unknown ⇒ dispatch, known ⇒ join); the execution's id is the
+    # counter's. Forgotten when the ring evicts the execution.
+    names: dict[str, int] = field(default_factory=dict)
 
     # LEDGER RETENTION — a RING: when the ledger exceeds the cap, the OLDEST
     # SETTLED rows are evicted, unnamed before named (a named row carries a
@@ -372,24 +385,50 @@ class Kernel:
     # tree's own auto-flush law. Called (sync, cheap) at every settle.
     ledger_flusher: "Callable[[], None] | None" = None
 
-    # THE ROW STORE — an agent's CONVERSATION, kernel-held. One row per turn (a
-    # message, a delivered reply, a fold mark, a recall decision), id-addressed in
-    # the SAME id space as executions (`mint_task_id`), append-only: a row is never
-    # edited or removed by this API. Dehydrated reply bodies live in `bodies` under
+    # THE MESSAGE STORE — every message the kernel ever made, id-addressed by the
+    # one counter, append-only: a row is never edited or removed by this API. An
+    # agent's CONVERSATION (a turn, a delivered reply, a fold mark, a recall
+    # decision) and the kernel's own bookkeeping — a `call` row per batch item, a
+    # `task` row per forked job — live in the same table; readers filter by `kind`. Dehydrated reply bodies live in `bodies` under
     # their pid; an agent's current VIEW (the ordered ids it sees, each at a
     # resolution) in `views`. Rows outlive `delete_agent`: agent id is conversation
     # id, and a re-created id continues where it left off — a clean slate is a new
     # id. Retention: process lifetime, unbounded; persistence (a `rows.json`
     # beside `ledger.json`) is the later increment, riding the same flush seam.
-    rows: dict[str, dict] = field(default_factory=dict)
-    bodies: dict[str, bytes] = field(default_factory=dict)
+    rows: dict[int, dict] = field(default_factory=dict)
+    bodies: dict[int, bytes] = field(default_factory=dict)
     views: dict[str, dict] = field(default_factory=dict)
-    _rows_by_agent: dict[str, list[str]] = field(default_factory=dict)
+    _rows_by_agent: dict[str, list[int]] = field(default_factory=dict)
 
-    def rows_put(self, agent_id: str, row: dict) -> str:
-        """Append one row for `agent_id`; mint its id when absent. Bookkeeping from
-        above — the same standing as `ledger_put` — never gated."""
-        rid = row.get("id") or self.mint_task_id(agent_id)
+    def mint_id(self) -> int:
+        """The next message id. The ONLY allocator in the kernel: a call, a forked
+        task, a conversation row, a reply body all take their id here, so one
+        number names one thing everywhere (`ps`, `cancel`, `messages`, a reply
+        tag). Minting reserves the id; the row may be written later (`rows_put`
+        accepts a pre-minted id) — an AI turn names its own id in the reply tags
+        it sends before its row exists."""
+        n = self.next_id
+        self.next_id = n + 1
+        return n
+
+    def rows_put(self, agent_id: str, row: dict) -> int:
+        """Append one message for `agent_id`; mint its id when absent, accept a
+        PRE-MINTED unused one, refuse anything else — the store is the only
+        allocator. Bookkeeping from above (the same standing as `ledger_put`),
+        never gated. Returns the id."""
+        rid = row.get("id")
+        if rid is None:
+            rid = self.mint_id()
+        elif (
+            isinstance(rid, bool)
+            or not isinstance(rid, int)
+            or rid <= 0
+            or rid >= self.next_id
+            or rid in self.rows
+        ):
+            raise ValueError(
+                f"rows_put: id must be absent or a pre-minted unused id, got {rid!r}"
+            )
         stored = {**row, "id": rid, "agent": agent_id}
         stored.setdefault("ts", time.time())
         self.rows[rid] = stored
@@ -404,14 +443,14 @@ class Kernel:
             if i in self.rows
         ]
 
-    def rows_get(self, ids: list[str]) -> list[dict]:
+    def rows_get(self, ids: list[int]) -> list[dict]:
         """Rows by id, any agent, in the order asked. The `messages` verb gates."""
         return [self.rows[i] for i in ids if i in self.rows]
 
-    def body_put(self, pid: str, data: bytes) -> None:
+    def body_put(self, pid: int, data: bytes) -> None:
         self.bodies[pid] = bytes(data)
 
-    def body_get(self, pid: str, offset: int, length: int):
+    def body_get(self, pid: int, offset: int, length: int):
         """One page of a stored body: (bytes, next_offset, eof, size), or None."""
         b = self.bodies.get(pid)
         if b is None:
@@ -430,9 +469,15 @@ class Kernel:
         if self.ledger_flusher is not None:
             self.ledger_flusher()
 
-    def ledger_put(self, exec_id: str, row: dict) -> None:
-        """Insert one execution row, then enforce the ring."""
+    def resolve_name(self, name: str) -> int | None:
+        """The message id a caller's name stands for, while its execution is held."""
+        return self.names.get(name)
+
+    def ledger_put(self, exec_id: int, row: dict) -> None:
+        """Insert one execution's PROCESS state, then enforce the ring."""
         self.executions[exec_id] = row
+        if row.get("name"):
+            self.names[row["name"]] = exec_id
         cap = self.ledger_cap
         if cap is None or len(self.executions) <= cap:
             return
@@ -448,52 +493,19 @@ class Kernel:
                 if not r["fut"].done():
                     continue
                 del self.executions[eid]
+                if r.get("name") and self.names.get(r["name"]) == eid:
+                    del self.names[r["name"]]
                 if len(self.executions) <= cap:
                     return
 
-    # Per-kernel salt so the opaque task token cannot be predicted or replayed
-    # across kernels (see `mint_task_id`). Random per process, never persisted.
-    _task_salt: bytes = field(default_factory=lambda: secrets.token_bytes(16))
-
-    def mint_task_id(self, agent_id: str) -> str:
-        """Next task id for `agent_id` — `"<agent_id>:<hex8>"`.
-
-        The token is OPAQUE, not a visible counter. Uniqueness still comes from
-        the monotonic `task_seq` (an id is never reused, so a stale `cancel`
-        kills nothing) — but it is rendered through a per-kernel salted hash, so
-        consecutive ids look unrelated.
-
-        Why: a VISIBLE counter invites an ordering inference that is false. The
-        sequence increments on EVERY dispatch to that agent — boots, internal
-        sends, another caller's traffic — so a caller sees gaps it did not cause.
-        Measured 2026-08-20 (the model, live): given `[reply to
-        file_bridge_830365:10]` after issuing what it thought was `:5`, the model
-        spent a whole turn reconciling the gap — "Maybe the kernel renumbered it.
-        Strange." — instead of doing the task. A human debugger reads it the same
-        wrong way. An id's job is to be UNIQUE and matchable, not to imply order;
-        `started_at` on the `ps` row is where ordering actually lives.
-        """
-        n = self.task_seq.get(agent_id, 0)
-        while True:
-            n += 1
-            token = hashlib.blake2b(
-                f"{agent_id}:{n}".encode(), digest_size=4, key=self._task_salt
-            ).hexdigest()
-            task_id = f"{agent_id}:{token}"
-            # A 4-byte token can collide; the counter guarantees a fresh input,
-            # so re-roll rather than hand back an id the table already holds.
-            if task_id not in self.tasks:
-                self.task_seq[agent_id] = n
-                return task_id
-
     def register_task(
         self,
-        task_id: str,
+        task_id: int,
         agent_id: str,
         verb: str | None,
         task: "asyncio.Task",
         *,
-        parent: str | None,
+        parent: int | None,
     ) -> dict:
         """Put one in-flight asyncio.Task in the table. Self-cleaning: the
         entry is forgotten when the task ends (done-callback), cancelled or
@@ -522,7 +534,7 @@ class Kernel:
         task.add_done_callback(lambda _t, tid=task_id: self.forget_task(tid))
         return entry
 
-    def spawn_task(self, agent_id: str, verb: str, task: "asyncio.Task") -> str:
+    def spawn_task(self, agent_id: str, verb: str, task: "asyncio.Task") -> int:
         """Register BACKGROUND work a bundle forked out of a dispatch (an OS
         subprocess pump, a PTY reader) — work that OUTLIVES the dispatch that
         started it. Bundles call this so their real work is visible to `ps`
@@ -530,12 +542,17 @@ class Kernel:
         drops, and the resource is unreachable (that is the orphan bug).
 
         Parent = the dispatch that forked it, so the fork stays inside the
-        caller's process group. Returns the new task id."""
-        task_id = self.mint_task_id(agent_id)
-        self.register_task(task_id, agent_id, verb, task, parent=_current_task.get())
+        caller's process group. A FORK IS A MESSAGE: the task's id is the id of
+        a `task` row written here, so every id in the kernel names a row.
+        Returns that id."""
+        parent = _current_task.get()
+        task_id = self.rows_put(
+            agent_id, {"kind": "task", "verb": verb, "parent": parent}
+        )
+        self.register_task(task_id, agent_id, verb, task, parent=parent)
         return task_id
 
-    def forget_task(self, task_id: str) -> None:
+    def forget_task(self, task_id: int) -> None:
         """Drop one entry. Surviving children are RE-PARENTED to the dead
         task's parent — init-adoption: a forked job outlives the dispatch
         that spawned it, and must stay in its caller's process group (else
@@ -561,17 +578,17 @@ class Kernel:
             for e in self.tasks.values()
         ]
 
-    def task_subtree(self, task_id: str) -> list[str]:
+    def task_subtree(self, task_id: int) -> list[int]:
         """`task_id` + every descendant, POST-ORDER (leaves first) — the kill
         order of a process group: children die before the parent that awaits
         them."""
-        kids: dict[str, list[str]] = {}
+        kids: dict[int, list[int]] = {}
         for e in self.tasks.values():
             if e["parent"] is not None:
                 kids.setdefault(e["parent"], []).append(e["id"])
-        out: list[str] = []
+        out: list[int] = []
 
-        def walk(tid: str) -> None:
+        def walk(tid: int) -> None:
             for k in kids.get(tid, []):
                 walk(k)
             out.append(tid)
@@ -579,7 +596,7 @@ class Kernel:
         walk(task_id)
         return out
 
-    async def cancel_task(self, task_id: str) -> dict:
+    async def cancel_task(self, task_id: int) -> dict:
         """Kill a task AND ITS SUBTREE. Two-phase, mirroring SIGTERM→SIGKILL:
 
         ① `on_cancel` — each agent's bundle hook releases the REAL resources
@@ -614,7 +631,7 @@ class Kernel:
             agent = self.agents.get(entry["agent"])
             if agent is not None:
                 await agent.on_cancel(tid)
-        killed: list[str] = []
+        killed: list[int] = []
         for tid in ids:  # ② SIGKILL — no await in this loop
             entry = self.tasks.pop(tid, None)
             if entry is None:

@@ -358,13 +358,14 @@ the next process start.
   can detect it programmatically. Clear via `update_agent`.
 - **The TASK TABLE (`ps` / `cancel`)** — the kernel models WORK IN
   FLIGHT, Linux-style. The unit is a **task** — ONE in-flight dispatch,
-  not an agent — with id `"<agent_id>:<token>"` (a pid). Every `send` runs its
+  not an agent — with an int id (a pid: the message id of its call). Every `send` runs its
   dispatch as a registered `asyncio.Task`; a `send` issued INSIDE a handler
   is a **CHILD** of that handler's task (the current id rides a
   `_current_task` contextvar, exactly as the sender rides `_current_sender`),
   so the table is a **tree**. Two KERNEL verbs read and act on it — baked into
   the substrate, in no bundle's `verbs` map, answered by the ROOT. A task id
-  already names its own agent (`<agent>:<token>`), which is why neither verb
+  is the message id of the call that started it (an int from the kernel's one
+  counter; the agent is a field on the row), which is why neither verb
   needs a target. An agent granted `cancel` on the kernel can kill ANY task:
   before 2026-08-24 every agent answered these, so a manifest could grant
   "A may watch and kill B's work" as one edge — that granularity is gone,

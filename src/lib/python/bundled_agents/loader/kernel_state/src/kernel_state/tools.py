@@ -654,7 +654,10 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
 _LEDGER_BLOB = "ledger.json"
 
 
-_LEDGER_VERSION = 1
+# v2 (2026-09-08): ids are the kernel's int64 message ids; rows are an ARRAY
+# (JSON object keys are strings and would stringify them); a named row carries
+# `name`.
+_LEDGER_VERSION = 2
 
 
 def _ledger_dump(kernel) -> str:
@@ -665,7 +668,7 @@ def _ledger_dump(kernel) -> str:
     confidently WRONG recorded outcome — worse than no dedup. A caller that
     wants durable bytes stores them through `file_bridge`, the one disk
     surface."""
-    rows = {}
+    rows = []
     for eid, row in kernel.executions.items():
         if not row["fut"].done():
             continue
@@ -675,14 +678,18 @@ def _ledger_dump(kernel) -> str:
                 continue  # round-trips but not EXACTLY (tuples, int keys)
         except (TypeError, ValueError):
             continue  # not JSON-serializable at all (bytes): RAM-only
-        rows[eid] = {
-            "target": row["target"],
-            "retries": row["retries"],
-            "attempts": row["attempts"],
-            "named": row["named"],
-            "origin": row.get("origin"),
-            "outcome": outcome,
-        }
+        rows.append(
+            {
+                "id": eid,
+                "target": row["target"],
+                "retries": row["retries"],
+                "attempts": row["attempts"],
+                "named": row["named"],
+                "name": row.get("name"),
+                "origin": row.get("origin"),
+                "outcome": outcome,
+            }
+        )
     return json.dumps({"v": _LEDGER_VERSION, "rows": rows})
 
 
@@ -726,7 +733,8 @@ async def _rehydrate_ledger(agent) -> None:
         return
     rows = doc["rows"]
     loop = asyncio.get_event_loop()
-    for eid, r in rows.items():
+    for r in rows:
+        eid = int(r["id"])
         fut = loop.create_future()
         fut.set_result(r["outcome"])
         agent.ctx.ledger_put(
@@ -739,9 +747,30 @@ async def _rehydrate_ledger(agent) -> None:
                 "retries": r["retries"],
                 "attempts": r["attempts"],
                 "named": r["named"],
+                "name": r.get("name"),
                 "origin": r.get("origin"),
             },
         )
+    # TODO(hydration): the COUNTER. Every loaded id came from the one counter of a
+    # previous life; the next mint must start above all of them or a new message
+    # collides with a hydrated one. `next_id = max(id) + 1` over EVERYTHING this
+    # loader hydrates — these settled calls AND the message rows/bodies/views once
+    # `_rehydrate_rows` exists (tmp/messageflow.md §2-4) — and it is the LOADER's
+    # responsibility: the kernel never guesses a counter. Not done here yet:
+    # only settled calls are persisted, so a max over them under-counts what a
+    # crashed kernel had minted; the row store must persist first.
+    if rows:
+        ids = [int(r["id"]) for r in rows]
+        agent.ctx.next_id = max(agent.ctx.next_id, max(ids) + 1)
+
+
+async def _rehydrate_rows(agent) -> None:
+    """The message store's hydration — NOT BUILT. Its shape is settled in
+    tmp/messageflow.md: rows stream in id order from the provider (JSONL per
+    agent, or `db_bridge`) into `rows_put` in silent mode before the first boot;
+    bodies and views the same way; then the counter: `next_id = max(id) + 1`.
+    TODO(hydration): implement; until then rows live in RAM only, by design."""
+    return None
 
 
 def _install_ledger_flusher(agent) -> None:

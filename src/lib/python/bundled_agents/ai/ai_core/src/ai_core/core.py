@@ -355,10 +355,22 @@ def _ctx(kernel):
     return getattr(kernel, "ctx", kernel)
 
 
-def _mint_row_id(self_id: str, kernel) -> str:
-    """ONE ID SPACE. Rows are minted by the kernel's own allocator, so a row id and a
-    pid are the same kind of thing and never collide."""
-    return _ctx(kernel).mint_task_id(self_id)
+def _mint_row_id(self_id: str, kernel) -> int:
+    """ONE ID SPACE. The kernel's counter is the only allocator: a row id, a pid, a
+    fold, a body all take the next int, so one number names one thing everywhere."""
+    return _ctx(kernel).mint_id()
+
+
+def _as_id(x) -> int | None:
+    """A message id as an int — an int, or its decimal string (a model quotes what it
+    copied out of a tag). Anything else is not an id."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, int):
+        return x if x > 0 else None
+    if isinstance(x, str) and x.strip().isdigit():
+        return int(x.strip())
+    return None
 
 
 # EVERY ROW HAS AN ADDRESS. `id` is `<agent>:<hex>` — the same allocator the kernel uses
@@ -369,13 +381,13 @@ def _mint_row_id(self_id: str, kernel) -> str:
 _TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑(\S+)[^\]]*\]")
 
 
-def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[str, str | None]:
+def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[int, int | None]:
     """(id, parent) for an incoming turn. A delivered reply turn names the assistant
     turn that made the calls (`↑`) on its first tag; anything else is a ROOT — a fresh
     message from a person or a peer."""
     rid = _mint_row_id(self_id, kernel)
     m = _TAG_LINKS.match(text or "")
-    return rid, (m.group(1) if m else None)
+    return rid, (_as_id(m.group(1)) if m else None)
 
 
 def _reply_tag(pid, target, verb, title, turn_id, n, m_total, batch) -> str:
@@ -403,12 +415,19 @@ def _res_of(row: dict) -> str:
     return "full"
 
 
+_BOOKKEEPING = frozenset({"call", "task"})
+
+
 async def _load_history(self_id: str, kernel) -> list[dict]:
     """The agent's conversation — every row, in order — from the KERNEL ROW STORE.
     AGENT ID IS CONVERSATION ID: a second conversation is a second agent. Nothing is
     read from disk here; persistence of the store is the kernel's concern (later, on
     the ledger's own flush seam), never this bundle's."""
-    return list(_ctx(kernel).rows_for(self_id))
+    # The store holds the kernel's own bookkeeping too — a `call` row per send, a
+    # `task` row per fork. Those are the ledger's; the CONVERSATION is the rest.
+    return [
+        r for r in _ctx(kernel).rows_for(self_id) if r.get("kind") not in _BOOKKEEPING
+    ]
 
 
 async def _save_history(self_id: str, kernel, new_turns: list[dict]) -> None:
@@ -573,7 +592,7 @@ _ASYNC_HOWTO = """## Replies are rows, not turns
 A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
 tag, your title, size — with the body stored:
 [reply to <pid> · notes read · "survey filler_2"]
-(settled, 6812 bytes — NOT inlined. To find a line in it: send yourself {type:'grep', query:'<substring>', ids:['<pid>']}. To read it: {type:'pull', pid:'<pid>', offset:0})
+(settled, 6812 bytes — NOT inlined. To find a line in it: send yourself {type:'grep', query:'<substring>', ids:[<pid>]}. To read it: {type:'pull', pid:<pid>, offset:0})
 GREP BEFORE YOU PAGE: {type:'grep', query:'<substring>'} on yourself finds the line —
 in a stored body, a folded stretch, an old turn — with its id and line; pull only what
 matched. A `pull` page always fits inline; `next_offset` continues it, `eof` ends it.
@@ -650,7 +669,7 @@ your prose is not harvested as an answer behind your back. Answer from what you
 know NOW: this one turn is the reply, so if you need to look something up
 first, say that instead of leaving them waiting.
 
-HOW REPLIES ARRIVE. Every send is dispatched under a PID (`<agent>:<token>`) and
+HOW REPLIES ARRIVE. Every send is dispatched under a PID (an integer message id) and
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
 literally:
 
@@ -670,7 +689,8 @@ literally:
   Re-sending the SAME id NEVER runs the work twice: you get the first run's
   recorded outcome back, byte for byte (even if it failed). Use it for any call
   you must not double-fire (a write, a payment, a create) and to safely re-fetch
-  a reply; a genuinely NEW attempt needs a NEW id. Ids may not contain ':'.
+  a reply; a genuinely NEW attempt needs a NEW id. An id you choose is a NAME (a word);
+  the kernel's own ids are integers and cannot be created, only joined.
   Add `retries: N` and the KERNEL re-runs a failing or timing-out call up to N
   more times before answering — you send once and receive the final outcome
   (`attempts` says how many runs it took). Work that stays failed is parked:
@@ -1349,7 +1369,9 @@ async def _route_reply(
         # identifies the individual call and is the `ps`/`cancel` handle.
         # The batch token IS the assistant row's hex, so `in batch <b>` and `↑<turn>`
         # name the same thing and the model can see the row every reply points at.
-        batch = turn_id.split(":", 1)[1] if turn_id else secrets.token_hex(2)
+        # The batch token IS the assistant row's id, so `in batch <b>` and `↑<turn>`
+        # name the same thing.
+        batch = turn_id if turn_id else secrets.token_hex(2)
         groups: dict[str, list[str]] = {}
         order: list[str] = []
         for dest, target, verb, idx, body, *_ in units:
@@ -1380,7 +1402,7 @@ async def _route_reply(
                 # non-fatal: it becomes a row to page, never a turn to fit.
                 if (
                     async_on
-                    and pid != "-"
+                    and pid is not None
                     and estimate_one({"role": "user", "content": body}) > cap
                 ):
                     size = len(body)
@@ -1390,8 +1412,8 @@ async def _route_reply(
                         # recall_after_fold: 24 pulls, 0 greps, marker not found).
                         body = (
                             f"(settled, {size} bytes — NOT inlined. To find a line in it: "
-                            f"send yourself {{type:'grep', query:'<substring>', ids:['{pid}']}}. "
-                            f"To read it: {{type:'pull', pid:'{pid}', offset:0}})"
+                            f"send yourself {{type:'grep', query:'<substring>', ids:[{pid}]}}. "
+                            f"To read it: {{type:'pull', pid:{pid}, offset:0}})"
                         )
             else:
                 pid = "-"
@@ -2313,8 +2335,8 @@ def _make_history(cfg: Backend):
             limit = int(payload.get("limit") or 0)
         except (TypeError, ValueError):
             limit = 0
-        after = payload.get("after")
-        if isinstance(after, str) and after:
+        after = _as_id(payload.get("after"))
+        if after is not None:
             ids = [d["id"] for d in digest]
             digest = digest[ids.index(after) + 1 :] if after in ids else []
         cap = _inline_cap(kernel.get(id) or {})
@@ -2337,7 +2359,7 @@ CANCEL_DOC = (
     "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the "
     "substrate's universal system verbs: send 'kernel' {type:'ps'} for the live task "
     "table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' "
-    "{type:'cancel', task_id:'<agent>:<n>'}. The turn closes with status(phase='done', "
+    "{type:'cancel', task_id:<n>}. The turn closes with status(phase='done', "
     "reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the "
     "blocked caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole "
     "SUBTREE, so any work the turn spawned dies with it."
@@ -2544,10 +2566,10 @@ async def _derive_reaction(id, kernel) -> dict | None:
 # None built. The per-page cap is the only guard today.
 async def _pull(id, payload, kernel):
     """args: pid:str (req — the pid on a settled reply's tag), offset:int? (0), length:int? (chars; default and max = your inline cap). Reads ONE PAGE of a reply body that was too large to inline. Returns {pid, offset, text, next_offset, eof} — page with `offset: next_offset` until `eof`."""
-    pid = payload.get("pid")
-    if not isinstance(pid, str) or not pid.strip():
+    pid = _as_id(payload.get("pid"))
+    if pid is None:
         return {
-            "error": "pull: `pid` is required — it is on the reply's tag line",
+            "error": "pull: `pid` (an int) is required — it is on the reply's tag line",
             "reason": "bad_arg",
             "arg": "pid",
         }
@@ -2565,11 +2587,11 @@ async def _pull(id, payload, kernel):
             "reason": "bad_arg",
             "arg": "length",
         }
-    got = await _load_reply(id, kernel, pid.strip(), offset, max(1, length))
+    got = await _load_reply(id, kernel, pid, offset, max(1, length))
     if got is None:
         # A fold id: its body is on the row itself.
         for r in await _load_history(id, kernel):
-            if r.get("kind") == "fold" and r.get("id") == pid.strip():
+            if r.get("kind") == "fold" and r.get("id") == pid:
                 text = str(r.get("body") or "")
                 return {
                     "pid": pid,
@@ -2632,12 +2654,11 @@ async def _grep(id, payload, kernel):
         limit = max(1, min(int(payload.get("limit") or 100), 100))
     except (TypeError, ValueError):
         limit = 100
-    ids = payload.get("ids")
-    if ids is not None and (
-        not isinstance(ids, list) or any(not isinstance(x, str) for x in ids)
-    ):
+    raw_ids = payload.get("ids")
+    ids = [_as_id(x) for x in raw_ids] if isinstance(raw_ids, list) else None
+    if raw_ids is not None and (ids is None or any(x is None for x in ids)):
         return {
-            "error": "grep: `ids` must be a list of row ids / pids",
+            "error": "grep: `ids` must be a list of message ids / pids (ints)",
             "reason": "bad_arg",
             "arg": "ids",
         }
@@ -2675,8 +2696,8 @@ async def _grep(id, payload, kernel):
             )
             for block in _reply_blocks(text):
                 pm = _PID_TAG.match(block)
-                if pm:
-                    pids.append(pm.group(1))
+                if pm and (p := _as_id(pm.group(1))) is not None:
+                    pids.append(p)
     # STORED BODIES FIRST: what a grep is for is the line inside a body never pulled —
     # rows that merely mention the query (the task, the model's own plan) come after,
     # so the content hit is never the one the inline cap cuts. A pid with a stored body
@@ -2687,8 +2708,8 @@ async def _grep(id, payload, kernel):
         if got is None:
             continue
         scan(pid, got[0])
-    for i, m in enumerate(rows):
-        rid = m.get("id") or f"row:{i}"
+    for m in rows:
+        rid = m["id"]
         if scope is None or rid in scope:
             content = m.get("content")
             text = (
@@ -2744,7 +2765,7 @@ DIGEST resolution; your budget for the body is {budget} tokens and the digests u
 {done}
 Choose which rows you want IN FULL next turn (expansions cost their size) and say in one
 sentence why. Reply JSON only:
-{{"expand": ["<id>", ...], "why": "<one sentence>"}}
+{{"expand": [<id>, ...], "why": "<one sentence>"}}
 
 {lines}"""
 
@@ -2852,8 +2873,8 @@ async def _context_recall(id, payload, kernel, cfg: Backend | None = None):
             head_ids = {view[i]["id"] for i in head}
             want = [
                 x
-                for x in (ans.get("expand") or [])
-                if isinstance(x, str) and x in head_ids
+                for x in (_as_id(v) for v in (ans.get("expand") or []))
+                if x is not None and x in head_ids
             ]
             why = str(ans.get("why") or "")[:300] or "chosen"
             degraded = False

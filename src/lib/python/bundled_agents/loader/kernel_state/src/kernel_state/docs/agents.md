@@ -29,7 +29,7 @@ verbs (also in no `verbs` map — send them anywhere):
     send(kernel, {type:'ps'})
       -> {tasks:[{id, agent, parent, verb, started_at}, ...]}
 
-    send(kernel, {type:'cancel', task_id:'<agent>:<n>'})
+    send(kernel, {type:'cancel', task_id:<n>})   # the pid an outcome / ps row carries — an int
       -> {cancelled:true, killed:['<id>', ...]}     # the task AND its subtree
       -> {cancelled:false, killed:[]}               # unknown / already finished
 

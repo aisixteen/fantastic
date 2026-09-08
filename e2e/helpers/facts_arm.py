@@ -223,12 +223,16 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
 def _descents(msgs, aid) -> list[str]:
     """Fold ids the model actually went INTO — a grep scoped to one, or a pull of one."""
     folds = {m.get("id") for m in msgs if m.get("kind") == "fold"}
+
+    def _i(x):  # the model may quote an id it copied out of a tag
+        return int(x) if isinstance(x, str) and x.isdigit() else x
+
     out = []
     for c in ctx_score.calls_made(msgs, target=aid, verb="grep"):
-        out += [i for i in (c["payload"].get("ids") or []) if i in folds]
+        out += [_i(i) for i in (c["payload"].get("ids") or []) if _i(i) in folds]
     for c in ctx_score.calls_made(msgs, target=aid, verb="pull"):
-        if c["payload"].get("pid") in folds:
-            out.append(c["payload"]["pid"])
+        if _i(c["payload"].get("pid")) in folds:
+            out.append(_i(c["payload"]["pid"]))
     return out
 
 
@@ -307,12 +311,16 @@ async def inject_row(core, root, aid: str, row: dict) -> None:
 
 async def copy_rows(root, src: str, dst: str) -> int:
     """FORK from above: the source's rows re-minted under the destination id, parents
-    re-linked through the same map so the chains survive. A row id is minted per agent
-    (`<agent>:<hex8>`) and the table is one dict — copying an id verbatim would clobber
-    the original's row, so every copy gets a new id. In-process only."""
+    re-linked through the same map so the chains survive. Ids come from the kernel's one
+    counter and the table is one dict — copying an id verbatim would clobber the
+    original's row, so every copy is re-minted. In-process only."""
     ctx = root.ctx
-    remap: dict[str, str] = {}
+    remap: dict[int, int] = {}
+    # The CONVERSATION forks; the kernel's own bookkeeping (a `call` row per send, a
+    # `task` row per fork) is the original's ledger and stays with it.
     for r in ctx.rows_for(src):
+        if r.get("kind") in ("call", "task"):
+            continue
         row = {k: v for k, v in r.items() if k not in ("id", "agent", "ts")}
         if row.get("parent") in remap:
             row["parent"] = remap[row["parent"]]

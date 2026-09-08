@@ -40,11 +40,11 @@ from ai_core.folds import make_fold
 FB = "synth_fb"
 
 
-def _reply(pid, aid, parent, title, size):
-    return {"role": "user", "id": f"{aid}:{secrets.token_hex(4)}", "parent": parent,
+def _reply(mint, pid, parent, title, size):
+    return {"role": "user", "id": mint(), "parent": parent,
             "content": f'[reply to {pid} · notes read · "{title}" · ↑{parent}]\n'
-                       f"(settled, {size} bytes — NOT inlined. Pull a page: send yourself "
-                       f"{{type:'pull', pid:'{pid}', offset:0}})"}
+                       f"(settled, {size} bytes — NOT inlined. To find a line in it: send yourself "
+                       f"{{type:'grep', query:'<substring>', ids:[{pid}]}}. To read it: {{type:'pull', pid:{pid}, offset:0}})"}
 
 
 async def main():
@@ -54,23 +54,24 @@ async def main():
         plant_fillers(12, marker_in=5, marker=marker, pad_to=3000)
         await fixture(root, FB, arms=FOLD_ARMS)
         # ── the planted history ──────────────────────────────────────────────
-        goal = {"role": "user", "id": f"user:{secrets.token_hex(4)}", "parent": None,
+        mint = root.ctx.mint_id  # ids come from the kernel's one counter, planted or not
+        goal = {"role": "user", "id": mint(), "parent": None,
                 "content": "Survey filler_0..11 one per turn, then write report.md listing every file."}
         rows, bodies, ids = [goal], {}, []
         prev = goal["id"]
         for i in range(12):
-            call_id = f"{AID}:{secrets.token_hex(4)}"
-            pid = f"notes:{secrets.token_hex(4)}"
+            call_id = mint()
+            pid = mint()
             rows.append({"role": "assistant", "id": call_id, "parent": prev,
                          "content": f'Reading filler_{i}. <tool_call>{{"name":"send","arguments":{{"target_id":"notes","payload":{{"type":"read","path":"filler_{i}.txt"}},"title":"survey filler_{i}"}}}}</tool_call>'})
-            rep = _reply(pid, AID, call_id, f"survey filler_{i}", 3000)
+            rep = _reply(mint, pid, call_id, f"survey filler_{i}", 3000)
             rows.append(rep); ids.append((call_id, rep["id"]))
             bodies[pid] = Path(f"filler_{i}.txt").read_text()
             prev = rep["id"]
         f1 = make_fold(AID, [x for pair in ids[:6] for x in pair], "filler_0-5 surveyed: padding; HOUSE RULE learned",
-                       f"Read filler_0..5. All padding. HOUSE RULE (from the operator, binds the whole run): report.md must OPEN with the exact line `## {rule_tok}`.", False, parent=goal["id"])
+                       f"Read filler_0..5. All padding. HOUSE RULE (from the operator, binds the whole run): report.md must OPEN with the exact line `## {rule_tok}`.", False, id=mint(), parent=goal["id"])
         f2 = make_fold(AID, [x for pair in ids[6:] for x in pair], "filler_6-11 surveyed: marker in filler_5? no — fact recorded",
-                       f"Read filler_6..11. Padding. FACT recorded for the report: the build id is `{fact_tok}`; write it as `build: {fact_tok}`.", False, parent=goal["id"])
+                       f"Read filler_6..11. Padding. FACT recorded for the report: the build id is `{fact_tok}`; write it as `build: {fact_tok}`.", False, id=mint(), parent=goal["id"])
         rows += [f1, f2]
         # PLANT BEFORE THE AGENT EXISTS. `_save_history` resolves the leg from the record,
         # so the record is created first with no provider (no turn runs), planted, then

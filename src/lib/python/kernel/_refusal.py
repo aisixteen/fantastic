@@ -136,12 +136,10 @@ def guard_agent_id(verb: str, agent_id: object) -> dict | None:
         return bad(verb, "id", f"a name that is not a path traversal; got {agent_id!r}")
     if agent_id.startswith("."):
         return bad(verb, "id", f"a name that is not hidden; got {agent_id!r}")
-    if ":" in agent_id:
-        # The minted-pid namespace. An id carrying a colon would collide with
-        # `<agent>:<hex>` in the one id space the ledger and task table share.
+    if agent_id.isdigit():
+        # Message ids are plain integers; in prompt text an all-digit agent id
+        # would read as one. Names are words.
         return bad(
-            verb,
-            "id",
-            f"a name without ':' (the minted-pid namespace); got {agent_id!r}",
+            verb, "id", f"a name, not a number (message ids are ints); got {agent_id!r}"
         )
     return None

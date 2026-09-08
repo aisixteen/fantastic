@@ -35,15 +35,16 @@ async def main():
     root, core, close = await open_kernel(prefix="coding_msgs_", reach=["ai", "peer", "cli", "user"])
     try:
         secret = secrets.token_hex(4)
-        pid = f"notes:{secrets.token_hex(4)}"
-        goal = {"role": "user", "id": f"user:{secrets.token_hex(4)}", "parent": None,
+        mint = root.ctx.mint_id  # ids come from the kernel's one counter, planted or not
+        pid = mint()
+        goal = {"role": "user", "id": mint(), "parent": None,
                 "content": f"The vault code is `{secret}`. Keep it."}
-        turn = {"role": "assistant", "id": f"ai:{secrets.token_hex(4)}", "parent": goal["id"],
+        turn = {"role": "assistant", "id": mint(), "parent": goal["id"],
                 "content": "Noted. " + "x" * 400}
-        reply = {"role": "user", "id": f"ai:{secrets.token_hex(4)}", "parent": turn["id"],
+        reply = {"role": "user", "id": mint(), "parent": turn["id"],
                  "content": f'[reply to {pid} · notes read · "the spec" · ↑{turn["id"]}]\n'
-                            f"(settled, 5000 bytes — NOT inlined. Pull a page: send yourself "
-                            f"{{type:'pull', pid:'{pid}', offset:0}})"}
+                            f"(settled, 5000 bytes — NOT inlined. To find a line in it: send yourself "
+                            f"{{type:'grep', query:'<substring>', ids:[{pid}]}}. To read it: {{type:'pull', pid:{pid}, offset:0}})"}
         await plant_store(core, root, "ai", [goal, turn, reply], {pid: "BODY " * 1000})
         ids = [r["id"] for r in await store_rows(root, core, "ai")]
         assert len(ids) == 3, ids

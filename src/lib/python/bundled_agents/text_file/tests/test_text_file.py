@@ -418,7 +418,9 @@ async def test_checkpointed_write_restores_byte_identical(
         {"type": "write", "path": "c.txt", "bytes": b"mutated\n", "checkpoint": True},
     )
     ck = w["ckpt_id"]
-    assert ":" in ck  # the dispatch's kernel task pid
+    assert (
+        isinstance(ck, int) and ck > 0
+    )  # the dispatch's kernel task pid, a message id
     assert (tmp_path / "sd" / "c.txt").read_text() == "mutated\n"
     r = await _call(
         seeded_kernel, ed, {"type": "restore", "path": "c.txt", "ckpt_id": ck}

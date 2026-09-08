@@ -15,7 +15,6 @@ the links when a projection needs to know what is closed.
 from __future__ import annotations
 
 import json
-import secrets
 
 from ai_core.tool_parse import extract_tool_calls
 
@@ -77,15 +76,18 @@ def covered(rows: list[dict]) -> set[str]:
 
 def make_fold(
     self_id: str,
-    refs: list[str],
+    refs: list[int],
     title: str,
     body: str,
     degraded: bool,
     *,
+    id: int,
     lvl: int = 1,
-    parent: str | None = None,
+    parent: int | None = None,
 ) -> dict:
-    fid = f"{self_id}:{secrets.token_hex(4)}"
+    """A fold row. Its id is MINTED BY THE STORE (`ctx.mint_id()`) and passed in — a
+    fold is a message like any other, never self-named."""
+    fid = id
     title = clean_title(title)
     head = f'{FOLD_TAG}{fid} · {len(refs)} refs · L{lvl}] "{title}"'
     note = "  (summary unavailable — refs and titles only)" if degraded else ""

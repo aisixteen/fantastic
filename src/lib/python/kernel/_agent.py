@@ -191,6 +191,18 @@ _SYSTEM_VERB_DOCS = {
 }
 
 
+def _as_id(x) -> int | None:
+    """A message id as an int: an int, or its decimal string (a model may quote
+    what it copied out of a tag). Anything else is not an id."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, int):
+        return x if x > 0 else None
+    if isinstance(x, str) and x.isdigit():
+        return int(x)
+    return None
+
+
 @dataclass
 class _Dispatched:
     """One launched batch item awaiting settle. `pid is None` marks the
@@ -198,7 +210,7 @@ class _Dispatched:
     task table."""
 
     index: int
-    pid: str | None
+    pid: int | None
     task: "asyncio.Task | None"
     timeout: float | None
     target: "Agent"
@@ -211,6 +223,8 @@ class _Dispatched:
     # The kernel-reflect fast path applies reflect flags INSIDE its task; settle
     # must not apply them twice when such an execution is caller-named.
     flags_done: bool = False
+    # The caller's NAME for this execution (its item `id`), echoed on the outcome.
+    name: str | None = None
 
 
 class Agent:
@@ -504,10 +518,11 @@ class Agent:
         `id` (optional) NAMES the execution — ensure-semantics, like a supplied
         `create_agent` id: unknown ⇒ dispatch and ledger it; in flight ⇒ JOIN
         (no second run); settled ⇒ the recorded outcome returns and no handler
-        runs. Idempotency and once-only execution in one field, and it is the
-        SAME id `ps`/`cancel`/reply tags carry. Caller ids may not contain ":"
-        (the minted-pid namespace); an id is BOUND to its first execution's
-        target. Retention: session lifetime.
+        runs. Idempotency and once-only execution in one field. The NAME is a
+        string of the caller's; the execution's id is the kernel's counter and
+        the outcome carries both (`pid`, `name`). An int `id` on an item JOINS
+        that execution by id and never creates one. A name is BOUND to its first
+        execution's target. Retention: session lifetime.
 
         `timeout` is per-item seconds. The kernel NEVER defaults it:
         absent/None = wait forever. On expiry the item is killed through the
@@ -532,6 +547,8 @@ class Agent:
         if dispatched:
             settled = await asyncio.gather(*(self._settle(d) for d in dispatched))
             for d, out in zip(dispatched, settled):
+                if d.name is not None and isinstance(out, dict):
+                    out = {**out, "name": d.name}
                 results[d.index] = out
         return results
 
@@ -590,36 +607,47 @@ class Agent:
         # or spawned: a bad `id`/`retries` used to be caught only after an unnamed
         # dispatch had already started (orphaning a running task).
         exec_id = item.get("id")
+        join_id: int | None = None  # an int item id: JOIN by message id
+        name: str | None = None  # a string item id: the caller's NAME
         if exec_id is not None:
-            # A caller-NAMED execution — "ensure it exists", the same semantics
-            # a supplied `create_agent` id has. One id space: minted pids carry
-            # `<agent>:<hex>`, so a caller id may not contain ":" and the two
-            # can never collide.
-            if not isinstance(exec_id, str) or not exec_id:
+            # A caller-NAMED execution — "ensure it exists", the same semantics a
+            # supplied `create_agent` id has. The name is the caller's; the
+            # execution's id is the kernel's counter. An int names an execution
+            # by its id and can only join it — the kernel is the only allocator.
+            if isinstance(exec_id, bool) or not isinstance(exec_id, (str, int)):
                 return outcome(
                     None,
                     FAILED,
                     refusal(
                         BAD_ARG,
-                        f"send: id must be a non-empty string, got {exec_id!r}",
+                        f"send: id must be a name (non-empty string) or a message "
+                        f"id (int), got {exec_id!r}",
                         arg="id",
                     ),
                 )
-            if ":" in exec_id and exec_id not in self.ctx.executions:
-                # The minted namespace: a colon id NAMES an existing execution
-                # (re-fetch / join by pid) and never CREATES one — the kernel is
-                # the only allocator there.
-                return outcome(
-                    None,
-                    FAILED,
-                    refusal(
-                        BAD_ARG,
-                        f"send: id {exec_id!r} is in the kernel-minted pid "
-                        "namespace (':') and names no known execution — "
-                        "minted ids can be referenced, never created",
-                        arg="id",
-                    ),
-                )
+            if isinstance(exec_id, int):
+                if exec_id not in self.ctx.executions:
+                    return outcome(
+                        None,
+                        FAILED,
+                        refusal(
+                            BAD_ARG,
+                            f"send: id {exec_id} names no known execution — "
+                            "ids are minted by the kernel and can be joined, "
+                            "never created",
+                            arg="id",
+                        ),
+                    )
+                join_id = exec_id
+            else:
+                if not exec_id:
+                    return outcome(
+                        None,
+                        FAILED,
+                        refusal(BAD_ARG, "send: id must be a non-empty name", arg="id"),
+                    )
+                name = exec_id
+                join_id = self.ctx.resolve_name(name)
         bad_retries = self._check_retries(item)
         if bad_retries is not None:
             return bad_retries
@@ -655,7 +683,7 @@ class Agent:
         # like any other reflect. Async (reflect flags nest dispatches), so it
         # rides the settle phase as a pid-less task.
         if exec_id is not None:
-            entry = self.ctx.executions.get(exec_id)
+            entry = self.ctx.executions.get(join_id) if join_id is not None else None
             if entry is not None:
                 # The id is BOUND to its first execution's target — returning an
                 # unrelated agent's outcome would be silent corruption.
@@ -702,18 +730,22 @@ class Agent:
                 dispatched.append(
                     _Dispatched(
                         index,
-                        exec_id,
+                        join_id,
                         None,
                         timeout,
                         target,
                         payload,
                         exec_fut=entry["fut"],
                         joined=True,
+                        name=entry.get("name"),
                     )
                 )
                 return None
+            # NAMED and new: the message id is minted like any other; the name
+            # is a field on it.
+            exec_id = self.ctx.mint_id()
             fut, bad = self._ledger_open(
-                exec_id, target, payload, timeout, item, named=True
+                exec_id, target, payload, timeout, item, name=name
             )
             if bad is not None:
                 return bad
@@ -736,12 +768,15 @@ class Agent:
                         payload,
                         exec_fut=fut,
                         flags_done=True,
+                        name=name,
                     )
                 )
                 return None
             pid, task = self._spawn_dispatch(target, payload, task_id=exec_id)
             dispatched.append(
-                _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
+                _Dispatched(
+                    index, pid, task, timeout, target, payload, exec_fut=fut, name=name
+                )
             )
             return None
         if target_id == "kernel" and verb == "reflect":
@@ -755,8 +790,8 @@ class Agent:
         # ring (Kernel.ledger_cap) bounds what history costs.
         # The row opens BEFORE the spawn: `retries` was validated up front, so
         # nothing here can refuse after work has started.
-        pid = self.ctx.mint_task_id(target.id)
-        fut, bad = self._ledger_open(pid, target, payload, timeout, item, named=False)
+        pid = self.ctx.mint_id()
+        fut, bad = self._ledger_open(pid, target, payload, timeout, item, name=None)
         if bad is not None:
             return bad
         pid, task = self._spawn_dispatch(target, payload, task_id=pid)
@@ -782,15 +817,31 @@ class Agent:
             )
         return None
 
-    def _ledger_open(self, exec_id, target, payload, timeout, item, *, named):
-        """Open one ledger row (`retries` already validated). Returns (fut, refusal?)."""
+    def _ledger_open(self, exec_id: int, target, payload, timeout, item, *, name):
+        """Open one execution under a pre-minted id: the CALL ROW in the message
+        store (what outlives the process) and the process side (`executions`).
+        `retries` already validated. Returns (fut, refusal?)."""
         retries = item.get("retries", 0)
         if bad := self._check_retries(item):
             return None, bad
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        # The row is the WHOLE engine: dedup and join key on it, retry re-issues
-        # against it, dead-letter is reading it. `attempts` counts real runs;
-        # `origin` scopes who may see the row through the `ledger` verb.
+        origin = _current_sender.get()
+        # EVERY SEND IS A MESSAGE. The row names the call — who was asked what,
+        # by which message — and takes the outcome's status at settle; the reply
+        # body stays with the reply. `parent` is the message that made the call.
+        row = {
+            "id": exec_id,
+            "kind": "call",
+            "verb": payload.get("type"),
+            "parent": _current_task.get(),
+            "origin": origin,
+        }
+        if name is not None:
+            row["name"] = name
+        self.ctx.rows_put(target.id, row)
+        # The side entry is the WHOLE engine: dedup and join key on it, retry
+        # re-issues against it, dead-letter is reading it. `attempts` counts real
+        # runs; `origin` scopes who may see the row through the `ledger` verb.
         self.ctx.ledger_put(
             exec_id,
             {
@@ -800,20 +851,21 @@ class Agent:
                 "timeout": timeout,
                 "retries": retries,
                 "attempts": 1,
-                "named": named,
-                "origin": _current_sender.get(),
+                "named": name is not None,
+                "name": name,
+                "origin": origin,
             },
         )
         return fut, None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict, task_id: str | None = None
-    ) -> tuple[str, "asyncio.Task"]:
-        """Mint the pid and start ONE dispatch as a registered asyncio.Task —
-        the unit of the task table. Synchronous: the pid exists before any
-        await, which is what lets a batch report every pid up front."""
+        self, target: "Agent", payload: dict, *, task_id: int
+    ) -> tuple[int, "asyncio.Task"]:
+        """Start ONE dispatch as a registered asyncio.Task — the unit of the task
+        table — under the message id its call row was opened with. Tasks never
+        mint: the id is the call's. Synchronous: the pid exists before any await,
+        which is what lets a batch report every pid up front."""
         ctx = self.ctx
-        task_id = task_id or ctx.mint_task_id(target.id)
         # Captured HERE, before the dispatch rewrites `_current_sender` to the
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
@@ -937,9 +989,9 @@ class Agent:
                 # (and every future re-send of this id) hangs on a dead future.
                 # Settled DIRECTLY — cancel is absorbing, no retry consideration.
                 if d.exec_fut is not None and not d.exec_fut.done():
-                    d.exec_fut.set_result(
-                        outcome(d.pid, CANCELLED, {"cancelled": True})
-                    )
+                    out = outcome(d.pid, CANCELLED, {"cancelled": True})
+                    d.exec_fut.set_result(out)
+                    self._stamp_call(d.pid, out)
                     self.ctx.ledger_settled()
                 raise
             if d.task.cancelled():
@@ -982,8 +1034,23 @@ class Agent:
                 out = dict(out)
                 out["attempts"] = row["attempts"]
             d.exec_fut.set_result(out)
+            self._stamp_call(d.pid, out)
             self.ctx.ledger_settled()
         return out
+
+    def _stamp_call(self, pid: int | None, out: dict) -> None:
+        """The call row takes the outcome's STATUS (and a refusal's error/reason),
+        never the result body — bodies are the reply's business."""
+        row = self.ctx.rows.get(pid) if pid is not None else None
+        if row is None:
+            return
+        res = out.get("result")
+        stamp = {"status": out.get("status")}
+        if isinstance(res, dict) and res.get("error"):
+            stamp["error"] = str(res.get("error"))[:200]
+            if res.get("reason"):
+                stamp["reason"] = res.get("reason")
+        row["outcome"] = stamp
 
     def _loader_id(self) -> str | None:
         """The id `$loader` resolves to in a grant — the persistence root."""
@@ -1274,7 +1341,22 @@ class Agent:
             the dispatch down with us. Swallowing here would resurrect a task
             the kernel just killed.
         """
-        _pid, task = self._spawn_dispatch(target, payload)
+        # An internal dispatch is a call like any other: it takes a message id
+        # and a call row (`internal: True` tells a reader it was the kernel's own
+        # roster read, not a caller's send).
+        pid = self.ctx.mint_id()
+        self.ctx.rows_put(
+            target.id,
+            {
+                "id": pid,
+                "kind": "call",
+                "verb": payload.get("type"),
+                "parent": _current_task.get(),
+                "origin": _current_sender.get(),
+                "internal": True,
+            },
+        )
+        _pid, task = self._spawn_dispatch(target, payload, task_id=pid)
         try:
             return await task
         except asyncio.CancelledError:
@@ -1967,21 +2049,18 @@ class Agent:
         return {"tasks": tasks, "next": nxt}
 
     def _verb_messages(self, payload: dict) -> dict:
-        """args: ids:list[str] (req), limit:int?, after:str?. Rows by id at DIGEST
+        """args: ids:list[int] (req), limit:int?, after:int?. Rows by id at DIGEST
         resolution, gated INSIDE: the caller's own rows always; another agent's only
         when that owner's `callable_by` names the caller for `messages` (the same
         ingress check `_gate` runs, re-run here against the OWNER because a root verb
         skips ingress); the operator sees all. Refused ids are LISTED, never silently
         dropped. Bodies stay behind the owner's `pull`."""
-        ids = payload.get("ids")
-        if (
-            not isinstance(ids, list)
-            or not ids
-            or any(not isinstance(x, str) for x in ids)
-        ):
+        raw = payload.get("ids")
+        ids = [_as_id(x) for x in raw] if isinstance(raw, list) else []
+        if not ids or any(x is None for x in ids):
             return refusal(
                 BAD_ARG,
-                "messages: `ids` must be a non-empty list of row ids",
+                "messages: `ids` must be a non-empty list of message ids (ints)",
                 arg="ids",
             )
         caller = _current_origin.get()
@@ -2010,8 +2089,8 @@ class Agent:
             allowed_owner[owner_id] = bool(d.allowed)
             return allowed_owner[owner_id]
 
-        after = payload.get("after")
-        if isinstance(after, str) and after in ids:
+        after = _as_id(payload.get("after"))
+        if after is not None and after in ids:
             ids = ids[ids.index(after) + 1 :]
         out, refused = [], []
         for rid in ids:
@@ -2038,6 +2117,12 @@ class Agent:
                 d["level"] = row["level"]
             if row.get("refs"):
                 d["refs"] = len(row["refs"])
+            if row.get("kind") in ("call", "task"):
+                d["verb"] = row.get("verb")
+                if row.get("name"):
+                    d["name"] = row["name"]
+                if row.get("outcome"):
+                    d["status"] = row["outcome"].get("status")
             out.append(d)
         # DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
         try:
@@ -2065,8 +2150,8 @@ class Agent:
         until the row settles, then the outcome's own status; `outcome` appears
         only once settled. `named` says which kind of row it is: True for a
         caller-named execution (its `id` is the caller's own, and is also its
-        `cancel`/`ps` handle), False for an unnamed send the kernel minted an
-        `<agent>:<hex8>` pid for.
+        `cancel`/`ps` handle), False for an unnamed send. Either way `id` is the
+        kernel's message id (an int); a named row also carries `name`.
 
         This docstring — and the `ledger` line every reflect carries — used to
         say NAMED executions only, and that "unnamed sends never appear here".
@@ -2094,6 +2179,8 @@ class Agent:
                 "retries": row["retries"],
                 "named": row["named"],
             }
+            if row.get("name"):
+                entry["name"] = row["name"]
             if fut.done():
                 out = fut.result()
                 entry["status"] = out["status"]
@@ -2113,16 +2200,28 @@ class Agent:
         return {"executions": page_rows, "next": nxt}
 
     async def _verb_cancel(self, payload: dict) -> dict:
-        """args: task_id:str — kill that task AND ITS SUBTREE (children first,
+        """args: task_id:int — kill that task AND ITS SUBTREE (children first,
         depth-first, like killing a process group). Each bundle's `on_cancel`
         hook runs BEFORE the abort so real resources (OS subprocesses, PTYs)
         die with it. Returns {cancelled:True, killed:[task_id, ...]}; an unknown
         or already-finished id returns {cancelled:False, killed:[]} — it does
         not pretend. The cancelled dispatch's blocked caller gets the reply
         {"cancelled": True}."""
-        task_id = payload.get("task_id")
-        if not isinstance(task_id, str) or not task_id:
+        raw = payload.get("task_id")
+        if (
+            raw is None
+            or raw == ""
+            or isinstance(raw, bool)
+            or not isinstance(raw, (int, str))
+        ):
             return missing("cancel", "task_id")
+        task_id = _as_id(raw)
+        if task_id is None and isinstance(raw, str):
+            # A caller's NAME for an execution is its handle too.
+            task_id = self.ctx.resolve_name(raw)
+        if task_id is None:
+            # Names no task — honest, not a refusal (the same answer a stale id gets).
+            return {"cancelled": False, "killed": []}
         return await self.ctx.cancel_task(task_id)
 
     async def _verb_shutdown_kernel(self, payload: dict) -> dict:

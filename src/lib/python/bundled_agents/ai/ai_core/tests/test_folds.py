@@ -16,8 +16,38 @@ from _fake import FakeCtx as _K  # noqa: E402
 BIG = "x" * 3000
 
 
+_IDS: dict[str, int] = {}
+_NEXT = iter(range(100_000, 10_000_000))
+
+
+def _id(tag):
+    """A fixture TAG ("user:goal", "ai:a0r") as the int id the store holds. One
+    registry for the session: the same tag is the same id in every test, and the
+    range starts far above what a FakeCtx mints (1, 2, …), so nothing collides."""
+    if tag is None or isinstance(tag, int):
+        return tag
+    if tag not in _IDS:
+        _IDS[tag] = next(_NEXT)
+    return _IDS[tag]
+
+
 def _row(role, content, id_, parent=None, **extra):
-    return {"role": role, "content": content, "id": id_, "parent": parent, **extra}
+    return {
+        "role": role,
+        "content": content,
+        "id": _id(id_),
+        "parent": _id(parent),
+        **extra,
+    }
+
+
+_FOLD_IDS = iter(range(10_000, 20_000))
+
+
+def _fold(self_id, refs, title, body, degraded, **kw):
+    """`make_fold` for tests: the store mints in the product; here a fixture id."""
+    kw.setdefault("id", next(_FOLD_IDS))
+    return folds.make_fold(self_id, [_id(r) for r in refs], title, body, degraded, **kw)
 
 
 def _chain(tag, n_calls, big=True, open_end=False):
@@ -101,10 +131,11 @@ def test_chains_are_derived_from_parent_links_across_an_interleave():
     got = folds.chains(rows)
     assert len(got) == 3
     roots = {rows[ch[0]]["id"] for ch in got}
-    assert roots == {"user:a", "user:b", "user:c"}
-    for ch in got:
-        tag = rows[ch[0]]["id"].split(":")[1]
-        assert all(tag in rows[i]["id"] for i in ch)
+    assert roots == {_id("user:a"), _id("user:b"), _id("user:c")}
+    for ch in got:  # a chain is a parent path: every member hangs off the previous one
+        assert all(
+            rows[ch[j]]["parent"] == rows[ch[j - 1]]["id"] for j in range(1, len(ch))
+        )
 
 
 def test_a_chain_ending_on_an_unanswered_send_is_open():
@@ -128,29 +159,29 @@ def test_rows_without_ids_are_their_own_roots_and_never_fold():
 
 def test_a_fold_hides_its_refs_and_sits_where_its_first_ref_was():
     rows = _chain("a", 2, big=False) + [_row("user", "later", "user:l")]
-    f = folds.make_fold("ai", [r["id"] for r in rows[:5]], "done a", "body a", False)
+    f = _fold("ai", [r["id"] for r in rows[:5]], "done a", "body a", False)
     view = folds.render(rows + [f])
     ids = [r.get("id") for r in view]
     assert ids[0] == f["id"], "the fold renders at the first ref's position"
     assert not any(r["id"] in f["refs"] for r in view)
-    assert ids[-1] == "user:l"
+    assert ids[-1] == _id("user:l")
     assert view[0]["content"].startswith("[fold ") and '"done a"' in view[0]["content"]
 
 
 def test_a_fold_of_folds_hides_the_inner_fold():
     rows = _chain("a", 1, big=False)
-    inner = folds.make_fold("ai", [r["id"] for r in rows], "inner", "b", False)
-    outer = folds.make_fold("ai", [inner["id"]], "outer", "b", False)
+    inner = _fold("ai", [r["id"] for r in rows], "inner", "b", False)
+    outer = _fold("ai", [inner["id"]], "outer", "b", False)
     view = folds.render(rows + [inner, outer])
     assert [r.get("id") for r in view] == [outer["id"]]
 
 
 def test_expand_ids_descends_through_folds():
     rows = _chain("a", 1, big=False)
-    inner = folds.make_fold("ai", [r["id"] for r in rows], "i", "b", False)
-    outer = folds.make_fold("ai", [inner["id"], "other:1"], "o", "b", False)
+    inner = _fold("ai", [r["id"] for r in rows], "i", "b", False)
+    outer = _fold("ai", [inner["id"], "other:1"], "o", "b", False)
     got = folds.expand_ids(rows + [inner, outer], [outer["id"]])
-    assert set(got) == {r["id"] for r in rows} | {"other:1"}
+    assert set(got) == {r["id"] for r in rows} | {_id("other:1")}
 
 
 # ── the strategy ────────────────────────────────────────────────────
@@ -219,7 +250,7 @@ async def test_grep_and_pull_descend_into_a_fold(monkeypatch):
     k = _K()
     rows = _chain("a", 1, big=False)
     rows[2]["content"] = rows[2]["content"].replace("ok", "the secret is 9f3a")
-    f = folds.make_fold("ai", [r["id"] for r in rows], "done a", "summary of a", False)
+    f = _fold("ai", [r["id"] for r in rows], "done a", "summary of a", False)
     all_rows = rows + [f]
 
     async def fake_load(self_id, kernel):
@@ -289,9 +320,7 @@ async def test_folds_are_ordinary_members_so_nesting_needs_no_second_stage():
     rows = [_row("user", "GOAL", "user:goal")] + _interleave(*chs)
     for c in chs:  # pre-folded with LARGE bodies, so the view is mostly folds
         rows.append(
-            folds.make_fold(
-                "ai", [r["id"] for r in c], f"done {c[0]['id']}", "S" * 1500, False
-            )
+            _fold("ai", [r["id"] for r in c], f"done {c[0]['id']}", "S" * 1500, False)
         )
     rows.append(_row("user", "now?", None))
     proj = await get_strategy("fold")(rows, [], {}, _ctx(1200, k))
@@ -308,16 +337,14 @@ async def test_fold_of_folds_terminates_when_even_folds_do_not_fit():
     for t in "ab":
         c = _chain(t, 1, big=False)
         rows += c
-        rows.append(
-            folds.make_fold("ai", [r["id"] for r in c], f"done {t}", "S" * 5000, False)
-        )
+        rows.append(_fold("ai", [r["id"] for r in c], f"done {t}", "S" * 5000, False))
     rows.append(_row("user", "now?", None))
     proj = await get_strategy("fold")(rows, [], {}, _ctx(300, k))  # absurdly small
     assert proj is not None  # it returned — no infinite loop
 
 
 def test_a_title_cannot_close_the_tag_or_quote_itself():
-    f = folds.make_fold("ai", ["x:1", "x:2"], 'weird "title] here', "b", False)
+    f = _fold("ai", ["x:1", "x:2"], 'weird "title] here', "b", False)
     head = f["content"].splitlines()[0]
     assert head.count("]") == 1 and head.endswith('"weird \'title) here"')
 
@@ -345,8 +372,8 @@ async def test_a_fold_written_twice_over_the_same_stretch_is_not_written_twice()
 
 async def test_overlapping_folds_never_show_a_member_twice():
     a = _chain("a", 2, big=False)
-    f1 = folds.make_fold("ai", [r["id"] for r in a[:3]], "part", "b", False)
-    f2 = folds.make_fold("ai", [r["id"] for r in a], "whole", "b", False)
+    f1 = _fold("ai", [r["id"] for r in a[:3]], "part", "b", False)
+    f2 = _fold("ai", [r["id"] for r in a], "whole", "b", False)
     view = folds.render(a + [f1, f2])
     ids = [r.get("id") for r in view]
     assert len(ids) == len(set(ids))
@@ -355,15 +382,15 @@ async def test_overlapping_folds_never_show_a_member_twice():
 
 def test_a_fold_whose_member_was_pruned_still_renders_and_expands():
     a = _chain("a", 1, big=False)
-    f = folds.make_fold("ai", [r["id"] for r in a] + ["gone:0000"], "done", "b", False)
+    f = _fold("ai", [r["id"] for r in a] + ["gone:0000"], "done", "b", False)
     view = folds.render(a + [f])
     assert [r.get("id") for r in view] == [f["id"]]
-    assert "gone:0000" in folds.expand_ids(a + [f], [f["id"]])
+    assert _id("gone:0000") in folds.expand_ids(a + [f], [f["id"]])
 
 
 def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
     a = _chain("a", 1, big=False)
-    f = folds.make_fold("ai", [r["id"] for r in a], "done", "b", False)
+    f = _fold("ai", [r["id"] for r in a], "done", "b", False)
     late = _row(
         "user",
         "[reply to notes:late · notes read · ↑ai:a0]\nlate reply",
@@ -371,7 +398,7 @@ def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
         "ai:a0",
     )
     view = folds.render(a + [f, late])
-    assert [r.get("id") for r in view] == [f["id"], "ai:late"]
+    assert [r.get("id") for r in view] == [f["id"], _id("ai:late")]
     assert (
         folds.chains(a + [f, late])[0][-1] == len(a) + 1 or True
     )  # attached by parent, not orphaned
@@ -393,10 +420,8 @@ async def test_folding_does_not_build_a_linked_list_of_summaries():
 
 def test_a_fold_inherits_its_first_members_parent():
     a = _chain("a", 1, big=False)
-    f = folds.make_fold(
-        "ai", [a[1]["id"], a[2]["id"]], "t", "b", False, parent=a[1]["parent"]
-    )
-    assert f["parent"] == "user:a"
+    f = _fold("ai", [a[1]["id"], a[2]["id"]], "t", "b", False, parent=a[1]["parent"])
+    assert f["parent"] == _id("user:a")
     assert folds.chains(a + [f])[0] == [0, 1, 2, 3], (
         "the fold sits in the chain it collapsed"
     )

@@ -112,16 +112,18 @@ async def test_hostile_rows_rehydrate_as_data_and_never_execute(tmp_path, monkey
     persist(k1)
     sqli = "job-1'; DROP TABLE agents;--"
     hostile = {
-        "v": 1,
-        "rows": {
-            "job-1": {
+        "v": 2,
+        "rows": [
+            {
+                "id": 1,
+                "name": "job-1",
                 "target": "adv5_probe",
                 "retries": 0,
                 "attempts": 1,
                 "named": True,
                 "origin": None,
                 "outcome": {
-                    "pid": "job-1",
+                    "pid": 1,
                     "status": "completed",
                     "result": {
                         "note": sqli,
@@ -131,7 +133,7 @@ async def test_hostile_rows_rehydrate_as_data_and_never_execute(tmp_path, monkey
                     "attempts": 1,
                 },
             }
-        },
+        ],
     }
     _SIDECAR.write_text(json.dumps(hostile))
     del k1
@@ -156,7 +158,7 @@ async def test_hostile_rows_rehydrate_as_data_and_never_execute(tmp_path, monkey
     led = (await k2.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
-    rows = {r["id"]: r for r in led["executions"]}
+    rows = {r.get("name"): r for r in led["executions"] if r.get("name")}
     assert "job-1" in rows and rows["job-1"]["status"] == "completed"
 
     # joining the hostile id returns the recorded strings VERBATIM — the

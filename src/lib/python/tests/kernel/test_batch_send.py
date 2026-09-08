@@ -102,7 +102,7 @@ async def test_mixed_batch_settles_in_input_order(seeded_kernel):
     )
     assert [o["status"] for o in outs] == ["failed", "completed", "failed", "completed"]
     assert outs[0]["pid"] is None and outs[0]["result"]["reason"] == "unknown_agent"
-    assert outs[1]["pid"] and outs[1]["pid"].startswith(f"{a}:")
+    assert isinstance(outs[1]["pid"], int) and outs[1]["pid"] > 0
     assert outs[2]["pid"] is None and outs[2]["result"]["reason"] == "missing_arg"
     assert "agents" in outs[3]["result"]
 
