@@ -18,8 +18,6 @@ class FakeCtx:
             else {"context_window": window, "output_reserve": 0}
         )
         self.rows: dict[int, dict] = {}
-        self.bodies: dict[int, bytes] = {}
-        self.views: dict[str, dict] = {}
         self._by_agent: dict[str, list[int]] = {}
         self.sent: list = []
         self.emitted: list = []
@@ -79,22 +77,41 @@ class FakeCtx:
     def rows_get(self, ids: list[int]) -> list[dict]:
         return [self.rows[i] for i in ids if i in self.rows]
 
-    def body_put(self, pid, data: bytes) -> None:
-        self.bodies[self.id(pid)] = bytes(data)
+    def body_put(self, agent_id: str, pid, text: str) -> int:
+        return self.rows_put(
+            agent_id, {"kind": "body", "parent": self.id(pid), "content": text}
+        )
 
-    def body_get(self, pid: str, offset: int, length: int):
-        b = self.bodies.get(self.id(pid))
-        if b is None:
+    def body_get(self, pid, offset: int, length: int):
+        pid = self.id(pid)
+        row = next(
+            (
+                r
+                for r in reversed(list(self.rows.values()))
+                if r.get("kind") == "body" and r.get("parent") == pid
+            ),
+            None,
+        )
+        if row is None:
             return None
+        b = str(row.get("content", ""))
         chunk = b[offset : offset + max(1, length)]
         nxt = offset + len(chunk)
         return chunk, nxt, nxt >= len(b), len(b)
 
-    def view_put(self, agent_id: str, doc: dict) -> None:
-        self.views[agent_id] = dict(doc)
+    def view_put(self, agent_id: str, doc: dict) -> int:
+        return self.rows_put(agent_id, {**doc, "kind": "view"})
 
     def view_get(self, agent_id: str) -> dict | None:
-        return self.views.get(agent_id)
+        row = next(
+            (r for r in reversed(self.rows_for(agent_id)) if r.get("kind") == "view"),
+            None,
+        )
+        if row is None:
+            return None
+        return {
+            k: v for k, v in row.items() if k not in ("kind", "agent", "id", "parent")
+        }
 
     # ── the Agent surface a bundle uses ──────────────────────────────────
     def get(self, _id):

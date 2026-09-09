@@ -567,8 +567,9 @@ review, force-push surprise, polluted history) is high.
 
 - Project code lives in version-controlled files in this repo or
   user dirs. **`.fantastic/` is runtime state only** — agent.json
-  records, per-agent sidecars (chat_<client>.json,
-  schedules.json, history.jsonl), `lock.json`, `readme.md`.
+  records, `messages.jsonl` (the kernel's message log, appended by the
+  loader's pump, hydrated cold at boot), `ledger.json`, per-agent
+  sidecars (schedules.json), `lock.json`, `readme.md`.
   Wipe-and-rebuild safe.
 - Use a `file_bridge` agent (rooted INSIDE the running dir — the clamp;
   created OPEN with `ingress_rule=allow_all_ingress`) for HTTP-served content:

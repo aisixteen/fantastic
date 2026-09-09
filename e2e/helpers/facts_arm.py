@@ -203,13 +203,17 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         "folded": sum(int(d.get("folded") or 0) for d in conn.compactions),
         "fold_ids": [m.get("id") for m in msgs if m.get("kind") == "fold"],
         "descents": _descents(msgs, aid),
-        "roots": sum(1 for m in msgs if m.get("role") == "user" and m.get("id") and not m.get("parent")),
+        # a ROOT is a message from a person or a peer — not a recall/fold/late row, which
+        # are parentless by construction
+        "roots": sum(1 for m in msgs if m.get("role") == "user" and m.get("id") and not m.get("parent") and not m.get("kind") and not str(m.get("content", "")).startswith("[")),  # a kernel notice/nudge/reply starts with `[`
         "view_ids": ((await call(root, aid, {"type": "context_status"})).get("last_projection") or {}).get("view_ids") or [],
         "view": (await read_view(core, root, aid)) if core is not None else None,
         "recall_rows": sum(1 for m in msgs if m.get("kind") == "recall"),
-        "dehydrated_self": sum(1 for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "NOT inlined" in str(m.get("content"))),
+        # a self-reply that came back as a STUB: the stub prefix right after the tag line —
+        # not the phrase anywhere (a grep reply quoting another row's stub is not one)
+        "dehydrated_self": sum(1 for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "\n(settled, " in str(m.get("content"))[:400]),
         # WHICH self-reply overflowed, so a failing run names the verb (kind, tag head)
-        "dehydrated_self_tags": [f"{m.get('kind') or m.get('role')}: {str(m.get('content'))[:110]}" for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "NOT inlined" in str(m.get("content"))][:3],
+        "dehydrated_self_tags": [f"{m.get('kind') or m.get('role')}: {str(m.get('content'))[:110]}" for m in msgs if m.get("role") == "user" and f"· {aid} " in str(m.get("content")) and "\n(settled, " in str(m.get("content"))[:400]][:3],
         "fold_levels": sorted({int(m.get("level") or 1) for m in msgs if m.get("kind") == "fold"}),
         "digested": sum(
             1 for m in msgs if m.get("role") == "user"
@@ -222,17 +226,39 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
 
 def _descents(msgs, aid) -> list[str]:
     """Fold ids the model actually went INTO — a grep scoped to one, or a pull of one."""
+    # A descent is a grep/pull aimed at a fold — or at a LEAF the fold collapsed: the
+    # body (pid) behind one of its member replies. The model that pulls the member's
+    # body has gone through the fold to the file, which is the point.
     folds = {m.get("id") for m in msgs if m.get("kind") == "fold"}
+    # leaf pid → the fold ids whose members that pid's reply row belongs to
+    by_row = {m.get("id"): m for m in msgs if m.get("id") is not None}
+    leaf_to_folds: dict = {}
+    for f in msgs:
+        if f.get("kind") != "fold":
+            continue
+        for r in f.get("refs") or []:
+            m = by_row.get(r)
+            if not m or m.get("role") != "user":
+                continue
+            head = str(m.get("content", "")).split("\n", 1)[0]
+            tok = head[len("[reply to "):].split(" ")[0] if head.startswith("[reply to ") else ""
+            if tok.isdigit():
+                leaf_to_folds.setdefault(int(tok), []).append(f["id"])
 
     def _i(x):  # the model may quote an id it copied out of a tag
         return int(x) if isinstance(x, str) and x.isdigit() else x
 
+    def _hit(i):  # a fold id names itself; a leaf pid names every fold above it
+        if i in folds:
+            return [i]
+        return list(leaf_to_folds.get(i, []))
+
     out = []
     for c in ctx_score.calls_made(msgs, target=aid, verb="grep"):
-        out += [_i(i) for i in (c["payload"].get("ids") or []) if _i(i) in folds]
+        for i in c["payload"].get("ids") or []:
+            out += _hit(_i(i))
     for c in ctx_score.calls_made(msgs, target=aid, verb="pull"):
-        if _i(c["payload"].get("pid")) in folds:
-            out.append(_i(c["payload"]["pid"]))
+        out += _hit(_i(c["payload"].get("pid")))
     return out
 
 
@@ -276,16 +302,15 @@ async def send_when(root, core, aid: str, text: str, ready, *, max_wait: float, 
     summarized: the model then chose between an unfinished task and a FINAL that told
     it to stop — folds_x_chains wrote 1 of 4 reports and called done. The tasks
     themselves stay on timers; interleaving is what those probes measure."""
-    import asyncio, time
+    import asyncio
+    import time
 
     async def _go():
         end = time.monotonic() + max_wait
         while time.monotonic() < end:
-            try:
-                if await ready():
-                    break
-            except Exception:
-                pass
+            # a readiness predicate that raises is a probe bug — let it surface
+            if await ready():
+                break
             await asyncio.sleep(poll)
         await call(root, "user", {"type": "send", "target": aid,
                                   "payload": {"type": "send", "text": text, "client_id": aid}})
@@ -319,8 +344,8 @@ async def copy_rows(root, src: str, dst: str) -> int:
     # The CONVERSATION forks; the kernel's own bookkeeping (a `call` row per send, a
     # `task` row per fork) is the original's ledger and stays with it.
     for r in ctx.rows_for(src):
-        if r.get("kind") in ("call", "task"):
-            continue
+        if r.get("kind") in ("call", "task", "body", "view"):
+            continue  # bookkeeping, and bodies/views resolve through the original's ids
         row = {k: v for k, v in r.items() if k not in ("id", "agent", "ts")}
         if row.get("parent") in remap:
             row["parent"] = remap[row["parent"]]

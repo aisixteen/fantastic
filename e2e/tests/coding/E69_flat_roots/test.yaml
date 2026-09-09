@@ -6,10 +6,11 @@ title: "24 tiny root tasks — folds of folds appear and the final answer needs 
 runner: probe.py
 runtimes: [python]
 costs: turns
+long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
   max_turns: 140
   no_progress_turns: 10
   turn_chars: 60000
   turn_seconds: 300
-env: {}
+env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model lost every deliverable (2026-09-08)

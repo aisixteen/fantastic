@@ -6,6 +6,7 @@ title: "the human sends a second task mid-run — two chains interleave, two rep
 runner: probe.py
 runtimes: [python]
 costs: turns
+long: true  # hit the 180 s proxy limit at 6 lanes (2026-09-08); at most 2 long run at once
 limits:
   idle_seconds: 60
   max_turns: 60

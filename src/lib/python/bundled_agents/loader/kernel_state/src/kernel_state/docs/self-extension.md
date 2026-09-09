@@ -13,9 +13,10 @@ The way that WORKS now, and it makes something that genuinely persists and
 re-runs:
 
 1. **Write the program to a file** on the file leg, its bytes carried over a
-   stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`,
-   or `send_binary` (same call, but write the program RAW in the LAST `bytes`
-   field — nothing escaped; see the `send` docs).
+   stream so nothing is escaped — `write_stream {path, bytes:<raw>, truncate:true}`.
+   `bytes` is VERBATIM: write the program between its quotes exactly as it should
+   land (real newlines, real quotes, nothing escaped) and close the call; it is cut
+   out before the call's JSON is parsed.
 2. **Run it** with the command executor: `start {command:'python',
    args:['<your file>'], …}`. The file is durable on disk, so the SAME command
    run again later re-executes the SAME program against whatever the inputs hold
@@ -112,3 +113,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   lateral grant. A specialist created under the root is NOT yours: you cannot confer
   reach on it (refused: not your child, not in your can_call), and repairing that
   costs a delete + recreate (measured 2026-09-02: twenty turns).
+- **A lateral edge is opened on the CALLEE, never on the caller.** To let `clock` call
+  your child, add `clock` to the child's `callable_by`. You never edit a peer's
+  `can_call` (you cannot, and you need not): `can_call` is yours to set only on your
+  own children, at create time. One `update_agent` on the callee ends the question.

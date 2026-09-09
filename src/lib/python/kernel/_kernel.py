@@ -67,6 +67,23 @@ _current_task: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_current_task", default=None
 )
 
+# THE SHUTDOWN SEQUENCE'S OWN SENDS. While the kernel drains, a send with no live
+# parent task is refused — except the kernel's own `shutdown` verbs, which run
+# under this marker (see `Kernel.shutdown_agents` and `Agent._launch`).
+_in_shutdown: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_in_shutdown", default=False
+)
+
+
+@contextlib.contextmanager
+def shutdown_context():
+    """Mark the sends inside as the kernel's own shutdown traffic."""
+    tok = _in_shutdown.set(True)
+    try:
+        yield
+    finally:
+        _in_shutdown.reset(tok)
+
 
 # WHO CALLED THIS DISPATCH. `_current_sender` is rewritten to the TARGET's id
 # the moment a handler runs (`Agent._dispatch`), so a handler cannot see its
@@ -389,16 +406,26 @@ class Kernel:
     # one counter, append-only: a row is never edited or removed by this API. An
     # agent's CONVERSATION (a turn, a delivered reply, a fold mark, a recall
     # decision) and the kernel's own bookkeeping — a `call` row per batch item, a
-    # `task` row per forked job — live in the same table; readers filter by `kind`. Dehydrated reply bodies live in `bodies` under
-    # their pid; an agent's current VIEW (the ordered ids it sees, each at a
-    # resolution) in `views`. Rows outlive `delete_agent`: agent id is conversation
-    # id, and a re-created id continues where it left off — a clean slate is a new
-    # id. Retention: process lifetime, unbounded; persistence (a `rows.json`
-    # beside `ledger.json`) is the later increment, riding the same flush seam.
+    # `task` row per forked job — live in the same table; readers filter by `kind`.
+    # A dehydrated reply BODY is a `body` row whose `parent` is the call's id; an
+    # agent's VIEW (the ordered ids it sees, each at a resolution) is a `view` row,
+    # the newest one being current. ONE TABLE, so one append-only stream carries
+    # everything. Rows outlive `delete_agent`: agent id is conversation id, and a
+    # re-created id continues where it left off — a clean slate is a new id.
+    #
+    # THE KERNEL NEVER KNOWS DISK. It starts empty, always. A hydrator (a loader
+    # bundle, from above) fills it with `rows_put` and sets `next_id`; a persister
+    # tails it with `rows_stream(after)`. Both are optional and interchangeable.
     rows: dict[int, dict] = field(default_factory=dict)
-    bodies: dict[int, bytes] = field(default_factory=dict)
-    views: dict[str, dict] = field(default_factory=dict)
     _rows_by_agent: dict[str, list[int]] = field(default_factory=dict)
+    _body_by_parent: dict[int, int] = field(default_factory=dict)  # pid → body row
+    _view_by_agent: dict[str, int] = field(default_factory=dict)  # agent → view row
+    _tails: list["asyncio.Queue"] = field(default_factory=list)
+
+    # DRAINING: the first phase of a graceful stop (`shutdown_agents`). New roots
+    # are refused `{reason:"draining"}`; sends with a live parent task, and the
+    # kernel's own `shutdown` verbs, still pass.
+    draining: bool = False
 
     def mint_id(self) -> int:
         """The next message id. The ONLY allocator in the kernel: a call, a forked
@@ -433,7 +460,43 @@ class Kernel:
         stored.setdefault("ts", time.time())
         self.rows[rid] = stored
         self._rows_by_agent.setdefault(agent_id, []).append(rid)
+        kind = stored.get("kind")
+        if kind == "body" and isinstance(stored.get("parent"), int):
+            self._body_by_parent[stored["parent"]] = rid
+        elif kind == "view":
+            self._view_by_agent[agent_id] = rid
+        for q in self._tails:
+            q.put_nowait(stored)
         return rid
+
+    async def rows_stream(self, after: int):
+        """THE TAIL. Every row with `id > after` in id order, then every row as it is
+        appended — for a persister (the loader's pump) or any other consumer. Replay
+        then live, deduped by id, so a subscriber that opens at the id it last saw
+        misses nothing and doubles nothing. Yielding is not a message: no send, no
+        task, no row. The queue holds references to rows already in RAM."""
+        q: asyncio.Queue = asyncio.Queue()
+        self._tails.append(q)  # registered BEFORE the snapshot: nothing slips between
+        # IDS DO NOT ARRIVE IN ORDER. An AI turn's id is minted when the turn starts
+        # and its row lands when the turn ends, after calls minted in between — so
+        # "newer than the last yielded" would drop it (measured 2026-09-08: every
+        # conversation turn missing from the log). Dedupe only against the replay.
+        replayed = sorted(i for i in self.rows if i > after)
+        try:
+            for rid in replayed:
+                row = self.rows.get(rid)
+                if row is not None:
+                    yield row
+            seen = set(replayed)
+            while True:
+                row = await q.get()
+                if row["id"] in seen or row["id"] <= after:
+                    continue
+                seen.add(row["id"])
+                yield row
+        finally:
+            if q in self._tails:
+                self._tails.remove(q)
 
     def rows_for(self, agent_id: str) -> list[dict]:
         """That agent's rows, in append order."""
@@ -447,23 +510,34 @@ class Kernel:
         """Rows by id, any agent, in the order asked. The `messages` verb gates."""
         return [self.rows[i] for i in ids if i in self.rows]
 
-    def body_put(self, pid: int, data: bytes) -> None:
-        self.bodies[pid] = bytes(data)
+    def body_put(self, agent_id: str, pid: int, text: str) -> int:
+        """A reply body too large to inline: a `body` row under the conversation that
+        received it, `parent` = the call's id. Returns the row id."""
+        return self.rows_put(agent_id, {"kind": "body", "parent": pid, "content": text})
 
     def body_get(self, pid: int, offset: int, length: int):
-        """One page of a stored body: (bytes, next_offset, eof, size), or None."""
-        b = self.bodies.get(pid)
-        if b is None:
+        """One page of a stored body: (text, next_offset, eof, size), or None."""
+        rid = self._body_by_parent.get(pid)
+        row = self.rows.get(rid) if rid is not None else None
+        if row is None:
             return None
+        b = str(row.get("content", ""))
         chunk = b[offset : offset + max(1, length)]
         nxt = offset + len(chunk)
         return chunk, nxt, nxt >= len(b), len(b)
 
-    def view_put(self, agent_id: str, doc: dict) -> None:
-        self.views[agent_id] = dict(doc)
+    def view_put(self, agent_id: str, doc: dict) -> int:
+        """The agent's VIEW as a `view` row; the newest one is current."""
+        return self.rows_put(agent_id, {**doc, "kind": "view"})
 
     def view_get(self, agent_id: str) -> dict | None:
-        return self.views.get(agent_id)
+        rid = self._view_by_agent.get(agent_id)
+        row = self.rows.get(rid) if rid is not None else None
+        if row is None:
+            return None
+        return {
+            k: v for k, v in row.items() if k not in ("kind", "agent", "id", "parent")
+        }
 
     def ledger_settled(self) -> None:
         if self.ledger_flusher is not None:
@@ -506,6 +580,7 @@ class Kernel:
         task: "asyncio.Task",
         *,
         parent: int | None,
+        keepalive: bool = False,
     ) -> dict:
         """Put one in-flight asyncio.Task in the table. Self-cleaning: the
         entry is forgotten when the task ends (done-callback), cancelled or
@@ -529,12 +604,17 @@ class Kernel:
             # Set by `cancel_task` BEFORE the walk, so a dying handler cannot
             # register new work on its way out (see `_launch`).
             "_killed": False,
+            # A persister loop that must outlive `shutdown_agents`' quiet phase
+            # (the loader's message pump). Everything else is pending work.
+            "_keepalive": keepalive,
         }
         self.tasks[task_id] = entry
         task.add_done_callback(lambda _t, tid=task_id: self.forget_task(tid))
         return entry
 
-    def spawn_task(self, agent_id: str, verb: str, task: "asyncio.Task") -> int:
+    def spawn_task(
+        self, agent_id: str, verb: str, task: "asyncio.Task", *, keepalive: bool = False
+    ) -> int:
         """Register BACKGROUND work a bundle forked out of a dispatch (an OS
         subprocess pump, a PTY reader) — work that OUTLIVES the dispatch that
         started it. Bundles call this so their real work is visible to `ps`
@@ -549,8 +629,15 @@ class Kernel:
         task_id = self.rows_put(
             agent_id, {"kind": "task", "verb": verb, "parent": parent}
         )
-        self.register_task(task_id, agent_id, verb, task, parent=parent)
+        self.register_task(
+            task_id, agent_id, verb, task, parent=parent, keepalive=keepalive
+        )
         return task_id
+
+    def is_registered(self, task) -> bool:
+        """Whether this asyncio task IS a row of the table (a spawned loop, e.g. the
+        loader's pump) — live work by definition, whatever its contextvar says."""
+        return task is not None and any(e["_task"] is task for e in self.tasks.values())
 
     def forget_task(self, task_id: int) -> None:
         """Drop one entry. Surviving children are RE-PARENTED to the dead
@@ -720,16 +807,83 @@ class Kernel:
             return {"error": f"cannot delete root agent {agent_id!r}"}
         return await agent.parent.delete(agent_id)
 
+    SHUTDOWN_VERB_TIMEOUT = 30.0  # one bound for every agent's `shutdown` turn
+    QUIET_TIMEOUT = 10.0  # how long in-flight work may take to settle before cancel
+
+    async def shutdown_agents(self) -> dict:
+        """The AGENT half of a graceful stop — also the `shutdown_agents` kernel verb.
+
+        1. DRAIN: new roots are refused; sends with a live parent task still pass.
+        2. `shutdown` VERB: every agent whose bundle advertises it is told, all at
+           once, under `shutdown_context()`, bounded. For an AI it is a turn ("the
+           kernel is stopping; persist what matters, then done"); its tools work.
+        3. QUIET: wait for the task table to empty (persister loops marked
+           `keepalive` excepted), bounded; the rest is cancelled through the
+           normal `cancel_task` path (subtree, `on_cancel` hooks).
+        Idempotent: a second call answers the same shape and shuts nothing new.
+        The kernel keeps serving afterwards — reads, `messages`, the persister —
+        until `shutdown()` tears it down."""
+        self.draining = True
+        shut: list[str] = []
+        targets = [a for a in list(self.agents.values()) if a.advertises("shutdown")]
+        if targets and self.root is not None:
+            with shutdown_context(), operator_context():
+                outs = await self.root.send(
+                    [
+                        {
+                            "target": a.id,
+                            "payload": {"type": "shutdown"},
+                            "timeout": self.SHUTDOWN_VERB_TIMEOUT,
+                        }
+                        for a in targets
+                    ]
+                )
+            shut = [
+                a.id for a, o in zip(targets, outs) if o.get("status") == "completed"
+            ]
+        # The dispatch running THIS verb is in the table too; it is not pending work.
+        me = _current_task.get()
+
+        def pending() -> list[int]:
+            return [
+                tid
+                for tid, e in self.tasks.items()
+                if not e.get("_keepalive") and tid != me
+            ]
+
+        deadline = time.monotonic() + self.QUIET_TIMEOUT
+        while time.monotonic() < deadline and pending():
+            await asyncio.sleep(0.05)
+        cancelled: list[int] = []
+        for tid in pending():
+            e = self.tasks.get(tid)
+            if e is None or e.get("parent") is not None:
+                continue  # roots only: the subtree dies with its root
+            with operator_context():
+                out = await self.cancel_task(tid)
+            cancelled += out.get("killed", [])
+        return {"drained": True, "shut": shut, "cancelled": cancelled}
+
     async def shutdown(self) -> None:
-        """Graceful tree-wide process-shutdown. Depth-first walks
-        every agent's `on_shutdown`/`on_delete` hook to free OS
-        resources (PTYs, subprocesses like `code serve-web`, open
-        sockets) without touching records or disk — the tree
-        survives so the next boot rehydrates cleanly. Idempotent:
-        guarded by `_shutdown_complete`, so the SIGTERM signal
-        handler and the atexit safety net don't double-run."""
+        """Graceful tree-wide process-shutdown: `shutdown_agents()` (drain, the
+        `shutdown` verb, quiet), then the root bundle's duck-typed
+        `flush_pending(agent)` — awaited BEFORE the teardown walk, so a persister
+        can write its last window while its provider child is still alive — then
+        the depth-first `on_shutdown`/`on_delete` walk that frees OS resources
+        (PTYs, subprocesses, sockets) without touching records or disk. The tree
+        survives so the next boot rehydrates cleanly. Idempotent: guarded by
+        `_shutdown_complete`, so the SIGTERM handler and the atexit safety net
+        don't double-run."""
         if self._shutdown_complete or self.root is None:
             return
+        await self.shutdown_agents()
+        hook = self.root.module_hook("flush_pending")
+        if hook is not None:
+            try:
+                with shutdown_context():  # its writes are the kernel's own traffic
+                    await hook(self.root)
+            except Exception as e:  # noqa: BLE001 — teardown continues
+                print(f"  [shutdown] flush_pending raised: {e}", file=sys.stderr)
         await self.root.shutdown()
         self._shutdown_complete = True
 

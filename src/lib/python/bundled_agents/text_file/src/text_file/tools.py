@@ -297,11 +297,10 @@ async def _reflect(id, payload, kernel):
         ),
         "compose": (
             "every content-carrying verb (`write`, `patch`, `append`) takes its "
-            "document in `bytes` — send it with `send_binary` in the FENCED "
-            'form: the call\'s JSON stays small with `"bytes":"@body"`, and '
-            "the document rides VERBATIM between two column-0 marker lines "
-            "inside the same tool_call — `*** Begin Bytes`, the content (real "
-            "newlines, real quotes, nothing escaped), `*** End Bytes`"
+            "document in `bytes`, and `bytes` is VERBATIM: write the document "
+            "between the quotes exactly as it should land — real newlines, real "
+            "quotes, nothing escaped — then close the call. It is cut out before "
+            "the call's JSON is parsed; no fence, no placeholder"
         ),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()

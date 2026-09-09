@@ -52,6 +52,52 @@ from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, re
 # `fs`, so nothing here escapes the running dir.
 
 
+_MESSAGES_FILE = "messages.jsonl"
+
+
+def read_messages(root_dir: Path) -> tuple[list[dict], int]:
+    """COLD HYDRATION of the kernel's message store — `(rows, next_id)`.
+
+    The message log is `.fantastic/messages.jsonl`: one JSON object per line, one
+    line per row the kernel ever made (a turn, a delivered reply, a fold, a recall, a
+    `body` — the text merged in — a `view`, a `call`, a `task`), in id order, exactly
+    as the pump appended it. Read through `fs` (clamped), before any agent exists,
+    like `read_tree`. The bootstrap hands the rows to `Kernel.rows_put` FROM ABOVE
+    and sets `next_id` — the kernel starts empty every time and never guesses a
+    counter; this is the hydrator's logic. A corrupt line is skipped loudly. A
+    second ingestion of the same file is the user's fault: `rows_put` raises on the
+    first duplicate id rather than guarding it."""
+    rd = str(root_dir)
+    if not fs.exists(rd, _MESSAGES_FILE):
+        return [], 1
+    rows: list[dict] = []
+    top = 0
+    for n, line in enumerate(fs.read_text(rd, _MESSAGES_FILE).splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"  [messages] {_MESSAGES_FILE}:{n} unreadable, skipped: {e}")
+            continue
+        if not isinstance(row, dict) or not isinstance(row.get("id"), int):
+            print(f"  [messages] {_MESSAGES_FILE}:{n} is not a row, skipped")
+            continue
+        rows.append(row)
+        top = max(top, row["id"])
+    return rows, top + 1
+
+
+def hydrate_messages(kernel, root_dir: Path) -> int:
+    """Apply `read_messages` to a kernel FROM ABOVE, before its first mint. Sets the
+    counter first so every hydrated id is a pre-minted one. Returns the row count."""
+    rows, next_id = read_messages(root_dir)
+    kernel.next_id = max(kernel.next_id, next_id)
+    for r in rows:
+        kernel.rows_put(r["agent"], r)
+    return len(rows)
+
+
 def read_tree(root_dir: Path) -> list[dict]:
     """Walk a `.fantastic` tree → flat list of records (root + descendants).
     `parent_id` comes from disk position (authoritative). Pure read; the
@@ -428,6 +474,127 @@ async def _forget_via_store(agent, store_id: str, abs_path: Path) -> None:
 # ─── the auto-flush loop (the root subscribes the live tree) ────────
 
 
+class _MessagePump:
+    """PERSIST THE MESSAGE STORE — a tail of the kernel, appended to the provider.
+
+    The kernel exposes `rows_stream(after)`; this pump is one consumer of it. Rows are
+    batched (0.15 s debounce, the `_FlushLoop` rhythm) and each batch is ONE
+    `write_stream` append of JSON lines through the discovered provider (`_find_store`)
+    — no held-open channel exists on the stream verbs, and one send per row would be
+    a call row per row. THE PUMP SKIPS ITS OWN CALLS: a flush is a send, so it mints
+    a `call` row on the provider; persisting that row would mint another, forever.
+    The rule is general: operator-context calls ON THE STORE (the loader's own
+    persistence traffic — this pump, the record flusher, the blob verbs) and the
+    pump's own `task` rows are bookkeeping of persisting and never enter the log.
+
+    ORDER, by contract: hydrate (bootstrap, cold) → subscribe (here, at `after = the
+    highest id present`) → only then anything that creates children. Subscribing
+    before hydrating would re-append what was just read; creating children before
+    subscribing would lose their first messages.
+
+    No provider ⇒ batches are dropped and said so once (RAM only, by design — the
+    same law as records). Swap the sink by wiring a different provider that answers
+    `write_stream`; the pump does not know what is behind it."""
+
+    VERBS = ("message_pump", "message_pump_flush")
+
+    def __init__(self, agent) -> None:
+        self.agent = agent
+        self.kernel = agent.ctx
+        self.pending: list[dict] = []
+        self.seen = 0  # the highest id the tail has handed us
+        self.written = 0  # the highest id landed on the provider
+        self._wake = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
+        self._said_no_store = False
+
+    def start(self, after: int) -> None:
+        self.seen = after
+        self.written = after
+        reader = asyncio.create_task(self._read(after))
+        flusher = asyncio.create_task(self._flush_loop())
+        for verb, t in zip(self.VERBS, (reader, flusher)):
+            self.kernel.spawn_task(self.agent.id, verb, t, keepalive=True)
+        self._tasks = [reader, flusher]
+
+    def _skip(self, row: dict) -> bool:
+        store = _find_store(self.agent)
+        if row.get("kind") == "task" and row.get("agent") == self.agent.id:
+            return row.get("verb") in self.VERBS
+        if row.get("kind") == "call" and row.get("agent") == store:
+            return row.get("origin") is None  # the loader's own persistence traffic
+        return False
+
+    async def _read(self, after: int) -> None:
+        try:
+            async for row in self.kernel.rows_stream(after):
+                self.seen = max(self.seen, row["id"])
+                if self._skip(row):
+                    continue
+                self.pending.append(row)
+                self._wake.set()
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_loop(self) -> None:
+        try:
+            while True:
+                await self._wake.wait()
+                await asyncio.sleep(0.15)
+                self._wake.clear()
+                await self.flush()
+        except asyncio.CancelledError:
+            pass
+
+    async def flush(self) -> None:
+        if not self.pending:
+            return
+        store_id = _find_store(self.agent)
+        if store_id is None:
+            if not self._said_no_store:
+                print("  [messages] no store wired — messages stay in RAM", flush=True)
+                self._said_no_store = True
+            self.pending.clear()
+            return
+        batch, self.pending = self.pending, []
+        lines = "".join(json.dumps(r, default=str) + "\n" for r in batch)
+        with operator_context():
+            out = await self.kernel.send(
+                [
+                    {
+                        "target": store_id,
+                        "payload": {
+                            "type": "write_stream",
+                            "path": _MESSAGES_FILE,
+                            "bytes": lines.encode("utf-8"),
+                        },
+                    }
+                ]
+            )
+        res = (out[0] or {}).get("result") or {}
+        if isinstance(res, dict) and res.get("error"):
+            print(f"  [messages] append refused: {res.get('error')}", flush=True)
+            self.pending = batch + self.pending  # nothing lost; retried next flush
+            return
+        self.written = max(self.written, max(r["id"] for r in batch))
+
+    async def catch_up(self) -> None:
+        """Land every row minted so far. Each flush mints one call row (skipped), so
+        the loop converges when the tail has seen everything and nothing pends."""
+        for _ in range(1000):
+            await asyncio.sleep(0)
+            if self.seen >= self.kernel.next_id - 1 and not self.pending:
+                return
+            await self.flush()
+            await asyncio.sleep(0.01)
+
+    async def stop(self) -> None:
+        await self.catch_up()
+        for t in self._tasks:
+            t.cancel()
+        self._tasks = []
+
+
 class _FlushLoop:
     """Subscribe to the kernel state stream; debounce-flush records on add/update,
     remove on delete — ONLY through a DISCOVERED provider (`_find_store`: a file_bridge
@@ -561,7 +728,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         #
         # 1. THE FILE IS BYTES, NOT JSON. A program squeezed into a JSON string is
         #    lost to one stray quote (the old `code` field's whole failure). The
-        #    program's bytes ride a STREAM — `write_stream`, or `send_binary` — so
+        #    program's bytes ride a STREAM — `write_stream`, whose `bytes` is verbatim — so
         #    nothing is escaped. A model told only "write the program" reaches for a
         #    JSON string; the string names the stream path so it does not.
         #
@@ -577,8 +744,8 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # whole run. Prose stays behind `readme:'self-extension'`; this shape does not.
         base["self_extension"] = (
             "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE "
-            "it to a file: {write_stream, path, bytes, truncate:true}, or "
-            '`send_binary` (program VERBATIM in a fenced block: `"bytes":"@body"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). '
+            "it to a file: {write_stream, path, bytes, truncate:true} — `bytes` is "
+            "VERBATIM (the program between the quotes exactly as written, real newlines, nothing escaped; it is cut out before the call is parsed). "
             "(2) RUN it on the COMMAND runner: `start {command, args}`, gated by its "
             "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
             "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
@@ -609,8 +776,8 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON "
             "string. Use the file leg's STREAM verbs — {type:'write_stream', path, "
             "bytes, truncate:true} to write, {type:'read_stream', path, offset} to "
-            "read, one raw chunk at a time — or `send_binary` (same call, but write "
-            'the program VERBATIM in a fenced block: `"bytes":"@body"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). That is '
+            "read, one raw chunk at a time. `bytes` is VERBATIM: the program between "
+            "the quotes exactly as written, real newlines, nothing escaped — it is cut out before the call is parsed. That is "
             "the only byte path; the string read/write verbs are gone.\n"
             "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect "
             "it, read its `allowed` regexes, then send "
@@ -751,26 +918,12 @@ async def _rehydrate_ledger(agent) -> None:
                 "origin": r.get("origin"),
             },
         )
-    # TODO(hydration): the COUNTER. Every loaded id came from the one counter of a
-    # previous life; the next mint must start above all of them or a new message
-    # collides with a hydrated one. `next_id = max(id) + 1` over EVERYTHING this
-    # loader hydrates — these settled calls AND the message rows/bodies/views once
-    # `_rehydrate_rows` exists (tmp/messageflow.md §2-4) — and it is the LOADER's
-    # responsibility: the kernel never guesses a counter. Not done here yet:
-    # only settled calls are persisted, so a max over them under-counts what a
-    # crashed kernel had minted; the row store must persist first.
+    # THE COUNTER is restored by `hydrate_messages` (the bootstrap, cold, before the
+    # first mint). The ledger only RAISES it: a settled call whose id the message log
+    # never saw (a log that stopped short) must still stay below the next mint.
     if rows:
         ids = [int(r["id"]) for r in rows]
         agent.ctx.next_id = max(agent.ctx.next_id, max(ids) + 1)
-
-
-async def _rehydrate_rows(agent) -> None:
-    """The message store's hydration — NOT BUILT. Its shape is settled in
-    tmp/messageflow.md: rows stream in id order from the provider (JSONL per
-    agent, or `db_bridge`) into `rows_put` in silent mode before the first boot;
-    bodies and views the same way; then the counter: `next_id = max(id) + 1`.
-    TODO(hydration): implement; until then rows live in RAM only, by design."""
-    return None
 
 
 def _install_ledger_flusher(agent) -> None:
@@ -820,6 +973,12 @@ async def _boot(id, payload, agent):
         # it just read.
         await _rehydrate_ledger(agent)
         _install_ledger_flusher(agent)
+        # THE PUMP SUBSCRIBES HERE: after hydration (the bootstrap did it, cold),
+        # before anything below creates or wakes children.
+        if getattr(agent, "_message_pump", None) is None:
+            pump = _MessagePump(agent)
+            agent._message_pump = pump
+            pump.start(after=agent.ctx.next_id - 1)
     if rec.get("watch", True) is False:
         return
     if getattr(agent, "_fs_flush_loop", None) is not None:
@@ -1162,11 +1321,23 @@ async def _load_blob(id, payload, agent):
     return {"name": name, "content": None}  # absent → empty (NOT an error)
 
 
+async def flush_pending(agent):
+    """The kernel's shutdown hook (awaited before the teardown walk, provider still
+    alive): land every message minted so far, then stop the pump."""
+    pump = getattr(agent, "_message_pump", None)
+    if pump is not None:
+        await pump.stop()
+        agent._message_pump = None
+
+
 async def on_shutdown(agent):
-    """Final flush + unsubscribe — a graceful shutdown loses nothing."""
+    """Final flush + unsubscribe — a graceful shutdown loses nothing. `flush_pending`
+    normally ran already (the kernel calls it before the walk); a path that skipped
+    it (a bare `Agent.shutdown`) still lands the last window here."""
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.stop()
+    await flush_pending(agent)
 
 
 VERBS = {

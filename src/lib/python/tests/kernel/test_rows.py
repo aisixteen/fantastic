@@ -54,12 +54,18 @@ def test_a_row_id_never_collides_with_a_live_task(root):
 
 def test_bodies_page_and_views_round_trip(root):
     k = root.ctx
-    k.body_put(1, b"0123456789")
-    assert k.body_get(1, 0, 4) == (b"0123", 4, False, 10)
-    assert k.body_get(1, 8, 4) == (b"89", 10, True, 10)
+    pid = k.mint_id()
+    k.body_put("ai", pid, "0123456789")
+    assert k.body_get(pid, 0, 4) == ("0123", 4, False, 10)
+    assert k.body_get(pid, 8, 4) == ("89", 10, True, 10)
     assert k.body_get(999, 0, 4) is None
-    k.view_put("ai", {"v": 1, "ids": [{"id": "x", "res": "full"}]})
-    assert k.view_get("ai")["ids"][0]["id"] == "x" and k.view_get("zz") is None
+    k.view_put("ai", {"v": 1, "ids": [{"id": 7, "res": "full"}]})
+    k.view_put("ai", {"v": 1, "ids": [{"id": 8, "res": "stub"}]})
+    assert k.view_get("ai")["ids"][0]["id"] == 8 and k.view_get("zz") is None
+    kinds = [r["kind"] for r in k.rows_for("ai")]
+    assert kinds == ["body", "view", "view"], (
+        "bodies and views are rows of the one table"
+    )
 
 
 async def test_rows_outlive_delete_agent(root):

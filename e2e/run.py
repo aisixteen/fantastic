@@ -322,8 +322,30 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=()):
     return picked
 
 
-async def run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: dict):
+# LONG TESTS SHARE THE MODEL. On one RTX6000, six long lanes push single turns past the
+# proxy's 180 s limit (measured 2026-09-06/08: 2–3 timeouts per long test at 6 lanes,
+# none at 1–2). A test marked `long: true` in its test.yaml takes one of these two
+# slots FIRST, then a lane; short tests use the lanes freely.
+LONG_LANES = 2
+
+
+async def run_one(
+    t: dict,
+    bk,
+    logdir: Path,
+    sem: asyncio.Semaphore,
+    results: dict,
+    long_sem: "asyncio.Semaphore | None" = None,
+):
     name = f"{t['group']}.{t['id']}"
+    if t.get("long") and long_sem is not None:
+        async with long_sem:
+            await _run_one(t, bk, logdir, sem, results, name)
+    else:
+        await _run_one(t, bk, logdir, sem, results, name)
+
+
+async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: dict, name: str):
     async with sem:
         log = logdir / f"{name}.log"
         # The knobs a test owns, rendered into the env its runner already reads.
@@ -602,11 +624,14 @@ async def main() -> int:
         print(flush=True)
 
     sem = asyncio.Semaphore(a.lanes)
+    long_sem = asyncio.Semaphore(min(LONG_LANES, a.lanes))
     results: dict = {}
     # Written every time a test settles, so a watcher tailing this file sees
     # progress without parsing 14 transcripts.
     began = time.monotonic()
-    await asyncio.gather(*(run_one(t, bk, logdir, sem, results) for t in picked))
+    await asyncio.gather(
+        *(run_one(t, bk, logdir, sem, results, long_sem) for t in picked)
+    )
 
     counts: dict[str, int] = {}
     for r in results.values():

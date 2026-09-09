@@ -11,7 +11,7 @@ from ai_core.core import _grep, _pull, dedupe_stale_reads, drop_answered_reflect
 from ai_core.strategies import get_strategy
 from ai_core.strategies.strip import _stripped
 
-from _fake import FakeCtx as _K  # noqa: E402
+from _fake import FakeCtx  # noqa: E402
 
 BIG = "x" * 3000
 
@@ -20,10 +20,19 @@ _IDS: dict[str, int] = {}
 _NEXT = iter(range(100_000, 10_000_000))
 
 
+class _K(FakeCtx):
+    """A FakeCtx whose mints draw from the SAME allocator as the fixture tags below —
+    one counter, like the kernel's — so a row the product mints (a view, a body)
+    never lands on an id a later fixture row was going to carry."""
+
+    def mint_id(self) -> int:
+        return next(_NEXT)
+
+
 def _id(tag):
     """A fixture TAG ("user:goal", "ai:a0r") as the int id the store holds. One
-    registry for the session: the same tag is the same id in every test, and the
-    range starts far above what a FakeCtx mints (1, 2, …), so nothing collides."""
+    registry for the session: the same tag is the same id in every test, drawn from
+    the allocator `_K` mints from, so nothing collides."""
     if tag is None or isinstance(tag, int):
         return tag
     if tag not in _IDS:

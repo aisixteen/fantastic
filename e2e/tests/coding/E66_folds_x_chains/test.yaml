@@ -6,10 +6,11 @@ title: "four roots sent over time, folds firing across them, a question about an
 runner: probe.py
 runtimes: [python]
 costs: turns
+long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
   max_turns: 100
   no_progress_turns: 8
   turn_chars: 60000
   turn_seconds: 300
-env: {}
+env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model lost every deliverable (2026-09-08)

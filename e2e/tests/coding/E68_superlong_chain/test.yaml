@@ -6,6 +6,7 @@ title: "one chain, 40 reads at a 12k window — it folds its own past in spans a
 runner: probe.py
 runtimes: [python]
 costs: turns
+long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
   max_turns: 120

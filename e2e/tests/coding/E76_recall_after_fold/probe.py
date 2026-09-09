@@ -45,7 +45,7 @@ async def main():
         a = await run_arm(root, core, BK, FB, AID, STRATEGY, EXTRA, task, "report.md")
         want = f"marker: filler_1.txt {marker}"
         print(f"     turns={a['turns']}  folded={a['folded']}  recalls={a['recall_rows']}  greps={a['greps']}  pulls={a['pulls']}  "
-              f"self-replies dehydrated={a['dehydrated_self']}  FOUND={want in a['body']}")
+              f"self-replies dehydrated={a['dehydrated_self']}{(' ' + '; '.join(a.get('dehydrated_self_tags') or [])) if a['dehydrated_self'] else ''}  FOUND={want in a['body']}")
         checks = [
             (f"folds fired ({a['folded']})", a["folded"] >= 1),
             (f"a recall followed the folds ({a['recall_rows']})", a["recall_rows"] >= 1),
