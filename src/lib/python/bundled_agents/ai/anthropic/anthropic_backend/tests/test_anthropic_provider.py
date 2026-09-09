@@ -1,9 +1,9 @@
-"""AnthropicProvider — the two channels it must read, and the tool_use TRANSLATION.
+"""AnthropicProvider — the two channels it must read, and NO native tool route.
 
-Tool-calling in this kernel is RAW: `ai_core` teaches the `<tool_call>` envelope
-in the prompt and owns the only parser. These assert the provider never breaks
-that — including on the OPTIONAL `tool_use` route, whose entire job is to hand
-`ai_core` the SAME text a raw-route model would have written itself.
+Tool-calling in this kernel is RAW: `ai_core` teaches the `<call>` grammar in the
+prompt and owns the only parser. These assert the provider never breaks that: it
+declares no `tools`, and a native `tool_use` block from the endpoint is a loud
+error, never a translation.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ import json
 import httpx
 import pytest
 from ai_core.core import THINK_CLOSE, THINK_OPEN
-from ai_core.tool_parse import extract_tool_calls
-from anthropic_backend.provider import RETRIES, SEND_TOOL, AnthropicProvider
+from anthropic_backend.provider import RETRIES, AnthropicProvider
 
 
 @pytest.fixture(autouse=True)
@@ -119,50 +118,6 @@ async def test_raw_route_sends_no_tools():
     assert "tools" not in sink[0]
 
 
-async def test_tool_use_route_declares_exactly_the_one_send_tool():
-    """One tool, matching what ai_core teaches in prose — never a second contract."""
-    sink: list = []
-    await _drain(_provider(sink, _text("hello"), tool_use=True))
-    assert sink[0]["tools"] == [SEND_TOOL]
-    assert SEND_TOOL["name"] == "send"
-
-
-async def test_tool_use_block_becomes_the_text_envelope_ai_core_parses():
-    """The translation, end to end: a native block goes in, and what comes out is
-    the SAME `<tool_call>` text a raw-route model would have written — so
-    `ai_core`'s one parser handles both routes identically."""
-    sse = _sse(
-        {
-            "type": "content_block_start",
-            "content_block": {"type": "tool_use", "name": "send"},
-        },
-        {
-            "type": "content_block_delta",
-            "delta": {
-                "type": "input_json_delta",
-                "partial_json": '{"target_id": "kernel_state",',
-            },
-        },
-        {
-            "type": "content_block_delta",
-            "delta": {
-                "type": "input_json_delta",
-                "partial_json": ' "payload": {"type": "reflect"}}',
-            },
-        },
-        {"type": "content_block_stop"},
-        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
-    )
-    out = await _drain(_provider([], sse, tool_use=True))
-    calls = extract_tool_calls(out)
-    assert len(calls) == 1
-    assert calls[0]["name"] == "send"
-    assert calls[0]["arguments"] == {
-        "target_id": "kernel_state",
-        "payload": {"type": "reflect"},
-    }
-
-
 async def test_tool_use_stop_reason_without_a_tool_use_block_is_an_anomaly():
     """`stop_reason='tool_use'` over nothing but text means the stream did not
     carry what its stop_reason claims — an error on EITHER route. Measured
@@ -175,16 +130,15 @@ async def test_tool_use_stop_reason_without_a_tool_use_block_is_an_anomaly():
         {"type": "content_block_stop"},
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
     )
-    for flag in (True, False):
-        with pytest.raises(RuntimeError, match=r"blocks=\['text'\]"):
-            await _drain(_provider([], sse, tool_use=flag))
+    with pytest.raises(RuntimeError, match=r"blocks=\['text'\]"):
+        await _drain(_provider([], sse))
 
 
-async def test_tool_use_blocks_are_terminal_even_when_we_declared_no_tools():
-    """The `/cc` route converts the model's native tool syntax server-side and
-    returns `tool_use` blocks with no `tools` key in the request. Measured
-    2026-08-24: gating terminality on our own flag failed such a turn on arrival,
-    killing the run at pass 1. What the stream carried decides."""
+async def test_a_native_tool_use_block_is_a_loud_error_not_a_silent_drop():
+    """The `/cc` route converts a model's native tool syntax server-side and returns
+    `tool_use` blocks with no `tools` key in the request (measured 2026-08-24). Its
+    arguments are JSON this kernel does not read; dropping the block would end the
+    turn looking finished with the call lost, so it raises, naming the grammar."""
     sse = _sse(
         {
             "type": "content_block_start",
@@ -201,28 +155,9 @@ async def test_tool_use_blocks_are_terminal_even_when_we_declared_no_tools():
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
     )
     sink: list = []
-    out = await _drain(_provider(sink, sse))  # tool_use=False — we declare nothing
+    with pytest.raises(RuntimeError, match=r"native tool_use block.*<call name="):
+        await _drain(_provider(sink, sse))
     assert "tools" not in sink[0]
-    assert len(extract_tool_calls(out)) == 1
-
-
-async def test_malformed_tool_args_do_not_crash_the_stream():
-    """A truncated `input_json_delta` yields an empty-argument call, not a
-    traceback — ai_core's malformed-call path can then teach the model."""
-    sse = _sse(
-        {
-            "type": "content_block_start",
-            "content_block": {"type": "tool_use", "name": "send"},
-        },
-        {
-            "type": "content_block_delta",
-            "delta": {"type": "input_json_delta", "partial_json": '{"target_id": "ker'},
-        },
-        {"type": "content_block_stop"},
-        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
-    )
-    calls = extract_tool_calls(await _drain(_provider([], sse, tool_use=True)))
-    assert len(calls) == 1 and calls[0]["arguments"] == {}
 
 
 # ── transport retry ──────────────────────────────────────────────────────────

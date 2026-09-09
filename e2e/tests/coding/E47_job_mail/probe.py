@@ -29,7 +29,7 @@ BK = _resolve_backend()
 RUNNER = "job_runner"
 FB = "mail_fb"
 INTERP = sys.executable
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 
 # A minimal fantastic-aware worker: raw control-fd reader, blocks for ONE inbox
 # frame ([4-byte BE len | kind 'T' | json], op=='inbox'), writes its `token`, exits.
@@ -119,8 +119,8 @@ async def main():
         steered = Path("steered.txt").read_text().strip() if Path("steered.txt").exists() else ""
         checks = [
             ("the worker received the mailed token", steered == token),
-            ("the model started the job", '"start"' in transcript),
-            ("the model sent the steer mail", '"steer"' in transcript),
+            ("the model started the job", '<type>start</type>' in transcript),
+            ("the model sent the steer mail", '<type>steer</type>' in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

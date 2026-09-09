@@ -69,11 +69,6 @@ MAX_TOKENS_FIELD = int(os.environ.get("MAX_TOKENS", "0"))
 # truncation reads as a model failure; `live_dialog.py` already recorded that once.
 IDLE = float(os.environ.get("IDLE", "60" if BACKEND == "anthropic" else "240"))
 SHOW_SYSTEM = os.environ.get("SHOW_SYSTEM") == "1"
-# The `/cc` route: the endpoint parses the model's NATIVE tool syntax and hands
-# back `tool_use` blocks, which anthropic_backend TRANSLATES into the same
-# `<tool_call>` text ai_core parses. Off by default — the raw route is the
-# contract, this is one provider's dialect.
-TOOL_USE = os.environ.get("TOOL_USE") == "1"
 # A CEILING. Without one this harness has no end but IDLE: run 03 reached turn 77
 # and run 04 turn 89, both killed by hand, both re-verifying a posture already set.
 # 0 = no cap.
@@ -394,7 +389,7 @@ async def main():
     print("═" * (W + 4))
     print(
         f"  {MODEL}   ·   plan / change / report"
-        + ("   ·   tool_use route (/cc)" if TOOL_USE else "")
+
     )
     print("  3 sealed file_bridge agents, real contents; descriptions say who may read")
     print("═" * (W + 4))
@@ -594,7 +589,7 @@ async def main():
     print(f"\n  observed — memory documents after the run : {docs[:8]}")
     print(f"  observed — planning language in run : {plan_words}/4 markers")
     print(
-        f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<tool_call>')}"
+        f"  observed — final turn is prose      : {not last_turn.lstrip().startswith('<call ')}"
     )
     print(f"  observed — final turn length        : {len(last_turn)} chars")
     (

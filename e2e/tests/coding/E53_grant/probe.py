@@ -46,7 +46,7 @@ TASK = (
     "reflect the tree to find the agent that says it is the human, and `send` "
     "it an `inquiry`. The answer comes straight back as that call's reply. "
     "After access is granted, retry the write. When "
-    "the file is written, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    "the file is written, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 

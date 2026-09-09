@@ -26,7 +26,7 @@ from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 FB = "cmp_fb"
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 LOREM = ("the quick brown fox jumps over the lazy dog " * 220)
 
 

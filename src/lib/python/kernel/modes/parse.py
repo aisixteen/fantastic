@@ -7,7 +7,11 @@ import shlex
 from typing import Any
 
 
-def _coerce(v: str) -> Any:
+def coerce_scalar(v: str) -> Any:
+    """ONE scalar rule for text a caller typed — the CLI's `k=v` and the model's
+    `<k>v</k>` alike: `true`/`false` → bool, an integer → int, a decimal → float,
+    anything else → the string as written. No JSON, no quoting: a value that has to
+    stay text is text, and a verb that needs a type gets the typed value or refuses."""
     if v.lower() in ("true", "false"):
         return v.lower() == "true"
     try:
@@ -18,6 +22,15 @@ def _coerce(v: str) -> Any:
         return float(v)
     except ValueError:
         pass
+    return v
+
+
+def _coerce(v: str) -> Any:
+    """CLI `k=v`: the shared scalar rule, plus a JSON object/list for the OPERATOR
+    (out of the model↔harness path, which carries no JSON at all)."""
+    typed = coerce_scalar(v)
+    if not isinstance(typed, str):
+        return typed
     if (v.startswith("{") and v.endswith("}")) or (
         v.startswith("[") and v.endswith("]")
     ):

@@ -65,7 +65,7 @@ TASK = (
     '2) in `farewell`, change `"Bye, "` to `"Goodbye, "`.\n'
     "Change NOTHING else. Use the editor's `patch` verb (reflect `editor` for "
     "the shape); do NOT rewrite the whole file with `write`. When the patch "
-    'is applied, end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>.'
+    'is applied, end your run by calling done — emit <call name="done"></call>.'
 )
 
 
@@ -128,16 +128,14 @@ async def main():
         after = Path("hello.py").read_text()
         checks = [
             ("the file is exactly the expected result", after == EXPECTED),
-            ("the PATCH organ was used", '"patch"' in transcript),
+            ("the PATCH organ was used", "<type>patch</type>" in transcript),
             (
                 # dispatched calls only — the model quoting the readme's `write`
                 # example in its thinking is not a rewrite (false XX, 2026-09-09)
                 "no whole-file rewrite",
                 not any(
-                    re.search(r'"type"\s*:\s*"write"', c)
-                    for c in re.findall(
-                        r"<tool_call>(.*?)</tool_call>", transcript, re.DOTALL
-                    )
+                    re.search(r"<type>\s*write\s*</type>", c)
+                    for c in re.findall(r"<call\s+name=(.*?)</call>", transcript, re.DOTALL)
                 ),
             ),
         ]

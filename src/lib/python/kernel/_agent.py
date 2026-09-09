@@ -1459,9 +1459,9 @@ class Agent:
 
     _MORE_HINT = (
         "Distilled: every agent and what it is FOR. Reflect one agent for its verbs "
-        "({type:'reflect'}). Manual: {type:'reflect', readme:'index'} - keys include "
-        "system-verbs (ps/cancel/create_agent args) and self-extension (author your own "
-        "durable tools). {type:'reflect', detail:'full'} adds wiring and posture - ask "
+        "(<type>reflect</type>). Manual: <type>reflect</type> <readme>index</readme> - keys "
+        "include system-verbs (ps/cancel/create_agent args) and self-extension (author your "
+        "own durable tools). <detail>full</detail> on a reflect adds wiring and posture - ask "
         "for it only when you need to see how agents are plumbed, not to find one."
     )
 
@@ -2346,7 +2346,7 @@ class Agent:
 
     _LIST_HINT = (
         "Raw records — how agents are WIRED, not what they are FOR, and no manual. "
-        "{type:'reflect'} on the root is the briefing: each agent's purpose, plus "
+        "<type>reflect</type> on the root is the briefing: each agent's purpose, plus "
         "`self_extension` (how to author your own durable tools in THIS kernel — which "
         "executor, and the fields without which the agent is created and never runs) "
         "and `readmes` (the manual index). Reflect the root before building anything."

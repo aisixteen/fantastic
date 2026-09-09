@@ -298,9 +298,10 @@ async def _reflect(id, payload, kernel):
         "compose": (
             "every content-carrying verb (`write`, `patch`, `append`) takes its "
             "document in `bytes`, and `bytes` is VERBATIM: write the document "
-            "between the quotes exactly as it should land — real newlines, real "
-            "quotes, nothing escaped — then close the call. It is cut out before "
-            "the call's JSON is parsed; no fence, no placeholder"
+            "between `<bytes>` and `</bytes>` exactly as it should land — real "
+            "newlines, real quotes, nothing escaped, no fence — then close the "
+            "call. The document ends at the first `</bytes>`. A patch names its "
+            "edits as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"
         ),
         "verbs": {
             n: (f.__doc__ or "").strip().splitlines()[0] for n, f in VERBS.items()

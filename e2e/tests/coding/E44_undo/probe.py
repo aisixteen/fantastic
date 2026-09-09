@@ -103,8 +103,8 @@ async def main():
         after = Path("config.txt").read_text()
         checks = [
             ("the file ends byte-identical to the original", after == CONFIG),
-            ("the edit actually happened (a patch call)", '"patch"' in transcript),
-            ("the revert used restore", '"restore"' in transcript),
+            ("the edit actually happened (a patch call)", '<type>patch</type>' in transcript),
+            ("the revert used restore", '<type>restore</type>' in transcript),
             ("a checkpoint id crossed the wire", "ckpt_id" in transcript),
         ]
         for name, ok in checks:

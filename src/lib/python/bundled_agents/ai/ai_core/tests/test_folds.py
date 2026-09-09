@@ -68,7 +68,7 @@ def _chain(tag, n_calls, big=True, open_end=False):
         rows.append(
             _row(
                 "assistant",
-                f'read {tag}{i} <tool_call>{{"name":"send","arguments":{{"target_id":"notes","payload":{{"type":"read"}},"title":"read {tag}{i}"}}}}</tool_call>',
+                f'read {tag}{i} <call name="send"><target_id>notes</target_id><title>read {tag}{i}</title><type>read</type></call>',
                 a,
                 prev,
             )
@@ -88,7 +88,7 @@ def _chain(tag, n_calls, big=True, open_end=False):
         rows.append(
             _row(
                 "assistant",
-                'one more <tool_call>{"name":"send","arguments":{"target_id":"notes","payload":{"type":"read"}}}</tool_call>',
+                'one more <call name="send"><target_id>notes</target_id><type>read</type></call>',
                 a,
                 prev,
             )

@@ -281,6 +281,29 @@ def done_calls(rows: list[dict]) -> int:
     return sum(1 for m in rows if m.get("role") == "assistant" and '"name":"done"' in re.sub(r"\s", "", str(m.get("content"))))
 
 
+def after_replies(root, aid: str, n: int = 1):
+    """Readiness for a SECOND ROOT: the agent has received at least `n` delivered
+    replies in its current run, i.e. it is mid-task. A fixed delay was tried
+    (`send_later(…, 45.0)`, 2026-09-08) and raced the model: under the tag grammar
+    the fold arm finished a four-read task in six turns, the chain ended before 45 s,
+    the later send was cancelled, and the second root never existed (two_roots_live,
+    2026-09-09)."""
+
+    async def ready() -> bool:
+        rows = root.ctx.rows_for(aid)
+        return (
+            sum(
+                1
+                for r in rows
+                if r.get("role") == "user"
+                and str(r.get("content") or "").startswith("[reply to ")
+            )
+            >= n
+        )
+
+    return ready
+
+
 def after_tasks(root, aid: str, laters: list):
     """Readiness for a FINAL: every earlier task was DELIVERED and the agent has gone
     quiet (no in-flight task of its own). Polled every few seconds, so it lands well

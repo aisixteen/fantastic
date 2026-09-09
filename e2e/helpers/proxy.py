@@ -44,7 +44,7 @@ def distinct_calls(transcript: list[str]) -> int:
     """
     seen = set()
     for block in re.findall(
-        r"<tool_call>(.*?)</tool_call>", "".join(transcript), re.DOTALL
+        r"<call\s+name=(.*?)</call>", "".join(transcript), re.DOTALL
     ):
         seen.add(" ".join(block.split()))
     return len(seen)

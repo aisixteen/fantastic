@@ -39,7 +39,7 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 FB = "impl_fb"
 N = 8
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 TASK = (
     "Step 1: read `README.md` through the editor `notes` — it describes how this team "
     "works and what deliverables must look like.\n"

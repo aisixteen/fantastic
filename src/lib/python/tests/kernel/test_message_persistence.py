@@ -1,11 +1,10 @@
 """The message store persists through a LOADER PUMP and hydrates COLD — the kernel knows
 neither. One table (bodies and views are rows), a tail (`rows_stream`), a drain, the
-`shutdown_agents` half, and the loader's `messages.jsonl`."""
+`shutdown_agents` half, and the loader's `messages.xml`."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import types
 from pathlib import Path
@@ -14,6 +13,7 @@ import pytest
 
 from kernel import Kernel
 from kernel._kernel import shutdown_context
+from kernel_state import messages_xml
 from kernel_state.tools import (
     _MESSAGES_FILE,
     flush_pending,
@@ -203,7 +203,7 @@ def _lines(root_dir: Path) -> list[dict]:
     p = root_dir / _MESSAGES_FILE
     if not p.exists():
         return []
-    return [json.loads(x) for x in p.read_text().splitlines() if x.strip()]
+    return messages_xml.parse_messages(p.read_text())
 
 
 async def test_read_messages_round_trips_and_sets_the_counter(tmp_path, monkeypatch):
@@ -236,10 +236,7 @@ async def test_read_messages_round_trips_and_sets_the_counter(tmp_path, monkeypa
         },
     ]
     (root / _MESSAGES_FILE).write_text(
-        "\n".join(json.dumps(r) for r in rows)
-        + "\nnot json\n"
-        + json.dumps({"x": 1})
-        + "\n"
+        messages_xml.HEADER + "".join(messages_xml.row_to_xml(r) for r in rows)
     )
     got, nxt = read_messages(root)
     assert [r["id"] for r in got] == [3, 5, 9] and nxt == 10
@@ -341,3 +338,59 @@ async def test_kernel_shutdown_runs_the_flush_hook_before_the_walk(
     assert order[:2] == ["flush", "walk"], order  # on_shutdown re-runs the hook, idle
     assert rid in [r["id"] for r in _lines(Path(".fantastic"))]
     assert root.ctx.draining is True and root.ctx._shutdown_complete is True
+
+
+def test_xml_rows_round_trip_every_shape_and_escape():
+    """The library escapes; a body may hold the log's own tags, `&`, newlines, and a
+    megabyte, and every scalar comes back typed."""
+    rows = [
+        {
+            "id": 1,
+            "agent": "ai",
+            "role": "assistant",
+            "parent": None,
+            "ts": 1.5,
+            "content": "a </content> & </row> <messages> inside\nline 2\n",
+            "title": 'quoted "title" with <tag>',
+        },
+        {"id": 2, "agent": "ai", "kind": "call", "verb": "read", "internal": True},
+        {"id": 3, "agent": "ai", "kind": "fold", "level": 2, "refs": [1, 2]},
+        {
+            "id": 4,
+            "agent": "ai",
+            "kind": "view",
+            "ids": [{"id": 3, "res": "full"}],
+            "budget": 12,
+            "why": "t",
+        },
+        {
+            "id": 5,
+            "agent": "ai",
+            "kind": "body",
+            "parent": 2,
+            "content": "x" * 1_000_000,
+        },
+        {"id": 6, "agent": "ai", "kind": "late", "content": ""},
+    ]
+    text = messages_xml.HEADER + "".join(messages_xml.row_to_xml(r) for r in rows)
+    back = messages_xml.parse_messages(text)
+    want = [{k: v for k, v in r.items() if v is not None} for r in rows]
+    assert back == want
+
+
+def test_a_cut_last_row_is_a_loud_error_not_a_repair():
+    import xml.etree.ElementTree as ET
+
+    good = messages_xml.row_to_xml({"id": 1, "agent": "ai", "content": "ok"})
+    cut = messages_xml.row_to_xml({"id": 2, "agent": "ai", "content": "lost"})[:-12]
+    with pytest.raises(ET.ParseError, match="row 1"):
+        messages_xml.parse_messages(messages_xml.HEADER + good + cut)
+
+
+def test_an_unknown_log_version_refuses(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = Path(".fantastic")
+    root.mkdir()
+    (root / _MESSAGES_FILE).write_text('<messages v="9">\n')
+    with pytest.raises(RuntimeError, match="unknown log version"):
+        read_messages(root)

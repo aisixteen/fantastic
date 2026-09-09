@@ -1,6 +1,6 @@
 """LlamaCppProvider — pure raw-text streaming chat against a local `llama-server`.
 
-Tool-calling is owned by ai_core (it parses `<tool_call>` text out of this
+Tool-calling is owned by ai_core (it parses `<call>` text out of this
 stream). This provider just streams the model's text tokens.
 
 `llama-server` speaks the OpenAI-compatible surface at `<endpoint>/chat/completions`
@@ -82,7 +82,7 @@ class LlamaCppProvider:
 
     async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
         """Stream raw text tokens — NO tools array. ai_core parses any
-        `<tool_call>` envelope out of the text stream."""
+        `<call>` element out of the text stream."""
         client = self._get_client()
         body: dict = {"messages": messages, "stream": True}
         if self._model:

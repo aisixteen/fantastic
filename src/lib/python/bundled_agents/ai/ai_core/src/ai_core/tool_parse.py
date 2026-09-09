@@ -1,759 +1,439 @@
-"""Tool-call parsing — the text shapes a model may use to name a `send`.
+"""Tool-call parsing — the ONE text shape a model uses to name a call.
 
-TWO callers, and the first of them is LIVE (this docstring used to say the
-parser was "retained ONLY for the context-reaction read-model"; the routing work
-of 2026-08-02 made it load-bearing again):
+TWO callers, both live:
 
   - `core._route_reply` — every completion is scanned here, and each call found is
-    dispatched with its reply delivered to its own `reply_to`. This is the path a
-    chain continues on. A shape this module does not recognize is a turn that
-    silently does nothing.
+    dispatched with its reply delivered to its own `reply_to`. A shape this module
+    does not recognize is a turn that silently does nothing — so the unrecognized
+    shape is reported back (`malformed_calls`), never guessed at.
   - `core._derive_reaction` — scans the DURABLE transcript for whether the model
     reacted to a compaction notice (e.g. by emitting a `recall`/persist call).
 
-There is still NO agentic loop and NO native provider tool API: the provider
-streams plain text, this module reads it. Three envelopes are recognized, because
-a model's trained format beats our instruction and refusing a shape costs a whole
-run (each is documented at its own constants below):
+There is NO agentic loop and NO native provider tool API: the provider streams plain
+text, this module reads it. There is also NO JSON anywhere on this path. The grammar
+is tag-delimited, args INLINE:
 
-    <tool_call>{"name":"send","arguments":{…}}</tool_call>     taught (Hermes-style)
-    <invoke name="send"><parameter …>…</parameter></invoke>    Claude's own
-    <|tool_call>call:<name>{…}<tool_call|>                     special-token channel
+    <call name="send">
+    <target_id>notes</target_id>
+    <reply_to>self</reply_to>
+    <type>patch</type>
+    <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
+    <bytes>…verbatim: real newlines, real quotes, ends at the first </bytes>…
+    </bytes>
+    </call>
+
+Why tags and not JSON (measured 2026-09-09, qwen3.8-27b, `tmp/tagprobe.py`, 4 trials ×
+3 shapes that had failed in e2e): JSON with a verbatim `bytes` cut 3/12 correct —
+escaped quotes, literal `\\n`, a `\\"}` inside content ending the value early; bare
+child tags 12/12, zero escapes, nested lists parsed every time. A `"` boundary inside
+JSON fires the model's escaping reflex; a tag boundary carries none. Every harness that
+carries documents in prompt-parsed calls moved them out of JSON quotes (aider text
+blocks, OpenHands/cline per-parameter tags, codex freeform grammar).
+
+Rules (all of them):
+- Envelope `<call name="<tool>">…</call>`. Tools: `send`, `done`, `inquiry_answer`.
+- `send`: `target_id`, `reply_to`, `title`, `timeout`, `retries`, `exec_id` are
+  CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
+  are the arguments.
+- An element with child elements → dict; children all named `<item>` → list;
+  text → scalar typed by the ONE rule shared with the CLI (`kernel.modes.parse.
+  coerce_scalar`: true/false, int, float, else str); an empty element → "".
+- `bytes` is VERBATIM: never trimmed, never inspected, ends at the FIRST `</bytes>`,
+  delivered as utf-8 bytes. While inside `<bytes>` the scanner is in verbatim mode, so
+  a `</call>` in a document does not end the call.
+- Nothing is repaired. A call that does not parse is reported with its fault named and
+  the minimal shape to send; the model fixes it.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import secrets
 
-OPEN = "<tool_call>"
-CLOSE = "</tool_call>"
+from kernel.modes.parse import coerce_scalar
 
-# A SECOND text envelope, because a model's trained format beats our instruction.
-# Claude models routinely emit their own shape instead of the taught one:
-#
-#   <invoke name="send">
-#     <parameter name="arguments">{"target_id":"notes", …, "reply_to":"self"}</parameter>
-#   </invoke>
-#
-# with the arguments perfectly correct — only the wrapper differs. Refusing it dropped
-# whole runs at pass 1 (observed on claude-haiku-4.5), after which the model, never
-# receiving a reply, invented the entire remaining session.
-#
-# This is STILL raw prompt-and-parse: it is plain text the model typed. There is no
-# `tools=[]`, no `tool_choice`, no native `tool_use` block — the provider is untouched
-# and knows nothing. Parsing more text shapes is exactly this layer's job.
-INVOKE_OPEN = "<invoke"
-INVOKE_CLOSE = "</invoke>"
-_INVOKE_NAME = re.compile(r'name\s*=\s*"([^"]*)"')
-_INVOKE_PARAM = re.compile(
-    r'<parameter\s+name\s*=\s*"([^"]*)"\s*>(.*?)</parameter>', re.DOTALL
-)
+OPEN = "<call"
+CLOSE = "</call>"
+BYTES_OPEN = "<bytes>"
+BYTES_CLOSE = "</bytes>"
 
-
-def parse_invoke(block: str) -> dict | None:
-    """Parse one `<invoke name="…">…</invoke>` body into `{id, name, arguments}`."""
-    head, _, body = block.partition(">")
-    m = _INVOKE_NAME.search(head)
-    name = (m.group(1) if m else "") or "send"
-    params = {k: v.strip() for k, v in _INVOKE_PARAM.findall(body)}
-    if not params:
-        return None
-    args: dict = {}
-    blob = params.pop("arguments", None)
-    if blob is not None:
-        try:
-            parsed = json.loads(blob)
-            if isinstance(parsed, dict):
-                args = parsed
-        except (json.JSONDecodeError, ValueError):
-            pass
-    # Remaining `<parameter name="x">` pairs are arguments too (models split them
-    # either way). JSON-decode each value so objects/ints survive; else keep the text.
-    for k, v in params.items():
-        try:
-            args[k] = json.loads(v)
-        except (json.JSONDecodeError, ValueError):
-            args[k] = v
-    if not args:
-        return None
-    return {"id": _mint_id(), "name": str(name), "arguments": args}
+_HEAD = re.compile(r'^\s*name\s*=\s*"([A-Za-z_][\w]*)"\s*>', re.DOTALL)
+# A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and the
+# relative tokens (`$self`, `$parent`, `$children`), and the model writes those as
+# tags (`<$self>*</$self>`, measured 2026-09-09 gated_write, 12 refusals) — so `$`,
+# `-` and `.` are letters here.
+_TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")
+# Call-level fields of a `send`: where it goes, where the answer goes, what it is for,
+# and the kernel's per-item bounds. Everything else in the call is the payload. The
+# kernel item's caller-chosen execution name is `exec_id` HERE (core maps it onto the
+# item's `id`): a bare `<id>` would collide with the many verbs whose payload has an
+# `id` (`delete_agent`, `update_agent`, …) now that arguments are inline.
+_ROUTING = ("target_id", "reply_to", "title", "timeout", "retries", "exec_id")
+# The tools. Any other `name` is refused with the shape — a verb is `<type>`, never
+# the tool name (a compression small models made under the JSON grammar).
+TOOLS = ("send", "done", "inquiry_answer")
 
 
-# A THIRD text envelope, from the SPECIAL-TOKEN family. A `|` inside the brackets
-# marks a token that lives in the tokenizer's VOCABULARY rather than in ordinary
-# text, so the delimiter cannot be forged by the content it wraps — the same idea as
-# ChatML's `<|im_start|>`, Llama-3's `<|eot_id|>` / `<|python_tag|>`, harmony's
-# `<|channel|>`, and DeepSeek's tool-call markers. What distinguishes THIS grammar is
-# that the pipe MIRRORS across the pair — `<|tool_call>` opens, `<tool_call|>` closes
-# — and that strings carry a quoting token of their own, `<|"|>`, instead of `"`:
-#
-#   <|tool_call>call:get_current_weather{location:<|"|>Tokyo, JP<|"|>}<tool_call|>
-#
-# So the argument body is NOT JSON. Keys are bare, strings wear `<|"|>`, and numbers,
-# booleans, lists and nested objects are written bare. `json.loads` over that body
-# succeeds ONLY for the empty `{}` — every call carrying an actual argument parses as
-# malformed and is silently dropped, which is the worst possible failure here.
-#
-# Measured 2026-08-04 on gemma-4-12B-it: it planned correctly in its thought channel,
-# chose the right agent AND verb, emitted
-# `<|tool_call>call:kernel_state.list_agents{}<tool_call|>`, and the run died at pass
-# 1 with zero calls extracted. `<tool_call>` is not a substring of either tag — the
-# pipe breaks the match — so the taught envelope's finder never saw it at all.
-#
-# Two body shapes reach us, because a model compresses our ONE universal tool:
-#   call:send{target_id:<|"|>x<|"|>,payload:{…}}   — our taught tool, in this syntax
-#   call:<target>.<verb>{…}                        — the same thing, compressed
-# The second maps onto `send(target_id=<target>, payload={"type": <verb>, **args})`.
-# `reply_to` has no slot and needs none: it defaults to SELF, so the reply arrives as
-# the next turn, which is what a loop wants.
-#
-# Still raw prompt-and-parse — plain text the model typed. No `tools=[]`, no
-# `tool_choice`, no native tool_use block; the provider is untouched.
-CHANNEL_OPEN = "<|tool_call>"
-CHANNEL_CLOSE = "<tool_call|>"
-CHANNEL_STR = '<|"|>'
-_CHANNEL_HEAD = re.compile(r"\s*call\s*:\s*([^\s{]+)\s*")
-# Sentinel: `None` is a legal VALUE, so it cannot double as the failure signal.
-_BAD = object()
+class _Malformed(Exception):
+    """The block is a call the model MEANT and it does not parse; `str(exc)` is the
+    fault, named for the model."""
 
 
-def _skip_ws(s: str, i: int) -> int:
-    while i < len(s) and s[i].isspace():
-        i += 1
-    return i
-
-
-# The escapes a quoted channel string may carry. Shared by both quote styles so
-# `'a\nb'` and "a\nb" decode identically — a model should not get a different
-# string back for picking a different quote character.
-_ESCAPES = {
-    '"': '"',
-    "'": "'",
-    "\\": "\\",
-    "/": "/",
-    "n": "\n",
-    "r": "\r",
-    "t": "\t",
-    "b": "\b",
-    "f": "\f",
-}
-
-
-def _parse_quoted(s: str, i: int):
-    """(string, next_index) for a `'…'` or "…" value. `-1` means malformed.
-
-    BOTH quote styles, because which one a model reaches for is a property of its
-    training, not of our grammar — the documented gemma grammar uses `<|"|>`, the
-    2026-08-04 run mixed in JSON double quotes, and the 2026-08-06 run emitted
-    `call:kernel_state{type: 'send', target_id: 'kernel', …}` in single quotes. That
-    last one was a fully correct intent and the parser threw it away, which ended
-    the run: the model had nothing left to fix.
-
-    ONLY the matching quote closes. So an opener of one style closed by the other
-    never terminates, runs to the end of the body, and is reported malformed —
-    which is right, because a mismatched pair is a real error and not a shape any
-    model actually means."""
-    q = s[i]
-    out: list[str] = []
-    i += 1
-    while i < len(s):
-        c = s[i]
-        if c == "\\" and i + 1 < len(s):
-            nxt = s[i + 1]
-            if nxt == "u" and i + 5 < len(s):
-                try:
-                    out.append(chr(int(s[i + 2 : i + 6], 16)))
-                    i += 6
-                    continue
-                except ValueError:
-                    pass
-            # An unknown escape keeps both characters rather than guessing: a
-            # Windows path in a program body (`\d`) must survive verbatim.
-            out.append(_ESCAPES.get(nxt, "\\" + nxt))
-            i += 2
-            continue
-        if c == q:
-            return "".join(out), i + 1
-        out.append(c)
-        i += 1
-    return _BAD, -1
-
-
-def _parse_channel_value(s: str, i: int):
-    """(value, next_index). `next_index == -1` means malformed."""
-    i = _skip_ws(s, i)
-    if i >= len(s):
-        return _BAD, -1
-    if s.startswith(CHANNEL_STR, i):
-        j = s.find(CHANNEL_STR, i + len(CHANNEL_STR))
-        if j == -1:
-            return _BAD, -1
-        return s[i + len(CHANNEL_STR) : j], j + len(CHANNEL_STR)
-    if s[i] in "\"'":
-        # MIXED SYNTAX — the envelope is the channel one, the strings are ordinary
-        # quoted text. Measured 2026-08-04: gemma-4-12B-it emitted
-        #   call:kernel_state.update_agent{"id":"assets","ingress_rule":"allow_all_ingress"}
-        # Without this branch the bare-token path returns `"assets"` WITH its quote
-        # characters, `id` never arrives, and the call comes back
-        # `{"error": "update_agent: id required"}` — which is what killed all three
-        # posture changes in that run.
-        return _parse_quoted(s, i)
-    if s[i] == "{":
-        return _parse_channel_object(s, i)
-    if s[i] == "[":
-        out: list = []
-        i = _skip_ws(s, i + 1)
-        if i < len(s) and s[i] == "]":
-            return out, i + 1
-        while True:
-            v, i = _parse_channel_value(s, i)
-            if i == -1:
-                return _BAD, -1
-            out.append(v)
-            i = _skip_ws(s, i)
-            if i < len(s) and s[i] == ",":
-                i += 1
-                continue
-            if i < len(s) and s[i] == "]":
-                return out, i + 1
-            return _BAD, -1
-    # A BARE token, ending at the first structural character.
-    j = i
-    while j < len(s) and s[j] not in ",}]":
-        j += 1
-    raw = s[i:j].strip()
-    if not raw:
-        return _BAD, -1
-    low = raw.lower()
-    if low == "true":
-        return True, j
-    if low == "false":
-        return False, j
-    if low in ("null", "none"):
-        return None, j
-    try:
-        return int(raw), j
-    except ValueError:
-        pass
-    try:
-        return float(raw), j
-    except ValueError:
-        pass
-    return raw, j
-
-
-def _parse_channel_object(s: str, i: int):
-    """(dict, next_index) for a `{k:v,k:v}` body. `next_index == -1` means malformed."""
-    i = _skip_ws(s, i)
-    if i >= len(s) or s[i] != "{":
-        return _BAD, -1
-    i = _skip_ws(s, i + 1)
-    out: dict = {}
-    if i < len(s) and s[i] == "}":
-        return out, i + 1
+def _find_close(text: str, start: int) -> int:
+    """Index of the `</call>` that closes a call whose body starts at `start`,
+    skipping any `</call>` inside a `<bytes>` value; -1 if unterminated."""
+    i = start
     while True:
-        i = _skip_ws(s, i)
-        # Keys are bare in the documented grammar, but a model mixing JSON quotes
-        # them — in EITHER style. Parsed with the same reader as a value so a key
-        # is allowed to contain `:` or `,`; scanning bare to the first structural
-        # character would split such a key in half and lose the rest.
-        if i < len(s) and s[i] in "\"'":
-            key, k = _parse_quoted(s, i)
-            if k == -1:
-                return _BAD, -1
-            k = _skip_ws(s, k)
-        else:
-            k = i
-            while k < len(s) and s[k] not in ":,}":
-                k += 1
-            key = s[i:k].strip()
-        if not key or k >= len(s) or s[k] != ":":
-            return _BAD, -1
-        v, i = _parse_channel_value(s, k + 1)
-        if i == -1:
-            return _BAD, -1
-        out[key] = v
-        i = _skip_ws(s, i)
-        if i < len(s) and s[i] == ",":
-            i += 1
+        c = text.find(CLOSE, i)
+        b = text.find(BYTES_OPEN, i)
+        if b == -1 or (c != -1 and c < b):
+            return c
+        e = text.find(BYTES_CLOSE, b + len(BYTES_OPEN))
+        if e == -1:
+            return -1  # an open document runs to the end: unterminated
+        i = e + len(BYTES_CLOSE)
+
+
+def _elements(body: str) -> list[tuple[str, str]]:
+    """`(name, raw)` for every child element of `body`, in order. Text between
+    elements must be whitespace. `bytes` runs verbatim to its first closer."""
+    out: list[tuple[str, str]] = []
+    pos = 0
+    while True:
+        m = _TAG.search(body, pos)
+        if m is None:
+            tail = body[pos:]
+            break
+        between = body[pos : m.start()]
+        if between.strip():
+            raise _Malformed(
+                f"text outside a tag (`{between.strip()[:40]}`) — every argument "
+                "is its own `<name>…</name>` element"
+            )
+        name = m.group(1)
+        closer = f"</{name}>"
+        if name == "bytes":
+            end = body.find(closer, m.end())
+            if end == -1:
+                raise _Malformed(
+                    "`<bytes>` opened and never closed — close the document with "
+                    "`</bytes>`, then the call with `</call>`"
+                )
+            out.append((name, body[m.end() : end]))
+            pos = end + len(closer)
             continue
-        if i < len(s) and s[i] == "}":
-            return out, i + 1
-        return _BAD, -1
+        end = _matching_close(body, name, m.end())
+        if end == -1:
+            raise _Malformed(f"`<{name}>` opened and never closed with `{closer}`")
+        out.append((name, body[m.end() : end]))
+        pos = end + len(closer)
+    if tail.strip():
+        raise _Malformed(
+            f"text after the last tag (`{tail.strip()[:40]}`) — every argument is "
+            "its own `<name>…</name>` element"
+        )
+    return out
 
 
-def parse_channel_call(block: str) -> dict | None:
-    """Parse one `call:<name>{…}` body into the universal `send` call."""
-    m = _CHANNEL_HEAD.match(block)
+def _matching_close(body: str, name: str, start: int) -> int:
+    """The closer of `<name>` opened just before `start`, honouring nesting of the
+    SAME name and skipping `<bytes>` values inside."""
+    opener, closer = f"<{name}>", f"</{name}>"
+    depth, i = 1, start
+    while depth:
+        c = body.find(closer, i)
+        if c == -1:
+            return -1
+        o = body.find(opener, i)
+        b = body.find(BYTES_OPEN, i)
+        nxt = min(x for x in (c, o, b) if x != -1)
+        if nxt == b:
+            e = body.find(BYTES_CLOSE, b + len(BYTES_OPEN))
+            if e == -1:
+                return -1
+            i = e + len(BYTES_CLOSE)
+        elif nxt == o:
+            depth += 1
+            i = o + len(opener)
+        else:
+            depth -= 1
+            if depth == 0:
+                return c
+            i = c + len(closer)
+    return -1
+
+
+def _value(name: str, raw: str):
+    """One element's value: verbatim bytes, a nested dict/list, or a typed scalar."""
+    if name == "bytes":
+        return raw.encode("utf-8")
+    if _TAG.search(raw) is None or not raw.strip().startswith("<"):
+        return coerce_scalar(raw.strip())
+    kids = _elements(raw)
+    if not kids:
+        return coerce_scalar(raw.strip())
+    names = [k for k, _ in kids]
+    # A LIST is a tag whose children are all `<item>` — one element each, any
+    # count, one element included. The same tag the reply notation renders, so
+    # what the model reads is what it writes (2026-09-09 subai_graph: a reply
+    # showed `<allowed><item>…</item></allowed>`, the model wrote it back, and a
+    # plural/singular rule read the lone child as a one-field object — three
+    # refusals and a JSON-string fallback).
+    if all(k == "item" for k in names):
+        return [_value(k, v) for k, v in kids]
+    out: dict = {}
+    for k, v in kids:
+        if k in out or k == "item":
+            raise _Malformed(
+                f"duplicate `<{k}>` — a list is one tag whose children are all "
+                f"`<item>`: `<{name}><item>…</item><item>…</item></{name}>`"
+            )
+        out[k] = _value(k, v)
+    return out
+
+
+def parse_call(block: str) -> dict | None:
+    """Parse the text between `<call` and `</call>` into `{id, name, arguments}`.
+    Raises `_Malformed` (fault named) for a call-shaped block that does not parse;
+    returns None only for a block that is not a call at all (no `name="…">` head)."""
+    m = _HEAD.match(block)
     if m is None:
-        return None
+        head = block.split(">", 1)[0].strip()
+        if not head.startswith("name="):
+            return None
+        raise _Malformed(
+            'the call head must be exactly `name="<tool>"` — nothing else before `>`'
+        )
     name = m.group(1)
-    args, end = _parse_channel_object(block, m.end())
-    if end == -1 or not isinstance(args, dict):
-        # Malformed args are NOT repaired — a parser that guesses what the model
-        # meant is measuring its own guess. Drop the call; the model gets no reply
-        # and can restate it.
-        return None
-    # THE ARGS DECIDE, not the name. A model that already wrote `target_id` has
-    # written canonical `send` arguments, and any dotted prefix on the name is a
-    # NAMESPACE it added, not a target. Measured 2026-08-04: gemma-4-12B-it emitted
-    #   call:kernel_state.send{"payload":{"type":"reflect"},"target_id":"kernel_state"}
-    # Reading the prefix as the target turned that into
-    # `send(kernel_state, {"type":"send", …})` and came back
-    # `{"error": "kernel_state: unknown type 'send'"}` eight times in one run.
-    if "target_id" in args:
-        if "payload" in args:
-            return {"id": _mint_id(), "name": "send", "arguments": args}
-        # target_id, no payload, but a `type` sitting among the args: the payload is
-        # INLINE — the model flattened one level instead of nesting. Measured
-        # 2026-08-06, gemma-4-12B emitted
-        #   call:kernel_state{type: 'reflect', target_id: 'readings'}
-        # meaning "reflect readings". Before this branch the name was not dotted, so
-        # the verb was looked for only in the name, found nowhere, and a complete
-        # instruction was discarded. `type` beats a dotted verb here for the reason
-        # the block below already gives: THE ARGS DECIDE.
-        if "type" in args:
-            return _inline_send(args["target_id"], args)
-        # target_id but NO payload: the VERB is still in the name and must not be
-        # dropped. Measured 2026-08-04 — `call:kernel_state.reflect{"target_id":
-        # "transcripts"}` means "reflect transcripts". An earlier revision of this
-        # branch returned a send with no payload at all; `_route_reply` dispatched
-        # `None` and the handler raised `'NoneType' object has no attribute 'get'`,
-        # three times in one run.
-        if "." in name:
-            verb = name.partition(".")[2]
-            rest = {k: v for k, v in args.items() if k != "target_id"}
-            return {
-                "id": _mint_id(),
-                "name": "send",
-                "arguments": {
-                    "target_id": args["target_id"],
-                    "payload": {"type": verb, **rest},
-                },
-            }
-        # No payload and no verb anywhere — there is no call here to make.
-        return None
-    if "." in name:
-        target, _, verb = name.partition(".")
-        payload = {"type": verb}
-        payload.update(args)
-        return {
-            "id": _mint_id(),
-            "name": "send",
-            "arguments": {"target_id": target, "payload": payload},
-        }
-    if not args:
-        return None
-    # No target_id and an undotted name, but a `type` among the args: then the NAME
-    # is the agent and the args are its payload — `call:kernel_state{type:'reflect'}`
-    # is `send('kernel_state', {'type':'reflect'})`. Without this the call kept the
-    # agent's name in `name` where nothing reads it, arrived with no `target_id`, and
-    # earned a `no target_id` error for a request that was perfectly clear.
-    if "type" in args:
-        return _inline_send(name, args)
-    return {"id": _mint_id(), "name": name, "arguments": args}
-
-
-def _inline_send(target, args: dict) -> dict | None:
-    """A `send` whose payload was written FLAT among the args.
-
-    `target_id` names the destination and `reply_to` says where the answer goes —
-    both are routing, so they stay at the top level. Everything else is the payload.
-    """
+    if name not in TOOLS:
+        raise _Malformed(
+            f"`{name}` is not a tool — the tools are {', '.join(TOOLS)}. A VERB goes in "
+            f'`<type>`: `<call name="send"><target_id>…</target_id><type>{name}</type></call>`'
+        )
+    body = block[m.end() :]
+    fields: dict = {}
+    for k, v in _elements(body):
+        if k in fields:
+            raise _Malformed(
+                f"duplicate `<{k}>` — a list is one tag whose children are all "
+                f"`<item>`: `<{k}><item>…</item><item>…</item></{k}>`"
+            )
+        fields[k] = _value(k, v)
+    if name != "send":
+        return {"id": _mint_id(), "name": name, "arguments": fields}
+    target = fields.pop("target_id", None)
     if not isinstance(target, str) or not target.strip():
-        return None
-    out: dict = {
-        "target_id": target.strip(),
-        "payload": {
-            k: v for k, v in args.items() if k not in ("target_id", "reply_to")
-        },
-    }
-    if "reply_to" in args:
-        out["reply_to"] = args["reply_to"]
-    return {"id": _mint_id(), "name": "send", "arguments": out}
+        raise _Malformed(
+            "a send names its target: `<target_id>agent id</target_id>` as the first "
+            "child of the call"
+        )
+    args: dict = {"target_id": target.strip()}
+    for key in _ROUTING[1:]:
+        if key in fields:
+            args[key] = fields.pop(key)
+    args["payload"] = fields
+    return {"id": _mint_id(), "name": "send", "arguments": args}
+
+
+def render_call(name: str, arguments: dict | None = None) -> str:
+    """The inverse of `parse_call`: `{name, arguments}` as the ONE grammar's text.
+    `send` arguments are the parser's own shape (`target_id`, `reply_to`?, `title`?,
+    `payload`) and come out inline. A list renders as its outer tag with one child per
+    element named by the outer's singular; `bytes` renders verbatim. Tests build
+    fixtures with this so they cannot drift from the grammar; a renderer is also what
+    anything that SHOWS a call to a human uses."""
+    args = dict(arguments or {})
+    if name == "send":
+        payload = args.pop("payload", None) or {}
+        flat = {k: args[k] for k in _ROUTING if k in args}
+        flat.update(payload)
+        args = flat
+    body = "".join(_render_field(k, v) for k, v in args.items())
+    return f'<call name="{name}">\n{body}</call>'
+
+
+def _render_field(name: str, value) -> str:
+    if name == "bytes" or isinstance(value, bytes):
+        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        return f"<bytes>{text}</bytes>\n"
+    if isinstance(value, dict):
+        inner = "".join(_render_field(k, v) for k, v in value.items())
+        return f"<{name}>{inner}</{name}>\n"
+    if isinstance(value, list):
+        inner = "".join(_render_field("item", v) for v in value)
+        return f"<{name}>{inner}</{name}>\n"
+    if isinstance(value, bool):
+        value = "true" if value else "false"
+    return f"<{name}>{value}</{name}>\n"
+
+
+def render_reply(value) -> str:
+    """A REPLY to the model, in the same tag notation it writes calls in — one
+    notation on the whole model↔harness path, no JSON either way (user, 2026-09-09:
+    "align answers in the same format"). A dict is one `<k>…</k>` per line; a list
+    is its outer tag with one `<item>` per element; text
+    with newlines spans lines verbatim; bytes are decoded utf-8 (replace); `None` is
+    an empty tag. Measured why (2026-09-06 note above `_pull`): a JSON envelope
+    escapes every newline and quote, so the model could not see a read's lines,
+    and (2026-09-09 program_tests) a refusal carrying a JSON-dumped list showed
+    doubled backslashes that cost a run."""
+    if isinstance(value, dict):
+        return "".join(_render_reply_field(k, v) for k, v in value.items()).rstrip("\n")
+    if isinstance(value, list):
+        return _render_reply_field("items", value).rstrip("\n")
+    return _reply_text(value)
+
+
+def _reply_text(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return str(v)
+
+
+def _render_reply_field(name: str, value) -> str:
+    if isinstance(value, dict):
+        inner = "".join(_render_reply_field(k, v) for k, v in value.items())
+        return f"<{name}>\n{inner}</{name}>\n"
+    if isinstance(value, list):
+        if all(isinstance(v, (dict, list)) for v in value):
+            inner = "".join(_render_reply_field("item", v) for v in value)
+            return f"<{name}>\n{inner}</{name}>\n"
+        inner = "".join(f"<item>{_reply_text(v)}</item>\n" for v in value)
+        return f"<{name}>\n{inner}</{name}>\n"
+    text = _reply_text(value)
+    if "\n" in text:
+        return f"<{name}>\n{text}\n</{name}>\n"
+    return f"<{name}>{text}</{name}>\n"
 
 
 def _mint_id() -> str:
     return f"call_{secrets.token_hex(4)}"
 
 
-# ─── `bytes`: THE ONE VERBATIM FIELD, CUT OUT BEFORE PARSING ────────────────
-#
-# A model cannot be asked to JSON-escape a document (2026-08-31: a diligently
-# escaped program lost the call to one escaped closing quote) nor to remember a
-# second grammar for it (2026-09-08: the fenced `@body` form, forgotten one time
-# in three, then repeated unfenced while saying "let me add the fence"). So the
-# contract is one call and one rule: a field named `bytes` is VERBATIM. The model
-# writes the text between the quotes exactly as it should land — real newlines,
-# real quotes, nothing escaped — and the harness CUTS it out before it parses the
-# rest. Position does not matter: the value ends at the closing quote after which
-# the remainder of the call is strict JSON, so fields after `bytes` are part of
-# what must parse and cannot be swallowed. Nothing inside the value is inspected
-# or changed. No candidate parses ⇒ the call is malformed, refused with the shape
-# to send (`malformed_calls`) — never repaired.
-_BYTES_KEY = re.compile(r'"bytes"\s*:\s*"')
-
-
-_BYTES_END = re.compile(r'"\s*[,}\]]')
-
-
-def _cut_bytes(inner: str) -> tuple[str, list[str]] | None:
-    """(skeleton, values) — the call with `"bytes":null` in place of EVERY `bytes`
-    value (a `patch` carries one per edit), and the values verbatim, in order. A
-    value ends at the first quote that is followed by a JSON delimiter (`,` `}` `]`),
-    i.e. where the call resumes; nothing inside is inspected or changed. The one
-    text that cannot ride is one containing a quote immediately followed by such a
-    delimiter — then the skeleton does not parse and the call is refused, with the
-    rule named, never repaired. None ⇒ no `bytes` field or no cut."""
-    out: list[str] = []
-    pos = 0
-    skeleton = ""
-    while True:
-        m = _BYTES_KEY.search(inner, pos)
-        if m is None:
-            skeleton += inner[pos:]
-            break
-        start = m.end()
-        e = _BYTES_END.search(inner, start)
-        if e is None:
-            return None
-        out.append(inner[start : e.start()])
-        skeleton += inner[pos : m.start()] + '"bytes":null'
-        pos = e.start() + 1  # keep the delimiter, drop the closing quote
-    if not out:
-        return None
-    return skeleton, out
-
-
-def _plant_bytes(node, values: list[bytes]) -> None:
-    """Put the cut values (as bytes) where each `"bytes":null` sits, in order."""
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if k == "bytes" and v is None and values:
-                node[k] = values.pop(0)
-            else:
-                _plant_bytes(v, values)
-    elif isinstance(node, list):
-        for v in node:
-            _plant_bytes(v, values)
-
-
-def parse_one(inner: str) -> dict | None:
-    """Parse the JSON between one tag pair into `{id, name, arguments}`.
-
-    Lenient (tiny models drift): accepts `{"name","arguments"}`, a `tool` alias for
-    `name`, a flattened object (remaining keys become arguments), and double-encoded
-    (stringified) arguments. Returns None on unparseable JSON.
-    """
-    # `bytes` FIRST, on the unstripped block: the one verbatim field is cut out
-    # and the remainder is parsed like any call (see `_cut_bytes`).
-    if _BYTES_KEY.search(inner) is not None:
-        cut = _cut_bytes(inner)
-        if cut is None:
-            return None
-        skeleton, values = cut
-        # STRICT here: the lenient paths below (trailing junk after a complete
-        # object) would let a value cut short by a `"}` inside the text dispatch
-        # as a truncated document. A cut skeleton parses whole or the call is
-        # refused with the rule named.
-        try:
-            json.loads(skeleton.strip())
-        except (json.JSONDecodeError, ValueError):
-            return None
-        call = parse_one(skeleton)
-        if call is None:
-            return None
-        pending = [v.encode("utf-8") for v in values]
-        _plant_bytes(call.get("arguments"), pending)
-        if pending:
-            return None  # a value with no field to land in: not this call's shape
-        return call
-    inner = inner.strip()
-    try:
-        obj = json.loads(inner)
-        rest = ""
-    except (json.JSONDecodeError, ValueError):
-        # Trailing junk after a COMPLETE object — observed live from
-        # gpt-oss:120b, which closes `arguments` early and then emits
-        # `,"reply_to":"self"}}` (one brace too many). `raw_decode` takes the
-        # object that IS there; the remainder is scanned below rather than
-        # thrown away, because the model's real intent is usually in it.
-        try:
-            obj, end = json.JSONDecoder().raw_decode(inner)
-            rest = inner[end:]
-        except (json.JSONDecodeError, ValueError):
-            return None
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name") or obj.get("tool") or "send"
-    args = obj.get("arguments")
-    if args is None:
-        args = {k: v for k, v in obj.items() if k not in ("name", "tool", "arguments")}
-    elif isinstance(args, dict):
-        # Top-level keys that belong INSIDE arguments. Models routinely put
-        # `reply_to` one level too high; `arguments` wins on conflict.
-        strays = {
-            k: v for k, v in obj.items() if k not in ("name", "tool", "arguments")
-        }
-        if rest:
-            # `,"reply_to":"self"}}` → recover the k/v pairs the stray tail held.
-            try:
-                tail = json.loads("{" + rest.strip().lstrip(",").rstrip("}") + "}")
-                if isinstance(tail, dict):
-                    strays.update(tail)
-            except (json.JSONDecodeError, ValueError):
-                pass
-        args = {**strays, **args}
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except (json.JSONDecodeError, ValueError):
-            args = {}
-    if not isinstance(args, dict):
-        args = {}
-    name = str(name)
-    # THE VERB IN THE TOOL NAME. `send` is the only tool there is, so a model that
-    # writes any other name has compressed verb and tool into one — the same
-    # compression `parse_channel_call` already handles for `call:<agent>.<verb>`,
-    # arriving here in the JSON envelope instead. Measured 2026-08-06, gemma-4-12B:
-    #   {"name":"reflect","arguments":{"target_id":"clock"}}
-    # meaning "reflect the clock". Untranslated, `_route_reply` read `payload` as
-    # absent and dispatched `send("clock", None)`, so the handler was called with
-    # None and raised `'NoneType' object has no attribute 'get'` — three times in
-    # the run this was found in. An explicit `type` in the args still wins, since
-    # the args decide.
-    if name != "send" and "payload" not in args and "target_id" in args:
-        inline = _inline_send(args["target_id"], {"type": name, **args})
-        if inline is not None:
-            return inline
-    return {"id": _mint_id(), "name": name, "arguments": args}
-
-
-def _scan(text: str) -> list[tuple[str, str, dict | None, bool]]:
-    """Every envelope found, in document order, as
-    `(envelope, block, call|None, terminated)`.
-
-    A `None` call means an envelope WAS opened and its body did not parse. The
-    scanner keeps those instead of dropping them so a caller can tell the two
-    outcomes apart — see `malformed_calls`. `terminated` says whether the closing
-    tag was present, which is what separates a real attempt from a model merely
-    MENTIONING the tag in prose. Splitting the scan out of `extract_tool_calls`
-    keeps ONE implementation of the envelope precedence rules; two copies would
-    drift the moment a fourth envelope arrives."""
-    out: list[tuple[str, str, dict | None, bool]] = []
+def _envelopes(text: str):
+    """Yield `(start, body_start, end)` for every `<call …>` envelope in document
+    order — `end` is the index of its `</call>` or -1 when unterminated (the last
+    thing in the completion). `<call` must be followed by whitespace, so `<caller>`
+    is not an envelope; a `</call>` inside a `<bytes>` value does not close."""
     i = 0
     while i < len(text):
-        # Whichever envelope comes first, in document order. Channel before invoke
-        # before taught on a tie, preserving the original precedence.
-        found = [
-            (pos, opener)
-            for pos, opener in (
-                (text.find(CHANNEL_OPEN, i), CHANNEL_OPEN),
-                (text.find(INVOKE_OPEN, i), INVOKE_OPEN),
-                (text.find(OPEN, i), OPEN),
-            )
-            if pos != -1
-        ]
-        if not found:
-            break
-        pos, opener = min(found, key=lambda f: f[0])
-        closer, parser = _ENVELOPES[opener]
-        end = text.find(closer, pos + len(opener))
-        # UNTERMINATED (`end == -1`) is not a truncation guess: the envelope is the
-        # LAST thing in the completion, so there is nothing after it to misread.
-        # Observed live from nvidia/nemotron-3-ultra-550b, which emits a complete,
-        # valid call object and simply stops without the closing tag. Dropping it
-        # loses an unambiguous instruction.
-        block = text[pos + len(opener) : end if end != -1 else len(text)]
-        call = parser(block)
-        if call is None and not _looks_like_an_attempt(opener, block):
-            # A MENTION, not a call — the model wrote the tag inside a sentence.
-            # Step over the OPENER ONLY. Consuming through `closer` would swallow
-            # whatever follows, and what follows is often the real call: a stray
-            # opener in prose pairs with the closing tag of the genuine call
-            # further down, and the genuine call is then never seen. That silently
-            # cost real instructions long before malformed reporting existed.
-            i = pos + len(opener)
+        pos = text.find(OPEN, i)
+        if pos == -1:
+            return
+        after = pos + len(OPEN)
+        # An envelope is `<call` + whitespace + `name=…`. Anything else (`<caller>`,
+        # "a <call soon") is prose: step over the OPENER ONLY, so a mention never
+        # swallows the real call that follows it.
+        if (
+            after >= len(text)
+            or not text[after].isspace()
+            or not text[after:].lstrip().startswith("name")
+        ):
+            i = after
             continue
-        out.append((opener, block, call, end != -1))
+        end = _find_close(text, after)
+        yield pos, after, end
+        if end == -1:
+            return
+        i = end + len(CLOSE)
+
+
+def call_spans(text: str) -> list[str]:
+    """Every COMPLETE call envelope in `text`, verbatim, in source order — what a
+    history writer keeps out of a dropped thought span (an action taken is not
+    reasoning). An unterminated opener is not kept: dispatch could not parse it."""
+    out: list[str] = []
+    for pos, after, end in _envelopes(text):
         if end == -1:
             break
-        i = end + len(closer)
+        block = text[after:end]
+        try:
+            call = parse_call(block)
+        except _Malformed:
+            call = None
+        if call is not None:
+            out.append(text[pos : end + len(CLOSE)])
+    return out
+
+
+def _scan(text: str) -> list[tuple[str, dict | None, str | None, bool]]:
+    """Every envelope found, in document order, as
+    `(block, call|None, fault|None, terminated)`.
+
+    A `None` call with a fault means an envelope WAS opened as a call and its body did
+    not parse — kept, so `malformed_calls` can say so. A `None` call without a fault
+    is the model MENTIONING `<call` in prose (not call-shaped): stepped over, so a
+    stray mention never swallows the real call after it."""
+    out: list[tuple[str, dict | None, str | None, bool]] = []
+    for _pos, after, end in _envelopes(text):
+        # UNTERMINATED (`end == -1`) is not a truncation guess: the envelope is the
+        # LAST thing in the completion, so there is nothing after it to misread.
+        block = text[after : end if end != -1 else len(text)]
+        try:
+            call = parse_call(block)
+            fault = None
+        except _Malformed as exc:
+            call, fault = None, str(exc)
+        if call is None and fault is None:
+            continue
+        out.append((block, call, fault, end != -1))
     return out
 
 
 def extract_tool_calls(text: str) -> list[dict]:
-    """Non-streaming: pull every finalized `<tool_call>` out of a complete string.
-    Used by the durable-history reader (`core._derive_reaction`)."""
-    return [call for _, _, call, _t in _scan(text) if call is not None]
+    """Non-streaming: pull every finalized `<call>` out of a complete string."""
+    return [call for _, call, _f, _t in _scan(text) if call is not None]
 
 
-# The advice appended to a malformed-envelope error. Carrying a program inside a
-# JSON string is THE failure mode measured on gemma-4-12B (2026-08-06). Note what
-# it actually got wrong, because it is the reverse of the obvious guess: the body
-# was escaped CORRECTLY throughout, and the closing quote of the `code` value was
-# simply never written —
-#
-#   …"code":"def update_totals():\n … return f\"…to {worker_res}\"}}
-#                ^ opens here                                    ^ still open
-#
-# so every following brace was read as string content and the object ended
-# unterminated. A model that escapes diligently can still lose the whole call by
-# escaping the ONE quote that was supposed to close the value. Naming the rule is
-# cheaper than letting it rediscover it, and this is advice, not a repair: we do
-# not re-quote the body and retry.
-_JSON_HINT = (
-    "Your text broke the call's JSON. Do NOT escape it: put the text in a field "
-    "named `bytes` — it is VERBATIM, cut out before parsing. Write it between the "
-    "quotes exactly as it should land (real newlines, real quotes), then close the "
-    "call: "
-    '{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"write","path":"<p>","bytes":"<text>"}}}'
+# The shape appended to every refusal: literal, minimal, copyable. Advice, not a
+# repair — the block is never re-parsed leniently.
+_HINT = (
+    'The shape: <call name="send">\n<target_id>agent id</target_id>\n'
+    "<type>verb</type>\n<path>a.md</path>\n<bytes>document, verbatim, to the first "
+    "</bytes>\n</bytes>\n</call> — one child tag per argument, a list is one tag "
+    "whose children are all <item>, nothing is escaped."
 )
-
-# The `<|tool_call>` body is NOT JSON, so the advice above would be actively
-# misleading there — it was, on 2026-08-06, when a single-quoted channel call was
-# answered with a lecture about escaping JSON. Advice has to match the grammar the
-# model actually used, or it teaches the wrong lesson.
-_CHANNEL_HINT = (
-    "The `<|tool_call>` body is NOT JSON: write it as "
-    "`call:<agent>{key: value, …}`. Strings may use ' or \" as long as the "
-    "SAME character closes them, and every { [ ( must be closed too."
-)
-
-_HINTS = {OPEN: _JSON_HINT, CHANNEL_OPEN: _CHANNEL_HINT, INVOKE_OPEN: _JSON_HINT}
-
-
-# opener -> (closer, body parser). One table, so the scanner has no per-envelope
-# branches to keep in step and a fourth envelope is one entry.
-_ENVELOPES = {
-    OPEN: (CLOSE, parse_one),
-    INVOKE_OPEN: (INVOKE_CLOSE, parse_invoke),
-    CHANNEL_OPEN: (CHANNEL_CLOSE, parse_channel_call),
-}
 
 
 def _defang(text: str) -> str:
     """Neutralize envelope delimiters so quoted text cannot re-arm the scanner.
 
     Anything we echo back becomes conversation the model reads, quotes and reasons
-    about — and a quoted `<tool_call>` is indistinguishable from an emitted one.
-    Measured 2026-08-06: echoing a block verbatim made this error self-amplifying,
-    each report seeding the next. Breaking the opener is enough; the text stays
-    perfectly legible, which is the point of showing it at all."""
-    for tag in (OPEN, CLOSE, CHANNEL_OPEN, CHANNEL_CLOSE, INVOKE_OPEN, INVOKE_CLOSE):
+    about — and a quoted `<call` is indistinguishable from an emitted one. Measured
+    2026-08-06 (on the JSON envelope): echoing a block verbatim made this error
+    self-amplifying, each report seeding the next. Breaking the opener is enough."""
+    for tag in (OPEN, CLOSE, BYTES_OPEN, BYTES_CLOSE):
         text = text.replace(tag, tag.replace("<", "‹").replace(">", "›"))
     return text
 
 
-def _looks_like_an_attempt(envelope: str, block: str) -> bool:
-    """Did the model MEAN this opener as a call? Only asked of UNTERMINATED
-    blocks, where the tag may just be a word in a sentence."""
-    body = block.strip()
-    if envelope == CHANNEL_OPEN:
-        return bool(_CHANNEL_HEAD.match(body))
-    if envelope == INVOKE_OPEN:
-        return body.startswith("name=") or "<parameter" in body
-    return body.startswith("{")
-
-
 def malformed_calls(text: str) -> list[dict]:
-    """Envelopes that opened and did not parse, as `{envelope, reason, excerpt}`.
+    """Envelopes that opened as a call and did not parse, as
+    `{error, envelope, your_block}`.
 
     Exists because a call that cannot be read is the one failure a model cannot
-    debug: `extract_tool_calls` returns `[]` for it, which is byte-identical to
-    a turn that emitted no call at all — and that means "done". Measured on
-    gemma-4-12B (2026-08-06): its last pass left the `code` string unclosed,
-    nothing parsed, nothing dispatched, no error came back, and the run ended
-    looking finished with the task untouched. Five earlier `no target_id` errors
-    had TAUGHT it — it self-corrected out loud — so the fix is not a better
-    parser, it is giving this failure the same voice the others already have."""
+    debug: `extract_tool_calls` returns `[]` for it, which is byte-identical to a
+    turn that emitted no call at all — and that means "done". Measured on
+    gemma-4-12B (2026-08-06): nothing parsed, nothing dispatched, no error came back,
+    and the run ended looking finished with the task untouched. Earlier errors HAD
+    taught it — it self-corrected out loud — so the fix is not a better parser, it
+    is giving this failure the same voice the others already have."""
     out: list[dict] = []
-    for envelope, block, call, terminated in _scan(text):
+    for block, call, fault, _terminated in _scan(text):
         if call is not None:
             continue
-        if not _looks_like_an_attempt(envelope, block):
-            # An opener whose body is not call-shaped is the model TALKING about the
-            # envelope, not using it. Reporting those cost gemma-4-12B a turn on
-            # 2026-08-06: it wrote the tag inside a sentence and got an error about
-            # JSON.
-            #
-            # `terminated` is NOT the test, though the first version of this guard
-            # used it. A stray opener in prose plus the closing tag of a REAL call
-            # further down the completion makes a "terminated" block out of a
-            # sentence, so requiring the closer let prose through — and then the
-            # loop closed: this error echoes `your_block`, the model quotes the
-            # error while reasoning about it, its quotation contains the tag, and
-            # the next scan finds a fresh opener. Three of run 4's errors were that
-            # loop feeding itself, not the model. Shape decides, always.
-            continue
-        reason = "the body did not parse"
-        if envelope == OPEN:
-            stripped = block.strip()
-            # Diagnose the grammar the model ACTUALLY used — the strict-JSON
-            # error for a raw/fenced attempt sends it debugging the wrong thing
-            # (measured 2026-09-01: a raw-form call one brace short was told
-            # "Invalid control character", reasoned about newlines for four
-            # turns, and the write never landed).
-            if _BYTES_KEY.search(stripped) is not None:
-                # Two distinct faults, named apart (measured 2026-09-09: a call
-                # one brace short was told "could not be cut" and spent its next
-                # turn reasoning about the cut rule instead of counting braces).
-                cut = _cut_bytes(stripped)
-                skeleton_error = None
-                if cut is not None:
-                    try:
-                        json.loads(cut[0])
-                    except ValueError as e:
-                        skeleton_error = str(e)
-                if skeleton_error is not None:
-                    reason = (
-                        "the JSON AROUND the `bytes` value does not parse: "
-                        f"{skeleton_error} (positions are with the value replaced "
-                        "by `null`). A `bytes` value is verbatim and ENDS at the "
-                        "first quote followed by a JSON delimiter (`,` `}` `]`), so "
-                        "either the call is short a closing brace after the value "
-                        '(`"}}}` closes payload, arguments and the call) or the text '
-                        "holds a quote immediately followed by such a delimiter, "
-                        "which ended the value early. Never escape the text"
-                    )
-                else:
-                    reason = (
-                        "the `bytes` value could not be cut. A `bytes` value is "
-                        "verbatim and ENDS at the first quote followed by a JSON "
-                        'delimiter (`,` `}` `]`) — so close it with `"` and go '
-                        "straight on with `,` or `}`; a quote immediately followed "
-                        "by such a delimiter INSIDE the text ends it early. Never "
-                        "escape the text; close the call after it"
-                    )
-            else:
-                try:
-                    json.loads(stripped)
-                except (json.JSONDecodeError, ValueError) as exc:
-                    reason = f"invalid JSON — {exc}"
         out.append(
             {
-                # The whole reply body, composed HERE so the wording has one
-                # owner. `core` delivers this verbatim; it does not assemble a
-                # second version of the same sentence.
-                "error": (
-                    f"tool_call NOT dispatched: {reason}. Nothing ran. "
-                    + _HINTS[envelope]
-                ),
-                "envelope": envelope,
-                # BOTH ENDS, never just the head. A flat 400-char cap hid the
-                # fault: the break in a long payload is almost never in the first
-                # 400 — an unterminated string or a bad escape sits at the END. A
-                # `create_agent` carrying 1.5k of `code` showed the model a prefix
-                # that looked fine, so it could not see what to fix and re-sent the
-                # same broken envelope. Measured 2026-08-24 (`live_build`): three
-                # identical unparseable retries, run ended by the tripwire with the
-                # artifact built but never run.
-                #
-                # NO CAP AT ALL now — the block is shown WHOLE (pinned by
-                # `test_the_broken_block_is_shown_whole`, 40k). DEFANGED so quoting
-                # it cannot arm the scanner again.
+                # The whole reply body, composed HERE so the wording has one owner.
+                "error": f"call NOT dispatched: {fault}. Nothing ran. " + _HINT,
+                "envelope": OPEN,
+                # BOTH ENDS, never just the head — the fault in a long block is
+                # almost never in the first 400 chars. Shown WHOLE, DEFANGED so
+                # quoting it cannot arm the scanner again.
                 "your_block": _defang(block.strip()),
             }
         )

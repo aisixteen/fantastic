@@ -2,7 +2,7 @@
 
 After ONE provider pass the output is routed. Two paths, and the FIRST is the model's:
 
-  its own `<tool_call>`  — names a target, a payload and `reply_to`. The call is
+  its own `<call>`  — names a target, a verb and `reply_to`. The call is
     dispatched (exactly one per pass, never a loop) and its REPLY is delivered to
     `reply_to`. `reply_to:'self'` is what makes a chain, one step at a time.
     NO CALL ENDS THE TURN — stop is the default, so a one-pass task costs one pass.
@@ -18,10 +18,9 @@ on a lock its own caller holds. `test_self_chain_does_not_deadlock` is that regr
 from __future__ import annotations
 
 import asyncio
-import json
 
 import ollama_backend.tools as ot
-from ai_core.tool_parse import extract_tool_calls
+from ai_core.tool_parse import extract_tool_calls, render_call
 
 
 def _call(target: str, payload: dict, reply_to: str | None = "self") -> str:
@@ -29,9 +28,7 @@ def _call(target: str, payload: dict, reply_to: str | None = "self") -> str:
     args: dict = {"target_id": target, "payload": payload}
     if reply_to is not None:
         args["reply_to"] = reply_to
-    return (
-        "<tool_call>" + json.dumps({"name": "send", "arguments": args}) + "</tool_call>"
-    )
+    return render_call("send", args)
 
 
 class _FakeProvider:
@@ -117,11 +114,12 @@ async def _until_calls(fp, n: int, timeout: float = 5.0) -> bool:
 # ─── stop is the default ────────────────────────────────────────
 
 
-async def test_no_call_means_one_pass(seeded_kernel, store_agent):
-    """THE point of model-owned routing: a one-pass task costs ONE pass. No
-    `<tool_call>` means the model is finished — nothing schedules another turn."""
+async def test_done_means_one_pass(seeded_kernel, store_agent):
+    """THE point of model-owned routing: a one-pass task costs ONE pass. A turn
+    that answers and calls `done` is finished — nothing schedules another turn.
+    (A turn with NO call is nudged: all is tool calls, 2026-09-09.)"""
     oid = await _make_ollama(seeded_kernel)
-    fp = _FakeProvider([["the answer"], ["must never run"]])
+    fp = _FakeProvider([['the answer <call name="done"></call>'], ["must never run"]])
     ot._providers[oid] = fp
     try:
         r = (
@@ -129,9 +127,9 @@ async def test_no_call_means_one_pass(seeded_kernel, store_agent):
                 [{"target": oid, "payload": {"type": "send", "text": "hi"}}]
             )
         )[0]["result"]
-        assert r["final"] == "the answer"
+        assert "the answer" in r["final"]
         await asyncio.sleep(0.3)
-        assert fp.calls == 1, f"no call must end the turn, got {fp.calls} passes"
+        assert fp.calls == 1, f"done must end the turn, got {fp.calls} passes"
     finally:
         ot._providers.pop(oid, None)
 
@@ -151,7 +149,7 @@ async def test_model_call_is_dispatched_and_the_result_returns(
     fp = _FakeProvider(
         [
             [_call("kernel_state", {"type": "list_agents"})],
-            ['done looking <tool_call>{"name":"done"}</tool_call>'],
+            ['done looking <call name="done"></call>'],
         ]
     )
     ot._providers[oid] = fp
@@ -183,7 +181,7 @@ async def test_self_chain_does_not_deadlock(seeded_kernel, store_agent):
             [_call("kernel_state", {"type": "list_agents"})],
             [_call("kernel_state", {"type": "list_agents"})],
             # the chain ends EXPLICITLY — prose alone would draw the nudge now
-            ['enough <tool_call>{"name":"done"}</tool_call>'],
+            ['enough <call name="done"></call>'],
         ]
     )
     ot._providers[oid] = fp
@@ -275,9 +273,9 @@ async def test_failed_call_comes_back_to_the_model(seeded_kernel, store_agent):
 
 
 async def test_malformed_call_is_reported_not_swallowed(seeded_kernel, store_agent):
-    """A `<tool_call>` with no target tells the model so, instead of vanishing."""
+    """A `<call>` with no target tells the model so, instead of vanishing."""
     oid = await _make_ollama(seeded_kernel)
-    bad = '<tool_call>{"name":"send","arguments":{"reply_to":"self"}}</tool_call>'
+    bad = '<call name="send"><reply_to>self</reply_to><type>read</type></call>'
     fp = _FakeProvider([[bad], ["ok"]])
     ot._providers[oid] = fp
     try:
@@ -287,7 +285,7 @@ async def test_malformed_call_is_reported_not_swallowed(seeded_kernel, store_age
             )
         )[0]["result"]
         assert await _until_calls(fp, 2), "malformed call was swallowed"
-        assert "no target_id" in str(fp.requests[1])
+        assert "a send names its target" in str(fp.requests[1])
     finally:
         ot._providers.pop(oid, None)
 
@@ -298,7 +296,7 @@ async def test_a_send_with_no_payload_names_what_is_missing(seeded_kernel, store
     internals, naming neither the omitted verb nor the agent. It must say what was
     missing instead, and must never dispatch."""
     oid = await _make_ollama(seeded_kernel)
-    bad = '<tool_call>{"name":"send","arguments":{"target_id":"totals"}}</tool_call>'
+    bad = '<call name="send"><target_id>totals</target_id></call>'
     fp = _FakeProvider([[bad], ["ok"]])
     ot._providers[oid] = fp
     try:
@@ -324,8 +322,8 @@ async def test_an_unparseable_call_reaches_the_model_as_an_error(
     run went on believing its agent existed."""
     oid = await _make_ollama(seeded_kernel)
     broken = (
-        '<tool_call>{"name":"send","arguments":{"target_id":"kernel","payload":'
-        '{"type":"create_agent","code":"x = \\"unclosed}}</tool_call>'
+        '<call name="send"><target_id>kernel</target_id><type>create_agent</type>'
+        '<bytes>x = "unclosed</call>'
     )
     fp = _FakeProvider([[broken], ["ok"]])
     ot._providers[oid] = fp
@@ -343,12 +341,10 @@ async def test_an_unparseable_call_reaches_the_model_as_an_error(
 
 
 async def test_a_verb_named_tool_reaches_the_agent(seeded_kernel, store_agent):
-    """The other half of the same fix: `{"name":"reflect","arguments":{"target_id":…}}`
-    is a real instruction and must DISPATCH, not earn an error."""
+    """`<call name="reflect">` compresses the verb into the tool name. Under the one
+    grammar that is REFUSED with the shape (a verb is `<type>`), never guessed."""
     oid = await _make_ollama(seeded_kernel)
-    call = (
-        '<tool_call>{"name":"reflect","arguments":{"target_id":"totals"}}</tool_call>'
-    )
+    call = '<call name="reflect"><target_id>totals</target_id></call>'
     fp = _FakeProvider([[call], ["ok"]])
     ot._providers[oid] = fp
     try:
@@ -359,8 +355,9 @@ async def test_a_verb_named_tool_reaches_the_agent(seeded_kernel, store_agent):
         )[0]["result"]
         assert await _until_calls(fp, 2), "the reflect never came back"
         turn2 = str(fp.requests[1])
-        assert "· totals reflect · ↑" in turn2, turn2[-300:]
-        assert "no payload" not in turn2 and "NoneType" not in turn2
+        assert "is not a tool" in turn2 and "<type>reflect</type>" in turn2, turn2[
+            -400:
+        ]
     finally:
         ot._providers.pop(oid, None)
 
@@ -373,8 +370,12 @@ async def test_caller_send_to_hands_off_once(seeded_kernel, store_agent):
     a caller cannot spend the model's turns for it."""
     b = await _make_ollama(seeded_kernel)
     a = await _make_ollama(seeded_kernel, grants={b: ["send"]})
-    fa = _FakeProvider([["the answer from a"], ["a must not run again"]])
-    fb = _FakeProvider([["b replied"], ["b must not run again"]])
+    fa = _FakeProvider(
+        [['the answer from a <call name="done"></call>'], ["a must not run again"]]
+    )
+    fb = _FakeProvider(
+        [['b replied <call name="done"></call>'], ["b must not run again"]]
+    )
     ot._providers[a] = fa
     ot._providers[b] = fb
     try:
@@ -460,7 +461,7 @@ async def test_prompt_states_the_mechanism_not_a_strategy(seeded_kernel, store_a
     # the mechanism IS stated
     assert "reply_to" in sys_block
     assert "reflect" in sys_block
-    assert "<tool_call>" in sys_block
+    assert "<call name=" in sys_block
 
     banned = [
         "loop",
@@ -560,7 +561,7 @@ async def test_thinking_is_parsed_but_not_persisted(seeded_kernel, store_agent):
     # …and PERSIST does not keep it.
     kept = without_thinking(raw)
     assert "Let me work out" not in kept
-    assert "<tool_call>" in kept and "on it" in kept
+    assert "<call " in kept and "on it" in kept
     # an unterminated span (stream cut mid-thought) drops its tail rather than leaking
     assert without_thinking(f"visible{THINK_OPEN}secret") == "visible"
 

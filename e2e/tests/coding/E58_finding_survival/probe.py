@@ -39,7 +39,7 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 FB = "find_fb"
 N = 8
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 TASK = (
     f"Survey the corpus: read `filler_0.txt` through `filler_{N - 1}.txt` ({N} files) "
     "through the editor `notes`, ONE PER TURN. Some files may carry an audit marker "

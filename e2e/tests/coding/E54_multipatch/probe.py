@@ -39,7 +39,7 @@ TASK = (
     "`lib.py` and both uses in `app.py`. A half-renamed state is a broken "
     "program, so make ALL the changes with ONE `patch` call — the patch verb "
     "is a TRANSACTION over an `edits` array (reflect `editor` for the exact "
-    "shape). Change nothing else. When the patch is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    "shape). Change nothing else. When the patch is applied, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 
@@ -106,10 +106,9 @@ async def main():
             ("lib.py is exactly the expected result", lib_after == LIB_AFTER),
             ("app.py is exactly the expected result", app_after == APP_AFTER),
             ("ONE transactional call (an `edits` array crossed the wire)",
-             '"edits"' in transcript),
+             '<edits>' in transcript),
             ("no whole-file rewrite",
-             '"type":"write"' not in transcript
-             and '"type": "write"' not in transcript),
+             '<type>write</type>' not in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

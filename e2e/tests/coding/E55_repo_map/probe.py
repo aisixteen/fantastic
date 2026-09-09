@@ -48,7 +48,7 @@ TASK = (
     "searcher `searcher` (`grep`/`find` — reflect it; start a job with "
     "{type:'start', command, args}, poll {type:'status', job_id}) and write "
     "the finished map as `map.md` through the editor `notes`, one line per "
-    "file, nothing else. Then end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    "file, nothing else. Then end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 

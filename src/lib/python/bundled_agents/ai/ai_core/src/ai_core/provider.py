@@ -6,7 +6,7 @@ live in their own bundles; this ABC documents the contract the shared
 plain chat messages (role system/user/assistant, text content) and yields
 content tokens (str). It does NOT do tool-calling — Fantastic NEVER uses a
 provider's native tool API. Tool-calling is owned by the base class
-(`ai_core.tool_parse` parses `<tool_call>` text out of this stream). The
+(`ai_core.tool_parse` parses `<call>` text out of this stream). The
 provider holds no agent state — queue / lock / history live in `ai_core.core`.
 """
 

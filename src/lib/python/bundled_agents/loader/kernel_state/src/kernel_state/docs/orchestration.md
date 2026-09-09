@@ -6,9 +6,9 @@ Every routine reaches every agent by id through its connector — a host
 `exec_bridge` job (its spawned code gets a `kernel`:
 send/emit/reflect/watch/on_message) and a browser view-agent's JS (its
 injected `fantastic`) alike. So from EITHER kernel a routine can: read
-memory from anywhere (`send(<state_id>, {type:"read"})`), run an inference
-turn (`send(<ai_id>, {type:"send", system_prompt, text})`), and/or spawn a
-compute job (`send(<py_id>, {type:"start", code})`) — by id, regardless of
+memory from anywhere (send the file agent `<type>read</type>`), run an inference
+turn (send the AI `<type>send</type> <text>…</text>`), and/or spawn a compute job
+(send the runner `<type>start</type> <command>…</command>`) — by id, regardless of
 which kernel owns the target.
 
 Memory, inference, and compute are interchangeable units you wire from

@@ -32,7 +32,6 @@ Knobs, all env, all off when 0:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 
@@ -60,7 +59,20 @@ _PY = os.path.join(
 for _p in (_PY, os.path.join(_PY, "bundled_agents/ai/ai_core/src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-from ai_core.tool_parse import extract_tool_calls, malformed_calls  # noqa: E402
+from ai_core.tool_parse import (  # noqa: E402
+    extract_tool_calls,
+    malformed_calls,
+    render_call,
+)
+
+
+def _target_of(sig: str) -> str:
+    """The `<target_id>` inside a call signature (a rendered call), or the tool name."""
+    m = re.search(r"<target_id>(.*?)</target_id>", sig, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'<call name="([^"]+)"', sig)
+    return m.group(1) if m else "?"
 
 
 def _calls(text: str) -> tuple[list[str], int]:
@@ -68,7 +80,10 @@ def _calls(text: str) -> tuple[list[str], int]:
     sigs = []
     for c in extract_tool_calls(text or ""):
         a = c.get("arguments") or {}
-        sigs.append(json.dumps([a.get("target_id"), a.get("payload")], sort_keys=True))
+        # The call's own text is its signature — the grammar has a renderer, and
+        # `json.dumps` cannot carry a verbatim `bytes` value (it killed agentic
+        # build on 2026-09-09 from INSIDE the provider stream).
+        sigs.append(render_call(c.get("name") or "send", a))
     return sigs, len(malformed_calls(text or ""))
 
 
@@ -141,7 +156,7 @@ class Watch:
             self.repeat_streak = 0
 
         if DIGEST:
-            head = [json.loads(s)[0] for s in sigs] if sigs else []
+            head = [_target_of(s) for s in sigs] if sigs else []
             print(
                 f"  · t{self.n:<3} {len(text or ''):>7}c {seconds:>5.0f}s "
                 f"{len(sigs)} call{'s' if len(sigs) != 1 else ' '}"
@@ -162,7 +177,7 @@ class Watch:
         if ratio is not None and ratio < RATIO:
             return f"degenerate output (unique-word ratio {ratio:.2f} < {RATIO})"
         if REPEAT and self.repeat_streak >= REPEAT - 1:
-            tgt = json.loads(self.last_sig)[0] if self.last_sig else "?"
+            tgt = _target_of(self.last_sig) if self.last_sig else "?"
             return f"same call {self.repeat_streak + 1}x in a row: {tgt}"
         if SILENT and self.silent_streak >= SILENT:
             return f"{self.silent_streak} turns with no call at all"

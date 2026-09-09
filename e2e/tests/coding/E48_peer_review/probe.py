@@ -36,7 +36,7 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 FB, RUNNER = "pr_fb", "pr_runner"
 INTERP = sys.executable
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 SPEC = "The service MUST use `timeout = 30`. Any other value is a defect.\n"
 CONFIG = "host = 127.0.0.1\ntimeout = 30\nworkers = 4\n"
 

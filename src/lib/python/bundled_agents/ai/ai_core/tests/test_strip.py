@@ -44,7 +44,7 @@ def _run(n=8, live="write the report"):
         body.append(
             _turn(
                 "assistant",
-                f'Reading filler_{i}. <tool_call>{{"name":"send"}}</tool_call>',
+                f'Reading filler_{i}. <call name="send"><target_id>notes</target_id></call>',
             )
         )
         body.append(_reply(f"ai:{i:04x}", f"survey filler_{i}"))

@@ -25,7 +25,7 @@ from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
 FB = "dist_fb"
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 
 
 async def _call(root, target, payload):

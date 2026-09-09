@@ -169,12 +169,6 @@ def _anthropic() -> Backend:
     # read ENDPOINT.
     if ep := os.environ.get("ENDPOINT"):
         extra["endpoint"] = ep
-    # Declaring the one `send` tool is a REQUEST-side choice and off by default:
-    # tool-calling here is raw prompt-and-parse. It is not needed to READ what a
-    # `/cc`-style route returns unasked — the provider translates those blocks to
-    # the raw envelope regardless.
-    if os.environ.get("TOOL_USE") == "1":
-        extra["tool_use"] = True
     extra["max_tokens"] = int(os.environ.get("MAX_TOKENS") or THINK_BUDGET)
     # Runner (sampling/budget) params from the JSON beside this file — see above.
     if sampling := _runner_params():
