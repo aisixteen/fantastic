@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -61,10 +62,10 @@ TASK = (
     "exactly:\n"
     "def greet(name):\n"
     '    return f"Hello, {name}!"\n'
-    "2) in `farewell`, change `\"Bye, \"` to `\"Goodbye, \"`.\n"
+    '2) in `farewell`, change `"Bye, "` to `"Goodbye, "`.\n'
     "Change NOTHING else. Use the editor's `patch` verb (reflect `editor` for "
     "the shape); do NOT rewrite the whole file with `write`. When the patch "
-    "is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    'is applied, end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>.'
 )
 
 
@@ -129,9 +130,15 @@ async def main():
             ("the file is exactly the expected result", after == EXPECTED),
             ("the PATCH organ was used", '"patch"' in transcript),
             (
+                # dispatched calls only — the model quoting the readme's `write`
+                # example in its thinking is not a rewrite (false XX, 2026-09-09)
                 "no whole-file rewrite",
-                '"type":"write"' not in transcript
-                and '"type": "write"' not in transcript,
+                not any(
+                    re.search(r'"type"\s*:\s*"write"', c)
+                    for c in re.findall(
+                        r"<tool_call>(.*?)</tool_call>", transcript, re.DOTALL
+                    )
+                ),
             ),
         ]
         for name, ok in checks:

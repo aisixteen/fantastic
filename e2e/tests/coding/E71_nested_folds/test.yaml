@@ -6,6 +6,7 @@ title: "long enough for folds of folds — every level summarized, grep finds a 
 runner: probe.py
 runtimes: [python]
 costs: turns
+long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:
   idle_seconds: 60
   max_turns: 140

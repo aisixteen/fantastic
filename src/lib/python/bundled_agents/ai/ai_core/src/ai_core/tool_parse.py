@@ -379,94 +379,65 @@ def _mint_id() -> str:
     return f"call_{secrets.token_hex(4)}"
 
 
-_SB_BYTES = re.compile(r'"bytes"\s*:\s*"')
-
-
-def _send_binary_raw(inner: str) -> dict | None:
-    """`send_binary` whose `bytes` field is a program that must NOT be JSON-escaped.
-
-    The whole reason a program-in-JSON fails is that `json.loads` demands every quote,
-    newline and backslash be escaped, and a model can't do that reliably on a big
-    program. But the PROGRAM is not data we need parsed — it is a string we read. So
-    for `send_binary` we lift `bytes` out RAW: everything from `"bytes":"` to the final
-    `"` in the envelope is the program, verbatim (no unescaping), and only the STRUCTURE
-    around it is JSON-parsed. `bytes` must be the LAST field (nothing but closing braces
-    after its value) so its end is unambiguous — that is the whole contract.
-    """
-    if '"send_binary"' not in inner:
-        return None
-    m = _SB_BYTES.search(inner)
-    if not m:
-        return None
-    val_start = m.end()  # first char of the raw program
-    val_end = inner.rfind('"')  # bytes is last, so its closing quote is the last quote
-    if val_end <= val_start:
-        return None
-    raw = inner[val_start:val_end]  # the program, exactly as written
-    # Re-close the JSON with an EMPTY bytes value → a well-formed object we can parse
-    # for the structure (name, target_id, payload metadata) without touching `raw`.
-    skeleton = inner[:val_start] + inner[val_end:]
-    try:
-        obj = json.loads(skeleton)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(obj, dict) or obj.get("name") != "send_binary":
-        return None
-    args = obj.get("arguments")
-    if not isinstance(args, dict):
-        return None
-    payload = args.get("payload")
-    (payload if isinstance(payload, dict) else args)["bytes"] = raw
-    return {"id": _mint_id(), "name": "send_binary", "arguments": args}
-
-
-# ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────────
+# ─── `bytes`: THE ONE VERBATIM FIELD, CUT OUT BEFORE PARSING ────────────────
 #
-# Measured 2026-09-01 (exercism gym, rust/word-count): the model followed the
-# raw-tail contract exactly — real newlines, real apostrophes — and still lost
-# the call to ONE missing closing brace, because the raw tail keeps the payload
-# inside JSON syntax, so the model must still balance the skeleton by hand. The
-# general fix removes closing syntax from the payload path entirely: the JSON
-# stays small flat metadata (models don't break short JSON) with "@body" where
-# the program goes, and the program rides verbatim between two column-0 marker
-# lines. A marker at column 0 is never valid code at that position in any
-# language, so there is nothing to escape, quote, or count — the design every
-# surviving harness converged on (codex `*** Begin Patch`, aider fences).
-FENCE_OPEN = "*** Begin Bytes"
-FENCE_CLOSE = "*** End Bytes"
-_FENCE_OPEN_RE = re.compile(r"^\*\*\* Begin Bytes[ \t]*\r?\n", re.M)
-_FENCE_CLOSE_RE = re.compile(r"^\*\*\* End Bytes[ \t]*\r?$", re.M)
+# A model cannot be asked to JSON-escape a document (2026-08-31: a diligently
+# escaped program lost the call to one escaped closing quote) nor to remember a
+# second grammar for it (2026-09-08: the fenced `@body` form, forgotten one time
+# in three, then repeated unfenced while saying "let me add the fence"). So the
+# contract is one call and one rule: a field named `bytes` is VERBATIM. The model
+# writes the text between the quotes exactly as it should land — real newlines,
+# real quotes, nothing escaped — and the harness CUTS it out before it parses the
+# rest. Position does not matter: the value ends at the closing quote after which
+# the remainder of the call is strict JSON, so fields after `bytes` are part of
+# what must parse and cannot be swallowed. Nothing inside the value is inspected
+# or changed. No candidate parses ⇒ the call is malformed, refused with the shape
+# to send (`malformed_calls`) — never repaired.
+_BYTES_KEY = re.compile(r'"bytes"\s*:\s*"')
 
 
-def _split_fence(inner: str, m: re.Match) -> tuple[str, str]:
-    """(metadata-JSON, raw program). The program runs from the line after
-    `*** Begin Bytes` to the LAST column-0 `*** End Bytes` — last, so a program
-    that somehow contains the closer is still taken whole. A missing closer
-    takes the rest of the block: the envelope's own closing tag already bounds
-    it, and dropping an unterminated program loses an unambiguous instruction
-    (same stance as `_scan`'s unterminated-envelope tolerance)."""
-    meta = inner[: m.start()]
-    body_start = m.end()
-    closes = list(_FENCE_CLOSE_RE.finditer(inner, body_start))
-    raw = inner[body_start : closes[-1].start()] if closes else inner[body_start:]
-    return meta, raw
+_BYTES_END = re.compile(r'"\s*[,}\]]')
 
 
-def _plant_body(node, raw: str) -> bool:
-    """Replace the first `"@body"` placeholder anywhere in the parsed call with
-    the raw program. Returns whether one was found."""
+def _cut_bytes(inner: str) -> tuple[str, list[str]] | None:
+    """(skeleton, values) — the call with `"bytes":null` in place of EVERY `bytes`
+    value (a `patch` carries one per edit), and the values verbatim, in order. A
+    value ends at the first quote that is followed by a JSON delimiter (`,` `}` `]`),
+    i.e. where the call resumes; nothing inside is inspected or changed. The one
+    text that cannot ride is one containing a quote immediately followed by such a
+    delimiter — then the skeleton does not parse and the call is refused, with the
+    rule named, never repaired. None ⇒ no `bytes` field or no cut."""
+    out: list[str] = []
+    pos = 0
+    skeleton = ""
+    while True:
+        m = _BYTES_KEY.search(inner, pos)
+        if m is None:
+            skeleton += inner[pos:]
+            break
+        start = m.end()
+        e = _BYTES_END.search(inner, start)
+        if e is None:
+            return None
+        out.append(inner[start : e.start()])
+        skeleton += inner[pos : m.start()] + '"bytes":null'
+        pos = e.start() + 1  # keep the delimiter, drop the closing quote
+    if not out:
+        return None
+    return skeleton, out
+
+
+def _plant_bytes(node, values: list[bytes]) -> None:
+    """Put the cut values (as bytes) where each `"bytes":null` sits, in order."""
     if isinstance(node, dict):
         for k, v in node.items():
-            if v == "@body":
-                node[k] = raw
-                return True
-            if _plant_body(v, raw):
-                return True
+            if k == "bytes" and v is None and values:
+                node[k] = values.pop(0)
+            else:
+                _plant_bytes(v, values)
     elif isinstance(node, list):
         for v in node:
-            if _plant_body(v, raw):
-                return True
-    return False
+            _plant_bytes(v, values)
 
 
 def parse_one(inner: str) -> dict | None:
@@ -476,37 +447,34 @@ def parse_one(inner: str) -> dict | None:
     `name`, a flattened object (remaining keys become arguments), and double-encoded
     (stringified) arguments. Returns None on unparseable JSON.
     """
-    # FENCED form first (on the UNSTRIPPED block — a strip would eat the
-    # program's trailing newline when the close marker was omitted): if the
-    # markers are present, the JSON part is ONLY what sits above them — parsing
-    # the whole block would either choke on the raw program or (when the program
-    # happens to be valid JSON-adjacent) silently keep the "@body" placeholder
-    # as the written contents.
-    if (fm := _FENCE_OPEN_RE.search(inner)) is not None:
-        meta, raw = _split_fence(inner, fm)
-        call = parse_one(meta)
+    # `bytes` FIRST, on the unstripped block: the one verbatim field is cut out
+    # and the remainder is parsed like any call (see `_cut_bytes`).
+    if _BYTES_KEY.search(inner) is not None:
+        cut = _cut_bytes(inner)
+        if cut is None:
+            return None
+        skeleton, values = cut
+        # STRICT here: the lenient paths below (trailing junk after a complete
+        # object) would let a value cut short by a `"}` inside the text dispatch
+        # as a truncated document. A cut skeleton parses whole or the call is
+        # refused with the rule named.
+        try:
+            json.loads(skeleton.strip())
+        except (json.JSONDecodeError, ValueError):
+            return None
+        call = parse_one(skeleton)
         if call is None:
             return None
-        args = call.get("arguments")
-        if isinstance(args, dict) and not _plant_body(args, raw):
-            # No placeholder written — the program still has exactly one home.
-            payload = args.get("payload")
-            (payload if isinstance(payload, dict) else args)["bytes"] = raw
+        pending = [v.encode("utf-8") for v in values]
+        _plant_bytes(call.get("arguments"), pending)
+        if pending:
+            return None  # a value with no field to land in: not this call's shape
         return call
     inner = inner.strip()
     try:
         obj = json.loads(inner)
         rest = ""
     except (json.JSONDecodeError, ValueError):
-        # send_binary carrying a RAW program in `bytes` (real newlines, real
-        # quotes — no escaping) is not JSON, so it lands here; `_send_binary_raw`
-        # lifts the program out verbatim. Tried ONLY after strict JSON fails:
-        # a model that escaped its payload correctly (measured 2026-08-31, E44:
-        # `"bytes":"<<<<<<< SEARCH\nport ..."`) parses above and gets its
-        # escapes DECODED — the raw path would have kept them literal and the
-        # patch died on "no blocks", twice, with no way for the model to see why.
-        if (sb := _send_binary_raw(inner)) is not None:
-            return sb
         # Trailing junk after a COMPLETE object — observed live from
         # gpt-oss:120b, which closes `arguments` early and then emits
         # `,"reply_to":"self"}}` (one brace too many). `raw_decode` takes the
@@ -637,16 +605,11 @@ def extract_tool_calls(text: str) -> list[dict]:
 # cheaper than letting it rediscover it, and this is advice, not a repair: we do
 # not re-quote the body and retry.
 _JSON_HINT = (
-    "Your program broke its own JSON envelope. Do NOT debug the escaping — "
-    "switch to the unbreakable FENCED form: keep the call's JSON small and "
-    'complete with "@body" where the contents go, then write the program '
-    "verbatim between two column-0 marker lines, still inside the same "
-    "<tool_call>:\n"
-    '{"name":"send_binary","arguments":{"target_id":"<id>","payload":'
-    '{…,"bytes":"@body"}}}\n'
-    "*** Begin Bytes\n"
-    "<the program, verbatim — real newlines, real quotes, nothing escaped>\n"
-    "*** End Bytes"
+    "Your text broke the call's JSON. Do NOT escape it: put the text in a field "
+    "named `bytes` — it is VERBATIM, cut out before parsing. Write it between the "
+    "quotes exactly as it should land (real newlines, real quotes), then close the "
+    "call: "
+    '{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"write","path":"<p>","bytes":"<text>"}}}'
 )
 
 # The `<|tool_call>` body is NOT JSON, so the advice above would be actively
@@ -733,25 +696,37 @@ def malformed_calls(text: str) -> list[dict]:
             # (measured 2026-09-01: a raw-form call one brace short was told
             # "Invalid control character", reasoned about newlines for four
             # turns, and the write never landed).
-            if (fm := _FENCE_OPEN_RE.search(stripped)) is not None:
-                try:
-                    json.loads(stripped[: fm.start()].strip())
-                    reason = "the fenced call did not resolve"
-                except (json.JSONDecodeError, ValueError) as exc:
+            if _BYTES_KEY.search(stripped) is not None:
+                # Two distinct faults, named apart (measured 2026-09-09: a call
+                # one brace short was told "could not be cut" and spent its next
+                # turn reasoning about the cut rule instead of counting braces).
+                cut = _cut_bytes(stripped)
+                skeleton_error = None
+                if cut is not None:
+                    try:
+                        json.loads(cut[0])
+                    except ValueError as e:
+                        skeleton_error = str(e)
+                if skeleton_error is not None:
                     reason = (
-                        f"the metadata JSON above `{FENCE_OPEN}` did not parse — "
-                        f"{exc}. It must be ONE complete, small JSON call object "
-                        '(every brace closed) with "@body" where the program goes; '
-                        "the program itself is fine, it rides verbatim between the "
-                        "markers"
+                        "the JSON AROUND the `bytes` value does not parse: "
+                        f"{skeleton_error} (positions are with the value replaced "
+                        "by `null`). A `bytes` value is verbatim and ENDS at the "
+                        "first quote followed by a JSON delimiter (`,` `}` `]`), so "
+                        "either the call is short a closing brace after the value "
+                        '(`"}}}` closes payload, arguments and the call) or the text '
+                        "holds a quote immediately followed by such a delimiter, "
+                        "which ended the value early. Never escape the text"
                     )
-            elif '"send_binary"' in stripped and _SB_BYTES.search(stripped):
-                reason = (
-                    "the send_binary raw lift failed — the JSON metadata around "
-                    "`bytes` must be valid and after the program's closing quote "
-                    "nothing may follow but the braces that close that metadata "
-                    "EXACTLY (count them)"
-                )
+                else:
+                    reason = (
+                        "the `bytes` value could not be cut. A `bytes` value is "
+                        "verbatim and ENDS at the first quote followed by a JSON "
+                        'delimiter (`,` `}` `]`) — so close it with `"` and go '
+                        "straight on with `,` or `}`; a quote immediately followed "
+                        "by such a delimiter INSIDE the text ends it early. Never "
+                        "escape the text; close the call after it"
+                    )
             else:
                 try:
                     json.loads(stripped)

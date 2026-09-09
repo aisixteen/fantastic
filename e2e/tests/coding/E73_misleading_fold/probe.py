@@ -49,7 +49,8 @@ async def main():
         rows = a1["msgs"]
         member_ids = [m["id"] for m in rows if m.get("id") and "filler_1" in str(m.get("content", ""))]
         planted = make_fold(aid, member_ids, "read filler_1 — its checksum",
-                            f"filler_1.txt was read; its checksum line said >> checksum: {wrong}.", False)
+                            f"filler_1.txt was read; its checksum line said >> checksum: {wrong}.", False,
+                            id=root.ctx.mint_id())  # a planted fold is minted by the store like any row
         await inject_row(core, root, aid, planted)
         final = (f"FINAL: what is the checksum in `filler_1.txt`? Its read is folded — the fold summary may be stale; "
                  f"verify against the actual row before answering. Write `final.md` through `notes` with "

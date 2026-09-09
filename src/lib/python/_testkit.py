@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernel_state.tools import read_tree, write_record
+from kernel_state.tools import hydrate_messages, read_tree, write_record
 
 from kernel import Kernel
 
@@ -39,6 +39,9 @@ def boot_root(*, compose_cli: bool = False):
     if not records:
         records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}]
     k.load(records, root_path=root_dir)
+    # HYDRATE THE MESSAGE STORE, cold, before the first send mints an id. The kernel
+    # starts empty; the loader bundle's reader fills it from above and sets the counter.
+    hydrate_messages(k, root_dir)
     write_record(k.root._root_path, k.root.record)  # root agent.json + readme
     if compose_cli:
         from cli import Cli
@@ -62,7 +65,7 @@ def persist(root) -> None:
 # interpreter allowlist. A test that wants a python child speaking the kernel
 # wire composes it itself — the wire client is DATA (`CONNECTOR_SRC`), so the
 # test prepends it and runs `python -c <program>` like any other command.
-import sys as _sys
+import sys as _sys  # noqa: E402 — after the module prose above
 
 
 def py_runner_meta(**extra) -> dict:

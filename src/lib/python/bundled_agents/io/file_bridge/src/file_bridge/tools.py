@@ -304,7 +304,7 @@ async def _read_stream(id, payload, kernel):
 
 
 async def _write_stream(id, payload, kernel):
-    """args: path:str (req), bytes:bytes (req — ONE raw chunk; a model composes it via send_binary's fenced form), offset:int? (default =
+    """args: path:str (req), bytes:bytes (req — ONE raw chunk; a model writes it VERBATIM in the `bytes` field, which is cut out before the call is parsed), offset:int? (default =
     append at end), truncate:bool=False. The SINK half — a producer pushes RAW chunks by
     calling repeatedly. Pass truncate:true on the first chunk to start fresh. Returns
     {path, written, offset, size}. Refused if readonly. The chunk is raw bytes — text

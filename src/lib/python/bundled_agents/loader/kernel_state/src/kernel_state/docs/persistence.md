@@ -35,3 +35,27 @@ verbatim (an explicit `guid` always wins, a minted one is never regenerated)
 — unlike the run-scoped `env`/`version`, which are read inline each reflect.
 A relay peer advertises this value as its `owner_guid` (distinct from a relay
 LEG's own `guid` on a `relay_connector` record).
+
+## The message log — `messages.jsonl`
+
+Every message the kernel makes — a turn, a delivered reply, a fold, a recall, a `body`
+(a reply too large to inline, its text merged in), a `view`, a `call` per send, a `task`
+per fork — is one JSON line, appended in id order, at `.fantastic/messages.jsonl`.
+
+- **The kernel never knows disk.** It starts empty every boot. The bootstrap runs this
+  bundle's cold `read_messages` (through `fs`, before any agent or id exists) and hands
+  the rows to the kernel from above, setting the counter to `max(id) + 1`. A second
+  ingestion of the same log is refused by the kernel on its first duplicate id — the
+  user's fault, surfaced, never guarded.
+- **The pump** (`_MessagePump`, root loader only) tails `rows_stream(after)` from the
+  highest id present, batches 0.15 s, and appends one `write_stream` per batch through
+  the discovered provider. Its own calls to the store — and every operator-context
+  call on the store, i.e. this bundle's persistence traffic — never enter the log.
+- **Order, by contract:** hydrate → subscribe → only then children. The loader's `boot`
+  subscribes right after the ledger rehydrates and before anything that creates or
+  wakes agents.
+- **No provider ⇒ RAM only**, said once on stderr. Swap the sink by wiring a provider
+  that answers `write_stream`; a table-backed one later needs no kernel change.
+- **Stop:** `shutdown_agents` (drain, the `shutdown` verb, quiet) then the kernel awaits
+  `flush_pending` — the pump lands every message minted so far — before the teardown
+  walk. `shutdown_kernel` does all of it.

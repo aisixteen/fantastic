@@ -165,3 +165,56 @@ async def test_grep_puts_the_stored_body_hit_first_and_collapses_repeated_lines(
     r = await _grep("ai", {"query": "audit marker"}, k)
     assert r["matches"][0]["id"] == 7 and "deadbeef" in r["matches"][0]["text"]
     assert r["total"] == 2, r
+
+
+async def test_grep_scoped_to_a_fold_searches_its_members_bodies():
+    """A descent: `ids:[fold]` must reach the bodies behind the member replies."""
+    from ai_core.core import _grep, _store_reply
+    from ai_core.folds import make_fold
+
+    k = _Leg()
+    call = k.mint_id()
+    pid = k.mint_id()
+    reply = k.rows_put(
+        "ai",
+        {
+            "role": "user",
+            "parent": call,
+            "content": f'[reply to {pid} · notes read · "read filler_1" · ↑{call}]\n(settled, 9 bytes — NOT inlined)',
+        },
+    )
+    await _store_reply("ai", k, pid, "chunk 1\n>> audit marker: cafebabe\nchunk 1")
+    fold = make_fold(
+        "ai", [call, reply], "read filler_1", "plain filler", False, id=k.mint_id()
+    )
+    k.rows_put("ai", fold)
+    r = await _grep("ai", {"query": "audit marker", "ids": [fold["id"]]}, k)
+    assert (
+        r["total"] == 1
+        and r["matches"][0]["id"] == pid
+        and "cafebabe" in r["matches"][0]["text"]
+    )
+    r2 = await _grep("ai", {"query": "audit marker", "ids": [pid]}, k)
+    assert r2["total"] == 1, "an id that is itself a pid still reaches its body"
+
+
+async def test_grep_width_is_the_models_to_raise():
+    from ai_core.core import _grep, _store_reply
+
+    k = _Leg()
+    pid = k.mint_id()
+    k.rows_put(
+        "ai",
+        {
+            "role": "user",
+            "content": f"[reply to {pid} · notes read]\n(settled, 9 bytes — NOT inlined)",
+        },
+    )
+    await _store_reply("ai", k, pid, "rule: " + "x" * 300 + " VALUE=cafebabe")
+    r = await _grep("ai", {"query": "rule:"}, k)
+    assert (
+        len(r["matches"][0]["text"]) == 200
+        and "cafebabe" not in r["matches"][0]["text"]
+    )
+    r = await _grep("ai", {"query": "rule:", "width": 400}, k)
+    assert "cafebabe" in r["matches"][0]["text"]

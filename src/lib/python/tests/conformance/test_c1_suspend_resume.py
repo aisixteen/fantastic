@@ -40,7 +40,7 @@ def _call(verb_payload: dict) -> str:
         "<tool_call>"
         + json.dumps(
             {
-                "name": "send_binary",
+                "name": "send",
                 "arguments": {
                     "target_id": "c1_store",
                     "payload": verb_payload,

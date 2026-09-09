@@ -47,6 +47,7 @@ NOT_HERE = "not_here"  # right verb, wrong agent — kernel verbs are root-only
 EXISTS = "exists"  # an id that is already taken (carries `id`)
 UNHANDLED = "unhandled"  # the agent has no such verb (carries `verb`)
 NOT_FOUND = "not_found"  # the named THING is absent — a path, a job, a key
+DRAINING = "draining"  # the kernel is stopping; no new roots are accepted
 
 # Transport codes — a leg that could not carry the call at all. Owned by
 # `relay_connector` today; listed here because they share the field, and a caller
@@ -68,6 +69,7 @@ CODES = frozenset(
         EXISTS,
         UNHANDLED,
         NOT_FOUND,
+        DRAINING,
         NOT_CONNECTED,
         TRANSPORT_ERROR,
         TRANSPORT_CLOSED,

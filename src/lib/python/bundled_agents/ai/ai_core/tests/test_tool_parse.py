@@ -225,8 +225,8 @@ def test_the_unclosed_code_string_that_ended_the_gemma_run_is_reported():
     assert len(bad) == 1, bad
     assert "NOT dispatched" in bad[0]["error"]
     assert "Unterminated string" in bad[0]["error"], "name the JSON fault"
-    assert "send_binary" in bad[0]["error"], (
-        "name the RECOVERY (go raw), not more escaping"
+    assert "bytes" in bad[0]["error"], (
+        "name the RECOVERY (the verbatim field), not more escaping"
     )
     assert "reading_aggregator" in bad[0]["your_block"], "show its own text back"
 

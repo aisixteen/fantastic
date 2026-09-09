@@ -415,7 +415,10 @@ def _res_of(row: dict) -> str:
     return "full"
 
 
-_BOOKKEEPING = frozenset({"call", "task"})
+# The store holds the kernel's bookkeeping (`call`, `task`) and the conversation's
+# out-of-line parts (`body` rows behind `pull`/`grep`, `view` rows behind the view).
+# The CONVERSATION a reader sees is everything else.
+_BOOKKEEPING = frozenset({"call", "task", "body", "view"})
 
 
 async def _load_history(self_id: str, kernel) -> list[dict]:
@@ -441,7 +444,7 @@ async def _store_reply(self_id: str, kernel, pid: str, body: str) -> bool:
     """FULL ASYNC: a reply too big to hand the model as a turn is kept in the kernel's
     body store under its pid and the model is handed its DIGEST; it pulls pages when
     and if it wants them."""
-    _ctx(kernel).body_put(pid, body.encode("utf-8"))
+    _ctx(kernel).body_put(self_id, pid, body)
     return True
 
 
@@ -451,7 +454,7 @@ async def _load_reply(self_id: str, kernel, pid: str, offset: int, length: int):
     if got is None:
         return None
     chunk, nxt, eof, size = got
-    return chunk.decode("utf-8", "replace"), nxt, eof, size
+    return chunk, nxt, eof, size
 
 
 def _inline_cap(rec: dict) -> int:
@@ -615,22 +618,19 @@ answer comes back as your next message. Name another agent's id to hand the answ
 them instead, or `null` to discard it. Text outside the tag is your message to whoever
 asked. Interpret instructions literally — act on what is asked, not on inferred
 intent. Keep prose brief: the work happens in calls, not in explanation.
+EMIT CALLS BEFORE YOU DELIBERATE. A plan written in thought and never sent is a wasted
+turn: the moment you know the next call, send it — reasoning continues after the reply,
+with the reply in hand. Never end a turn on "let me do X" without X in a tool_call.
 
-## Sending verbatim content — `send_binary`
-When a payload field's VALUE is a body of text you are authoring (source, a document,
-a patch), a JSON string breaks on escaping — use `send_binary` with the FENCED form:
-keep the JSON small and complete, put `"@body"` where that value goes, and write the
-body OUTSIDE the JSON between two marker lines, still inside the same tool_call:
-<tool_call>{"name":"send_binary","arguments":{"target_id":"<id>","payload":{…,"bytes":"@body"}}}
-*** Begin Bytes
-<the body, verbatim — real newlines, real quotes, nothing escaped>
-*** End Bytes
-</tool_call>
-Both markers start at column 0. Everything between them rides VERBATIM — no escaping,
-any content, any size; nothing to quote, balance or count. The JSON line above them
-is ordinary and small (`target_id`, `reply_to`, `id`, `timeout`, `retries` live
-there). Which verbs take a body, and in which field, is each agent's own story —
-reflect the agent to learn its composition; `into` names a field other than `bytes`.
+## Sending a document — the `bytes` field is VERBATIM
+When a verb takes a body of text (a file to write, a patch, a program), it names the
+field `bytes`. That field is cut out of your call BEFORE the JSON is parsed: write the
+text between its quotes exactly as it should land — real newlines, real quotes, nothing
+escaped — and close the call after it. No fence, no placeholder, no second form:
+<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"write","path":"<p>","bytes":"line one
+line two, with "quotes" and anything else
+"}}}</tool_call>
+Which verbs take a body is each agent's own story — reflect it; every one names `bytes`.
 
 A `<tool_call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
 thinking. The envelope is parsed out of everything you emit and dispatched the
@@ -1267,63 +1267,6 @@ async def _route_reply(
                     )
                 )
             continue
-        # send_binary: encode ONE named payload field from a JSON string to real
-        # BYTES. A model tool call is JSON and JSON has no bytes type, so a stream
-        # sink (`write_stream`) that demands raw bytes is otherwise unreachable — it
-        # refuses a str. The model writes the contents as an ordinary JSON string in
-        # `bytes` (its own serializer does the escaping, which it does reliably); we
-        # utf-8-encode that one field here and the send is ordinary from the kernel's
-        # side. The whole call is a single JSON object — no second region.
-        if call.get("name") == "send_binary" and isinstance(payload, dict):
-            field = str(args.get("into") or "bytes")
-            val = payload.get(field)
-            # A LITERAL "@body" is the fence placeholder with NO fenced block —
-            # valid JSON, so it parses and would be WRITTEN AS THE FILE (measured
-            # 2026-09-01, gym go/bowling + go/connect: `illegal character '@'`).
-            # Refuse loud instead of dispatching the placeholder as content.
-            if val == "@body":
-                if reply_to:
-                    units.append(
-                        (
-                            reply_to,
-                            target,
-                            payload.get("type", "?"),
-                            None,
-                            json.dumps(
-                                {
-                                    "error": (
-                                        "send_binary NOT dispatched: `bytes` is the "
-                                        'literal placeholder "@body" but no fenced '
-                                        "block followed. Re-send the SAME call with "
-                                        "the program between column-0 marker lines "
-                                        "inside the same <tool_call>: the JSON line, "
-                                        "then `*** Begin Bytes`, the program verbatim, "
-                                        "then `*** End Bytes`. For a SHORT text (a few "
-                                        "lines) skip the fence: an ordinary `send` with "
-                                        "the text as a JSON string in that field."
-                                    ),
-                                    "target": target,
-                                    "example": {
-                                        "name": "send",
-                                        "arguments": {
-                                            "target_id": target,
-                                            "payload": {
-                                                **{
-                                                    k: v
-                                                    for k, v in payload.items()
-                                                    if k != field
-                                                },
-                                                field: "<the text, as a JSON string>",
-                                            },
-                                        },
-                                    },
-                                }
-                            ),
-                        )
-                    )
-                continue
-            if isinstance(val, str):
-                payload[field] = val.encode("utf-8")
         # The model's own `timeout` overrides the layer default; the kernel
         # validates it, so a bad value comes back as a readable refusal.
         # A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched here,
@@ -2636,7 +2579,7 @@ async def _pull(id, payload, kernel):
 
 
 async def _grep(id, payload, kernel):
-    """args: query:str (req — case-insensitive substring), ids:list[str]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."""
+    """args: query:str (req — case-insensitive substring), ids:list[int]? (row ids / pids / fold ids to search; default: every row of this conversation and every stored reply body it received), limit:int? (matches, default: as many as fit inline), width:int? (chars of each matched line returned, from its start; default 200 — raise it when the value you need sits deep in a long line). Finds the LINE that mentions something, wherever it is — a stored body you never pulled, a digest line, an old turn. Returns {matches:[{id, line, text}], total, truncated}."""
     # THE SUPER SIMPLE ONE, deliberately. Measured 2026-09-06: the model spent four
     # ~10k-token thinking turns byte-scanning one 6.8KB body in 300-char pages to find a
     # single line. "Find the line that mentions X" is the operation it wanted, and this
@@ -2652,6 +2595,10 @@ async def _grep(id, payload, kernel):
         }
     try:
         limit = max(1, min(int(payload.get("limit") or 100), 100))
+        # The per-line cut. A bare default (200) that the model can raise: a rule
+        # written as one long line lost its tail at 200 and the model concluded grep
+        # could not reach it (measured 2026-09-08, fold_long).
+        width = max(20, min(int(payload.get("width") or 200), 20_000))
     except (TypeError, ValueError):
         limit = 100
     raw_ids = payload.get("ids")
@@ -2680,13 +2627,20 @@ async def _grep(id, payload, kernel):
                 seen_lines.add(key)
                 total += 1
                 if len(matches) < limit:
-                    matches.append({"id": rid, "line": n, "text": line.strip()[:200]})
+                    matches.append({"id": rid, "line": n, "text": line.strip()[:width]})
 
     rows = await _load_history(id, kernel)
     # A fold id in `ids` is a DESCENT: it expands to the rows it collapsed.
     scope = set(expand_fold_ids(rows, ids)) if ids else None
-    pids: list[str] = []
+    # The bodies in reach: the pids on the reply tags of the rows considered — every
+    # row of the conversation, or, under a scope, the rows the scope names (a fold's
+    # members ARE reply rows, and their bodies hang off the pids in their tags — a
+    # descent that ignored them found nothing, measured 2026-09-08: 22 greps, 22
+    # zeros). An id that is itself a pid (a call id) counts too.
+    pids: list[int] = []
     for m in rows:
+        if scope is not None and m.get("id") not in scope:
+            continue
         if m.get("role") == "user":
             content = m.get("content")
             text = (
@@ -2698,12 +2652,14 @@ async def _grep(id, payload, kernel):
                 pm = _PID_TAG.match(block)
                 if pm and (p := _as_id(pm.group(1))) is not None:
                     pids.append(p)
+    if scope is not None:
+        pids = list(dict.fromkeys(list(scope) + pids))
     # STORED BODIES FIRST: what a grep is for is the line inside a body never pulled —
     # rows that merely mention the query (the task, the model's own plan) come after,
     # so the content hit is never the one the inline cap cuts. A pid with a stored body
     # is greppable without pulling it: those this conversation received (pids on its
     # reply tags), or the ids the caller named.
-    for pid in list(scope) if scope else pids:
+    for pid in pids:
         got = await _load_reply(id, kernel, pid, 0, 4 * 1024 * 1024)
         if got is None:
             continue

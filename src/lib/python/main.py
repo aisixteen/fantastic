@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from cli import Cli
-from kernel_state.tools import read_tree, write_record
+from kernel_state.tools import hydrate_messages, read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, dispatch_argv
 
@@ -38,6 +38,9 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
         # `reflect` paths take no lock and write nothing).
         records = [{"id": "kernel_state", "handler_module": "kernel_state.tools"}]
     kernel.load(records, root_path=root_dir)
+    # HYDRATE THE MESSAGE STORE, cold, before the first send mints an id. The kernel
+    # starts empty; the loader bundle's reader fills it from above and sets the counter.
+    hydrate_messages(kernel, root_dir)
     # No stream provider is composed here. kernel_state's AUTO-FLUSH persists ONLY
     # through a DISCOVERED provider (a file_bridge child rooted at `.fantastic` that an
     # operator/LLM wires) — with none wired the live tree stays in RAM (no fallback).

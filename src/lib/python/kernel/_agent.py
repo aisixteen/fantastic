@@ -52,6 +52,7 @@ from dataclasses import dataclass
 
 from kernel._refusal import (
     BAD_ARG,
+    DRAINING,
     EXISTS,
     INVALID_META,
     LOCKED,
@@ -73,6 +74,7 @@ from kernel._authz import (
 )
 from kernel._kernel import (
     BUNDLE_ENTRY_GROUP,
+    _in_shutdown,
     CANCELLED,
     COMPLETED,
     FAILED,
@@ -118,6 +120,7 @@ _SYSTEM_VERBS = frozenset(
         # Root-only control verb — gated inside its handler to the tree
         # root (a non-root agent answers with an error). Stops the whole
         # kernel process gracefully; see `_verb_shutdown_kernel`.
+        "shutdown_agents",
         "shutdown_kernel",
     }
 )
@@ -128,7 +131,14 @@ _SYSTEM_VERBS = frozenset(
 # The verbs that CHANGE something. Distilled reflect carries their argument line;
 # read-only verbs carry only their name (their reply teaches the rest).
 _MUTATING_VERBS = frozenset(
-    {"create_agent", "update_agent", "delete_agent", "cancel", "shutdown_kernel"}
+    {
+        "create_agent",
+        "update_agent",
+        "delete_agent",
+        "cancel",
+        "shutdown_agents",
+        "shutdown_kernel",
+    }
 )
 
 _SYSTEM_VERB_DOCS = {
@@ -184,6 +194,11 @@ _SYSTEM_VERB_DOCS = {
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
         "own agent. Returns {cancelled:bool, killed:[…]}; the blocked caller's "
         "batch item settles as status:'cancelled'. Unknown id ⇒ {cancelled:false}."
+    ),
+    "shutdown_agents": (
+        "No args. Stops the AGENTS, not the process: drains (new roots refused), "
+        "sends `shutdown` to every agent advertising it, waits for in-flight work, "
+        "cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."
     ),
     "shutdown_kernel": (
         "No args. Stops the kernel PROCESS — under env:'container', the container."
@@ -658,6 +673,30 @@ class Agent:
         cur = _current_task.get()
         if cur is not None and (self.ctx.tasks.get(cur) or {}).get("_killed"):
             return outcome(None, CANCELLED, {"cancelled": True})
+        # WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent task
+        # in the table — including an agent's own `shutdown` turn using its tools)
+        # passes; the kernel's own shutdown traffic passes; everything else is a
+        # new root and is refused before it costs an id.
+        # The root's own control surface stays open while draining: kernel verbs
+        # (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`, `ledger`)
+        # and `reflect` are how an operator watches and finishes the stop.
+        to_root = target_id == "kernel" or target_id == self._root().id
+        if (
+            self.ctx.draining
+            and not _in_shutdown.get()
+            and not (to_root and (verb in _SYSTEM_VERBS or verb == "reflect"))
+            and (cur is None or cur not in self.ctx.tasks)
+            and not self.ctx.is_registered(asyncio.current_task())
+        ):
+            return outcome(
+                None,
+                FAILED,
+                refusal(
+                    DRAINING,
+                    "send: the kernel is draining for shutdown — no new work is "
+                    "accepted; in-flight work may finish",
+                ),
+            )
         if target_id == "kernel":
             target = self._root()
         else:
@@ -1051,6 +1090,28 @@ class Agent:
             if res.get("reason"):
                 stamp["reason"] = res.get("reason")
         row["outcome"] = stamp
+
+    def advertises(self, verb: str) -> bool:
+        """Whether this agent's bundle answers `verb` (its `VERBS` table)."""
+        if not self.handler_module:
+            return False
+        try:
+            mod = importlib.import_module(self.handler_module)
+        except Exception:  # noqa: BLE001 — an unimportable bundle advertises nothing
+            return False
+        verbs = getattr(mod, "VERBS", None)
+        return isinstance(verbs, dict) and verb in verbs
+
+    def module_hook(self, name: str):
+        """A duck-typed module-level hook of this agent's bundle, or None."""
+        if not self.handler_module:
+            return None
+        try:
+            mod = importlib.import_module(self.handler_module)
+        except Exception:  # noqa: BLE001
+            return None
+        fn = getattr(mod, name, None)
+        return fn if callable(fn) else None
 
     def _loader_id(self) -> str | None:
         """The id `$loader` resolves to in a grant — the persistence root."""
@@ -2035,6 +2096,8 @@ class Agent:
             return self._verb_messages(payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
+        if verb == "shutdown_agents":
+            return await self._verb_shutdown_agents(payload)
         if verb == "shutdown_kernel":
             return await self._verb_shutdown_kernel(payload)
         return refusal(UNHANDLED, f"unhandled system verb {verb!r}", verb=verb)
@@ -2123,6 +2186,11 @@ class Agent:
                     d["name"] = row["name"]
                 if row.get("outcome"):
                     d["status"] = row["outcome"].get("status")
+            elif row.get("kind") == "view":
+                # a view digest says how much it holds, never the array itself
+                d["ids"] = len(row.get("ids") or [])
+                d["budget"] = row.get("budget")
+                d["title"] = row.get("why")
             out.append(d)
         # DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
         try:
@@ -2223,6 +2291,19 @@ class Agent:
             # Names no task — honest, not a refusal (the same answer a stale id gets).
             return {"cancelled": False, "killed": []}
         return await self.ctx.cancel_task(task_id)
+
+    async def _verb_shutdown_agents(self, payload: dict) -> dict:
+        """No args. The agent half of a graceful stop: drain, the `shutdown` verb
+        to every agent that advertises it, quiet, cancel the rest. The kernel keeps
+        serving; the persister catches up. Root control surface only."""
+        if self.parent is not None:
+            return {
+                "error": (
+                    "shutdown_agents: root control surface only; address "
+                    "the kernel root (alias 'kernel')"
+                )
+            }
+        return await self.ctx.shutdown_agents()
 
     async def _verb_shutdown_kernel(self, payload: dict) -> dict:
         """Gracefully stop the whole kernel PROCESS (root control surface

@@ -62,8 +62,9 @@ A program that persists and re-runs is a FILE you write plus a command that runs
 no `code` field at all:
 
 1. **Write the program to a file** on a `file_bridge` leg, its bytes carried over a STREAM so
-   nothing is escaped: `write_stream {path, bytes, truncate:true}` (or `send_binary`, which writes the
-   program RAW in its last `bytes` field — nothing escaped). A program squeezed into a JSON string is lost to one stray quote.
+   nothing is escaped: `write_stream {path, bytes, truncate:true}` — `bytes` is VERBATIM, written between
+   its quotes exactly as it should land and cut out before the call is parsed. A program squeezed into an
+   ESCAPED JSON string is lost to one stray quote; the verbatim field is why you never escape it.
 2. **Run it** here: `start {command:'<interp>', args:['<your file>']}`, past the `allowed`
    gate.
 3. **Re-run** the SAME command later — the file is durable on disk, so it re-executes the

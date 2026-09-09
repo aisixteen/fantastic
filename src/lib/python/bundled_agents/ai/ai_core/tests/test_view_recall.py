@@ -313,7 +313,8 @@ async def test_a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on(monkey
             return await super().send(batch)
 
     kk = _Kern()
-    kk.rows, kk._by_agent, kk.bodies, kk.views = k.rows, k._by_agent, k.bodies, k.views
+    kk.rows, kk._by_agent, kk._alias = k.rows, k._by_agent, k._alias
+    kk.next_id = k.next_id
     boot = _make_boot(_cfg())
     await boot("ai", {}, kk)  # reboot → incarnation 2
     await _deliver(kk, "ai", "[reply to n:1 · n r]\nlate", "c", None, born=1)
