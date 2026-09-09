@@ -3,7 +3,8 @@
 Reinstated 2026-09-01 (the no-nudge experiment ended when `repo_map:swift`
 twice stopped mid-task with a partial artifact): a CHAIN turn that emits no
 call gets ONE runtime reminder; a `{"name":"done"}` call ends the chain
-silently; a chat turn (prose to a person) is never nudged."""
+silently. EVERY turn is held to it — a first turn from a person too (2026-09-09:
+"all is tool calls") — so prose with no call is nudged until `done`."""
 
 import asyncio
 
@@ -26,29 +27,18 @@ class _Script:
 
 
 def _call(payload: dict) -> str:
-    import json
+    from ai_core.tool_parse import render_call
 
-    return (
-        "<tool_call>"
-        + json.dumps(
-            {
-                "name": "send",
-                "arguments": {
-                    "target_id": "echo",
-                    "payload": payload,
-                    "reply_to": "self",
-                },
-            }
-        )
-        + "</tool_call>"
+    return render_call(
+        "send", {"target_id": "echo", "payload": payload, "reply_to": "self"}
     )
 
 
-DONE = '<tool_call>{"name":"done"}</tool_call>'
+DONE = '<call name="done"></call>'
 
 
 def _done() -> str:
-    return '<tool_call>{"name":"done"}</tool_call>'
+    return DONE
 
 
 async def _settle(fp, want, timeout=5.0):
@@ -158,8 +148,8 @@ async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
         core._providers.pop(aid, None)
 
 
-async def test_chat_turn_is_never_nudged(seeded_kernel):
-    fp = _Script(["just an answer, no calls"])
+async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
+    fp = _Script(["just an answer, no calls", DONE])
     aid = "nd_c"
     seeded_kernel.create(
         "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
@@ -169,8 +159,9 @@ async def test_chat_turn_is_never_nudged(seeded_kernel):
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
         )
-        await asyncio.sleep(0.4)
-        assert fp.calls == 1, fp.incoming
+        await asyncio.sleep(0.6)
+        assert fp.calls == 2, fp.incoming
+        assert "[no call was dispatched]" in fp.incoming[-1]
     finally:
         core._providers.pop(aid, None)
 

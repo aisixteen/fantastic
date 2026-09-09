@@ -135,15 +135,13 @@ clothes, so it is a per-test knob: set `limits.max_tokens` in a test's
 The GPU proxy speaks the Anthropic wire at **`/cc/v1/messages`** (raw passthrough
 at `/raw`), tunnelled to `127.0.0.1:4000` over SSM.
 
-It returns `tool_use` blocks **for requests that declared no tools**. Both
-consequences are already handled — worth knowing so a result is not misread:
-
-- **Terminality is decided by what the stream CONTAINED**, not by whether we
-  declared tools. Gating on our own flag failed every such turn on arrival.
-- **Those blocks are translated to the raw `<tool_call>` envelope
-  UNCONDITIONALLY**, in python and rust alike. `TOOL_USE=1` controls only whether
-  we *declare* the `send` tool in the request; it is not needed to read what the
-  route sends back unasked.
+It returns `tool_use` blocks **for requests that declared no tools** — it parses a
+model's NATIVE tool syntax (qwen's JSON `<tool_call>`) server-side. This kernel
+declares no tools and reads no JSON from a model: a `tool_use` block in the stream
+is a LOUD provider error naming the grammar (`<call name=…>` text), never a
+translation. Under the tag grammar the model does not write the syntax the route
+parses, so the blocks do not appear; if one does, the model slipped into JSON and the
+error says so.
 
 SSM forwards have died mid-run before. If a probe fails on connect rather than on
 the substrate, re-check `:4000` before believing the result.

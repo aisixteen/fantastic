@@ -46,7 +46,7 @@ TASK = (
     "{type:'start', command, args}). The job must then be ABORTED: work is "
     "IN FLIGHT as a kernel task — list tasks with kernel `ps`, find the "
     "runner's job, and kill it with kernel `cancel` (task_id). When the "
-    "cancel reply confirms the kill, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>"
+    "cancel reply confirms the kill, end your run by calling done — emit <call name=\"done\"></call>"
     "."
 )
 
@@ -124,8 +124,8 @@ async def main():
         checks = [
             ("the job actually ran (heartbeat exists)", size_a > 0),
             ("the process is DEAD (heartbeat stopped growing)", size_a == size_b),
-            ("the job was started through the runner", '"start"' in transcript),
-            ("the kill went through kernel cancel", '"cancel"' in transcript),
+            ("the job was started through the runner", '<type>start</type>' in transcript),
+            ("the kill went through kernel cancel", '<type>cancel</type>' in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

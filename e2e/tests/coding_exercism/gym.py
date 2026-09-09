@@ -50,7 +50,7 @@ from helpers.kernel import open_kernel  # noqa: E402
 BENCH = E2E.parent / "tmp" / "repos" / "polyglot-benchmark"
 FB, RUNNER = "gym_fb", "gym_runner"
 INTERP = sys.executable
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 # Folders that leak the reference solution or are pure docs — never copied in.
 EXCLUDE = {".meta", ".docs", ".approaches", ".git", "node_modules", "build", "target"}
 

@@ -5,7 +5,7 @@ NVIDIA NIM exposes 100+ models on a free OpenAI-compatible API at
 (~40 RPM/model). Auth via `Authorization: Bearer <nvapi-...>`.
 
 Mirrors `OllamaProvider`: streams `str` content tokens ONLY — NO native tools
-array. Tool-calling is owned by ai_core, which parses `<tool_call>` text out of
+array. Tool-calling is owned by ai_core, which parses `<call>` text out of
 this stream.
 """
 
@@ -51,7 +51,7 @@ class NvidiaNimProvider:
 
     async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
         """Stream raw text tokens — NO tools array. ai_core parses any
-        `<tool_call>` envelope out of the text stream."""
+        `<call>` element out of the text stream."""
         if not self._model or self._model == DEFAULT_MODEL:
             raise RuntimeError(
                 "nvidia_nim_backend: no `model` set — this connector does not guess "

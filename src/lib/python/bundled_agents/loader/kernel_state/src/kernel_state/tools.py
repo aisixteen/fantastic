@@ -42,6 +42,8 @@ from typing import Any
 
 from file_bridge import fs
 
+from kernel_state import messages_xml
+
 from kernel import CURRENT_VERSION, operator_context
 from kernel import current_origin
 from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, refusal
@@ -52,39 +54,36 @@ from kernel._refusal import UNAUTHORIZED, UNHANDLED, guard_agent_id, missing, re
 # `fs`, so nothing here escapes the running dir.
 
 
-_MESSAGES_FILE = "messages.jsonl"
+_MESSAGES_FILE = "messages.xml"
 
 
 def read_messages(root_dir: Path) -> tuple[list[dict], int]:
     """COLD HYDRATION of the kernel's message store — `(rows, next_id)`.
 
-    The message log is `.fantastic/messages.jsonl`: one JSON object per line, one
-    line per row the kernel ever made (a turn, a delivered reply, a fold, a recall, a
-    `body` — the text merged in — a `view`, a `call`, a `task`), in id order, exactly
-    as the pump appended it. Read through `fs` (clamped), before any agent exists,
-    like `read_tree`. The bootstrap hands the rows to `Kernel.rows_put` FROM ABOVE
-    and sets `next_id` — the kernel starts empty every time and never guesses a
-    counter; this is the hydrator's logic. A corrupt line is skipped loudly. A
-    second ingestion of the same file is the user's fault: `rows_put` raises on the
-    first duplicate id rather than guarding it."""
+    The message log is `.fantastic/messages.xml`: ONE XML document whose root is
+    never closed, one `<row>` element per row the kernel ever made (a turn, a
+    delivered reply, a fold, a recall, a `body` — the text merged in — a `view`, a
+    `call`, a `task`), in id order, exactly as the pump appended it (format:
+    `messages_xml`). Read through `fs` (clamped), before any agent exists, like
+    `read_tree`. The bootstrap hands the rows to `Kernel.rows_put` FROM ABOVE and
+    sets `next_id` — the kernel starts empty every time and never guesses a counter;
+    this is the hydrator's logic. A file of another version, or a cut row, is a LOUD
+    error — nothing is skipped or repaired. A second ingestion of the same file is
+    the user's fault: `rows_put` raises on the first duplicate id."""
     rd = str(root_dir)
     if not fs.exists(rd, _MESSAGES_FILE):
         return [], 1
-    rows: list[dict] = []
-    top = 0
-    for n, line in enumerate(fs.read_text(rd, _MESSAGES_FILE).splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as e:
-            print(f"  [messages] {_MESSAGES_FILE}:{n} unreadable, skipped: {e}")
-            continue
-        if not isinstance(row, dict) or not isinstance(row.get("id"), int):
-            print(f"  [messages] {_MESSAGES_FILE}:{n} is not a row, skipped")
-            continue
-        rows.append(row)
-        top = max(top, row["id"])
+    text = fs.read_text(rd, _MESSAGES_FILE)
+    head = text.split("\n", 1)[0].strip()
+    if head != messages_xml.HEADER.strip():
+        raise RuntimeError(
+            f"{_MESSAGES_FILE}: unknown log version — first line is {head!r}, "
+            f"this loader writes {messages_xml.HEADER.strip()!r}"
+        )
+    rows = [
+        r for r in messages_xml.parse_messages(text) if isinstance(r.get("id"), int)
+    ]
+    top = max((r["id"] for r in rows), default=0)
     return rows, top + 1
 
 
@@ -507,6 +506,9 @@ class _MessagePump:
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._said_no_store = False
+        # Unknown until the first flush asks the store whether the log exists: a
+        # NEW log opens with the root element, an existing one is appended to.
+        self._header_needed: bool | None = None
 
     def start(self, after: int) -> None:
         self.seen = after
@@ -557,7 +559,28 @@ class _MessagePump:
             self.pending.clear()
             return
         batch, self.pending = self.pending, []
-        lines = "".join(json.dumps(r, default=str) + "\n" for r in batch)
+        if self._header_needed is None:
+            with operator_context():
+                probe = await self.kernel.send(
+                    [
+                        {
+                            "target": store_id,
+                            "payload": {
+                                "type": "read_stream",
+                                "path": _MESSAGES_FILE,
+                                "offset": 0,
+                                "length": 1,
+                            },
+                        }
+                    ]
+                )
+            pres = (probe[0] or {}).get("result") or {}
+            self._header_needed = bool(isinstance(pres, dict) and pres.get("error"))
+        lines = "".join(messages_xml.row_to_xml(r) for r in batch)
+        if self._header_needed:
+            # The root, once, at the head of a NEW log; never closed (a stream).
+            lines = messages_xml.HEADER + lines
+            self._header_needed = False
         with operator_context():
             out = await self.kernel.send(
                 [
@@ -744,15 +767,15 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         # whole run. Prose stays behind `readme:'self-extension'`; this shape does not.
         base["self_extension"] = (
             "A DURABLE PROGRAM is a FILE plus a command — no `code` field. (1) WRITE "
-            "it to a file: {write_stream, path, bytes, truncate:true} — `bytes` is "
-            "VERBATIM (the program between the quotes exactly as written, real newlines, nothing escaped; it is cut out before the call is parsed). "
-            "(2) RUN it on the COMMAND runner: `start {command, args}`, gated by its "
+            "it to a file: <type>write_stream</type> <path>…</path> <truncate>true</truncate> <bytes>…</bytes> — `bytes` is "
+            "VERBATIM (the program between `<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped). "
+            "(2) RUN it on the COMMAND runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by its "
             "`allowed` regexes (reflect it). (3) Re-run the same command to keep it "
             "current. A COMPUTE worker is an `exec_bridge.tools` agent + a program "
             "file — NOT a new handler_module. Create it as YOUR child; to wire it "
             "to a SIBLING (`totals`) grant `can_call:{totals}` AND `update_agent "
-            "id='totals'` to add it to `totals.callable_by`. Read {type:'reflect', "
-            "readme:'self-extension'} — send it to 'kernel' — for the fd wire."
+            "id='totals'` to add it to `totals.callable_by`. Read <type>reflect</type> "
+            "<readme>self-extension</readme> — send it to 'kernel' — for the fd wire."
         )
         return base
     return {
@@ -760,11 +783,10 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
         "readmes": agent._readme_index(),
         "docs": (
             "This kernel's manual is a keyed doc tree. To read it, send 'kernel' "
-            "a reflect payload with a string `readme` field: {type:'reflect', "
-            "readme:'index'} lists every topic with its ~token cost; "
-            "{type:'reflect', readme:'<key>'} opens one (e.g. "
-            "readme:'self-extension', readme:'streams'); {type:'reflect', "
-            "readme:true} is the short orientation. The field is named exactly "
+            "a reflect with a string `readme` field: <type>reflect</type> "
+            "<readme>index</readme> lists every topic with its ~token cost; "
+            "<readme>key</readme> opens one (e.g. self-extension, streams); "
+            "<readme>true</readme> is the short orientation. The field is named exactly "
             "`readme` (a string) - not 'readme_key'. Read only what a task needs."
         ),
         "self_extension": (
@@ -774,14 +796,14 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
             "to escaping. Assemble these THREE pieces and you have built something "
             "that persists and re-runs, with no `code` field at all:\n"
             "1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON "
-            "string. Use the file leg's STREAM verbs — {type:'write_stream', path, "
-            "bytes, truncate:true} to write, {type:'read_stream', path, offset} to "
+            "string. Use the file leg's STREAM verbs — <type>write_stream</type> <path>…</path> "
+            "<truncate>true</truncate> <bytes>…</bytes> to write, <type>read_stream</type> <path>…</path> <offset>0</offset> to "
             "read, one raw chunk at a time. `bytes` is VERBATIM: the program between "
-            "the quotes exactly as written, real newlines, nothing escaped — it is cut out before the call is parsed. That is "
+            "`<bytes>` and `</bytes>` exactly as written, real newlines, nothing escaped. That is "
             "the only byte path; the string read/write verbs are gone.\n"
             "2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect "
             "it, read its `allowed` regexes, then send "
-            "{type:'start', command:'<path>', args:[...]}; poll {type:'status'}. "
+            "<type>start</type> <command>path</command> <args><item>…</item></args>; poll <type>status</type>. "
             "It runs commands, not inline programs.\n"
             "3. RE-RUN: the file is durable on disk, so the SAME `start` command run "
             "again later re-executes the SAME program against whatever the inputs "

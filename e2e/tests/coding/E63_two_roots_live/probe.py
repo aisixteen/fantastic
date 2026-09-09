@@ -24,12 +24,13 @@ from helpers.facts_arm import (
     fixture,
     plant_fillers,
     report,
-    send_later,
+    after_replies,
+    send_when,
 )
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 
 from ai_core.folds import chains as _chains
 
@@ -49,7 +50,8 @@ async def main():
         results = []
         for aid, strategy, extra in FOLD_ARMS:
             from helpers.facts_arm import run_arm
-            later = await send_later(root, aid, TASK_B, 45.0)
+            # B lands once A is demonstrably mid-run (a reply delivered), not on a clock
+            later = await send_when(root, core, aid, TASK_B, after_replies(root, aid, 1), max_wait=600.0, poll=2.0)
             a = await run_arm(root, core, BK, FB, aid, strategy, extra, TASK_A, "report_a.md")
             later.cancel()
             pb = Path("report_b.md"); a["body_b"] = pb.read_text() if pb.exists() else ""

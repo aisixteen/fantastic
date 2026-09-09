@@ -41,7 +41,7 @@ TASK = (
     "job_id} for stdout). Find the one real hit and record it — write a file "
     "`found.md` through the editor `notes` whose entire content is exactly "
     "`<relative path>:<line number>` of the marker line (as grep -rn prints "
-    "it, without the line text). Then end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>"
+    "it, without the line text). Then end your run by calling done — emit <call name=\"done\"></call>"
     "."
 )
 

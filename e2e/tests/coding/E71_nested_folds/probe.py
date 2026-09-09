@@ -30,7 +30,7 @@ from helpers.facts_arm import (
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 FOLD_ONLY = (FOLD_ARMS[1],)
 
 FB = "nest_fb"

@@ -36,20 +36,16 @@ QUESTION = {
 
 
 def _call(verb_payload: dict) -> str:
-    return (
-        "<tool_call>"
-        + json.dumps(
-            {
-                "name": "send",
-                "arguments": {
-                    "target_id": "c1_store",
-                    "payload": verb_payload,
-                    "reply_to": "self",
-                    "id": f"c1-{verb_payload['path']}",
-                },
-            }
-        )
-        + "</tool_call>"
+    from ai_core.tool_parse import render_call
+
+    return render_call(
+        "send",
+        {
+            "target_id": "c1_store",
+            "payload": verb_payload,
+            "reply_to": "self",
+            "exec_id": f"c1-{verb_payload['path']}",
+        },
     )
 
 

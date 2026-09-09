@@ -113,33 +113,27 @@ Expected: messages ≥ 2; last message contains "ok" (case-insensitive).
 ```bash
 call $OB '{"type":"send","text":"how many agents are online? actually check using the send tool"}' | python -c "import json,sys; print(json.load(sys.stdin).get('final',''))"
 ```
-Expected: model emits a tool_call to `kernel_state` with `list_agents`, reads
-the reply, summarizes. Final answer mentions a number.
-Regression signal: model just says "I cannot check" without emitting
-tool_calls → either model lacks tool support or SEND_TOOL definition broke.
+Expected: the model emits a `<call name="send">` to `kernel` with
+`<type>list_agents</type>`, reads the reply, summarizes. Final answer mentions a
+number. Regression signal: the model just says "I cannot check" without emitting a
+`<call>` → the prompt's call section (`_SEND_TO_HOWTO`) broke.
 
-The persistence is **lossless** — the history must contain the full
-`assistant`-with-`tool_calls` turn AND its `role:tool` reply, not just
-the user/final-assistant pair. This is the audit trail for malformed
-tool-calls (Gemma chat-template-token leaks like `<|"|verb<|"|`,
-hallucinated verbs, args-as-string vs dict).
+The persistence is **lossless** — the history must contain the assistant turn WITH
+its `<call>` text AND the `[reply to …]` user row that answered it, not just the
+user/final-assistant pair. This is the audit trail for malformed calls (a tag never
+closed, a verb written as the tool name, JSON where tags were expected).
 
 ```bash
 call $OB '{"type":"history"}' | python -c "
 import json,sys
 d = json.load(sys.stdin)['messages']
-roles = [m['role'] for m in d]
-has_tcs = any(m.get('tool_calls') for m in d if m['role']=='assistant')
-has_tool = 'tool' in roles
-print('PASS' if has_tcs and has_tool else f'FAIL roles={roles} tcs={has_tcs}')
-print('  recent tool_call name:',
-      next((tc['function']['name']
-            for m in reversed(d) if m.get('tool_calls')
-            for tc in m['tool_calls']), '(none)'))
+has_call = any('<call name=' in (m.get('content') or '') for m in d if m['role']=='assistant')
+has_reply = any('[reply to' in (m.get('content') or '') for m in d if m['role']=='user')
+print('PASS' if has_call and has_reply else f'FAIL call={has_call} reply={has_reply}')
 "
 ```
-Expected: `PASS` and a non-`(none)` tool_call name (e.g. `send`).
-Regression signal: PASS missing → `_run` reverted to lossy persistence
+Expected: `PASS`.
+Regression signal: PASS missing → the turn store dropped the call or its reply
 (saving only user + final assistant). Faulty tool calls evaporate.
 
 ### Test 5: history persists across calls

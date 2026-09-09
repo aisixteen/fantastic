@@ -664,7 +664,7 @@ async def _reflect(id, payload, kernel):
             "hook before the kernel aborts the task, so nothing is orphaned."
         ),
         "authoring": (
-            "A general-purpose command runner: `start {command, args}`, gated by "
+            "A general-purpose command runner: <type>start</type> <command>…</command> <args><item>…</item></args>, gated by "
             "the `allowed` regexes on the full command line."
         ),
         **_describe(rec),
@@ -760,9 +760,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, list) or not raw:
-            return (
-                "allowed must be a non-empty list of regexes, e.g. allowed=['ls( .*)?']"
-            )
+            return "allowed must be a non-empty list of regexes, e.g. <allowed><item>ls( .*)?</item></allowed>"
         for pat in raw:
             try:
                 _re.compile(str(pat))

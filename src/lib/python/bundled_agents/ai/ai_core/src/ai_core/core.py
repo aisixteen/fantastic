@@ -39,8 +39,8 @@ backends + the TS ai_view before the next major bump:
      Future: history travels with the chat tile, backends become
      stateless-modulo-streaming.
   2. (resolved) Tool-call protocol is now RAW + uniform: every provider
-     streams plain text; the shared `tool_parse` parses one `<tool_call>`
-     envelope contract for all backends. No native provider tool API.
+     streams plain text; the shared `tool_parse` parses the one `<call>`
+     grammar for all backends. No native provider tool API, no JSON.
   3. Multi-modal binary frames — image/audio payloads currently
      have no defined wire shape. Needs the WS binary frame channel
      (also blocks terminal_backend's image-paste).
@@ -58,6 +58,7 @@ import re
 import secrets
 import sys
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,14 +85,10 @@ from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, drop_orphan_tools
 # two stale copies of a fact is worse than none.) `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.tool_parse import (
-    CHANNEL_CLOSE,
-    CHANNEL_OPEN,
-    CLOSE,
-    INVOKE_CLOSE,
-    INVOKE_OPEN,
-    OPEN,
+    call_spans,
     extract_tool_calls,
     malformed_calls,
+    render_reply,
 )
 from kernel import current_task
 
@@ -551,9 +548,17 @@ async def _get_provider(self_id: str, kernel, cfg: Backend):
 def _render_reflect(d: dict) -> str:
     d = dict(d)
     sentence = d.pop("sentence", "")
-    fields = "  ".join(
-        f"{k}={json.dumps(v) if not isinstance(v, str) else v}" for k, v in d.items()
-    )
+
+    # No JSON on the model path: a list of scalars is comma-joined, anything
+    # nested is the reply notation collapsed onto the line.
+    def _one(v) -> str:
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list) and all(not isinstance(x, (dict, list)) for x in v):
+            return ",".join(str(x) for x in v)
+        return " ".join(render_reply(v).split())
+
+    fields = "  ".join(f"{k}={_one(v)}" for k, v in d.items())
     return f"{sentence}  {fields}".strip()
 
 
@@ -562,14 +567,15 @@ Your live context is finite. When the conversation outgrows it, the system COMPA
 view: older turns are summarized or elided and a `[context-notice]` turn is inserted. The
 DURABLE transcript is ALWAYS whole — compaction only shapes what you see right now, and
 nothing is ever truly lost.
-- To page dropped turns back on demand: `send('<your_own_id>', {type:'recall', query?, limit?})`.
+- To page dropped turns back on demand: send your OWN id `<type>recall</type>` with an
+  optional `<query>` and `<limit>`.
   `query` substring-filters your full history; `limit` caps the page. Use it whenever you
   need a detail from earlier that isn't in your current view.
 - When a compaction notice lands and the dropped span held durable facts (names, decisions,
   preferences), persist them to a memory agent (reflect the tree to find one) via the send
   tool — that is how they survive beyond this window.
 - To inspect your budget + the last compaction + your own last reaction:
-  `send('<your_own_id>', {type:'context_status'})`.
+  send your OWN id `<type>context_status</type>`.
 """
 
 
@@ -582,8 +588,13 @@ def _clean_title(t) -> str | None:
 
 
 _TITLES_HOWTO = """## Titling your calls
-Every call carries a one-sentence `title` beside `target_id` and `payload`:
-<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{...},"title":"<why this call>"}}</tool_call>
+Every call carries a one-sentence `<title>` beside its `<target_id>`:
+<call name="send">
+<target_id>notes</target_id>
+<title>read filler_2 — looking for the audit marker</title>
+<type>read</type>
+<path>filler_2.txt</path>
+</call>
 The title rides on the reply's tag and is what remains once the reply BODY is stripped
 from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
 for the audit marker"), and after a reply SAY WHAT IT TOLD YOU in one sentence — the body
@@ -595,8 +606,8 @@ _ASYNC_HOWTO = """## Replies are rows, not turns
 A reply is DATA, not a message to answer. A LARGE reply arrives as a one-line digest —
 tag, your title, size — with the body stored:
 [reply to <pid> · notes read · "survey filler_2"]
-(settled, 6812 bytes — NOT inlined. To find a line in it: send yourself {type:'grep', query:'<substring>', ids:[<pid>]}. To read it: {type:'pull', pid:<pid>, offset:0})
-GREP BEFORE YOU PAGE: {type:'grep', query:'<substring>'} on yourself finds the line —
+(settled, 6812 bytes — NOT inlined. To find a line in it: send yourself `<type>grep</type> <query>substring</query> <ids><item>pid</item></ids>`. To read it: `<type>pull</type> <pid>pid</pid> <offset>0</offset>`)
+GREP BEFORE YOU PAGE: `<type>grep</type> <query>substring</query>` on yourself finds the line —
 in a stored body, a folded stretch, an old turn — with its id and line; pull only what
 matched. A `pull` page always fits inline; `next_offset` continues it, `eof` ends it.
 FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N refs]
@@ -604,35 +615,50 @@ FOLDS: when your window fills, finished stretches collapse into `[fold <id> · N
 look inside. After a fold, and on boot with a history, `context_recall` fits the head of
 your conversation to your budget and asks you what to keep in full; a `[recall …]` line
 is your own earlier decision and names the LIVE task. You may call
-{type:'context_recall'} on yourself any time.
+`<type>context_recall</type>` on yourself any time.
 """
 
 
 _SEND_TO_HOWTO = """## Reaching other agents
 Everything is an agent with a string id. `send(target_id, payload)` reaches any of them —
-the payload's `type` names the verb; `{type:'reflect'}` returns that agent's verbs and
-state. To send, emit exactly this, alone on its line:
-<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>
-`reply_to` is where that send's reply goes. It defaults to you — leave it out and the
+`<type>` names the verb; `reflect` returns that agent's verbs and
+state. A call is a `<call>` element: one child tag per argument, nothing else — no
+JSON, no quotes, no escaping. `<target_id>` names the agent, `<type>` the verb, and
+every other child is that verb's argument:
+<call name="send">
+<target_id>notes</target_id>
+<reply_to>self</reply_to>
+<type>reflect</type>
+</call>
+`<reply_to>` is where that send's reply goes. It defaults to you — leave it out and the
 answer comes back as your next message. Name another agent's id to hand the answer to
-them instead, or `null` to discard it. Text outside the tag is your message to whoever
-asked. Interpret instructions literally — act on what is asked, not on inferred
-intent. Keep prose brief: the work happens in calls, not in explanation.
+them instead, or `null` to discard it. A value is text as written (`true`, `12`, a
+path); a LIST is one tag whose children are all `<item>`, one element each:
+`<ids><item>12</item><item>15</item></ids>`; an object is a tag with child tags,
+and a list of objects is `<item>`s with children:
+`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`. Text outside the call
+is your message to whoever asked. Interpret instructions literally — act on what is
+asked, not on inferred intent. Keep prose brief: the work happens in calls.
 EMIT CALLS BEFORE YOU DELIBERATE. A plan written in thought and never sent is a wasted
 turn: the moment you know the next call, send it — reasoning continues after the reply,
-with the reply in hand. Never end a turn on "let me do X" without X in a tool_call.
+with the reply in hand. Never end a turn on "let me do X" without X in a `<call>`.
 
-## Sending a document — the `bytes` field is VERBATIM
+## Sending a document — `<bytes>` is VERBATIM
 When a verb takes a body of text (a file to write, a patch, a program), it names the
-field `bytes`. That field is cut out of your call BEFORE the JSON is parsed: write the
-text between its quotes exactly as it should land — real newlines, real quotes, nothing
-escaped — and close the call after it. No fence, no placeholder, no second form:
-<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"write","path":"<p>","bytes":"line one
+argument `bytes`. Write the text between `<bytes>` and `</bytes>` exactly as it should
+land — real newlines, real quotes, nothing escaped, no fence — and close the call after
+it. The document ends at the first `</bytes>`, so a document must not contain that tag.
+<call name="send">
+<target_id>notes</target_id>
+<type>write</type>
+<path>notes.md</path>
+<bytes>line one
 line two, with "quotes" and anything else
-"}}}</tool_call>
+</bytes>
+</call>
 Which verbs take a body is each agent's own story — reflect it; every one names `bytes`.
 
-A `<tool_call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
+A `<call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
 thinking. The envelope is parsed out of everything you emit and dispatched the
 moment it is complete, so there is no hypothetical or illustrative call: writing one
 makes it happen.
@@ -641,18 +667,18 @@ Your thinking is NOT carried over between turns — it is stripped from history,
 conclusion you only reasoned about is lost. Put what you worked out into the call you
 make, or into a message. Reasoning longer never carries further than acting now does.
 Before ending a turn, check one thing: every action you decided on exists as a
-`<tool_call>` envelope in the turn. A decision without its envelope did not happen.
+`<call>` in the turn. A decision without its call did not happen.
 
 Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
-<tool_call>{"name":"done"}</tool_call>
+<call name="done"></call>
 — that ends your chain. A turn with NO call ends nothing: the runtime reminds you
 once (a call decided in thinking does not execute unless the envelope is written
 out), so never leave a finished task unsignalled — call `done`.
 
 AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When
 you cannot proceed without a decision that is not yours to make, `send` them
-`{"type":"inquiry", "text":"...", "kind":"text|single|multi|confirm",
-"options":[...]}` and the ANSWER COMES BACK AS THE REPLY, in your next turn,
+an `inquiry` — `<type>inquiry</type> <text>…</text> <kind>text|single|multi|confirm</kind>
+<options><item>…</item></options>` — and the ANSWER COMES BACK AS THE REPLY, in your next turn,
 tagged with its pid like every other reply. Nothing suspends and nothing is
 scraped out of your prose: an inquiry is an ordinary call, so it is gated, it
 appears in the ledger, and someone who cannot answer REFUSES rather than
@@ -662,7 +688,7 @@ colleague are one verb, not two. Reflect before assuming anyone is reachable.
 
 RECEIVING ONE IS THE OTHER HALF. When someone `send`s YOU an `inquiry`, the turn
 you run IS your reply — say what your answer is:
-<tool_call>{"name":"inquiry_answer","arguments":{"answer":"<what you concluded>"}}</tool_call>
+<call name="inquiry_answer"><answer>what you concluded</answer></call>
 That call is not a send and dispatches nothing; it hands your answer back to
 whoever sent it. A turn that never emits it did not answer, and they are told so —
 your prose is not harvested as an answer behind your back. Answer from what you
@@ -683,19 +709,18 @@ literally:
 - Each call may carry `timeout: <seconds>` in its arguments to bound that call;
   otherwise a generous default applies. A call that exceeds it is CANCELLED and
   its block reports the timeout.
-- A call may carry `id: "<name>"` in its arguments — BESIDE `payload`, never
-  inside it: `{"name":"send","arguments":{"target_id":"x","payload":{...},
-  "id":"job-1"}}`. That NAMES the execution.
-  Re-sending the SAME id NEVER runs the work twice: you get the first run's
-  recorded outcome back, byte for byte (even if it failed). Use it for any call
-  you must not double-fire (a write, a payment, a create) and to safely re-fetch
-  a reply; a genuinely NEW attempt needs a NEW id. An id you choose is a NAME (a word);
-  the kernel's own ids are integers and cannot be created, only joined.
-  Add `retries: N` and the KERNEL re-runs a failing or timing-out call up to N
-  more times before answering — you send once and receive the final outcome
-  (`attempts` says how many runs it took). Work that stays failed is parked:
-  `send 'kernel' {type:'ledger'}` lists your executions and what became of
-  them, outcomes included — inspect there instead of re-firing blind.
+- A call may carry `<exec_id>job-1</exec_id>` beside its `<target_id>`. That NAMES
+  the execution. Re-sending the SAME exec_id NEVER runs the work twice: you get the
+  first run's recorded outcome back, byte for byte (even if it failed). Use it for
+  any call you must not double-fire (a write, a payment, a create) and to safely
+  re-fetch a reply; a genuinely NEW attempt needs a NEW exec_id. An exec_id you
+  choose is a NAME (a word); the kernel's own ids are integers and cannot be
+  created, only joined.
+  Add `<retries>N</retries>` and the KERNEL re-runs a failing or timing-out call up
+  to N more times before answering — you send once and receive the final outcome
+  (`attempts` says how many runs it took). Work that stays failed is parked: send
+  `kernel` `<type>ledger</type>` to list your executions and what became of them,
+  outcomes included — inspect there instead of re-firing blind.
 - `reply_to:null` means the call still runs but its answer is discarded — it is
   not in M and nothing comes back. `reply_to:<someone else>` hands that block to
   THEM instead of you.
@@ -712,7 +737,7 @@ again — it is cheap and always current, and re-reading beats guessing.
 #
 # After ONE provider pass, its output goes where it was addressed.
 #
-#   the model's own <tool_call>s — each names a target, a payload and `reply_to`. All are
+#   the model's own <call>s — each names a target, a verb and `reply_to`. All are
 #     dispatched, and each reply is delivered to its own `reply_to`. `reply_to:'self'` is
 #     what makes a chain, and the chain continues ONLY because the model asked again.
 #     No call ends the turn: stop is the default.
@@ -940,7 +965,7 @@ def drop_answered_reflects(history: list[dict]) -> list[dict]:
         )
         # FAIL CLOSED. Drop the body only if the model actually WROTE the distillation
         # in the turn that answered it. Measured 2026-08-20 (`live_plan`): the model
-        # replied to several reflects with a bare tool_call and no prose, the body was
+        # replied to several reflects with a bare <call> and no prose, the body was
         # dropped anyway, and it had to re-fetch what it had lost — "The index was
         # dropped from my view. Let me send it again and, THIS TIME, actually record
         # the facts." Burning turns re-reading is the exact loop this trim exists to
@@ -1006,8 +1031,8 @@ def dedupe_stale_reads(history: list[dict]) -> list[dict]:
     return list(reversed(keep_rev))
 
 
-# A `<tool_call>` written INSIDE a thought is not deliberation — it is an action
-# that was taken. Dispatch reads the FULL text, so such a call really does run and
+# A `<call>` written INSIDE a thought is not deliberation — it is an action that
+# was taken. Dispatch reads the FULL text, so such a call really does run and
 # really does return a reply; stripping the whole span deleted it from history, and
 # the next turn showed the model an effect with no cause.
 #
@@ -1019,53 +1044,25 @@ def dedupe_stale_reads(history: list[dict]) -> list[dict]:
 # up. 3 of 169 dispatched calls across the day's runs were lost this way, and 2 of
 # the 3 were in the run that failed at turn 2 because of it.
 #
-# ALL THREE DIALECTS, because dispatch parses all three. Keeping only the JSON
-# `<tool_call>` one left the identical gap open for a model that speaks another
-# grammar: gemma-4 emits the CHANNEL form (`<|tool_call>call:…<tool_call|>`), so its
-# calls ran, returned a `[reply to …]` next turn, and left no cause in the record —
-# the exact effect-without-cause failure this stripper exists to prevent. Rust's
-# `kept_envelopes` (think.rs) has scanned all three since it was written.
-#
-# The pairing MIRRORS `tool_parse._ENVELOPES` — that table is the source of truth
-# for which delimiters bound a call; a fourth envelope there is one line here.
-_ENVELOPE_PAIRS = (
-    (OPEN, CLOSE),
-    (INVOKE_OPEN, INVOKE_CLOSE),
-    (CHANNEL_OPEN, CHANNEL_CLOSE),
-)
+# The spans come from the parser itself (`tool_parse.call_spans`) — the ONE place
+# that knows where a call ends (a `</call>` inside a `<bytes>` document does not).
 
 
 def _kept_envelopes(span: str) -> str:
-    """Every COMPLETE tool-call envelope inside `span`, in SOURCE order, one per line.
-
-    Source order, not dialect order: a turn that opened a channel call and then a
-    JSON one must read back the way it was written, or the record misstates the
-    sequence of actions. An opener with no closer is not kept — dispatch could not
-    have parsed it either, so it is reasoning, not an action."""
-    found: list[tuple[int, str]] = []
-    for open_tag, close_tag in _ENVELOPE_PAIRS:
-        at = 0
-        while True:
-            a = span.find(open_tag, at)
-            if a == -1:
-                break
-            b = span.find(close_tag, a)
-            if b == -1:
-                break
-            at = b + len(close_tag)
-            found.append((a, span[a:at]))
+    """Every COMPLETE call envelope inside `span`, in SOURCE order, one per line.
+    An opener with no closer is not kept — dispatch could not have parsed it
+    either, so it is reasoning, not an action."""
+    found = call_spans(span)
     if not found:
         return ""
-    found.sort(key=lambda hit: hit[0])
-    return "\n" + "\n".join(e for _, e in found) + "\n"
+    return "\n" + "\n".join(found) + "\n"
 
 
 def without_thinking(text: str) -> str:
     """Drop every `<think>…</think>` span — what goes into durable history.
 
-    KEEPS any tool-call envelope found inside a dropped span — all three dialects
-    (`<tool_call>`, `<invoke>`, `<|tool_call>`), since dispatch parses all three:
-    the reasoning goes, the action stays. What was invoked must appear in the record
+    KEEPS any call envelope found inside a dropped span, since dispatch parses the
+    full text: the reasoning goes, the action stays. What was invoked must appear in the record
     of what happened, or the model cannot account for the replies it receives."""
     out, i = [], 0
     while True:
@@ -1125,11 +1122,10 @@ _NUDGE_LIMIT = 24
 _silent: dict[tuple[int, str, str], int] = {}
 
 _NO_CALL_NUDGE = (
-    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
+    "[no call was dispatched] Your turn emitted no <call> element, so "
     "NOTHING ran — a call decided in thinking does not execute unless the "
-    "envelope is written out. If the task is unfinished, emit that call now. "
-    'If it is finished, end the chain explicitly: <tool_call>{"name":"done"}'
-    "</tool_call>"
+    "element is written out. If the task is unfinished, emit that call now. "
+    'If it is finished, end the chain explicitly: <call name="done"></call>'
 )
 
 
@@ -1182,7 +1178,16 @@ async def _route_reply(
     # inside the body we could not read, and the documented default for an
     # absent `reply_to` is self anyway.
     for bad in malformed_calls(text or ""):
-        units.append((self_id, "-", "-", None, json.dumps(bad)))
+        # Plain text, not JSON: the model↔harness path carries no JSON either way.
+        units.append(
+            (
+                self_id,
+                "-",
+                "-",
+                None,
+                f"{bad['error']}\n\nyour block:\n{bad['your_block']}",
+            )
+        )
     done_called = any(c.get("name") == "done" for c in calls)
     for call in calls:
         if call.get("name") in ("done", "inquiry_answer"):
@@ -1220,15 +1225,14 @@ async def _route_reply(
                         "-",
                         "-",
                         None,
-                        json.dumps(
+                        render_reply(
                             {
                                 "error": (
                                     "no target_id, so nothing was dispatched — a "
                                     "send must name the AGENT it goes to. Shape: "
-                                    '{"name":"send","arguments":{"target_id":'
-                                    '"<agent>","payload":{"type":"<verb>"}}}. '
-                                    "Send `{type:'reflect'}` to the kernel for "
-                                    "the list of agent ids."
+                                    '<call name="send"><target_id>agent</target_id>'
+                                    "<type>verb</type></call>. Send `kernel` "
+                                    "<type>reflect</type> for the list of agent ids."
                                 ),
                                 "you_sent": {
                                     k: v for k, v in args.items() if k != "payload"
@@ -1240,7 +1244,7 @@ async def _route_reply(
             continue
         target = target.strip()
         payload = args.get("payload")
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or not payload:
             # NO PAYLOAD, NO SEND — what arrives here has no verb in it, and
             # saying so beats a Python error about our internals.
             if reply_to:
@@ -1250,13 +1254,12 @@ async def _route_reply(
                         target,
                         "-",
                         None,
-                        json.dumps(
+                        render_reply(
                             {
                                 "error": (
                                     f"send to {target!r} carried no payload, so "
-                                    "nothing was dispatched. A payload is an "
-                                    "object whose `type` names the verb, e.g. "
-                                    '{"type":"reflect"}.'
+                                    "nothing was dispatched. A call names its verb "
+                                    "in `<type>`, e.g. <type>reflect</type>."
                                 ),
                                 "target": target,
                                 "you_sent": {
@@ -1284,11 +1287,11 @@ async def _route_reply(
         item = {"target": target, "payload": payload, "timeout": send_timeout}
         if "timeout" in args:
             item["timeout"] = args.get("timeout")
-        # The model's execution id rides through untouched — the kernel owns the
-        # ledger semantics AND the validation (a bad id settles as a refusal the
-        # model can read).
-        if "id" in args:
-            item["id"] = args.get("id")
+        # The model's execution NAME rides through untouched as the item's `id` —
+        # the kernel owns the ledger semantics AND the validation (a bad name
+        # settles as a refusal the model can read).
+        if "exec_id" in args:
+            item["id"] = args.get("exec_id")
         if "retries" in args:
             item["retries"] = args.get("retries")
         items.append(item)
@@ -1332,7 +1335,8 @@ async def _route_reply(
             if idx is not None:
                 out = outcomes[idx]
                 pid = out["pid"] or "-"
-                body = json.dumps(out["result"], default=str)
+                # The SAME notation the model writes calls in — never JSON.
+                body = render_reply(out["result"])
                 # Only reflect bodies are dropped later, so only they carry
                 # the distillation notice.
                 if verb == "reflect":
@@ -1355,8 +1359,8 @@ async def _route_reply(
                         # recall_after_fold: 24 pulls, 0 greps, marker not found).
                         body = (
                             f"(settled, {size} bytes — NOT inlined. To find a line in it: "
-                            f"send yourself {{type:'grep', query:'<substring>', ids:[{pid}]}}. "
-                            f"To read it: {{type:'pull', pid:{pid}, offset:0}})"
+                            f"send yourself <type>grep</type> <query>substring</query> <ids><item>{pid}</item></ids>. "
+                            f"To read it: <type>pull</type> <pid>{pid}</pid> <offset>0</offset>)"
                         )
             else:
                 pid = "-"
@@ -1370,29 +1374,29 @@ async def _route_reply(
             )
     if done_called:
         _silent.pop((id(kernel), self_id, client_id), None)
-        return  # explicitly finished — nothing more runs, nothing reminds
+        # Explicitly finished — nothing more runs, nothing reminds. A caller's
+        # `send_to` hand-off is the one thing that still applies: the finished
+        # text is what it asked to have delivered.
+        if send_to is not None and not units:
+            _deliver_soon(kernel, send_to, text, client_id, system_prompt)
+        return
     if not calls and not units:
         # A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
         # dispatched nothing is REMINDED AGAIN — the model is queried until it
-        # emits a call, `done`, or a question. Until 2026-09-01 the reminder fired
-        # ONCE and a second silent turn ended the chain silently; a planning-heavy
-        # model (E30 subai) wrote prose for two turns and the run read as
-        # finished with the task untouched. A chat turn is not a chain (prose to
-        # a person is the product). Bounded by `nudge_limit` on the record
-        # (default 24 consecutive silent turns) so an unattended kernel cannot
-        # spin forever on a model that never calls; the harness's max_turns is
-        # the outer backstop.
-        chained = isinstance(incoming, str) and (
-            incoming.startswith("[reply to ")
-            or incoming.startswith("[no call was dispatched]")
-        )
-        # ASKING IS A CALL NOW, so there is no question-turn exemption here.
-        # A turn that asks the human DISPATCHES (`send` to the human agent) and
-        # is therefore never silent; the answer arrives as that call's reply.
-        # This used to scan the model's own prose for the old
-        # `{"type":"question"}` line and
-        # suppress the nudge on a hit — a text convention the kernel had to
-        # recognise, with the human living outside it entirely.
+        # emits a call or `done`. Until 2026-09-01 the reminder fired ONCE and a
+        # second silent turn ended the chain silently; a planning-heavy model
+        # (E30 subai) wrote prose for two turns and the run read as finished with
+        # the task untouched. EVERY turn, not only a chained one (user, 2026-09-09:
+        # "all is tool calls"): a first turn from a person that answers in prose
+        # and emits nothing is the same silence — the model ends it with `done`
+        # or acts. Bounded by `nudge_limit` on the record (default 24 consecutive
+        # silent turns) so an unattended kernel cannot spin forever on a model
+        # that never calls; the harness's max_turns is the outer backstop.
+        #
+        # ASKING IS A CALL, so there is no question-turn exemption. A turn that
+        # asks the human DISPATCHES (`send` to the human agent) and is therefore
+        # never silent; the answer arrives as that call's reply.
+        chained = True
         if chained:
             # Scoped to the KERNEL instance, not the process: two kernels in one
             # process (the test suite, an app embedding several) may carry the
@@ -1409,7 +1413,7 @@ async def _route_reply(
             return
     _silent.pop((id(kernel), self_id, client_id), None)
     if calls:
-        return
+        return  # the model routed its own work; a caller's hand-off does not apply
     if send_to is not None:
         _deliver_soon(kernel, send_to, text, client_id, system_prompt)
 
@@ -1665,7 +1669,7 @@ def _context_notice(
         )
     lines.append(
         "The full transcript is intact in durable storage. To page dropped turns back, "
-        "send {type:'recall', query?, limit?} to your OWN id. If the dropped span holds "
+        "send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds "
         "durable facts (names, decisions, preferences), persist them to your memory agent "
         "now via the send tool — the earlier turns are leaving your live view."
     )
@@ -2070,8 +2074,8 @@ def _make_inquiry(cfg: Backend):
             return {
                 "error": (
                     "you were sent an inquiry and did not answer it: emit "
-                    '<tool_call>{"name":"inquiry_answer","arguments":'
-                    '{"answer":"<what you concluded>"}}</tool_call>'
+                    '<call name="inquiry_answer"><answer>what you concluded'
+                    "</answer></call>"
                 ),
                 "reason": "unhandled",
                 "request_id": payload.get("request_id"),
@@ -2104,7 +2108,7 @@ def _make_inquiry(cfg: Backend):
 
 def _make_send(cfg: Backend):
     async def _send(id, payload, kernel):
-        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `reply_to` inside its <tool_call>s. Returns {response, final, client_id}."""
+        """args: text:str (req), client_id:str? (default 'cli'). Streams tokens to ONLY the caller — cli (stdout) for client_id='cli', or the browser tab whose WS is subscribed and filters by client_id otherwise. Persists per-client chat.json. Per-backend FIFO lock: concurrent callers serialize. If the lock is held when this call arrives, emits a `status` event (phase='queued', detail.ahead) for the caller; first `token` (or `status` of phase != queued) for the same client_id implicitly unqueues. Optional system_prompt:str REPLACES the auto-built prompt (caller-supplied role/context — read it from a state agent yourself, no yaml coupling here); optional messages:list REPLACES persisted history (fully stateless). _call_stack is reserved for the recursion guard (cycle/over-depth refusal before the lock). Optional send_to:str hands this pass's TEXT to that agent id as a fresh turn, once. The model routes its own work with `<reply_to>` inside its calls. Returns {response, final, client_id}."""
         client_id = _safe_client(payload.get("client_id") or DEFAULT_CLIENT_ID)
         # Recursion guard — checked BEFORE the lock, so a cycle can never deadlock on
         # the per-backend FIFO lock (A→B→A would otherwise block on A's held lock).
@@ -2207,6 +2211,11 @@ def _make_send(cfg: Backend):
                     "client_id": client_id,
                 }
             except Exception as e:
+                # THE TRACEBACK, on stderr, every time: a turn that ends in
+                # `reason='error'` with only `str(e)` is undiagnosable from a
+                # transcript (2026-09-09: "Object of type bytes is not JSON
+                # serializable" with no frame to name where).
+                traceback.print_exc()
                 # A backend may install a custom error mapper (nvidia: clean
                 # 429 / HTTP messages instead of re-raising).
                 if cfg._error_mapper is not None:
@@ -2300,9 +2309,9 @@ def _make_history(cfg: Backend):
 # reading the reflect) needs no bundle-private knowledge to stop a turn.
 CANCEL_DOC = (
     "No `interrupt` verb — an in-flight `send` IS a kernel task. Kill it with the "
-    "substrate's universal system verbs: send 'kernel' {type:'ps'} for the live task "
+    "substrate's universal system verbs: send 'kernel' <type>ps</type> for the live task "
     "table, find the row {agent:'<this agent>', verb:'send'}, then send 'kernel' "
-    "{type:'cancel', task_id:<n>}. The turn closes with status(phase='done', "
+    "<type>cancel</type> <task_id>n</task_id>. The turn closes with status(phase='done', "
     "reason='cancelled') + done, its HTTP stream and FIFO lock are released, and the "
     "blocked caller's `send` resolves to {cancelled:true}. Cancel kills the task's whole "
     "SUBTREE, so any work the turn spawned dies with it."
@@ -2349,7 +2358,7 @@ async def _status(id, payload, kernel):
 def _recall_render(m: dict) -> str:
     """Render ONE stored turn for a recall reply — WHOLE, never truncated.
 
-    Turns are pure text (tool calls/replies are inline `<tool_call>`/`<tool_response>`
+    Turns are pure text (tool calls are inline `<call>` elements, replies `[reply to …]` blocks
     text), so this only serializes a non-str content. The page `limit` is the bound
     that belongs here: recall exists to hand back a detail the model no longer has,
     and a per-turn cap silently drops the very part it went looking for — the caller
@@ -2392,7 +2401,7 @@ async def _recall(id, payload, kernel):
         # (`_route_reply` dehydrates on exactly that). Sizing the inner messages alone
         # let a 5,243-byte recall slip past the cap and come back as a stub (measured
         # 2026-09-06, recall_after_fold). Margin as in `_fit_reply`.
-        body = json.dumps(
+        body = render_reply(
             {
                 "messages": [
                     {"index": i, "role": m.get("role"), "content": _recall_render(m)}
@@ -2402,8 +2411,7 @@ async def _recall(id, payload, kernel):
                 "truncated": True,
                 "note": "page trimmed by 999 older turn(s) to fit your window (cap "
                 f"{cap} tok); pass before=999999 to page further back.",
-            },
-            default=str,
+            }
         )
         return estimate_one({"role": "user", "content": body})
 
@@ -2457,7 +2465,7 @@ async def _derive_reaction(id, kernel) -> dict | None:
     for m in store[idx:]:
         if m.get("role") != "assistant":
             continue
-        # Tool calls now live as `<tool_call>` text inside the assistant content —
+        # Tool calls now live as `<call>` text inside the assistant content —
         # extract them with the same shared parser the loop uses.
         for call in extract_tool_calls(m.get("content") or ""):
             args = call.get("arguments") or {}

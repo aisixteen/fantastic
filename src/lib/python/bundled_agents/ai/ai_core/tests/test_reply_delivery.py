@@ -18,25 +18,15 @@ order. The model never sees a partial batch, so it never re-asks.
 from __future__ import annotations
 
 import asyncio
-import json
 
 from ai_core.core import _route_reply
+from ai_core.tool_parse import render_call
 
 
 def _call(target: str, verb: str = "reflect", reply_to: str = "self") -> str:
-    return (
-        "<tool_call>"
-        + json.dumps(
-            {
-                "name": "send",
-                "arguments": {
-                    "target_id": target,
-                    "payload": {"type": verb},
-                    "reply_to": reply_to,
-                },
-            }
-        )
-        + "</tool_call>"
+    return render_call(
+        "send",
+        {"target_id": target, "payload": {"type": verb}, "reply_to": reply_to},
     )
 
 
@@ -147,59 +137,18 @@ async def test_the_layer_default_timeout_rides_every_item():
             return await super().send(items)
 
     k = _K()
-    with_own = (
-        "<tool_call>"
-        + json.dumps(
-            {
-                "name": "send",
-                "arguments": {
-                    "target_id": "slowpoke",
-                    "payload": {"type": "crunch"},
-                    "reply_to": "self",
-                    "timeout": 5,
-                },
-            }
-        )
-        + "</tool_call>"
+    with_own = render_call(
+        "send",
+        {
+            "target_id": "slowpoke",
+            "payload": {"type": "crunch"},
+            "reply_to": "self",
+            "timeout": 5,
+        },
     )
     await _route_reply("ai", k, _call("kernel") + with_own, "cli", None, None, 42.0, "")
     await _settle(k, 1)
     assert seen == [("kernel", 42.0), ("slowpoke", 5)]
-
-
-async def test_the_models_execution_id_rides_the_item(monkeypatch=None):
-    """`id` in the envelope names the execution at the KERNEL — the model's
-    handle on the ledger (dedup, join, recorded outcomes). Passed through
-    verbatim; the kernel validates."""
-    seen: list[tuple[str, object]] = []
-
-    class _K(_Kernel):
-        async def send(self, items):
-            for it in items:
-                if it["payload"].get("type") != "send":
-                    seen.append((it["target"], it.get("id"), it.get("retries")))
-            return await super().send(items)
-
-    k = _K()
-    named = (
-        "<tool_call>"
-        + json.dumps(
-            {
-                "name": "send",
-                "arguments": {
-                    "target_id": "vault",
-                    "payload": {"type": "withdraw"},
-                    "reply_to": "self",
-                    "id": "job-alpha",
-                    "retries": 2,
-                },
-            }
-        )
-        + "</tool_call>"
-    )
-    await _route_reply("ai", k, _call("kernel") + named, "cli", None, None, 42.0, "")
-    await _settle(k, 1)
-    assert seen == [("kernel", None, None), ("vault", "job-alpha", 2)]
 
 
 async def test_a_failed_outcome_is_rendered_not_hidden():
@@ -245,3 +194,32 @@ async def test_a_failed_outcome_is_rendered_not_hidden():
     assert blocks[0].startswith("[reply to hung:1 · hung reflect · 1 of 2")
     assert "no reply after 42s" in blocks[0]
     assert blocks[1].startswith("[reply to kernel:pid · kernel reflect · 2 of 2")
+
+
+async def test_the_models_exec_id_rides_the_item_as_its_id():
+    """`<exec_id>` is the call-level execution NAME; core hands it to the kernel as
+    the batch item's `id` (a bare `<id>` would collide with payload ids)."""
+
+    class _K(_Kernel):
+        def __init__(self):
+            super().__init__()
+            self.items = []
+
+        async def send(self, batch):
+            self.items.extend(batch)
+            return await super().send(batch)
+
+    k = _K()
+    named = render_call(
+        "send",
+        {
+            "target_id": "vault",
+            "payload": {"type": "withdraw"},
+            "reply_to": "self",
+            "exec_id": "job-alpha",
+            "retries": 2,
+        },
+    )
+    await _route_reply("ai", k, named, "cli", None, None, 42.0, "")
+    assert k.items[0]["id"] == "job-alpha" and k.items[0]["retries"] == 2
+    assert k.items[0]["payload"] == {"type": "withdraw"}

@@ -1,10 +1,15 @@
-"""LIVE TEST 5 — build a SUB-AI that keeps working after you leave.
+"""LIVE TEST 5 — build a SUB-AGENTIC ROUTINE that keeps working after you leave.
 
-    cd src/lib/python && BACKEND=llamacpp uv run python -u ../../../tmp/live_subai.py
+    cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai --lanes 1
 
 The probes so far all end when the model's turn ends. This one asks for something
-that OUTLIVES the conversation: a small specialised agent, wired to compute children,
-that a SCHEDULER drives on a recurrence — with no LLM in the loop at all.
+that OUTLIVES the conversation AND has a mind inside it (user, 2026-09-10): the
+creator must CREATE a new AI agent and a new code agent, aim the clock at the AI,
+and put the knowledge (the multiplier) in the code. Every tick: clock → sub-AI →
+program on the code agent → `current hour × 4` → stored durably. The creator
+builds, plumbs rights in both directions, triggers a tick, verifies, reports. It is
+the smallest complete routine the north star describes: AI → AI, clock → AI,
+AI → code, all wired from readmes alone. SINGLE LANE — it spawns live AI agents.
 
 The fixture is the concept, laid out but not assembled:
   - `brain`     an AI agent: one completion per send, no loop of its own
@@ -111,30 +116,42 @@ CANARY_VALUE = secrets.randbelow(9000) + 1000
 # "something that keeps the total up to date"; opus built a single flat tool, which is
 # a correct reading of that sentence, and then failed a check that silently demanded
 # nesting. Grade what you asked for.
+MULTIPLIER = 4
+# How many clock cycles the sub-AI must have reacted to (user, 2026-09-10): one
+# lucky turn is not a routine.
+CYCLES = int(os.environ.get("CYCLES", "3"))
+
 TASK = (
-    "You are the CREATOR here — the mind building the structure. Separate from you, "
-    "this kernel contains `brain`: an inference UNIT backed by its own separate model "
-    "stream, an ordinary agent your structures can send to and wire in, not you and "
-    "not another builder. There is also a scheduler (`clock`), a directory of sensor "
-    "readings (`readings`), and a durable store (`totals`). I am going to walk "
-    "away — but I am an AGENT here too, so if you genuinely cannot proceed without "
-    "a decision that is mine to make, reflect the tree, find me, and send me an "
-    "`inquiry`. Do not stall on a question you could have put to me.\n\n"
-    "Build me a standing WORKER that keeps the total of those readings up to date, "
-    "and wire the clock at it so it re-checks on its own. Only an agent that RUNS "
-    "SOMETHING can react to a tick — a plain agent holds a record and answers "
-    "nothing — so the thing the clock aims at is a command runner with a program "
-    "you wrote, and any helpers it needs are its own children. Do not build an "
-    "inert parent to hold the job.\n\n"
-    "One thing about this kernel you must account for: NOTHING can call anything "
-    "by default. Creating an agent does not connect it — an agent that has not "
-    "been given the authority to call a peer simply cannot, and the call is "
-    "refused. So 'wiring' here means granting that authority, in BOTH "
-    "directions, for every edge your design needs.\n\n"
-    "It must keep working after I am gone, including when new readings appear that "
-    "nobody told it about. Work out from this kernel how to build and wire that, build "
-    "it, make sure it really runs, and tell me what you made."
+    "You are the CREATOR here — the mind building the structure. I am going to walk "
+    "away, but I am an AGENT here too: if you genuinely cannot proceed without a "
+    "decision that is mine, reflect the tree, find me, and send me an `inquiry`.\n\n"
+    "Build me a ROUTINE made of THREE things, all of them yours to create:\n"
+    "1. A NEW AI agent (an inference unit like `brain` — `brain` is only your example "
+    "of what such a record looks like; list the agents to read it, then create your "
+    "own with its own id and its own instructions).\n"
+    "2. A NEW code agent — a command runner with a program file YOU write. The program "
+    f"holds the multiplier {MULTIPLIER} and, when run, computes the CURRENT HOUR (0-23, "
+    f"local time) times {MULTIPLIER} and prints it. The multiplier must live in the "
+    "program, nowhere else.\n"
+    "3. The clock (`clock`) wired AT THE NEW AI AGENT: every tick (every 20 seconds) "
+    "sends it a message, and on each message that AI must run the program on the "
+    "code agent, take the printed value, and store it durably in `totals` under a "
+    "stable name, then end its turn with `done`.\n\n"
+    "NOTHING can call anything by default: wiring means granting the authority in "
+    "BOTH directions for every edge (clock → AI, AI → code agent, AI → `totals`, "
+    "and whatever the code agent's `allowed` needs). Build it, trigger a tick, "
+    "verify the stored value is right, and tell me what you made."
 )
+
+
+
+def _hour_values() -> set[int]:
+    """The values a correct routine may have stored: this hour and the previous one
+    (a tick can straddle the hour boundary)."""
+    h = time.localtime().tm_hour
+    return {h * MULTIPLIER, ((h - 1) % 24) * MULTIPLIER}
+
+
 
 # The pre-wired command-runner leg — the operator's half of self-extension (see
 # `build_fixture`). FIXTURE, so it must be in MINE: it carries the command-runner
@@ -256,8 +273,6 @@ def _ai_meta(
         _ep = os.environ.get("ENDPOINT")
         if _ep:
             meta["endpoint"] = _ep
-        if os.environ.get("TOOL_USE") == "1":
-            meta["tool_use"] = True
         if MAX_TOKENS_FIELD:
             meta["max_tokens"] = MAX_TOKENS_FIELD
         meta["model"] = MODEL
@@ -557,7 +572,32 @@ async def build_fixture(root, *, interpreter: str | None = None):
     return store
 
 
-async def score(root, store_id: str, total: int, new_total: int, transcript: list[str]):
+def _stored_value(want: set[int]):
+    """A STORED value, not a number that happens to occur in prose: a line of a
+    non-program file that is the number alone or `<name>[:=] <number>`. `hour × 4`
+    is small (0–92) and word-bounded search matched a readme (measured 2026-09-10)."""
+    pat = re.compile(r"^\s*(?:[\w .-]{0,40}[:=]\s*)?(\d{1,3})\s*$")
+    skip_dirs = {"readings", "agents", ".ckpt", "__pycache__"}
+    for dirpath, dirnames, filenames in os.walk("."):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        for name in sorted(filenames):
+            if name.endswith((".py", ".sh", ".xml", ".jsonl")) or name in _KERNEL_OWNED:
+                continue
+            fp = Path(dirpath) / name
+            try:
+                if fp.stat().st_size > 20480:
+                    continue
+                for line in fp.read_text(errors="ignore").splitlines():
+                    m = pat.match(line)
+                    if m and int(m.group(1)) in want:
+                        return str(fp), line.strip(), int(m.group(1))
+            except OSError:
+                continue
+    return None
+
+
+async def score(root, store_id, total, new_total, transcript):
+    _ = (store_id, total, new_total)
     print("\n" + "=" * (W + 4))
     rec = (
         await root.send(
@@ -570,113 +610,123 @@ async def score(root, store_id: str, total: int, new_total: int, transcript: lis
         await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}])
     )[0]["result"]
     records = {a["id"]: a for a in (listing.get("agents") or [])}
+    made = [n for n in nodes if n.get("id") not in MINE]
+    ai_module = records.get("brain", {}).get("handler_module")
 
-    def _fixture(node: dict) -> bool:
-        """Is this agent the HARNESS's, rather than something the model authored?
-
-        `id in MINE` alone was not enough, measured 2026-08-07: the combined arm scored
-        `agents_made=2` for a model that created NOTHING. The two were an arm's own
-        fixture agent (arms now register theirs in MINE) and a chat store an AI backend
-        mounts for itself on first use. (Chat is a JSONL sidecar now, not an agent, so
-        id is `<owner>_chat` (deterministic, id-based — there is no `mode` field any
-        more); crediting the model with the backend's own bookkeeping is the
-        harness-counts-its-own-furniture bug.
-        """
-        if node.get("id") in MINE:
-            return True
-        rid = str(node.get("id") or "")
-        return rid.endswith("_chat")  # historical guard; no such agents exist any more
-
-    made = [n for n in nodes if not _fixture(n)]
-
-    # ── 1. STRUCTURE ──
-    # A model's compute child is a command runner (`exec_bridge.tools`) — the same
-    # module the fixture's own leg carries, a fixture fact, not a naming sniff.
-    execs = {EXEC_MODULE}
-    # A "script" is an executor agent the model made. STRUCTURE from RECORDS
-    # only: the job-table read (`status`) that used to be the evidence is GATED
-    # — over a wire the scorer arrives as `rest`, and a model-made runner does
-    # not list `rest` in `callable_by`, so the read was refused and every
-    # rust/swift lane scored `scripts=[]` with the tool demonstrably built
-    # (measured 2026-09-02). Whether it RAN is what checks 3 and 4 measure.
-    scripts = [n for n in made if n.get("handler_module") in execs]
-    # Parentage comes from the RECORDS: a distilled tree node does not carry
-    # `parent_id`, so reading it off the node silently yields no parents at all.
-    parents = {records.get(n["id"], {}).get("parent_id") for n in scripts}
-    sub_ai = [n for n in made if n["id"] in parents]
-    # A RUNNER THE MODEL MADE IS THE STRUCTURE. It used to demand a PARENT above
-    # it as well — "the specialist owns the job, the children do the work" — but
-    # a plain agent in this kernel has no handler and cannot react to a tick, so
-    # that tier had no expressible form and the ask was unsatisfiable as written
-    # (a model spent 26,000 characters of one turn deriving exactly that,
-    # measured 2026-09-04). The thing the clock aims at is the runner; helpers
-    # under it are the model's own business, reported but not required.
-    c1 = bool(scripts)
+    # ── 1. STRUCTURE: a sub-AI AND a code agent, both the model's ──
+    sub_ais = [n for n in made if records.get(n["id"], {}).get("handler_module") == ai_module]
+    runners = [n for n in made if records.get(n["id"], {}).get("handler_module") == EXEC_MODULE]
+    c1 = bool(sub_ais) and bool(runners)
     print(
-        f"    1. structure                {'OK' if c1 else 'NO'} "
-        f"agents_made={len(made)} scripts={[n['id'] for n in scripts]} "
-        f"under={[n['id'] for n in sub_ai]}"
+        f"    1. sub-AI + code agent      {'OK' if c1 else 'NO'} "
+        f"ai={[n['id'] for n in sub_ais]} code={[n['id'] for n in runners]} made={[n['id'] for n in made]}"
     )
 
-    # ── 2. WIRED to the clock ──
-    # `list`, not `reflect` — the scheduler's reflect carries tick state, not entries.
+    # ── 2. THE CLOCK AIMS AT THE SUB-AI ──
     scheds = (
-        (
-            (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0][
-                "result"
-            ]
-        ).get("schedules")
-        or []
-    )
-    made_ids = {n["id"] for n in made}
-    aimed = [s for s in scheds if s.get("target") in made_ids]
+        (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0]["result"]
+    ).get("schedules") or []
+    ai_ids = {n["id"] for n in sub_ais}
+    aimed = [s for s in scheds if s.get("target") in ai_ids]
     c2 = bool(aimed)
     print(
-        f"    2. schedule aims at its own {'OK' if c2 else 'NO'} "
+        f"    2. clock → sub-AI           {'OK' if c2 else 'NO'} "
         f"schedules={[(s.get('target'), s.get('interval_seconds')) for s in scheds]}"
     )
 
-    # ── 3. IT RUNS UNATTENDED — the model's turn is over ──
-    print(f"       … letting the clock run {UNATTENDED:.0f}s with nobody watching")
-    total = true_total()  # whatever is on disk NOW, test files and all
-    c3 = await wait_for(root, "totals", total, UNATTENDED)
-    key, val, _ = await find_value(root, "totals", total)
+    # ── 3. IT RUNS UNATTENDED and the value is hour × MULTIPLIER ──
+    print(f"       … letting the clock run {UNATTENDED:.0f}s with nobody watching (≥{CYCLES} cycles expected)")
+    want = _hour_values()
+    found = None
+    waited = 0.0
+    while waited < UNATTENDED and found is None:
+        found = _stored_value(want)
+        if found is None:
+            await asyncio.sleep(2.0)
+            waited += 2.0
+    c3 = found is not None
     print(
         f"    3. runs unattended          {'OK' if c3 else 'NO'} "
-        f"stored={val!r} key={key!r} true={total}"
+        f"stored={found[1]!r} at={found[0]!r} want={sorted(want)}"
+        if found
+        else f"    3. runs unattended          NO stored=None want={sorted(want)}"
     )
 
-    # ── 4. THE CANARY — a reading it has never seen ──
-    c4 = False
-    if c3:
-        # A name the model cannot already be using, so the canary is genuinely unseen.
-        with open(os.path.join("readings", "reading_canary_zz.txt"), "w") as fh:
-            fh.write(f"{CANARY_VALUE}\n")
-        new_total = true_total()
-        print(
-            f"       … new reading {CANARY_VALUE}; waiting {UNATTENDED:.0f}s to follow"
+    # ── 4. SEVERAL CYCLES: the sub-AI reacted to ≥ CYCLES ticks, each with the code ──
+    # The clock's own count (`run_count` on the schedule aimed at the sub-AI) says how
+    # many ticks were fired; the sub-AI's history says how many it ACTED on: a tick
+    # arrives as a root user turn (not a `[reply to …]`), and the reaction is a `start`
+    # on the code agent in the turns that follow. Operator reads — ungated.
+    async def _fired() -> int:
+        scheds_after = (
+            (await root.send([{"target": "clock", "payload": {"type": "list"}}]))[0]["result"]
+        ).get("schedules") or []
+        return sum(int(s.get("run_count") or 0) for s in scheds_after if s.get("target") in ai_ids)
+
+    # Keep the clock running until the cycles are there or the budget is spent — a
+    # sub-AI turn per tick takes longer than the tick interval.
+    fired = await _fired()
+    waited = 0.0
+    while fired < CYCLES and waited < UNATTENDED:
+        await asyncio.sleep(5.0)
+        waited += 5.0
+        fired = await _fired()
+    await asyncio.sleep(10.0)  # let the last tick's turn land its `start`
+    ticks_seen = 0
+    starts = 0
+    for aid in ai_ids:
+        # The kernel's rows, whole — the `history` verb is a DIGEST (120-char heads),
+        # which hid every `start` (measured 2026-09-10: ticks_received=0 with the
+        # routine demonstrably running).
+        msgs = [
+            r
+            for r in root.ctx.rows_for(aid)
+            if r.get("kind") not in ("call", "task", "body", "view")
+        ]
+        ticks_seen += sum(
+            1
+            for m in msgs
+            if m.get("role") == "user"
+            and not str(m.get("content") or "").startswith(("[reply to ", "[no call"))
         )
-        c4 = await wait_for(root, "totals", new_total, UNATTENDED)
+        starts += sum(
+            len(re.findall(r"<type>\s*start\s*</type>", str(m.get("content") or "")))
+            for m in msgs
+            if m.get("role") == "assistant"
+        )
+    c4 = fired >= CYCLES and ticks_seen >= CYCLES and starts >= CYCLES
     print(
-        f"    4. follows a new reading    {'OK' if c4 else 'NO'} expected={new_total}"
+        f"    4. reacted to ≥{CYCLES} cycles    {'OK' if c4 else 'NO'} "
+        f"clock_fired={fired} ticks_received={ticks_seen} code_runs={starts}"
     )
+
+    # ── 5. THE MULTIPLIER LIVES IN THE PROGRAM, not in a prompt ──
+    in_code = False
+    for dirpath, dirnames, filenames in os.walk("."):
+        dirnames[:] = [d for d in dirnames if d not in {"readings", "agents", ".ckpt", "__pycache__"}]
+        for name in filenames:
+            if not name.endswith((".py", ".sh", ".js", ".rb", ".pl")):
+                continue
+            try:
+                body = (Path(dirpath) / name).read_text(errors="ignore")
+            except OSError:
+                continue
+            if re.search(rf"\b{MULTIPLIER}\b", body) and re.search(r"hour", body, re.I):
+                in_code = True
+                break
+        if in_code:
+            break
+    c5 = in_code
+    print(f"    5. multiplier in the code   {'OK' if c5 else 'NO'} program_has_multiplier={in_code}")
 
     joined = " ".join(transcript).lower()
     print(f"\n  observed — agents created     : {[n['id'] for n in made]}")
     print(f"  observed — read the docs      : {'readme' in joined}")
-    print(
-        f"  observed — planning language  : "
-        f"{sum(w in joined for w in ('plan', 'step', 'first', 'then'))}/4"
-    )
-    print(
-        f"  observed — final turn length  : {len(transcript[-1]) if transcript else 0} chars"
-    )
-    ok = c1 and c2 and c3 and c4
-    print(
-        f"\n  RESULT: {'PASS — it built something that outlives the conversation' if ok else 'FAIL'}"
-    )
+    ok = c1 and c2 and c3 and c4 and c5
+    print(f"\n  RESULT: {'PASS — a routine: AI → code, on the clock, without the creator' if ok else 'FAIL'}")
     verdict(ok)
     return ok
+
 
 
 # A WRITE is a call that changes the world: a record mutation, or a store/disk/exec
@@ -697,7 +747,7 @@ async def run(
     interpreter: str | None = None,
     extra_agents=None,
     brain_backend: str | None = None,
-    banner: str = "build a sub-AI that survives the conversation",
+    banner: str = "build a sub-agentic routine that survives the conversation",
 ):
     """The probe, parameterized. ONE fixture and ONE `score` for every arm — a second
     copy of the scoring path is how two arms diverge silently, which the emergence

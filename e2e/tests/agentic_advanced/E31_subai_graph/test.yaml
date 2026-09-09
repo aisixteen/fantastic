@@ -17,4 +17,4 @@ limits:
   no_progress_turns: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_turns is the backstop
   turn_chars: 120000
   turn_seconds: 600
-env: {}
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run 14-18k chars of thinking; 180 s cut the run at pass 6 while it was progressing (2026-09-10)

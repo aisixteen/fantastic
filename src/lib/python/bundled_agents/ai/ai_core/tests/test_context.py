@@ -293,14 +293,11 @@ def _send_turn(target, payload):
     """An assistant turn carrying a `<tool_call>` envelope inline — the shape a
     mind (or an old transcript) leaves in the durable store for `_derive_reaction`
     to detect. Built inline (the backend no longer renders tool calls)."""
-    import json
+    from ai_core.tool_parse import render_call
 
-    envelope = json.dumps(
-        {"name": "send", "arguments": {"target_id": target, "payload": payload}}
-    )
     return {
         "role": "assistant",
-        "content": f"<tool_call>{envelope}</tool_call>",
+        "content": render_call("send", {"target_id": target, "payload": payload}),
     }
 
 
@@ -591,7 +588,9 @@ def test_a_reflect_the_model_did_not_distil_is_kept():
     non-compliance costs context, never comprehension."""
     body = [
         _turn("user", "[reply to notes:aaa · notes reflect]\n" + "TREE" * 500),
-        _turn("assistant", '<tool_call>{"name":"send",...}</tool_call>'),  # no SEEN
+        _turn(
+            "assistant", '<call name="send"><target_id>x</target_id></call>'
+        ),  # no SEEN
         _turn("user", "[reply to assets:bbb · assets reflect]\n" + "FACTS" * 500),
         _turn("assistant", "SEEN assets — public web assets; verbs read/list."),
         _turn("user", "next"),

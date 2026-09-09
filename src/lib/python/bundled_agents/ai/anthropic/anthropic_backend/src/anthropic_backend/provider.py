@@ -2,17 +2,13 @@
 
 Matches the OllamaProvider contract: `chat(messages)` takes plain chat messages
 (role system/user/assistant, text content) and yields `str` content tokens ONLY.
-Tool-calling is owned by ai_core, which teaches the `<tool_call>` envelope in the
-prompt and parses it out of this text stream. (ai_core's `_render_for_model`
-already maps tool replies to plain user-role text before we see them.)
-
-OPTIONAL `tool_use` ROUTE. Set `tool_use: true` on the record and this provider
-declares the one `send` tool and TRANSLATES the `tool_use` blocks it receives
-back into that same `<tool_call>` text before yielding. ai_core is unchanged and
-never sees a native block: one parser, one envelope, backends still
-interchangeable. It is a dialect this provider speaks to its own endpoint, not a
-second tool-calling contract — which is why the translation lives here and not in
-`tool_parse`, where one model's quirk would land on every model.
+Tool-calling is owned by ai_core, which teaches the `<call>` grammar in the prompt
+and parses it out of this text stream. (ai_core's `_render_for_model` already maps
+tool replies to plain user-role text before we see them.) This provider NEVER
+declares `tools` and NEVER translates a native `tool_use` block: the model↔harness
+path carries no JSON in either direction. A native block that arrives anyway (an
+endpoint parsing the model's own tool syntax server-side) is a loud error, not a
+silent drop — the model wrote a call in a grammar this kernel does not speak.
 
 Internally translates to the Anthropic wire shape: a top-level `system` string +
 alternating user/assistant text turns. The key is read from `ANTHROPIC_KEY` (or
@@ -55,35 +51,13 @@ BACKOFF = 1.5
 # The endpoint's ceiling is `max_tokens + prompt <= the model's context`.
 MAX_TOKENS = 8192
 
-# The ONE tool `ai_core` teaches in prose. Sent only on the `tool_use` route, and
-# it is a TRANSLATION of the same contract — not a second one. Kept beside the
-# translator so the two can never describe different things.
-SEND_TOOL = {
-    "name": "send",
-    "description": (
-        "Reach any agent by id. The payload's `type` names the verb; "
-        "{type:'reflect'} returns that agent's verbs and state. `reply_to` is "
-        "where the reply goes — omit for yourself, name another agent to hand it "
-        "to them, or null to discard."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "target_id": {"type": "string"},
-            "payload": {"type": "object"},
-            "reply_to": {"type": ["string", "null"]},
-        },
-        "required": ["target_id", "payload"],
-    },
-}
-
 
 def _to_anthropic(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Plain messages → (system string, Anthropic messages).
 
     - role:system → the top-level `system` string.
     - role:user / role:assistant → {role, content:<str>}.
-    Tool calls/replies are already inline text (`<tool_call>`/`<tool_response>`),
+    Tool calls/replies are already inline text (`<call>` elements and `[reply to …]` blocks),
     so there is no tool_use/tool_result translation — pure text turns.
     """
     system: str | None = None
@@ -104,7 +78,6 @@ class AnthropicProvider:
         endpoint: str = DEFAULT_ENDPOINT,
         model: str = DEFAULT_MODEL,
         *,
-        tool_use: bool = False,
         max_tokens: int = MAX_TOKENS,
         sampling: dict | None = None,
         transport=None,
@@ -120,24 +93,9 @@ class AnthropicProvider:
         # Test seam, same as LlamaCppProvider's: an httpx transport to hand the
         # client. None = the real network.
         self._transport = transport
-        # TRANSLATE, do not adopt. With `tool_use` this provider declares the one
-        # `send` tool and converts the `tool_use` blocks it gets back into the
-        # SAME `<tool_call>` text `ai_core` already parses. The tool-calling
-        # contract stays owned by `ai_core` — exactly one parser, one envelope,
-        # every backend interchangeable — and this stays what it should be: a
-        # provider speaking its own endpoint's dialect.
-        #
-        # Why it exists: an endpoint may parse a model's NATIVE syntax better
-        # than we can from raw text. the model reverts to
-        # `<|im_start|>function=NAME>` under load; on the raw route that is a
-        # silent no-op turn, while the `/cc` route recovers it server-side
-        # (measured by the proxy's own A/B: 1 turn / 0 calls -> 5 turns with real
-        # work). Teaching OUR parser that syntax would put one model's quirk in
-        # the layer every model shares.
-        self._tool_use = tool_use
 
     async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
-        """Stream raw text tokens. ai_core parses any `<tool_call>` envelope out
+        """Stream raw text tokens. ai_core parses any `<call>` element out
         of the text stream — including the ones this provider synthesises from
         `tool_use` blocks when the `tool_use` route is on.
 
@@ -169,8 +127,6 @@ class AnthropicProvider:
         }
         if system:
             body["system"] = system
-        if self._tool_use:
-            body["tools"] = [SEND_TOOL]
         # Endpoint-whitelisted sampling knobs, merged last so an explicit value wins.
         body.update(self._sampling)
         headers = {
@@ -240,8 +196,6 @@ class AnthropicProvider:
                         # The block types are the one fact that distinguishes "the model wrote
                         # a native tool block" from "the connection died before any content".
                         blocks: list[str] = []
-                        tool_name: str | None = None
-                        tool_args = ""
                         async for line in resp.aiter_lines():
                             if not line.startswith("data:"):
                                 continue
@@ -264,17 +218,12 @@ class AnthropicProvider:
                                 # constantly. Reading `text_delta` alone silently drops whole
                                 # turns: a pass spent entirely reasoning arrives as an EMPTY
                                 # completion and the chain dies with no error anywhere — and a
-                                # `<tool_call>` the model wrote MID-THOUGHT is lost with it.
+                                # `<call>` the model wrote MID-THOUGHT is lost with it.
                                 # A raw text protocol reads the text the model produced; it does
                                 # not let the provider decide which field counts as output.
                                 # WRAPPED once (see `ai_core.core.without_thinking`): parsed for
                                 # tool calls, stripped before the turn is persisted.
-                                if (
-                                    dtype == "input_json_delta"
-                                    and tool_name is not None
-                                ):
-                                    tool_args += delta.get("partial_json") or ""
-                                elif dtype == "thinking_delta":
+                                if dtype == "thinking_delta":
                                     think = delta.get("thinking") or ""
                                     if think:
                                         if not thinking:
@@ -292,24 +241,19 @@ class AnthropicProvider:
                                 cb = evt.get("content_block") or {}
                                 blocks.append(cb.get("type"))
                                 if cb.get("type") == "tool_use":
-                                    tool_name = cb.get("name") or "send"
-                                    tool_args = ""
-                            elif (
-                                etype == "content_block_stop" and tool_name is not None
-                            ):
-                                # One `tool_use` block finished: re-emit it as the text
-                                # envelope `ai_core` parses. Same shape a raw-route model
-                                # would have written itself.
-                                try:
-                                    args = json.loads(tool_args or "{}")
-                                except json.JSONDecodeError:
-                                    args = {}
-                                yield (
-                                    "<tool_call>"
-                                    + json.dumps({"name": tool_name, "arguments": args})
-                                    + "</tool_call>"
-                                )
-                                tool_name, tool_args = None, ""
+                                    # The endpoint parsed a NATIVE tool call out of the
+                                    # model's text (the `/cc` route does this server-side
+                                    # whether or not `tools` were declared — measured
+                                    # 2026-08-24). Its arguments are JSON we do not read:
+                                    # the model wrote a call in a grammar this kernel does
+                                    # not speak, and a silent drop would end the turn
+                                    # looking finished with the call lost.
+                                    raise RuntimeError(
+                                        "anthropic stream carried a native tool_use block "
+                                        f"({cb.get('name')!r}): the model wrote a JSON tool "
+                                        "call, which this kernel does not parse — calls are "
+                                        "`<call name=…>` text"
+                                    )
                             elif etype == "message_delta":
                                 stop_reason = (evt.get("delta") or {}).get(
                                     "stop_reason"

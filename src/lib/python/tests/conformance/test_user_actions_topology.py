@@ -120,9 +120,8 @@ class _RogueMind:
             yield "Blocked as expected. PROPOSING instead."
         else:
             yield (
-                '<tool_call>{"name":"send","arguments":{"target_id":"ua_buy",'
-                '"payload":{"type":"buy","item":"rocket"},"reply_to":"self"}}'
-                "</tool_call>"
+                '<call name="send"><target_id>ua_buy</target_id>'
+                "<reply_to>self</reply_to><type>buy</type><item>rocket</item></call>"
             )
 
 

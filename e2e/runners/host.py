@@ -185,7 +185,9 @@ def main(scenario_id: str) -> int:
         assert key, "ANTHROPIC_API_KEY is unset — the backend will refuse"
 
         first = k.send("ai", {"type": "send", "text": sc["task"], "client_id": "probe"})
-        print(f"\n  pass 1: {str(first)[:300]}")
+        # WHOLE, never a 300-char head: the fault in a failed pass is what the
+        # model emitted after its thinking, and a head shows only the thinking.
+        print(f"\n  pass 1: {first}")
 
         # THE HUMAN, where a scenario declares one. Presses the button TWICE
         # with the id the MODEL minted. The AI holds no grant on the desk — that

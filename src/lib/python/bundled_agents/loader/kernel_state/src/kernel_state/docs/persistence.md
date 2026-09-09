@@ -36,11 +36,18 @@ verbatim (an explicit `guid` always wins, a minted one is never regenerated)
 A relay peer advertises this value as its `owner_guid` (distinct from a relay
 LEG's own `guid` on a `relay_connector` record).
 
-## The message log — `messages.jsonl`
+## The message log — `messages.xml`
 
 Every message the kernel makes — a turn, a delivered reply, a fold, a recall, a `body`
 (a reply too large to inline, its text merged in), a `view`, a `call` per send, a `task`
-per fork — is one JSON line, appended in id order, at `.fantastic/messages.jsonl`.
+per fork — is one `<row>` element, appended in id order, in `.fantastic/messages.xml`:
+ONE XML document opened by `<messages v="1">` and never closed (a stream). Scalars are
+attributes, text (`content`, `title`, `why`) and lists are child elements; the stdlib
+XML layer escapes `<` and `&` on the way out and restores them on the way in, so a body
+holding `</content>` cannot break the log. Hydrate is the incremental parser
+(`XMLPullParser`), one completed row at a time; EOF without `</messages>` is normal.
+A row cut by a crash mid-append, or a log of another version, is a LOUD error at boot —
+nothing is skipped or repaired; truncate at the last complete `</row>`.
 
 - **The kernel never knows disk.** It starts empty every boot. The bootstrap runs this
   bundle's cold `read_messages` (through `fs`, before any agent or id exists) and hands

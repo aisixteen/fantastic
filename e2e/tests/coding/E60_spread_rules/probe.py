@@ -34,7 +34,7 @@ from helpers.kernel import open_kernel
 BK = _resolve_backend()
 FB = "spread_fb"
 N = 12
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 TASK = (
     "Work through this sequence through the editor `notes`, ONE file per turn:\n"
     "  read `rules_a.md`, then `filler_0.txt` … `filler_4.txt`,\n"

@@ -37,7 +37,7 @@ from helpers.facts_arm import (
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 FB = "restart_fb"
 _, STRATEGY, EXTRA = FOLD_ARMS[1]
 N = 8
@@ -118,8 +118,8 @@ async def main():
         # ── STOP: the agent half, then the kernel's teardown (no exit — same process) ──
         stop = await call(root, root.id, {"type": "shutdown_agents"})
         await root.ctx.shutdown()
-        log = Path(".fantastic/messages.jsonl")
-        lines1 = len(log.read_text().splitlines()) if log.exists() else 0
+        log = Path(".fantastic/messages.xml")
+        lines1 = log.read_text().count("<row ") if log.exists() else 0
         # ── A NEW KERNEL on the same dir ──
         from _testkit import boot_root
 

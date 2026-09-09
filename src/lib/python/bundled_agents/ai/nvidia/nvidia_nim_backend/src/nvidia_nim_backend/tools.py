@@ -14,7 +14,7 @@ context_status/reflect) PLUS the NIM-specific bits, all wired through
 - Free tier rate-limits at ~40 RPM/model. `_stream_with_rate_limit_retry`
   (passed as `stream_wrapper`) retries once on a pre-stream HTTP 429.
 - Tool-calling is RAW (owned by ai_core): the provider streams plain text and
-  ai_core parses the `<tool_call>` envelope — no native tools array.
+  ai_core parses the `<call>` element — no native tools array, no JSON.
 - `error_mapper` turns a provider httpx.HTTPStatusError into a clean
   caller-facing error inside `send`.
 

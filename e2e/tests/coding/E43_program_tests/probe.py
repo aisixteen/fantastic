@@ -42,7 +42,7 @@ TASK = (
     "currently FAILS. Run it, read the failure, then fix the bug IN `prog.py` "
     "— never touch `test_prog.py` — using the editor agent `editor`'s "
     "`patch` verb (reflect it for the shape). Rerun the suite until "
-    "it passes. When it is green, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    "it passes. When it is green, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 
@@ -122,7 +122,7 @@ async def main():
             ("the fix is in the PROGRAM", "x + 1" in Path("prog.py").read_text()),
             ("the test was never touched", Path("test_prog.py").read_text() == TEST),
             ("the runner organ ran", "pytest" in transcript and RUNNER in transcript),
-            ("the edit organ made the fix", '\"patch\"' in transcript),
+            ("the edit organ made the fix", "<type>patch</type>" in transcript),
         ]
         for name, ok in checks:
             print(f"  [{'ok' if ok else 'XX'}] {name}")

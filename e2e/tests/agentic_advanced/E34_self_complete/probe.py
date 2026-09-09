@@ -34,7 +34,7 @@ TASK = (
     "One small task: using the text editor agent `notes` (reflect it for its "
     "verbs), write a file `status.md` whose entire content is the single line "
     "`status: done`. Verify nothing, build nothing else. When it is written, "
-    "end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>, and that is the correct "
+    "end your run by calling done — emit <call name=\"done\"></call>, and that is the correct "
     "way to finish."
 )
 

@@ -1,6 +1,6 @@
 """OllamaProvider — pure raw-text streaming chat (NO native tool API).
 
-Tool-calling is owned by ai_core (it parses `<tool_call>` text out of this
+Tool-calling is owned by ai_core (it parses `<call>` text out of this
 stream). This provider just streams the model's text tokens.
 """
 
@@ -61,7 +61,7 @@ class OllamaProvider:
 
     async def chat(self, messages: list[dict]) -> AsyncIterator[str]:
         """Stream raw text tokens from ollama — NO tools array. ai_core parses
-        any `<tool_call>` envelope out of the text stream."""
+        any `<call>` element out of the text stream."""
         if not self._model or self._model == DEFAULT_MODEL:
             raise RuntimeError(
                 "ollama_backend: no `model` set — this connector does not guess one. "

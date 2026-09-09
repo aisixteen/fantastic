@@ -32,7 +32,7 @@ from helpers.facts_arm import (
 from helpers.kernel import open_kernel
 
 BK = _resolve_backend()
-DONE = 'end your run by calling done — emit <tool_call>{"name":"done"}</tool_call>'
+DONE = 'end your run by calling done — emit <call name="done"></call>'
 AID, STRATEGY, EXTRA = FOLD_ARMS[1]
 
 from ai_core.folds import make_fold
@@ -63,7 +63,7 @@ async def main():
             call_id = mint()
             pid = mint()
             rows.append({"role": "assistant", "id": call_id, "parent": prev,
-                         "content": f'Reading filler_{i}. <tool_call>{{"name":"send","arguments":{{"target_id":"notes","payload":{{"type":"read","path":"filler_{i}.txt"}},"title":"survey filler_{i}"}}}}</tool_call>'})
+                         "content": f'Reading filler_{i}. <call name="send"><target_id>notes</target_id><title>survey filler_{i}</title><type>read</type><path>filler_{i}.txt</path></call>'})
             rep = _reply(mint, pid, call_id, f"survey filler_{i}", 3000)
             rows.append(rep); ids.append((call_id, rep["id"]))
             bodies[pid] = Path(f"filler_{i}.txt").read_text()

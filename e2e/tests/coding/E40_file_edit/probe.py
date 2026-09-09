@@ -37,7 +37,7 @@ TASK = (
     "The editor agent `editor` edits this run's files. In `config.txt`, change "
     "`port = 8080` to `port = 9090` — and change NOTHING else. Use the "
     "editor's `patch` verb (reflect `editor` to learn its exact shape); do "
-    "NOT rewrite the whole file. When the patch is applied, end your run by calling done — emit <tool_call>{\"name\":\"done\"}</tool_call>."
+    "NOT rewrite the whole file. When the patch is applied, end your run by calling done — emit <call name=\"done\"></call>."
 )
 
 
@@ -106,7 +106,7 @@ async def main():
             ),
             (
                 "the PATCH organ was used, not a rewrite",
-                '"patch"' in transcript,
+                '<type>patch</type>' in transcript,
             ),
         ]
         for name, ok in checks:

@@ -116,7 +116,7 @@ async def test_history_empty_when_no_turns(seeded_kernel, store_agent):
 
 async def test_history_returns_messages(seeded_kernel, store_agent):
     oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider([["hello"]])
+    fp = _FakeProvider([['hello <call name="done"></call>']])
     ot._providers[oid] = fp
     try:
         (
@@ -129,7 +129,10 @@ async def test_history_returns_messages(seeded_kernel, store_agent):
     r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "recall"}}]))[0][
         "result"
     ]
-    assert [m["content"] for m in r["messages"]] == ["hi", "hello"]
+    assert [m["content"] for m in r["messages"]] == [
+        "hi",
+        'hello <call name="done"></call>',
+    ]
 
 
 async def test_run_no_tool_calls_returns_content(seeded_kernel, store_agent):
@@ -411,7 +414,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
             self.calls += 1
             if self.calls == 1:
                 await asyncio.sleep(0.20)
-            yield "ok"
+            yield 'ok <call name="done"></call>'
 
     ot._providers[oid] = _SlowFirst()
 
@@ -455,7 +458,7 @@ async def test_contended_send_emits_queued_event(seeded_kernel, store_agent):
             if e.get("kind") in ("send", "emit")
         ]
 
-        assert r1["final"] == "ok" and r2["final"] == "ok"
+        assert r1["final"].startswith("ok") and r2["final"].startswith("ok")
 
         # Bob's request hit the lock → got a queued event tagged for bob.
         # Browser-routed events go via emit (target = oid).
@@ -518,7 +521,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
                 await asyncio.sleep(0.05)
                 user = messages[-1]["content"]
                 order.append(user)
-                yield "ok"
+                yield 'ok <call name="done"></call>'
             finally:
                 in_flight -= 1
 
@@ -545,7 +548,7 @@ async def test_concurrent_sends_serialize_per_backend(seeded_kernel, store_agent
         assert max_in_flight == 1, f"saw {max_in_flight} concurrent generations"
         assert order == ["first", "second"], f"FIFO order broke: {order}"
         replies = [outs[0]["result"] for outs in results]
-        assert all(r["final"] == "ok" for r in replies)
+        assert all(r["final"].startswith("ok") for r in replies)
         assert {r["client_id"] for r in replies} == {"a", "b"}
     finally:
         ot._providers.pop(oid, None)
@@ -593,7 +596,7 @@ def _statuses_for(events: list[dict], client_id: str) -> list[dict]:
 async def test_status_event_sequence_no_tool_calls(seeded_kernel, store_agent):
     """thinking → streaming → done(reason=ok). All carry the same send_id."""
     oid = await _make_ollama(seeded_kernel, store_agent)
-    fp = _FakeProvider([["hello"]])
+    fp = _FakeProvider([['hello <call name="done"></call>']])
     ot._providers[oid] = fp
     sends, emits, ctx = _capture(seeded_kernel)
     try:
@@ -639,7 +642,7 @@ async def test_queue_populated_and_drained_on_contention(seeded_kernel, store_ag
                 await asyncio.sleep(0.10)
                 queue_sizes.append(len(ot._queue.get(oid, [])))
                 await asyncio.sleep(0.10)
-            yield "ok"
+            yield 'ok <call name="done"></call>'
 
     ot._providers[oid] = _SlowFirst()
     try:
@@ -717,7 +720,7 @@ async def test_status_verb_shape_during_inflight_mine(seeded_kernel, store_agent
                 )
             )[0]["result"]
             captured_status.append(r)
-            yield "ok"
+            yield 'ok <call name="done"></call>'
 
     ot._providers[oid] = _SlowProvider()
     try:
@@ -782,7 +785,7 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent):
                         ]
                     )
                 )[0]["result"]
-            yield "ok"
+            yield 'ok <call name="done"></call>'
 
     ot._providers[oid] = _PrivacyProvider()
     try:
@@ -848,7 +851,7 @@ async def test_status_verb_no_client_id_redacts_text(seeded_kernel, store_agent)
                     )
                 )[0]["result"]
             )
-            yield "ok"
+            yield 'ok <call name="done"></call>'
 
     ot._providers[oid] = _RedactProvider()
     try:
