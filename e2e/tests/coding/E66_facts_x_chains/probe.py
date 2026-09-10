@@ -1,4 +1,4 @@
-"""coding/folds_x_chains — several roots, folds across them, then reach back.
+"""coding/facts_x_chains — several roots over time, then reach back.
 
 The human sends four tasks over time; each reads four fillers and writes its own report.
 At a 12k window the early chains fold while later ones run. The final message asks for
@@ -84,13 +84,16 @@ async def main():
 
         in_fold_text = any(token in str(m.get("title", "")) + str(m.get("body", "")) for m in fold["msgs"] if m.get("kind") == "fold")
         report((recency, fold), lambda a: f"reports clean={clean(a)}  FINAL={token in a['body']}  folded={a['folded']}  descents={len(a['descents'])}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
+            # NOT "both arms actually compacted": folding here was a side effect of a
+            # BLIND grep (2026-09-08: 12 greps, 12 zeros, then pulls filled the window).
+            # With grep reaching stored bodies (fixed 2026-09-09) the model never needs
+            # to hold them, so this test measures FACT SURVIVAL; folding is measured by
+            # fold_paging / nested_folds / superlong_chain / user_fold.
+        checks = [c for c in base_checks(recency, fold) if not c[0].startswith(("both arms produced", "both arms actually compacted"))] + [
             (f"four clean reports ({sum(clean(fold))}/4)", all(clean(fold))),
-            (f"folds fired across chains ({fold['folded']})", fold["folded"] >= 1),
             ("final.md carries task A's marker", token in fold["body"]),
-            ("reached it by descending into a fold, or the summary carried it", len(fold["descents"]) >= 1 or in_fold_text),
         ]
-        allok, note = conclude(recency, fold, checks, "four chains, folded, reached back correctly", "a folds_x_chains check failed")
+        allok, note = conclude(recency, fold, checks, "four chains, four clean reports, reached back correctly", "a facts_x_chains check failed")
         verdict(allok, note)
     finally:
         await close()

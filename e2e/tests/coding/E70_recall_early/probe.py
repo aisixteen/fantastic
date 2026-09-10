@@ -1,4 +1,4 @@
-"""coding/recall_through_folds — the durable store is whole under the folds.
+"""coding/recall_early — the durable store is whole after a long run.
 
 The very first instruction carries a code. Sixteen reads later, several folds in, the
 model is asked to quote it — recall pages the store where every row and every fold still
@@ -50,8 +50,12 @@ async def main():
         from helpers import ctx_score
         recalled = len(ctx_score.calls_made(fold["msgs"], target="ai_fold", verb="recall"))
         report((recency, fold), lambda a: f"code={code in a['body']}  marker={marker in a['body']}")
-        checks = [c for c in base_checks(recency, fold) if not c[0].startswith("both arms produced")] + [
-            (f"folds fired ({fold['folded']})", fold["folded"] >= 1),
+            # NOT "both arms actually compacted": folding here was a side effect of a
+            # BLIND grep (2026-09-08: 12 greps, 12 zeros, then pulls filled the window).
+            # With grep reaching stored bodies (fixed 2026-09-09) the model never needs
+            # to hold them, so this test measures FACT SURVIVAL; folding is measured by
+            # fold_paging / nested_folds / superlong_chain / user_fold.
+        checks = [c for c in base_checks(recency, fold) if not c[0].startswith(("both arms produced", "both arms actually compacted"))] + [
             # the claim is REACH, not method: the store under the folds answered, by
             # recall or by grep — either proves nothing was lost
             (f"the store was reached through the folds (recall={recalled}, greps={fold['greps']})",
@@ -59,7 +63,7 @@ async def main():
             ("the session code came back exactly", f"code: {code}" in fold["body"]),
             ("the marker came back exactly", f"marker: {marker}" in fold["body"]),
         ]
-        allok, note = conclude(recency, fold, checks, "recalled the first row and grepped through folds", "a recall_through_folds check failed")
+        allok, note = conclude(recency, fold, checks, "recalled the first row and grepped the store", "a recall_early check failed")
         verdict(allok, note)
     finally:
         await close()
