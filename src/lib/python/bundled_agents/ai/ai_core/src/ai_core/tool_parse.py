@@ -31,7 +31,7 @@ carries documents in prompt-parsed calls moved them out of JSON quotes (aider te
 blocks, OpenHands/cline per-parameter tags, codex freeform grammar).
 
 Rules (all of them):
-- Envelope `<call name="<tool>">…</call>`. Tools: `send`, `done`, `inquiry_answer`.
+- Envelope `<call name="<tool>">…</call>`. Tools: `send`, `done`, `await`, `inquiry_answer`.
 - `send`: `target_id` (or `to`, a list of recipients — one copy each), `re`,
   `reply_to`, `title`, `timeout`, `retries`, `exec_id` are CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
   are the arguments.
@@ -80,7 +80,7 @@ _ROUTING = (
 )
 # The tools. Any other `name` is refused with the shape — a verb is `<type>`, never
 # the tool name (a compression small models made under the JSON grammar).
-TOOLS = ("send", "done", "inquiry_answer")
+TOOLS = ("send", "done", "await", "inquiry_answer")
 
 
 class _Malformed(Exception):
@@ -190,9 +190,14 @@ def _value(name: str, raw: str):
     # refusals and a JSON-string fallback).
     if all(k == "item" for k in names):
         return [_value(k, v) for k, v in kids]
+    # `<item>` beside OTHER tags is an ordinary field named item (E14 2026-09-10:
+    # `<payload><type>buy</type><item>rocket</item></payload>` was refused as a
+    # list error and the purchase never left the model). Only a tag whose children
+    # are ALL `<item>` is a list; a one-field object named `item` is the single
+    # shape the notation cannot say.
     out: dict = {}
     for k, v in kids:
-        if k in out or k == "item":
+        if k in out:
             raise _Malformed(
                 f"duplicate `<{k}>` — a list is one tag whose children are all "
                 f"`<item>`: `<{name}><item>…</item><item>…</item></{name}>`"

@@ -5,10 +5,10 @@ The team is built and kicked off BY THE HARNESS (user, 2026-09-10: "create all b
 yourself and program agent kickoff in test harness") — so what is measured is the
 SWARM, not a creator's wiring. A creator-built variant is a separate test.
 
-The puzzle (the ring safe): oracle 1 = who works where (+ desks per room), oracle 2
-= what each room holds, oracle 3 = what each person owns. Each oracle ends with ONE
+The puzzle (the ring safe): oracle 1 = who works where, oracle 2 = what each room
+holds and its desks, oracle 3 = what each person owns. Each oracle ends with ONE
 clue: digit 1 needs oracle 1's room and oracle 2's count; digit 2 needs oracle 1's
-occupant and oracle 3's count; digit 3 needs oracle 1's room and its desks. So the
+occupant and oracle 3's count; digit 3 needs oracle 1's room and oracle 2's desks. So the
 pairs (1,2), (2,1), (2,3), (3,1) all have to talk — every pair of the three — and
 only the three digits together are the code, which all three must AGREE on before
 one of them writes it.
@@ -62,9 +62,10 @@ _ITEMS = ["crates", "lamps", "keys", "chairs", "boxes", "cables", "flags", "drum
 
 
 def make_puzzle(rng: random.Random) -> tuple[str, list[list[str]]]:
-    """(code, ledgers). Oracle 1: who works where + desks per room. Oracle 2: what each
-    room holds. Oracle 3: what each person owns. Each ledger ends with ONE clue; every
-    clue needs a fact from another oracle, and all three pairs get used."""
+    """(code, ledgers). Oracle 1: who works where. Oracle 2: what each room holds and
+    how many desks it has. Oracle 3: what each person owns. Each ledger ends with ONE
+    clue; every clue needs a fact from another oracle, and all three pairs get used:
+    digit 1 = 1→2, digit 2 = 2→1→3, digit 3 = 3→1→2."""
     people = rng.sample(_PEOPLE, 6)
     rooms = rng.sample(_ROOMS, 6)
     items = rng.sample(_ITEMS, 3)
@@ -79,14 +80,18 @@ def make_puzzle(rng: random.Random) -> tuple[str, list[list[str]]]:
     room_count[who_where[p1]] = digits[0]
     owned[p2] = digits[1]
     desks[who_where[p3]] = digits[2]
+    # EVERY FACT ABOUT A ROOM LIVES IN THE ROOMS LEDGER. Desks used to sit in the
+    # PEOPLE ledger "for a one-hop clue"; measured 2026-09-10: solver_2 (rooms) asked
+    # its oracle 73 times for desks it never had while the others waited — the
+    # ledger NAME is what the solvers reason from, so the split must honour it.
     ledger1 = [f"{p} works in {who_where[p]}." for p in people] + [
-        f"{r} has {desks[r]} desks." for r in rooms
+        f"{p} joined in {rng.randint(2010, 2024)}." for p in people
     ]
     ledger2 = [f"{r} holds {room_count[r]} {items[0]}." for r in rooms] + [
-        f"{r} is on floor {rng.randint(1, 5)}." for r in rooms
+        f"{r} has {desks[r]} desks." for r in rooms
     ]
     ledger3 = [f"{p} owns {owned[p]} {items[1]}." for p in people] + [
-        f"{p} joined in {rng.randint(2010, 2024)}." for p in people
+        f"{p} drives a {rng.choice(['red', 'blue', 'grey', 'green'])} car." for p in people
     ]
     clue1 = (
         f"CLUE for digit 1 of the safe code: it equals the number of {items[0]} held in "
@@ -101,7 +106,7 @@ def make_puzzle(rng: random.Random) -> tuple[str, list[list[str]]]:
     clue3 = (
         f"CLUE for digit 3 of the safe code: it equals the number of desks in the room "
         f"where {p3} works. This ledger knows what people own; the PEOPLE ledger knows "
-        f"where people work and how many desks each room has."
+        f"where people work, the ROOMS ledger knows how many desks each room has."
     )
     rng.shuffle(ledger1)
     rng.shuffle(ledger2)

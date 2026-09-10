@@ -300,3 +300,19 @@ def test_a_send_with_neither_target_nor_to_is_refused_naming_both():
     _refused(
         '<call name="send"><type>reflect</type></call>', "<target_id>", "<to><item>"
     )
+
+
+def test_await_is_a_control_call():
+    c = _one('<call name="await"></call>')
+    assert c["name"] == "await" and c["arguments"] == {}
+
+
+def test_item_beside_other_tags_is_a_field():
+    call = _one(
+        '<call name="send"><target_id>user</target_id><type>inquiry</type>'
+        "<action><payload><type>buy</type><item>rocket</item></payload></action></call>"
+    )
+    assert call["arguments"]["payload"]["action"]["payload"] == {
+        "type": "buy",
+        "item": "rocket",
+    }

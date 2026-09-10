@@ -14,14 +14,17 @@ from ai_core import core
 class _Script:
     """A scripted mind: yields the queued replies, records every incoming."""
 
-    def __init__(self, turns):
+    def __init__(self, turns, delay: float = 0.0):
         self.turns = list(turns)
         self.calls = 0
         self.incoming: list[str] = []
+        self.delay = delay  # a slow first turn, so a second send can queue behind it
 
     async def chat(self, messages):
         self.calls += 1
         self.incoming.append(messages[-1]["content"])
+        if self.calls == 1 and self.delay:
+            await asyncio.sleep(self.delay)
         out = self.turns.pop(0) if self.turns else "…nothing left…"
         yield out
 
@@ -174,3 +177,57 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel):
 # place. The behaviour is covered by the ordinary dispatched-turn cases above;
 # the human itself is exercised in e2e, where its bundle lives (`e2e/probes/`),
 # exactly like the other test-only fixtures.
+
+
+async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
+    seeded_kernel,
+):
+    fp = _Script(['waiting <call name="await"></call>', DONE])
+    aid = "nd_aw"
+    seeded_kernel.create(
+        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+    )
+    core._providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
+        )
+        await asyncio.sleep(0.6)
+        assert fp.calls == 2, fp.incoming
+        assert "[await refused]" in fp.incoming[-1]
+        assert "nothing of yours is in flight" in fp.incoming[-1]
+    finally:
+        core._providers.pop(aid, None)
+
+
+async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
+    seeded_kernel,
+):
+    """The honest wait: something is queued for the agent, so `await` ends the turn
+    with no nudge and no refusal; the queued message is the next turn."""
+    fp = _Script(['waiting <call name="await"></call>', DONE], delay=0.3)
+    aid = "nd_aw2"
+    seeded_kernel.create(
+        "ollama_backend.tools", id=aid, context_window=32768, can_call={"cli": "*"}
+    )
+    core._providers[aid] = fp
+    try:
+        first = asyncio.create_task(
+            seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "send", "text": "one"}}]
+            )
+        )
+        await asyncio.sleep(0.1)
+        second = asyncio.create_task(
+            seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "send", "text": "two"}}]
+            )
+        )
+        await asyncio.gather(first, second)
+        await asyncio.sleep(0.4)
+        assert fp.calls == 2, fp.incoming
+        assert not any("[await refused]" in m for m in fp.incoming)
+        assert not any("[no call was dispatched]" in m for m in fp.incoming)
+        assert fp.incoming[-1].endswith("two")
+    finally:
+        core._providers.pop(aid, None)

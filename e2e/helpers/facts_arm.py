@@ -203,9 +203,20 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         "folded": sum(int(d.get("folded") or 0) for d in conn.compactions),
         "fold_ids": [m.get("id") for m in msgs if m.get("kind") == "fold"],
         "descents": _descents(msgs, aid),
-        # a ROOT is a message from a person or a peer — not a recall/fold/late row, which
-        # are parentless by construction
-        "roots": sum(1 for m in msgs if m.get("role") == "user" and m.get("id") and not m.get("parent") and not m.get("kind") and not str(m.get("content", "")).startswith("[")),  # a kernel notice/nudge/reply starts with `[`
+        # a ROOT: a message from a person or a peer — it now OPENS with the kernel's
+        # `[from … ]` header (2026-09-10), so "starts with [" is no longer the test;
+        # the runtime's own lines (reply tags, nudges, notices, folds) are named.
+        "roots": sum(
+            1
+            for m in msgs
+            if m.get("role") == "user"
+            and m.get("id")
+            and not m.get("parent")
+            and not m.get("kind")
+            and not str(m.get("content", "")).startswith(
+                ("[reply to ", "[no call", "[context-notice", "[fold ", "[recall", "[late reply")
+            )
+        ),
         "view_ids": ((await call(root, aid, {"type": "context_status"})).get("last_projection") or {}).get("view_ids") or [],
         "view": (await read_view(core, root, aid)) if core is not None else None,
         "recall_rows": sum(1 for m in msgs if m.get("kind") == "recall"),

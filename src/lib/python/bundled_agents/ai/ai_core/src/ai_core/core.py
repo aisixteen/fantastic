@@ -688,9 +688,16 @@ Before ending a turn, check one thing: every action you decided on exists as a
 
 Stopping is EXPLICIT and costs one line: when the work is done, say so and emit
 <call name="done"></call>
-— that ends your chain. A turn with NO call ends nothing: the runtime reminds you
-once (a call decided in thinking does not execute unless the envelope is written
-out), so never leave a finished task unsignalled — call `done`.
+— that ends your chain. WAITING is explicit too: when what you need is still in
+flight (a reply that has not come, a peer who has not answered), emit
+<call name="await"></call>
+— you stop, nothing reminds you, and the next message that lands wakes you. That is
+the honest alternative to re-issuing a call: this is an ASYNC system, and a reply you
+have not seen is on its way, not lost. `await` with nothing of yours in flight and
+nothing queued is refused — then act, or call `done`. A turn with NO call ends
+nothing: the runtime reminds you once (a call decided in thinking does not execute
+unless the envelope is written out), so never leave a turn unsignalled — call, `await`,
+or `done`.
 
 AN INQUIRY IS A CALL, and whoever receives it is AN AGENT LIKE ANY OTHER. When
 you cannot proceed without a decision that is not yours to make, `send` them
@@ -716,11 +723,15 @@ HOW REPLIES ARRIVE. Every send is dispatched under a PID (an integer message id)
 every reply comes back tagged `[reply to <pid> · <agent> <verb>]`. Read that
 literally:
 
-- ALL the calls you make in ONE turn are answered TOGETHER in your next turn —
-  one block per call, each tagged `· N of M in batch <token>` when you made
-  several. M is complete on arrival: there is nothing still coming from that
-  batch, so never wait, poll, or re-ask for a "missing" reply — if a call
+- ALL the calls you make in ONE turn are answered TOGETHER, as ONE message — one
+  block per call, each tagged `· N of M in batch <token>` when you made several.
+  M is complete on arrival: nothing is still coming from that batch; if a call
   failed or timed out, its block says so.
+- That message arrives in a LATER turn, not necessarily the next: this is an
+  ASYNC system, and messages from people and peers queued before it are handed
+  to you first, one per turn. A reply you have not seen yet is IN FLIGHT, never
+  lost — do not re-issue the call; if you must know, send `kernel` `<type>ps</type>`
+  and look for your own task. Re-issuing only lengthens the queue that delays it.
 - The calls of one turn run CONCURRENTLY. Their side effects have NO defined
   order — if B must happen after A, put B in the next turn, after A's reply.
 - Each call may carry `timeout: <seconds>` in its arguments to bound that call;
@@ -1137,6 +1148,16 @@ def without_thinking(text: str) -> str:
 _NUDGE_LIMIT = 24
 #: (kernel instance, agent id, client id) → consecutive silent chain turns so far.
 _silent: dict[tuple[int, str, str], int] = {}
+# WHAT AN AGENT HAS IN FLIGHT: the number of its own routing turns whose batch is
+# still settling (the calls it made, not yet answered). Per agent id. Read by
+# `await` — the one control call that asks "is anything of mine still coming?".
+_inflight: dict[str, int] = {}
+
+_AWAIT_REFUSED = (
+    "[await refused] nothing of yours is in flight and nothing is queued for you, "
+    "so there is nothing to wait for. Act — make the call — or end the chain with "
+    '<call name="done"></call>.'
+)
 
 _NO_CALL_NUDGE = (
     "[no call was dispatched] Your turn emitted no <call> element, so "
@@ -1206,6 +1227,7 @@ async def _route_reply(
             )
         )
     done_called = any(c.get("name") == "done" for c in calls)
+    await_called = any(c.get("name") == "await" for c in calls)
     # ONE MESSAGE, SEVERAL RECIPIENTS. A send with `to` fans out here into one item
     # per recipient — the kernel's batch is already one-to-many — and every copy
     # carries the whole list (`to`), the sending turn's id (`msg`, the same number in
@@ -1248,7 +1270,7 @@ async def _route_reply(
             expanded.append(call)
     calls = expanded
     for call in calls:
-        if call.get("name") in ("done", "inquiry_answer"):
+        if call.get("name") in ("done", "await", "inquiry_answer"):
             # CONTROL CALLS, not dispatches. `done` ends the chain;
             # `inquiry_answer` hands this turn's answer back to whoever sent the
             # inquiry (the `inquiry` verb reads it). Neither is a send, neither
@@ -1365,7 +1387,14 @@ async def _route_reply(
                 )
             )
         # fire-and-forget: dispatched, counted nowhere, nobody awaits the answer
-    outcomes = await kernel.send(items) if items else []
+    # IN FLIGHT while the batch settles: `await` from a LATER turn (a root that
+    # arrived meanwhile) must see that these calls are still coming.
+    _inflight[self_id] = _inflight.get(self_id, 0) + (1 if items else 0)
+    try:
+        outcomes = await kernel.send(items) if items else []
+    finally:
+        if items:
+            _inflight[self_id] = max(0, _inflight.get(self_id, 0) - 1)
     if units:
         # A STABLE TOKEN PER TURN — two batches are distinguishable at a
         # glance (measured 2026-08-24: bare "1 of 3" labels collided across
@@ -1430,6 +1459,28 @@ async def _route_reply(
             _deliver_soon(
                 kernel, dest, "\n\n".join(groups[dest]), client_id, system_prompt
             )
+    if await_called and not done_called:
+        # AWAIT: "I am not finished, I am waiting for what is in flight; wake me
+        # when it lands." No nudge, no reply expected, the chain stays open — the
+        # next delivery is the next turn. Recorded as the model's own decision
+        # (a status event the user sees), not a silence the harness must read.
+        # HONEST OR REFUSED: with nothing of this agent's in flight and nothing
+        # queued for it, awaiting is stalling, and it is told so.
+        _silent.pop((id(kernel), self_id, client_id), None)
+        # Routing runs AFTER the turn released its lock, so "queued" is the queue
+        # plus a turn another message may already be running under that lock.
+        pending = (
+            _inflight.get(self_id, 0)
+            + len(_queue.get(self_id, []))
+            + (1 if _lock_for(self_id).locked() else 0)
+        )
+        if pending > 0 or items:
+            await _emit_status(
+                kernel, self_id, client_id, "done", reason="awaiting", pending=pending
+            )
+            return
+        _deliver_soon(kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt)
+        return
     if done_called:
         _silent.pop((id(kernel), self_id, client_id), None)
         # Explicitly finished — nothing more runs, nothing reminds. A caller's

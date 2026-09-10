@@ -97,10 +97,26 @@ class ProxyReader:
         self.trips = trips
         self.watch = watch
         self.n = 0
+        self.folds = 0
         self.transcript: list[str] = []
         self._seen = 0  # messages already printed
 
     async def chat(self, messages):
+        # A FOLD IS NOT A TURN. The agent summarises a span through the same
+        # provider (`ai_core.core._make_summarizer`); it carries no call and is
+        # not a chain step. Counted as a turn it inflated `n`, fed NO_PROGRESS
+        # (flat_roots: ten folds in a row → capped at 0/24) and polluted the
+        # transcript `distinct_calls` and scorers grep.
+        if messages and messages[0].get("role") == "system" and str(
+            messages[0].get("content", "")
+        ).startswith("Summarize the conversation excerpt"):
+            self.folds += 1
+            out: list[str] = []
+            async for chunk in self.inner.chat(messages):
+                out.append(chunk if isinstance(chunk, str) else "")
+                yield chunk
+            box(f"── fold {self.folds} · SUMMARY ←", "".join(out), "▌")
+            return
         self.n += 1
         L = self.limits
         if self.n == 1 and L.show_system and messages:
