@@ -37,8 +37,7 @@ struct AnthropicLiveTests {
             // live turn must name a real model (the connector never guesses one).
             model: env("ANTHROPIC_MODEL") ?? "claude-sonnet-4-6",
             apiKey: env("ANTHROPIC_API_KEY") ?? "",
-            maxTokens: 64,
-            toolUse: false)
+            maxTokens: 64)
 
         var text = ""
         // Any error here is a REAL failure: a non-terminal stream, an HTTP

@@ -26,10 +26,10 @@ thing. Tasks are the kernel's process table, and they form a TREE: a `send`
 issued inside a handler is a CHILD of that handler's task. Two more system
 verbs (also in no `verbs` map — send them anywhere):
 
-    send(kernel, {type:'ps'})
+    send `kernel` <type>ps</type>
       -> {tasks:[{id, agent, parent, verb, started_at}, ...]}
 
-    send(kernel, {type:'cancel', task_id:'<agent>:<n>'})
+    send `kernel` <type>cancel</type> <task_id>n</task_id>   # the pid an outcome / ps row carries — an int
       -> {cancelled:true, killed:['<id>', ...]}     # the task AND its subtree
       -> {cancelled:false, killed:[]}               # unknown / already finished
 

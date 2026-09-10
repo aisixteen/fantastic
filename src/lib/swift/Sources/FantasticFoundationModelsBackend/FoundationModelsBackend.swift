@@ -66,6 +66,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
                 ] as JSON,
                 // FM: stateless context (the on-device session owns it).
                 stateless: true,
+                compactPrompt: true,
                 reflectExtra: { _ in
                     [
                         "available": .bool(Self.isAvailable()),
@@ -120,7 +121,7 @@ public final class FoundationModelsBackendBundle: AgentBundle, @unchecked Sendab
         Verbs: send/history/interrupt/backend_state. Same LLM backend contract as \
         ollama_backend; runs stateless against the native on-device model.
         Tool-calling is RAW: no Apple @Generable Tool — the model generates text and \
-        FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
+        FantasticAICore parses the <call name=…> envelope (tool_parse).
         Durable memory: on boot a private memory file surface + a text_file editor are \
         auto-mounted; every memory document's content is spliced into the model \
         instructions on every send (always-on; no explicit recall needed).

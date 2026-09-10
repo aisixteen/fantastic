@@ -1,322 +1,370 @@
-// RAW tool-call parser tests — the JSON envelope's body and the SCANNER that
-// finds envelopes in a completion.
+// The ONE call grammar: `<call name="…">` with bare child tags, args inline,
+// `bytes` verbatim, no JSON anywhere. Parse or refuse with the fault named —
+// never repair.
 //
-// Mirrors the canonical Python suite `ai_core/tests/test_tool_parse.py` (the
-// `parse_one` + `extract_tool_calls` sections). Every fixture here was run
-// against the python implementation and its expectations copied from what
-// python actually produced — including object KEY ORDER, which is why a few
-// assertions compare serialized bytes.
+// Case for case the canonical python suite
+// `bundled_agents/ai/ai_core/tests/test_tool_parse.py`, whose expectations were
+// produced by running the fixtures through the python implementation. Rust's
+// `tool_parse/tests_grammar.rs` is the same translation.
 //
-// The malformed-reporting half lives in `MalformedCallsTests.swift`; the other
-// two envelopes' body grammars have their own suites,
-// `ToolParseChannelTests.swift` and `ToolParseInvokeTests.swift`.
+// ONE runtime divergence, deliberate: `bytes` lands as a swift `String`, not
+// python's `bytes` object. It rides that way to the kernel too, because the file
+// bundle REFUSES a `write`/`patch`/`append` whose `bytes` is not a string.
 
 import FantasticJSON
 import Foundation
+import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
 
-@Suite("tool-call parser: the JSON envelope")
-struct ToolParseTests {
+private let WRITE = """
+    <call name="send">
+    <target_id>notes</target_id>
+    <reply_to>self</reply_to>
+    <title>write the report</title>
+    <type>write</type>
+    <path>report.md</path>
+    <bytes>PRJ-1BCA4F
 
-    @Test func parseOneCanonical() {
-        let c = parseOne(
-            #"{"name":"send","arguments":{"target_id":"core","payload":{"type":"list_agents"}}}"#)!
-        #expect(c.name == "send")
-        #expect(c.arguments["target_id"].asString == "core")
-        #expect(c.arguments["payload"]["type"].asString == "list_agents")
-        // The id is minted here — no provider hands us one, the call is text.
-        #expect(c.id.hasPrefix("call_"))
-        #expect(c.id.count == "call_".count + 8)
-    }
+    # Report
+    - the phrase "quick brown fox", verbatim
+    </bytes>
+    </call>
+    """
 
-    @Test func parseOneFlattenedAndToolAlias() {
-        // tiny models drift: `tool` alias for name, flattened args.
-        let c = parseOne(#"{"tool":"send","target_id":"foo","payload":{"type":"reflect"}}"#)!
-        #expect(c.name == "send")
-        #expect(c.arguments.serialize() == #"{"target_id":"foo","payload":{"type":"reflect"}}"#)
-    }
+private let PATCH = """
+    <call name="send">
+    <target_id>notes</target_id>
+    <type>patch</type>
+    <edits><item><path>hello.py</path><hunks>2</hunks></item></edits>
+    <bytes><<<<<<< SEARCH
+        msg = "Hello, " + name
+    =======
+        return f"Hello, {name}!"
+    >>>>>>> REPLACE
+    </bytes>
+    </call>
+    """
 
-    @Test func parseOneStringifiedArguments() {
-        let c = parseOne(#"{"name":"send","arguments":"{\"target_id\":\"x\"}"}"#)!
-        #expect(c.arguments["target_id"].asString == "x")
-    }
-
-    // ── send_binary: the `bytes` field is a RAW program, never JSON-escaped ──
-
-    /// A send_binary tool_call with `program` written RAW as the ABSOLUTE last
-    /// field: metadata first, then `"bytes":"<program verbatim>"` with nothing but
-    /// closing braces after it. Mirrors python's `_binary_text` fixture.
-    private func binaryText(target: String, meta: String, program: String) -> String {
-        let prefix = meta.isEmpty ? "" : meta + ","
-        return "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\""
-            + target + "\",\"reply_to\":\"self\",\"payload\":{" + prefix
-            + "\"bytes\":\"" + program + "\"}}}</tool_call>"
-    }
-
-    @Test func sendBinaryProgramParsesVerbatim() {
-        // real newlines + quotes + a lone backslash — the stuff that breaks a JSON
-        // parser, lifted out raw and NOT unescaped.
-        let prog = "import os\nx = \"a \\ b\"\nprint(\"IMPORT_OK\", os.listdir(\".\"))\n"
-        let text = binaryText(
-            target: "store",
-            meta: "\"type\":\"write_stream\",\"path\":\"main.py\",\"truncate\":true",
-            program: prog)
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        #expect(calls.first?.name == "send_binary")
-        let p = calls.first!.arguments["payload"]
-        #expect(p["bytes"].asString == prog, "the program must be taken verbatim")
-        #expect(p["path"].asString == "main.py")
-        #expect(p["truncate"].asBool == true)
-    }
-
-    // ─── the FENCED form: the program rides OUTSIDE the JSON ────────────────
-    // Ported from python `test_send_binary.py` (fence tests, 2026-09-01).
-
-    /// The gym's killer case: quote-heavy source with apostrophes and braces —
-    /// verbatim through the fence, no escaping, no skeleton to balance.
-    @Test func fencedProgramRidesVerbatim() {
-        let prog = "use std::collections::HashMap;\n\nfn f() { let c = '\\''; }\n"
-        let text =
-            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
-            + "\"payload\":{\"type\":\"write\",\"path\":\"src/lib.rs\",\"truncate\":true,"
-            + "\"bytes\":\"@body\"}}}\n*** Begin Bytes\n" + prog + "*** End Bytes\n</tool_call>"
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        let p = calls.first!.arguments["payload"]
-        #expect(p["bytes"].asString == prog, "the program must be taken verbatim")
-        #expect(p["path"].asString == "src/lib.rs")
-    }
-
-    /// No placeholder written — the program still has exactly one home.
-    @Test func fencedWithoutPlaceholderLandsInPayloadBytes() {
-        let text =
-            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
-            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\"}}}\n"
-            + "*** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>"
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        #expect(calls.first!.arguments["payload"]["bytes"].asString == "x = 1\n")
-    }
-
-    /// A missing close marker takes the rest of the block — the envelope's own
-    /// closing tag already bounds it.
-    @Test func fencedMissingCloseMarkerTakesRestOfBlock() {
-        let text =
-            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
-            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}}\n"
-            + "*** Begin Bytes\na = 1\nb = 2\n</tool_call>"
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        #expect(calls.first!.arguments["payload"]["bytes"].asString == "a = 1\nb = 2\n")
-    }
-
-    /// Broken metadata above the fence earns the fence-grammar error, never the
-    /// strict-JSON red herring about the program's newlines.
-    @Test func fencedBadMetadataGetsAFenceError() {
-        // one closing brace SHORT — the measured live failure class
-        let text =
-            "<tool_call>{\"name\":\"send_binary\",\"arguments\":{\"target_id\":\"editor\","
-            + "\"payload\":{\"type\":\"write\",\"path\":\"m.py\",\"bytes\":\"@body\"}}\n"
-            + "*** Begin Bytes\nx = 1\n*** End Bytes\n</tool_call>"
-        #expect(extractToolCalls(text).isEmpty)
-        let errs = malformedCalls(text)
-        #expect(errs.count == 1)
-        let error = errs.first!["error"].asString ?? ""
-        #expect(error.contains("Begin Bytes"), "advice names the fence grammar")
-        #expect(!error.contains("control character"))
-    }
-
-    @Test func sendBinaryProgramWithJsonMetacharsSurvives() {
-        let prog = "d = {\"k\": \"v\"}\nprint(f\"{d}\")\npath = \"C:\\\\tmp\"\n"
-        let text = binaryText(
-            target: "store", meta: "\"type\":\"write_stream\",\"path\":\"x.py\"",
-            program: prog)
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        #expect(calls.first?.arguments["payload"]["bytes"].asString == prog)
-    }
-
-    @Test func nonSendBinaryIsUntouched() {
-        let plain =
-            "<tool_call>{\"name\":\"send\",\"arguments\":{\"target_id\":\"log\",\"payload\":{\"type\":\"note\",\"text\":\"hi\"}}}</tool_call>"
-        let calls = extractToolCalls(plain)
-        #expect(calls.count == 1 && calls.first?.name == "send")
-        #expect(calls.first?.arguments["payload"]["text"].asString == "hi")
-    }
-
-    @Test func parseOneMalformedReturnsNil() {
-        #expect(parseOne("{not json") == nil)
-        #expect(parseOne("[1,2,3]") == nil)
-    }
-
-    @Test func strayTopLevelKeysBelongInsideArguments() {
-        // Models routinely put `reply_to` one level too high. Discarding it —
-        // which both non-python runtimes did — silently turned a chaining call
-        // into a fire-and-forget one.
-        let c = parseOne(
-            #"{"name":"send","reply_to":"self","arguments":{"target_id":"m","payload":{"type":"reflect"}}}"#
-        )!
-        #expect(
-            c.arguments.serialize()
-                == #"{"reply_to":"self","target_id":"m","payload":{"type":"reflect"}}"#)
-    }
-
-    @Test func argumentsWinOverAStrayOfTheSameName() {
-        let c = parseOne(#"{"name":"send","target_id":"stray","arguments":{"target_id":"real"}}"#)!
-        #expect(c.arguments.serialize() == #"{"target_id":"real"}"#)
-    }
-
-    @Test func trailingJunkAfterACompleteObjectIsRecovered() {
-        // Observed live from gpt-oss:120b: it closes `arguments` early and then
-        // emits `,"reply_to":"self"}}` — one brace too many. The object that IS
-        // there parses, and the stray tail is read for the k/v pairs it held
-        // instead of being thrown away, because the model's real intent is in it.
-        let c = parseOne(
-            #"{"name":"send","arguments":{"target_id":"m","payload":{"type":"reflect"}}},"reply_to":"self"}}"#
-        )!
-        #expect(
-            c.arguments.serialize()
-                == #"{"reply_to":"self","target_id":"m","payload":{"type":"reflect"}}"#)
-    }
-
-    @Test func theVerbInTheToolNameBecomesThePayload() {
-        // VERBATIM from gemma-4-12B, probe 05 run 3, 2026-08-06. `send` is the
-        // only tool, so any other `name` is verb+tool compressed. Untranslated it
-        // dispatched `send([Item("clock", None)])[0].result` and raised `'NoneType' object has no
-        // attribute 'get'`.
-        let c = extractToolCalls(
-            #"<tool_call>{"name":"reflect","arguments":{"target_id":"clock"}}</tool_call>"#)[0]
-        #expect(c.name == "send")
-        #expect(c.arguments.serialize() == #"{"target_id":"clock","payload":{"type":"reflect"}}"#)
-    }
-
-    @Test func aNamedVerbKeepsItsOtherArgumentsInThePayload() {
-        let c = extractToolCalls(
-            #"<tool_call>{"name":"write","arguments":{"target_id":"a","path":"f.txt","reply_to":"self"}}</tool_call>"#
-        )[0]
-        // `reply_to` is ROUTING, so it stays at the top level, never in the payload.
-        #expect(
-            c.arguments.serialize()
-                == #"{"target_id":"a","payload":{"type":"write","path":"f.txt"},"reply_to":"self"}"#
-        )
-    }
-
-    @Test func anExplicitPayloadBeatsTheToolName() {
-        // THE ARGS DECIDE: a model that already wrote a payload gets it through
-        // verbatim, name and all.
-        let c = extractToolCalls(
-            #"<tool_call>{"name":"reflect","arguments":{"target_id":"a","payload":{"type":"list"}}}</tool_call>"#
-        )[0]
-        #expect(c.name == "reflect")
-        #expect(c.arguments["payload"].serialize() == #"{"type":"list"}"#)
-    }
-
-    @Test func aNamedVerbWithoutATargetIsLeftAlone() {
-        // `{"name":"list_agents","arguments":{}}` names no agent. We do not guess
-        // one — it earns the `no target_id` error, which teaches.
-        let c = extractToolCalls(
-            #"<tool_call>{"name":"list_agents","arguments":{}}</tool_call>"#
-        )[0]
-        #expect(c.name == "list_agents")
-        #expect(c.arguments.asObject?["target_id"] == nil)
-    }
+/// Exactly one call, or the failure names what the parser saw instead.
+private func one(_ text: String, _ loc: SourceLocation = #_sourceLocation) throws -> ToolCall {
+    let calls = extractToolCalls(text)
+    try #require(
+        calls.count == 1,
+        "\(calls.count) calls; malformed: \(malformedCalls(text).map(\.error))",
+        sourceLocation: loc)
+    return calls[0]
 }
 
-@Suite("tool-call parser: the scanner")
-struct ToolScanTests {
+private func payload(_ c: ToolCall) -> JSON { c.arguments["payload"] }
 
-    @Test func extractSingleCallFromProse() {
+@Suite("tool-call grammar")
+struct ToolParseTests {
+
+    // ── the taught shapes ────────────────────────────────────────
+
+    @Test("write: args inline, routing out, bytes verbatim")
+    func writeArgsInlineRoutingOutBytesVerbatim() throws {
+        let c = try one(WRITE)
+        #expect(c.name == "send")
+        #expect(c.id.hasPrefix("call_"))
+        #expect(c.arguments["target_id"].asString == "notes")
+        #expect(c.arguments["reply_to"].asString == "self")
+        #expect(c.arguments["title"].asString == "write the report")
+        #expect(
+            payload(c)
+                == .object([
+                    "type": .string("write"),
+                    "path": .string("report.md"),
+                    "bytes": .string(
+                        "PRJ-1BCA4F\n\n# Report\n- the phrase \"quick brown fox\", verbatim\n"),
+                ]))
+    }
+
+    @Test("patch: a nested list of objects, hunks typed")
+    func patchNestedListAndTypedHunks() throws {
+        let p = payload(try one(PATCH))
+        #expect(p["type"].asString == "patch")
+        #expect(
+            p["edits"]
+                == .array([.object(["path": .string("hello.py"), "hunks": .integer(2)])]))
+        #expect(p["bytes"].asString?.hasPrefix("<<<<<<< SEARCH\n    msg = ") == true)
+    }
+
+    @Test("JSON-looking content rides untouched")
+    func jsonLookingContentRidesUntouched() throws {
         let text =
-            "ok "
-            + #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect"}}}</tool_call>"#
-        let calls = extractToolCalls(text)
-        #expect(calls.count == 1)
-        #expect(calls[0].name == "send")
-        #expect(calls[0].arguments["target_id"].asString == "core")
+            #"<call name="send"><target_id>notes</target_id><type>write</type>"#
+            + "<path>c.json</path><bytes>{\"name\": \"demo\"}\n{\"tags\": [\"a\", \"b\"]}\n"
+            + "</bytes></call>"
+        #expect(
+            payload(try one(text))["bytes"].asString
+                == "{\"name\": \"demo\"}\n{\"tags\": [\"a\", \"b\"]}\n")
     }
 
-    @Test func extractMultipleCallsInDocumentOrder() {
-        let a =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"a","payload":{}}}</tool_call>"#
-        let b =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"b","payload":{}}}</tool_call>"#
-        let calls = extractToolCalls(a + "\n" + b)
-        #expect(calls.map { $0.arguments["target_id"].asString } == ["a", "b"])
-    }
-
-    @Test func extractSkipsABodyThatDidNotParse() {
-        // Malformed JSON inside a closed tag is not a call (it IS reported —
-        // see MalformedCallsTests — but it never dispatches).
-        #expect(extractToolCalls("<tool_call>{nope}</tool_call>").isEmpty)
-        // An incomplete object is not a call either, closer or no closer.
-        #expect(extractToolCalls(#"<tool_call>{"name":"send""#).isEmpty)
-        // Plain prose has no calls.
-        #expect(extractToolCalls("a < b and c").isEmpty)
-    }
-
-    @Test func anUnterminatedButCompleteCallIsAccepted() {
-        // REWRITTEN, not deleted: this test used to assert that an unterminated
-        // tag "yields nothing (no close to bound the JSON)" — which pinned the
-        // bug. `nvidia/nemotron-3-ultra-550b` emits a complete, valid call object
-        // and simply stops without the closing tag; the envelope is the LAST thing
-        // in the completion, so there is nothing after it to misread, and dropping
-        // it loses an unambiguous instruction. SHAPE decides, not the closer.
-        let calls = extractToolCalls(
-            #"<tool_call>{"name":"send","arguments":{"target_id":"m","payload":{"type":"one"}}}"#)
-        #expect(calls.count == 1)
-        #expect(calls[0].arguments["target_id"].asString == "m")
-    }
-
-    @Test func aStrayOpenerInProseDoesNotEatTheRealCall() {
-        // THE ACTIVE BUG this port fixes. A stray `<tool_call>` in a sentence used
-        // to pair with the closing tag of the GENUINE call further down, so the
-        // scanner consumed both and the real instruction was never seen — silent,
-        // and indistinguishable from the model saying nothing. A mention is
-        // stepped over by the OPENER ONLY.
+    @Test("a list is <item> children, at any count")
+    func listsAreItemChildrenAnyCount() throws {
         let text =
-            "My previous call was: `<tool_call>` and it failed. Retrying now."
-            + #"<tool_call>{"name":"send","arguments":{"target_id":"m","payload":{"type":"one"}}}</tool_call>"#
-        #expect(extractToolCalls(text).map { $0.arguments["target_id"].asString } == ["m"])
+            #"<call name="send"><target_id>me</target_id><type>grep</type>"#
+            + "<query>marker</query><ids><item>12</item><item>15</item></ids></call>"
+        #expect(payload(try one(text))["ids"] == .array([.integer(12), .integer(15)]))
+        let single = text.replacingOccurrences(of: "<item>15</item>", with: "")
+        #expect(payload(try one(single))["ids"] == .array([.integer(12)]))
+        let allowed =
+            #"<call name="send"><target_id>kernel</target_id><type>update_agent</type>"#
+            + #"<id>worker</id><allowed><item>python3 \S+</item></allowed></call>"#
+        #expect(payload(try one(allowed))["allowed"] == .array([.string(#"python3 \S+"#)]))
     }
 
-    @Test func threeEnvelopesInterleaveInDocumentOrder() {
-        // All three shapes coexist in ONE completion; `<|tool_call>` must not shadow
-        // or be shadowed by the taught `<tool_call>` envelope (its pipe means
-        // neither tag is a substring of the other, which is exactly why the channel
-        // envelope went unseen for so long). Document order is the dispatch order.
+    @Test("a one-field object is not a list")
+    func objectWithOneFieldIsNotAList() throws {
         let text =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"m","payload":{"type":"one"}}}</tool_call>"#
-            + "<|tool_call>call:n.two{}<tool_call|>"
-            + #"<invoke name="send"><parameter name="arguments">"#
-            + #"{"target_id":"o","payload":{"type":"three"}}</parameter></invoke>"#
-        let calls = extractToolCalls(text)
-        #expect(calls.map { $0.name } == ["send", "send", "send"])
-        #expect(calls.map { $0.arguments["payload"]["type"].asString } == ["one", "two", "three"])
-        #expect(calls.map { $0.arguments["target_id"].asString } == ["m", "n", "o"])
+            #"<call name="send"><target_id>notes</target_id><type>patch</type>"#
+            + "<edit><path>a.py</path></edit><bytes>x</bytes></call>"
+        #expect(payload(try one(text))["edit"] == .object(["path": .string("a.py")]))
     }
 
-    @Test func theReactionReaderSeesShapesItUsedToDrop() {
-        // `AIBackend.deriveReaction` reads `target_id` + `payload.type` off every
-        // call in an assistant turn to decide whether the model reacted to a
-        // compaction notice. It is unchanged; the parser under it is not. Neither
-        // shape below produced a visible reaction before this port — the
-        // unterminated one yielded no call at all, and the verb-named one yielded a
-        // call with no `payload` for the reader to look inside — so a model that DID
-        // react was recorded as not having reacted. This pins that they now arrive,
-        // and arrive carrying exactly the two fields that read-model reads.
-        let unterminated =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"me","payload":{"type":"recall"}}}"#
-        let verbNamed =
-            #"<tool_call>{"name":"set","arguments":{"target_id":"mem","key":"k"}}</tool_call>"#
-        for text in [unterminated, verbNamed] {
-            let call = extractToolCalls(text)[0]
-            #expect(call.arguments["target_id"].asString != nil, "\(text)")
-            #expect(call.arguments["payload"]["type"].asString != nil, "\(text)")
+    @Test("scalars are typed by the ONE rule")
+    func scalarsTypedByTheOneRule() throws {
+        let text =
+            #"<call name="send"><target_id>me</target_id><type>pull</type>"#
+            + "<offset>0</offset><length>1.5</length><checkpoint>true</checkpoint>"
+            + "<why>keep</why><empty></empty></call>"
+        #expect(
+            payload(try one(text))
+                == .object([
+                    "type": .string("pull"),
+                    "offset": .integer(0),
+                    "length": .double(1.5),
+                    "checkpoint": .bool(true),
+                    "why": .string("keep"),
+                    "empty": .string(""),
+                ]))
+    }
+
+    @Test("done and inquiry_answer are control calls")
+    func doneAndInquiryAnswer() throws {
+        let done = try one(#"<call name="done"></call>"#)
+        #expect(done.name == "done")
+        #expect(done.arguments == .object([:]))
+        let ans = try one(#"<call name="inquiry_answer"><answer>yes, "both"</answer></call>"#)
+        #expect(ans.name == "inquiry_answer")
+        #expect(ans.arguments == .object(["answer": .string("yes, \"both\"")]))
+    }
+
+    @Test("await is a control call")
+    func awaitIsAControlCall() throws {
+        let c = try one(#"<call name="await"></call>"#)
+        #expect(c.name == "await")
+        #expect(c.arguments == .object([:]))
+    }
+
+    // ── verbatim mode ────────────────────────────────────────────
+
+    @Test("a </call> inside bytes does not end the call")
+    func aClosingCallTagInsideBytesDoesNotEndTheCall() throws {
+        let text =
+            #"<call name="send"><target_id>notes</target_id><type>write</type>"#
+            + "<path>a.md</path><bytes>the text says </call> and goes on\n</bytes>"
+            + "<checkpoint>true</checkpoint></call>"
+        let p = payload(try one(text))
+        #expect(p["bytes"].asString == "the text says </call> and goes on\n")
+        #expect(p["checkpoint"] == .bool(true))
+    }
+
+    @Test("bytes is never trimmed; other values are")
+    func bytesIsNeverTrimmedAndOtherValuesAre() throws {
+        let text =
+            #"<call name="send"><target_id>notes</target_id><type>write</type>"#
+            + "<path>  a.md  </path><bytes>  two spaces \n</bytes></call>"
+        let p = payload(try one(text))
+        #expect(p["path"].asString == "a.md")
+        #expect(p["bytes"].asString == "  two spaces \n")
+    }
+
+    @Test("an unterminated call at the end is still an attempt")
+    func unterminatedCallAtTheEndIsStillAnAttempt() throws {
+        let text = #"<call name="send"><target_id>notes</target_id><type>reflect</type>"#
+        #expect(payload(try one(text)) == .object(["type": .string("reflect")]))
+    }
+
+    @Test("several calls in order, including one inside <think>")
+    func severalCallsInOrderAndACallInsideThink() {
+        let calls = extractToolCalls("<think>first \(WRITE)</think>then\n\(PATCH)\n")
+        #expect(calls.map { $0.arguments["payload"]["type"].asString } == ["write", "patch"])
+    }
+
+    @Test("a mention in prose is stepped over, not reported")
+    func aMentionInProseIsSteppedOverNotReported() {
+        let text = "I will emit a <call soon. \(PATCH)"
+        #expect(extractToolCalls(text).count == 1)
+        #expect(malformedCalls(text).isEmpty)
+        #expect(extractToolCalls("a <caller> is not an envelope").isEmpty)
+    }
+
+    // ── refusals: fault named, shape shown, nothing repaired ─────
+
+    /// Nothing dispatched, exactly one report, every needle in the error, and
+    /// the echoed block defanged.
+    @discardableResult
+    private func refused(
+        _ text: String, _ needles: [String], _ loc: SourceLocation = #_sourceLocation
+    ) throws -> MalformedCall {
+        #expect(extractToolCalls(text).isEmpty, sourceLocation: loc)
+        let bad = malformedCalls(text)
+        try #require(bad.count == 1, "\(bad.map(\.error))", sourceLocation: loc)
+        for n in needles {
+            #expect(bad[0].error.contains(n), "missing \(n) in: \(bad[0].error)", sourceLocation: loc)
         }
-        #expect(extractToolCalls(unterminated)[0].arguments["payload"]["type"].asString == "recall")
-        #expect(extractToolCalls(verbNamed)[0].arguments["payload"]["type"].asString == "set")
+        #expect(bad[0].error.hasPrefix("call NOT dispatched: "), sourceLocation: loc)
+        #expect(bad[0].error.contains("The shape:"), sourceLocation: loc)
+        #expect(!bad[0].yourBlock.contains("<call"), "the echoed block is defanged", sourceLocation: loc)
+        return bad[0]
+    }
+
+    @Test("a </bytes> inside a document ends the value early and is refused")
+    func bytesCloserInsideADocumentIsRefused() throws {
+        let text =
+            #"<call name="send"><target_id>notes</target_id><type>write</type>"#
+            + "<path>a.md</path><bytes>first </bytes> no\nreal end</bytes></call>"
+        try refused(text, ["text after the last tag", "no"])
+    }
+
+    @Test("bytes never closed")
+    func bytesNeverClosed() throws {
+        try refused(
+            #"<call name="send"><target_id>notes</target_id><type>write</type><bytes>open"#,
+            ["`<bytes>` opened and never closed"])
+    }
+
+    @Test("an element never closed")
+    func elementNeverClosed() throws {
+        try refused(
+            #"<call name="send"><target_id>notes</target_id><type>write<path>a</path></call>"#,
+            ["`<type>` opened and never closed"])
+    }
+
+    @Test("a duplicate scalar tag names the list shape")
+    func duplicateScalarTag() throws {
+        try refused(
+            #"<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>"#,
+            ["duplicate `<path>`", "<path><item>"])
+    }
+
+    @Test("text between tags")
+    func textBetweenTags() throws {
+        try refused(
+            #"<call name="send"><target_id>n</target_id> stray words <type>x</type></call>"#,
+            ["text outside a tag"])
+    }
+
+    @Test("a send with neither target nor to is refused naming both")
+    func sendWithoutTargetNamesBothShapes() throws {
+        try refused(
+            #"<call name="send"><type>reflect</type></call>"#,
+            ["a send names its target", "<target_id>", "<to><item>"])
+    }
+
+    @Test("a head with an extra attribute")
+    func headWithExtraAttribute() throws {
+        try refused(
+            #"<call name="send" id="7"><target_id>n</target_id></call>"#,
+            [#"the call head must be exactly `name="<tool>"`"#])
+    }
+
+    @Test("defang breaks every delimiter")
+    func defangBreaksEveryDelimiter() {
+        let d = defang(#"<call name="x"><bytes>a</bytes></call>"#)
+        #expect(!d.contains("<call"))
+        #expect(!d.contains("</call>"))
+        #expect(!d.contains("<bytes>"))
+        #expect(d.contains("\u{2039}call"))
+    }
+
+    @Test("the broken block is shown WHOLE")
+    func theBrokenBlockIsShownWhole() {
+        // The fault's LOCATION is why: an unclosed document breaks at the END of
+        // a long payload, so a head-only echo shows the model text that looks
+        // fine and it re-sends the identical envelope.
+        let big = String(repeating: "x", count: 40_000)
+        let text =
+            #"<call name="send"><target_id>n</target_id><type>write</type><bytes>"# + big
+        let bad = malformedCalls(text)
+        #expect(bad.count == 1)
+        #expect(bad.first?.yourBlock.contains(big) == true)
+    }
+
+    // ── render ↔ parse ───────────────────────────────────────────
+
+    @Test("renderCall round-trips the parser's shape")
+    func renderCallRoundTripsTheParserShape() throws {
+        let args: OrderedDictionary<String, JSON> = [
+            "target_id": .string("notes"),
+            "reply_to": .string("self"),
+            "title": .string("t"),
+            "payload": .object([
+                "type": .string("patch"),
+                "edits": .array([
+                    .object(["path": .string("a.py"), "hunks": .integer(2)]),
+                    .object(["path": .string("b.py"), "hunks": .integer(1)]),
+                ]),
+                "ids": .array([.integer(3)]),
+                "dry_run": .bool(true),
+                "bytes": .string("x = \"1\"\n</call>\n"),
+            ]),
+        ]
+        #expect(try one(renderCall("send", args)).arguments == .object(args))
+        #expect(try one(renderCall("done", [:])).arguments == .object([:]))
+        #expect(
+            try one(renderCall("inquiry_answer", ["answer": .string("ok")])).arguments
+                == .object(["answer": .string("ok")]))
+    }
+
+    @Test("grant maps keyed by ids and relative tokens are tags")
+    func grantMapsKeyedByIdsAndRelativeTokensAreTags() throws {
+        let text =
+            #"<call name="send"><target_id>kernel</target_id><type>update_agent</type>"#
+            + "<id>vault</id><callable_by><$self>*</$self><$parent>*</$parent>"
+            + "<ai-rev.2>*</ai-rev.2><notes><item>read</item><item>write</item></notes>"
+            + "</callable_by></call>"
+        let p = payload(try one(text))
+        #expect(
+            p["callable_by"]
+                == .object([
+                    "$self": .string("*"),
+                    "$parent": .string("*"),
+                    "ai-rev.2": .string("*"),
+                    "notes": .array([.string("read"), .string("write")]),
+                ]))
+        let round = renderCall("send", ["target_id": .string("k"), "payload": p])
+        #expect(payload(try one(round)) == p)
+    }
+
+    @Test("a send may name several recipients with <to>")
+    func aSendMayNameSeveralRecipientsWithTo() throws {
+        let text =
+            #"<call name="send"><to><item>solver_2</item><item>solver_3</item></to>"#
+            + "<re>412</re><type>send</type><text>CANDIDATE 586</text></call>"
+        let a = try one(text).arguments
+        #expect(a["to"] == .array([.string("solver_2"), .string("solver_3")]))
+        #expect(a["re"] == .integer(412))
+        #expect(a.asObject?["target_id"] == nil)
+        #expect(
+            a["payload"]
+                == .object(["type": .string("send"), "text": .string("CANDIDATE 586")]))
+        #expect(try one(renderCall("send", a.asObject ?? [:])).arguments == a)
+    }
+
+    @Test("<item> beside other tags is an ordinary field")
+    func itemBesideOtherTagsIsAField() throws {
+        // E14, 2026-09-10: `<payload><type>buy</type><item>rocket</item></payload>`
+        // was refused as a list error and the purchase never left the model.
+        let c = try one(
+            #"<call name="send"><target_id>user</target_id><type>inquiry</type>"#
+                + "<action><payload><type>buy</type><item>rocket</item></payload></action></call>")
+        #expect(
+            payload(c)["action"]["payload"]
+                == .object(["type": .string("buy"), "item": .string("rocket")]))
     }
 }

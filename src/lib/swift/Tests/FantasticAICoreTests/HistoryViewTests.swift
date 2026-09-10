@@ -67,7 +67,7 @@ struct HistoryViewTests {
     }
 
     /// FAIL CLOSED. Measured 2026-08-20 (`live_plan`): the model answered several
-    /// reflects with a bare tool_call and no prose. The body was dropped anyway, so
+    /// reflects with a bare call and no prose. The body was dropped anyway, so
     /// the facts were simply gone — "The index was dropped from my view. Let me send
     /// it again and, THIS TIME, actually record the facts." Re-fetching what it lost
     /// is the exact loop this trim exists to prevent, so a reflect the model did not
@@ -78,7 +78,7 @@ struct HistoryViewTests {
                 "user",
                 "[reply to notes:aaa · notes reflect]\n"
                     + String(repeating: "TREE", count: 100)),
-            turn("assistant", #"<tool_call>{"name":"send",...}</tool_call>"#),  // no SEEN
+            turn("assistant", #"<call name="send">…</call>"#),  // no SEEN
             turn(
                 "user",
                 "[reply to assets:bbb · assets reflect]\n"

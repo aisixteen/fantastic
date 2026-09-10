@@ -27,19 +27,8 @@ struct AnthropicDecoded: Equatable {
 }
 
 /// State carried ACROSS lines within one turn.
-///
-/// A `tool_use` block streams its arguments as `input_json_delta` fragments, so
-/// they must be concatenated and re-emitted as ONE envelope when the block
-/// closes. And whether the stream CONTAINED a tool_use decides terminality —
-/// see `finish(stopReason:)`.
 struct AnthropicStreamState {
     var wrap = ThinkingWrap()
-    /// The name of the `tool_use` block currently open, if any.
-    var toolName: String? = nil
-    /// Its arguments, accumulated across `input_json_delta` fragments.
-    var toolArgs = ""
-    /// What the stream ACTUALLY carried — the honest basis for terminality.
-    var sawToolUse = false
     var stopReason: String? = nil
 }
 
@@ -63,45 +52,29 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
     var out = AnthropicDecoded()
     switch obj["type"].asString ?? "" {
     case "content_block_start":
-        // A tool_use block can arrive WHETHER OR NOT we declared tools — the
-        // `/cc` route emits them for a request carrying no `tools` key at all.
-        // Record what came; terminality reads that rather than our own flag.
+        // A NATIVE tool_use BLOCK IS A LOUD ERROR. Its arguments are JSON we do
+        // not read: the model wrote a call in a grammar this kernel does not
+        // speak, and a silent drop would end the turn looking finished with the
+        // call lost. A `/cc`-style route emits these for a request carrying no
+        // `tools` key at all — that is exactly the case worth failing on.
         let cb = obj["content_block"]
         if cb["type"].asString == "tool_use" {
-            state.sawToolUse = true
-            state.toolName = cb["name"].asString ?? "send"
-            state.toolArgs = ""
+            let name = cb["name"].asString ?? "?"
+            out.error =
+                "anthropic stream carried a native tool_use block (\"\(name)\"): "
+                + "the model wrote a JSON tool call, which this kernel does not "
+                + "parse — calls are `<call name=…>` text"
         }
 
     case "content_block_delta":
         let delta = obj["delta"]
         switch delta["type"].asString ?? "" {
-        case "input_json_delta":
-            state.toolArgs += delta["partial_json"].asString ?? ""
         case "text_delta":
             out.tokens += state.wrap.content(delta["text"].asString ?? "")
         case "thinking_delta":
             out.tokens += state.wrap.reasoning(delta["thinking"].asString ?? "")
         default:
             break
-        }
-
-    case "content_block_stop":
-        // One `tool_use` block finished: re-emit it as the text envelope
-        // `ai_core` parses — the same shape a raw-route model writes itself.
-        // TRANSLATE, never adopt: this backend has no native tool-calling.
-        if let name = state.toolName {
-            state.toolName = nil
-            let args: JSON =
-                state.toolArgs.isEmpty
-                ? .object([:])
-                : ((try? JSON.parse(Data(state.toolArgs.utf8))) ?? .object([:]))
-            let envelope = JSON.object(["name": .string(name), "arguments": args])
-            // A thought may still be open when the model stops to call: close it
-            // so the envelope is not swallowed inside `<think>`.
-            out.tokens += state.wrap.finish()
-            out.tokens.append("<tool_call>\(envelope.serialize())</tool_call>")
-            state.toolArgs = ""
         }
 
     case "message_delta":
@@ -128,17 +101,13 @@ func decodeAnthropicSSELine(_ line: String, state: inout AnthropicStreamState)
 /// for. A completion cut by `max_tokens`, a refusal, or a dropped connection was
 /// once returned as if the model had finished: a create_agent turn stopped
 /// mid-`code`, the partial parsed as an unterminated envelope, and the chain
-/// died with no visible cause. And a `/cc`-style route answers `stop_reason:
-/// tool_use` for a request that declared no tools, so gating on our own flag
-/// failed EVERY such turn on arrival — the completion was whole and we threw it
-/// away.
+/// died with no visible cause. A `/cc`-style route answers `stop_reason:
+/// tool_use` for a request that declared no tools — those blocks now raise in
+/// the decoder, so a `stop_reason` of `tool_use` reaching here is an anomaly
+/// and says so.
 func anthropicTerminalityError(_ state: AnthropicStreamState) -> String? {
     switch state.stopReason {
     case "end_turn", "stop_sequence":
-        return nil
-    // The model stopped to CALL something. A finished turn, not a truncated
-    // one — the blocks are the answer.
-    case "tool_use" where state.sawToolUse:
         return nil
     case .some(let other):
         return "anthropic stream ended without end_turn: stop_reason=\(other)"
@@ -152,7 +121,7 @@ func anthropicTerminalityError(_ state: AnthropicStreamState) -> String? {
 /// plus the user/assistant turns.
 ///
 /// Tool-calling is RAW prompt-and-parse, so there is NO tool_use / tool_result
-/// translation on the way OUT — the envelope is already text in the turn.
+/// translation in EITHER direction — the envelope is already text in the turn.
 /// System blocks concatenate, matching rust's `translate_messages`.
 func translateAnthropicMessages(_ messages: [JSON]) -> (system: String?, messages: [JSON]) {
     var system: String? = nil

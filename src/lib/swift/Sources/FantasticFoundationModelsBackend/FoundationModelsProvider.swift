@@ -13,7 +13,7 @@
 //
 // RAW tool-calling: Fantastic NEVER uses Apple's native `@Generable` Tool
 // loop. The session is built with NO tools; the model GENERATES plain text
-// (the `<tool_call>` envelope is taught in the instructions), and ai-core's
+// (the `<call name=…>` envelope is taught in the instructions), and ai-core's
 // shared parser extracts the call + drives the agentic loop itself.
 
 import FantasticAICore
@@ -93,7 +93,7 @@ struct FoundationModelsProvider: AIProvider {
             kernel: Kernel
         ) -> LanguageModelSession {
             // RAW: NO native tools. The model generates plain text; the
-            // `<tool_call>` envelope is taught in the instructions and parsed
+            // `<call name=…>` envelope is taught in the instructions and parsed
             // by ai-core, which drives the agentic loop (kernel.send) itself.
             _ = kernel  // no longer wired into a native Tool
             if inst.isEmpty {

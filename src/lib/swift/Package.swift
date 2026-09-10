@@ -58,7 +58,6 @@ let package = Package(
             "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend",
             "FantasticFoundationModelsBackend",
-            "FantasticAppleKVS",
         ]),
         .library(name: "FantasticKernelStartup", targets: ["FantasticKernelStartup"]),
 
@@ -126,14 +125,6 @@ let package = Package(
         ),
         .target(
             name: "FantasticProxyAgent",
-            dependencies: ["FantasticKernel", "FantasticJSON",
-                           .product(name: "OrderedCollections", package: "swift-collections")]
-        ),
-        // apple_kvs — synced KV (iCloud KVS), Apple-only (gated by `#if
-        // canImport(Darwin)`; reports unavailable elsewhere). Sibling of
-        // KV in surface, synced + live-only in semantics.
-        .target(
-            name: "FantasticAppleKVS",
             dependencies: ["FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections")]
         ),
@@ -301,10 +292,10 @@ let package = Package(
                 "FantasticFile", "FantasticProxyAgent", "FantasticTools",
                 "FantasticScheduler", "FantasticStaticLoader", "FantasticCliBundle",
                 "FantasticKernelBridge", "FantasticWeb", "FantasticWebWS", "FantasticWebRest",
-                "FantasticTextFile", "FantasticAppleKVS",
+                "FantasticTextFile",
                 "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
-            "FantasticLlamaCppBackend", "FantasticLlamaCppBackend",
+                "FantasticLlamaCppBackend",
                 "FantasticFoundationModelsBackend",
                 "FantasticExecBridge", "FantasticTerminalBackend",
             ]
@@ -388,14 +379,6 @@ let package = Package(
                 "FantasticAICore", "FantasticOllamaBackend", "FantasticNvidiaNimBackend",
                 "FantasticAnthropicBackend",
             "FantasticLlamaCppBackend", "FantasticJSON",
-            ]
-        ),
-
-        .testTarget(
-            name: "FantasticAppleKVSTests",
-            dependencies: [
-                "FantasticAppleKVS", "FantasticKernel", "FantasticJSON",
-                .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),
 

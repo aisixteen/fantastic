@@ -6,7 +6,7 @@
 // `FantasticAICore.decodeOpenAISSELine` — the same one NIM uses.
 //
 // NO NATIVE TOOL-CALLING: the provider streams text and FantasticAICore parses
-// the `<tool_call>` envelope out of it.
+// the `<call name=…>` envelope out of it.
 //
 // Two things this backend does NOT pretend to own:
 //
@@ -79,7 +79,7 @@ public final class LlamaCppBundle: AgentBundle, @unchecked Sendable {
         """
         llamacpp_backend — local llama-server LLM agent (OpenAI-compatible); thin over FantasticAICore.
         Verbs: send, history, cancel, status, backend_state. `endpoint` defaults to http://127.0.0.1:8080/v1.
-        Tool-calling is RAW: the provider streams text and FantasticAICore parses the <tool_call>/<tool_response> envelope.
+        Tool-calling is RAW: the provider streams text and FantasticAICore parses the <call name=…> envelope.
         `think` toggles the template's `enable_thinking` per request — gemma-4 gates its thought channel behind it and defaults it FALSE; a server that sets neither streams thinking text with EMPTY content.
         The model and the context window belong to the server (`-hf`/`-m`, `-c N`), not to the record.
         """

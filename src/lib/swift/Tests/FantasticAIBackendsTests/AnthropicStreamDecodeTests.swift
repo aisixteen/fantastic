@@ -18,6 +18,21 @@ private func decode(_ lines: [String]) -> (tokens: [String], state: AnthropicStr
     return (out, st)
 }
 
+/// Same fold, keeping the first `error` the stream produced.
+private func decodeWithError(_ lines: [String]) -> (
+    tokens: [String], state: AnthropicStreamState, error: String?
+) {
+    var st = AnthropicStreamState()
+    var out: [String] = []
+    var err: String? = nil
+    for l in lines {
+        let d = decodeAnthropicSSELine(l, state: &st)
+        out += d.tokens
+        if err == nil { err = d.error }
+    }
+    return (out, st, err)
+}
+
 @Suite("Anthropic SSE decode")
 struct AnthropicStreamDecodeTests {
 
@@ -53,35 +68,16 @@ struct AnthropicStreamDecodeTests {
         #expect(st.wrap.finish() == [THINK_CLOSE])
     }
 
-    @Test("a tool_use block is TRANSLATED into the raw <tool_call> envelope")
-    func toolUseTranslated() {
-        // Arguments arrive as input_json_delta FRAGMENTS and must be
-        // concatenated before parsing — a per-fragment parse yields nothing.
-        let (tokens, st) = decode([
-            #"data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"send"}}"#,
-            #"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"target_id\":"}}"#,
-            #"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"\"store\"}"}}"#,
-            #"data: {"type":"content_block_stop"}"#,
+    @Test("a native tool_use block is a LOUD error, not a silent drop")
+    func toolUseIsLoud() {
+        // Some `/cc`-style routes emit one for a request carrying no `tools` key
+        // at all. Its arguments are JSON this kernel does not read, so a dropped
+        // block ends the turn looking finished with the call lost.
+        let (_, _, err) = decodeWithError([
+            #"data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"send"}}"#
         ])
-        #expect(st.sawToolUse)
-        let envelope = tokens.first { $0.hasPrefix("<tool_call>") }
-        #expect(envelope != nil)
-        #expect(envelope?.contains("\"target_id\"") == true)
-        #expect(envelope?.contains("store") == true)
-    }
-
-    @Test("a tool_use arriving mid-thought closes the thought first")
-    func toolCallNotSwallowedByThink() {
-        let (tokens, _) = decode([
-            #"data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}"#,
-            #"data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"send"}}"#,
-            #"data: {"type":"content_block_stop"}"#,
-        ])
-        let closeIdx = tokens.firstIndex(of: THINK_CLOSE)
-        let callIdx = tokens.firstIndex { $0.hasPrefix("<tool_call>") }
-        #expect(closeIdx != nil && callIdx != nil)
-        // Otherwise the envelope is inside <think> and gets stripped before parse.
-        #expect(closeIdx! < callIdx!)
+        #expect(err?.contains("native tool_use block") == true)
+        #expect(err?.contains("<call name=") == true)
     }
 
     @Test("message_stop ends the stream")
@@ -116,15 +112,13 @@ struct AnthropicStreamDecodeTests {
         }
     }
 
-    @Test("stop_reason=tool_use is a WHOLE turn when the stream carried one")
-    func toolUseIsTerminal() {
-        // The `/cc` route answers tool_use for a request that declared no tools.
-        // Gating on our own request flag failed every such turn on arrival — the
-        // completion was whole and it was thrown away.
+    @Test("stop_reason=tool_use reaching terminality is an anomaly and is loud")
+    func toolUseIsAnAnomaly() {
+        // The block itself now raises in the decoder, so a stream that got this
+        // far carried a stop_reason with no block behind it.
         var st = AnthropicStreamState()
         st.stopReason = "tool_use"
-        st.sawToolUse = true
-        #expect(anthropicTerminalityError(st) == nil)
+        #expect(anthropicTerminalityError(st)?.contains("tool_use") == true)
     }
 
     @Test("max_tokens is a TRUNCATED turn and must be loud")

@@ -31,8 +31,7 @@ struct NoDefaultModelTests {
             endpoint: DEFAULT_ENDPOINT,
             model: FantasticAnthropicBackend.DEFAULT_MODEL,
             apiKey: "unused",
-            maxTokens: 64,
-            toolUse: false)
+            maxTokens: 64)
         await #expect(throws: Error.self) {
             for try await _ in provider.chat(messages: [
                 .object(["role": .string("user"), "content": .string("hi")])

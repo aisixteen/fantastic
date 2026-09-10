@@ -8,7 +8,7 @@
 //
 // After ONE provider pass, its output goes where it was addressed.
 //
-//   the model's own <tool_call>s — each names a target, a payload and `reply_to`.
+//   the model's own <call>s — each names a target, a payload and `reply_to`.
 //     All are dispatched, and each reply is delivered to its own `reply_to`.
 //     `reply_to:'self'` is what makes a chain, and the chain continues ONLY
 //     because the model asked again. No call ends the turn: stop is the default.
@@ -57,8 +57,8 @@ import OrderedCollections
 /// used not to.
 let NO_TARGET_ERROR =
     "no target_id, so nothing was dispatched — a send must name the AGENT it goes to. "
-    + #"Shape: {"name":"send","arguments":{"target_id":"<agent>","payload":{"type":"<verb>"}}}. "#
-    + "Send `{type:'reflect'}` to the kernel for the list of agent ids."
+    + "Shape: <call name=\"send\"><target_id>agent</target_id><type>verb</type></call>. "
+    + "Send `kernel` <type>reflect</type> for the list of agent ids."
 
 /// NO PAYLOAD, NO SEND.
 ///
@@ -73,8 +73,7 @@ let NO_TARGET_ERROR =
 /// — single quotes — so the two runtimes' prompts stay the same sentence.
 func noPayloadError(target: String) -> String {
     "send to '\(target)' carried no payload, so nothing was dispatched. "
-        + "A payload is an object whose `type` names the verb, e.g. "
-        + #"{"type":"reflect"}."#
+        + "A call names its verb in `<type>`, e.g. <type>reflect</type>."
 }
 
 // ─── delivery ───────────────────────────────────────────────────
@@ -155,16 +154,80 @@ func deliverTurn(
 // text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
 // reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
 let noCallNudge =
-    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so "
+    "[no call was dispatched] Your turn emitted no <call> element, so "
     + "NOTHING ran — a call decided in thinking does not execute unless the "
-    + "envelope is written out. If the task is unfinished, emit that call now. "
-    + "If it is finished, end the chain explicitly: <tool_call>{\"name\":\"done\"}"
-    + "</tool_call>"
+    + "element is written out. If the task is unfinished, emit that call now. "
+    + "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
 
 /// Consecutive silent chain turns the reminder tolerates before the chain is
 /// let go (record meta `nudge_limit` overrides). A safety bound on an
 /// unattended kernel, not a budget. Mirrors python `_NUDGE_LIMIT`.
 let nudgeLimit = 24
+
+/// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
+/// a fresh turn: it must WAKE the model, not sit in a return value nobody reads.
+let awaitRefused =
+    "[await refused] nothing of yours is in flight and nothing is queued for you, "
+    + "so there is nothing to wait for. Act — make the call — or end the chain "
+    + "with <call name=\"done\"></call>."
+
+/// ROUTING TURNS with a live batch, per agent — the first summand of `await`'s
+/// `pending`. It counts TURNS, not calls: what the model is waiting for is a
+/// batch's answer, and a batch is answered whole.
+actor InFlightTurns {
+    private var counts: [String: Int] = [:]
+
+    func bump(_ agent: String, _ by: Int) {
+        counts[agent, default: 0] = max(0, (counts[agent] ?? 0) + by)
+    }
+
+    func count(_ agent: String) -> Int { counts[agent] ?? 0 }
+}
+
+let inFlightTurns = InFlightTurns()
+
+/// ONE COPY PER RECIPIENT. A `<to>` list is not a group address the kernel knows
+/// about — there is no such thing; every send reaches exactly one agent. What
+/// the list buys is that each copy carries the WHOLE list, so a recipient can
+/// see who else heard it and reply to the same group instead of forking a
+/// private conversation the others never see.
+func fanOut(_ calls: [ToolCall]) -> [ToolCall] {
+    var out: [ToolCall] = []
+    for call in calls {
+        guard case .object(let args) = call.arguments else {
+            out.append(call)
+            continue
+        }
+        var recipients: [String] = []
+        if case .some(.array(let items)) = args["to"] {
+            recipients = items.compactMap(\.asString).map(pyStrip).filter { !$0.isEmpty }
+        }
+        if call.name != "send" || recipients.isEmpty {
+            out.append(call)
+            continue
+        }
+        let re = args["re"]
+        var basePayload: OrderedDictionary<String, JSON> = [:]
+        if case .some(.object(let p)) = args["payload"] { basePayload = p }
+        for r in recipients {
+            var payload = basePayload
+            // The WHOLE list, in every copy — that is what makes it one message.
+            payload["to"] = .array(recipients.map { JSON.string($0) })
+            if let re { payload["re"] = re }
+            var copy: OrderedDictionary<String, JSON> = [:]
+            for (k, v) in args
+            // `to` became the fan-out, `re` moved into the payload, and
+            // `target_id` is the recipient this copy goes to.
+            where k != "to" && k != "re" && k != "target_id" && k != "payload" {
+                copy[k] = v
+            }
+            copy["target_id"] = .string(r)
+            copy["payload"] = .object(payload)
+            out.append(ToolCall(id: call.id, name: "send", arguments: .object(copy)))
+        }
+    }
+    return out
+}
 
 /// (kernel instance, agent id, client id) → consecutive silent chain turns so
 /// far. Scoped to the KERNEL, not the process: two kernels in one process (the
@@ -198,6 +261,10 @@ private struct RouteUnit {
     let verb: String
     let idx: Int?
     let body: String?
+    /// The model's own one-sentence `<title>` for this call. It rides on the
+    /// reply's tag and is what REMAINS once the body is stripped from the view,
+    /// so it is the call's name forever.
+    var title: String? = nil
 }
 
 /// One rendered reply block, owed to `dest`. `deliverGrouped` composes the tag —
@@ -207,6 +274,11 @@ private struct RouteBlock {
     let pid: String
     let target: String
     let verb: String
+    let title: String?
+    /// The assistant turn that MADE these calls, once the row store exists to
+    /// number turns. It rides as `\u{2191}<turn>` so a delivered reply names its
+    /// own parent and a chain stays attributable across interleaved work.
+    var turnId: Int? = nil
     let body: String
 }
 
@@ -236,10 +308,12 @@ func routeReply(
     sendTo: String?,
     systemPrompt: String?,
     incoming: String,
-    sendTimeout: Double
+    sendTimeout: Double,
+    runState: AIAgentRunState? = nil
 ) async {
-    let calls = extractToolCalls(text)
+    let calls = fanOut(extractToolCalls(text))
     let doneCalled = calls.contains { $0.name == "done" }
+    let awaitCalled = calls.contains { $0.name == "await" }
     let anyCalls = !calls.isEmpty
     // Everything owed to ONE destination, in the order the model wrote it.
     var units: [RouteUnit] = []
@@ -255,11 +329,11 @@ func routeReply(
     // block is counted in M and reads like its siblings.
     for bad in malformedCalls(text) {
         units.append(
-            RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: bad.serialize()))
+            RouteUnit(dest: selfId.value, target: "-", verb: "-", idx: nil, body: bad.body))
     }
 
     for call in calls {
-        if call.name == "done" || call.name == "inquiry_answer" {
+        if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
             // CONTROL CALLS, not dispatches. `done` ends the chain;
             // `inquiry_answer` hands this turn's answer back to whoever sent the
             // inquiry (the `inquiry` verb reads it). Neither is a send, neither
@@ -319,75 +393,51 @@ func routeReply(
                 units.append(
                     RouteUnit(
                         dest: replyTo, target: "-", verb: "-", idx: nil,
-                        body: JSON.object([
-                            "error": .string(NO_TARGET_ERROR),
-                            "you_sent": .object(argsWithoutPayload(args)),
-                        ]).serialize()))
+                        body: renderReply(
+                            .object([
+                                "error": .string(NO_TARGET_ERROR),
+                                "you_sent": .object(argsWithoutPayload(args)),
+                            ]))))
             }
             continue
         }
 
-        guard var payload = args["payload"]?.asObject else {
+        // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
+        // (every child that is not routing IS the payload), so `{}` is exactly
+        // what a send with no verb looks like — and dispatching it reaches the
+        // kernel as `payload.type required`, an error about OUR shape rather
+        // than about the verb the model left out.
+        guard var payload = args["payload"]?.asObject, !payload.isEmpty else {
             if let replyTo = replyTo {
                 units.append(
                     RouteUnit(
                         dest: replyTo, target: target, verb: "-", idx: nil,
-                        body: JSON.object([
-                            "error": .string(noPayloadError(target: target)),
-                            "target": .string(target),
-                            "you_sent": .object(argsWithoutPayload(args)),
-                        ]).serialize()))
+                        body: renderReply(
+                            .object([
+                                "error": .string(noPayloadError(target: target)),
+                                "target": .string(target),
+                                "you_sent": .object(argsWithoutPayload(args)),
+                            ]))))
             }
             continue
         }
 
         let verb = payload["type"]?.asString ?? "?"
 
-        // send_binary: ONE named payload field is a file's CONTENTS, and a JSON
-        // payload has no bytes type — so a stream sink (`write_stream`) that wants
-        // raw bytes is otherwise unreachable. The model wrote the program as an
-        // ordinary string in `into` (default `bytes`); lift that field out of the
-        // header and carry it as the item's BLOB. Mirrors python `core.py`'s
-        // send_binary branch. A non-string `into` field falls through to an
-        // ordinary send (python leaves it as-is too).
-        //
-        // It rides the ORDINARY BATCH as an item carrying a blob. Dispatching it
-        // inline through `sendWithBinary` gave it no task row, no ledger id, no
-        // timeout and no retries, and the model's reply tag read
-        // `[reply to - · …]` because there was no pid to name (2026-09-02).
-        var binaryBlob: Data? = nil
-        if call.name == "send_binary" {
-            let field = args["into"]?.asString ?? "bytes"
-            if case .string(let prog)? = payload[field] {
-                if prog == "@body" {
-                    // A LITERAL "@body" is the fence placeholder with NO fenced
-                    // block — valid JSON, so it parses and would be WRITTEN AS
-                    // THE FILE (measured 2026-09-01, gym: `illegal character
-                    // '@'`). Refuse loud instead.
-                    if let replyTo = replyTo {
-                        let err: JSON = .object([
-                            "error": .string(
-                                "send_binary NOT dispatched: `bytes` is the literal "
-                                    + "placeholder \"@body\" but no fenced block followed. "
-                                    + "Re-send the SAME call with the program between "
-                                    + "column-0 marker lines inside the same <tool_call>: "
-                                    + "the JSON line, then `*** Begin Bytes`, the program "
-                                    + "verbatim, then `*** End Bytes`."),
-                            "target": .string(target),
-                        ])
-                        units.append(
-                            RouteUnit(
-                                dest: replyTo, target: target, verb: verb, idx: nil,
-                                body: err.serialize()))
-                    }
-                    continue
-                }
-                var header = payload
-                header[field] = nil  // rides as the blob, not the JSON header
-                binaryBlob = Data(prog.utf8)
-                payload = header
-            }
+        // A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched
+        // here, AFTER the turn closed and the in-flight entry was cleared — so a
+        // verb that resolves its conversation from that entry (`recall`, `grep`,
+        // `history`) saw the DEFAULT client and searched an empty store.
+        if target == selfId.value && payload["client_id"] == nil {
+            payload["client_id"] = .string(clientId)
         }
+
+        // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
+        // payload as `bytes`, verbatim, because the grammar carries it verbatim
+        // — and `text_file` takes exactly that (its handler REFUSES a
+        // `write`/`patch`/`append` whose `bytes` is not a string). Lifting it
+        // into the item's binary channel would delete the key the target reads
+        // and route to the binary handler, which is not where a document goes.
 
         // A handler that RAISES must not take the chain down with it. Python ran
         // bare here until 2026-08-02, when a `file_bridge` whose ingress rule
@@ -412,12 +462,12 @@ func routeReply(
         // validates all three and a bad value settles that one call as a refusal
         // the model can read.
         var item = Item(AgentId(target), .object(payload))
-        // A `send_binary` call carries its bytes beside the JSON header; the
-        // kernel dispatches it through the binary channel under this same row,
-        // ledger id, timeout and retries.
-        if let blob = binaryBlob { item.binary = blob }
         item.timeout = sendTimeout
-        if let execId = args["id"]?.asString, !execId.isEmpty { item.id = execId }
+        // `exec_id`, not `id`: arguments are INLINE now, so a bare `<id>` would
+        // collide with the many verbs whose payload has one (`delete_agent`,
+        // `update_agent`, …). The parser keeps the name at the call level; here
+        // it becomes the item's execution name.
+        if let execId = args["exec_id"]?.asString, !execId.isEmpty { item.id = execId }
         if let t = args["timeout"]?.asDouble { item.timeout = t }
         if let r = args["retries"]?.asInt { item.retries = UInt32(r) }
         items.append(item)
@@ -430,7 +480,14 @@ func routeReply(
         }
     }
 
+    // BRACKETED so `await` can see it: while this batch is out, the agent has
+    // something in flight, and that is the honest answer to "is anything
+    // coming?" — the alternative the model reaches for otherwise is re-issuing
+    // the call, which only lengthens the queue that delays it.
+    let hadItems = !items.isEmpty
+    if hadItems { await inFlightTurns.bump(selfId.value, 1) }
     let outcomes = items.isEmpty ? [] : await kernel.send(items)
+    if hadItems { await inFlightTurns.bump(selfId.value, -1) }
 
     // The result — INCLUDING an error — goes back. A call that failed silently is
     // the one thing a model can never debug.
@@ -453,13 +510,15 @@ func routeReply(
                 obj["target"] = .string(u.target)
                 result = .object(obj)
             }
-            body = result.serialize()
+            body = renderReply(result)
             // Only reflect bodies are dropped later, so only they carry the
             // distillation notice.
             if u.verb == "reflect" { body += REFLECT_NUDGE }
         }
         blocks.append(
-            RouteBlock(dest: u.dest, pid: pid, target: u.target, verb: u.verb, body: body))
+            RouteBlock(
+                dest: u.dest, pid: pid, target: u.target, verb: u.verb, title: u.title,
+                body: body))
     }
 
     // THE TAIL BELOW IS PYTHON'S ORDER, step for step (core.py:1160-1176), and
@@ -480,7 +539,13 @@ func routeReply(
     // An inquiry turn was the OTHER legitimate silent end (emit + stop; the human's
     // answer resumes the chain) — nudging it would stomp the wait.
     let anyBlocks = !blocks.isEmpty
-    let chained =
+    // EVERY CALL-LESS TURN IS NUDGED, chain or not (user, 2026-09-09: "all is
+    // tool calls"). This used to fire only when the incoming text was itself a
+    // reply or a nudge, so a FIRST turn of pure prose from a person ended the
+    // work silently — the model had decided on a call, written it in thought,
+    // and never emitted it.
+    let chained = true
+    let _wasChained =
         incoming.hasPrefix("[reply to ") || incoming.hasPrefix("[no call was dispatched]")
     // AN INQUIRY IS A CALL NOW, so there is no silent-turn exemption: a turn that
     // consults someone DISPATCHES and is never silent. This used to scan the
@@ -497,7 +562,57 @@ func routeReply(
         await deliverGrouped(
             kernel: kernel, blocks: blocks, clientId: clientId, systemPrompt: systemPrompt)
     }
-    if doneCalled { return }  // explicitly finished — nothing more runs, nothing reminds
+    if doneCalled {
+        // Explicitly finished — nothing more runs, nothing reminds. A caller's
+        // `send_to` hand-off is the one thing that still applies: the finished
+        // text is what it asked to have delivered. It is ALSO the only turn on
+        // which it can still apply, now that a call-less turn is nudged instead
+        // of ending.
+        if let sendTo = sendTo, !anyBlocks {
+            await deliverTurn(
+                kernel: kernel, target: sendTo, text: text,
+                clientId: clientId, systemPrompt: systemPrompt)
+        }
+        return
+    }
+    if awaitCalled {
+        // EXPLICIT WAITING. The model stops and nothing reminds it: the next
+        // message that lands wakes it. That is the honest alternative to
+        // re-issuing a call it has not seen answered — this is an ASYNC system,
+        // and a reply in flight is on its way, not lost.
+        //
+        // PENDING is three summands, and all three are needed: this agent's own
+        // in-flight routing turns, the messages already queued for it, and the
+        // turn another message may ALREADY be running under the FIFO lock.
+        // Routing happens AFTER the turn released that lock, so "queued" alone
+        // would read empty at exactly the moment something is about to arrive.
+        await silentStreaks.reset(kernel, selfId.value, clientId)
+        let queued = runState?.queueDepth() ?? 0
+        let running = (await runState?.fifo.busy() ?? false) ? 1 : 0
+        let pending = await inFlightTurns.count(selfId.value) + queued + running
+        if pending > 0 || hadItems {
+            await kernel.emit(
+                selfId,
+                .object([
+                    "type": .string("status"),
+                    "source": .string(selfId.value),
+                    "phase": .string("done"),
+                    "detail": .object([
+                        "reason": .string("awaiting"),
+                        "pending": .integer(Int64(pending)),
+                    ]),
+                    "ts": .double(Date().timeIntervalSince1970),
+                    "client_id": .string(clientId),
+                ]))
+            return
+        }
+        // Nothing to wait for: say so, as a turn, so the model acts instead of
+        // waiting forever on an empty inbox.
+        await deliverTurn(
+            kernel: kernel, target: selfId.value, text: awaitRefused,
+            clientId: clientId, systemPrompt: systemPrompt)
+        return
+    }
     if nudging {
         let streak = await silentStreaks.bump(kernel, selfId.value, clientId)
         let limit =
@@ -557,7 +672,12 @@ private func deliverGrouped(
         let parts = byDest[dest] ?? []
         let m = parts.count
         let body = parts.enumerated().map { (i, b) -> String in
+            // The ONE line a reply is known by, forever — in the durable store,
+            // in `recall` pages, and as the stub a stripped body leaves behind.
+            // Optional segments append in THIS order:
+            //     [reply to <pid> · <target> <verb> · "<title>" · N of M in batch <b>]
             var tag = "[reply to \(b.pid) \u{b7} \(b.target) \(b.verb)"
+            if let t = b.title { tag += " \u{b7} \"\(t)\"" }
             tag += m > 1 ? " \u{b7} \(i + 1) of \(m) in batch \(token)]" : "]"
             return tag + "\n" + b.body
         }.joined(separator: "\n\n")
@@ -565,6 +685,26 @@ private func deliverGrouped(
             kernel: kernel, target: dest, text: body,
             clientId: clientId, systemPrompt: systemPrompt)
     }
+}
+
+/// A title lives INSIDE the reply tag, so it may not carry the one character
+/// that closes it, nor a newline that would end the tag line. Capped at 140
+/// characters: it is a sentence, not a body.
+private func cleanTitle(_ raw: JSON?) -> String? {
+    guard let text = raw?.asString else { return nil }
+    var out = ""
+    var gap = false
+    for c in text {
+        if c == "]" || c == "\r" || c == "\n" {
+            gap = true
+        } else {
+            if gap && !out.isEmpty { out.append(" ") }
+            gap = false
+            out.append(c)
+        }
+    }
+    let capped = String(out.trimmingCharacters(in: .whitespacesAndNewlines).prefix(140))
+    return capped.isEmpty ? nil : capped
 }
 
 /// The call's args minus `payload`, for the `you_sent` echo — showing the model

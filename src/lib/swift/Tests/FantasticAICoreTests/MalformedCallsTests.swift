@@ -1,14 +1,12 @@
-// A broken envelope must have a VOICE.
+// A broken envelope must have a VOICE. Mirrors the `malformed_calls` half of
+// `bundled_agents/ai/ai_core/tests/test_tool_parse.py` and rust's
+// `tool_parse/tests_malformed.rs`.
 //
-// Mirrors the canonical Python suite `ai_core/tests/test_tool_parse.py`
-// (`malformed_calls` section). Every fixture was run against the python
-// implementation and the expectations copied from what it produced.
-//
-// ONE deliberate divergence: the JSON fault is named by whichever JSON parser
-// the runtime has, so the reason text quotes swift's `JSONScanner`
-// ("unterminated string at offset N") where python quotes CPython's
-// ("Unterminated string starting at: line 1 column 162"). The HINT that follows
-// it is byte-identical across runtimes, because that half is a prompt.
+// Why the module exists at all: a call that cannot be read returns `[]` from
+// `extractToolCalls`, which is byte-identical to a turn that emitted no call —
+// and that means "done". Measured on gemma-4-12B (2026-08-06): nothing parsed,
+// nothing dispatched, no error came back, and the run ended looking finished
+// with the task untouched.
 
 import FantasticJSON
 import Foundation
@@ -16,133 +14,95 @@ import Testing
 
 @testable import FantasticAICore
 
-// From gemma-4-12B, probe 05, 2026-08-06 — the call that ended the run (the
-// `handler_module` is updated to the current executor; the parser defect under
-// test is the string, not the module). The program body is escaped correctly;
-// the `code` value is never closed, so every brace after it is string content
-// and the object runs off the end.
-private let GEMMA_UNCLOSED_CODE =
-    #"{"name":"send","arguments":{"target_id":"kernel_state","payload":"#
-    + #"{"type":"create_agent","handler_module":"exec_bridge.tools","#
-    + #""id":"reading_aggregator","code":"def update_totals():\n"#
-    + #"    worker_res = send(\"reading_worker\", {\"type\": \"compute_total\"})\n"#
-    + #"    return f\"updated to {worker_res}\"}}"#
-
 @Suite("tool-call parser: malformed reporting")
 struct MalformedCallsTests {
 
-    @Test func theUnclosedCodeStringThatEndedTheGemmaRunIsReported() {
-        // The regression this exists for. Silence here read as "the model is done"
-        // while the task sat untouched, so the assertion is not that we PARSE it —
-        // we must not — but that the model is TOLD.
-        let text = "<tool_call>" + GEMMA_UNCLOSED_CODE
-        #expect(extractToolCalls(text).isEmpty, "a broken call must never dispatch")
-        let bad = malformedCalls(text)
-        #expect(bad.count == 1)
-        let error = bad[0]["error"].asString ?? ""
-        #expect(error.contains("NOT dispatched"))
-        #expect(error.contains("unterminated string"), "name the JSON fault")
-        #expect(error.contains("FENCED form"), "name the fix")
-        #expect(error.contains("Begin Bytes"), "teach the fence grammar")
+    /// The advice is a PROMPT, not a diagnostic: a model reads it and retries
+    /// from it, and every runtime must say the same words. Pinned as LITERAL
+    /// TEXT so "tidying" a sentence shows up as a failing test rather than as
+    /// silent cross-runtime drift. Byte-for-byte python's `_HINT`.
+    @Test func theHintIsVerbatim() {
         #expect(
-            bad[0]["your_block"].asString?.contains("reading_aggregator") == true,
-            "show its own text back")
-        #expect(bad[0]["envelope"].asString == TOOL_OPEN)
+            HINT == "The shape: <call name=\"send\">\n"
+                + "<target_id>agent id</target_id>\n"
+                + "<type>verb</type>\n"
+                + "<path>a.md</path>\n"
+                + "<bytes>document, verbatim, to the first </bytes>\n"
+                + "</bytes>\n"
+                + "</call> — one child tag per argument, a list is one tag whose children "
+                + "are all <item>, nothing is escaped.")
     }
 
+    /// The three fields are python's dict, and the composed sentence is
+    /// `Malformed.swift`'s: `error` is the whole reply body so the wording has
+    /// ONE owner.
+    @Test func theReportIsThreeFieldsAndOneComposedSentence() {
+        let text =
+            #"<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>"#
+        let bad = malformedCalls(text)
+        #expect(bad.count == 1)
+        #expect(bad.first?.envelope == "<call")
+        #expect(
+            bad.first?.error == "call NOT dispatched: duplicate `<path>` — a list is one tag "
+                + "whose children are all `<item>`: `<path><item>…</item><item>…</item></path>`. "
+                + "Nothing ran. \(HINT)")
+        // The block is what sits BETWEEN the opener and the closer, whole and
+        // defanged — neither delimiter is part of it.
+        #expect(
+            bad.first?.yourBlock
+                == #"name="send"><target_id>n</target_id><path>a</path><path>b</path>"#)
+    }
+
+    /// PLAIN TEXT, not JSON — the model↔harness path carries none in either
+    /// direction, and a JSON-dumped refusal cost a run to doubled backslashes
+    /// (2026-09-09, program_tests).
+    @Test func theBodyDeliveredToTheModelIsPlainText() {
+        let bad = malformedCalls(#"<call name="send"><type>reflect</type></call>"#)
+        let body = bad[0].body
+        #expect(body.hasPrefix("call NOT dispatched: a send names its target"))
+        #expect(body.contains("\n\nyour block:\n"))
+        #expect(!body.hasPrefix("{"))
+    }
+
+    /// Two broken envelopes are two reports, in document order — a batch of
+    /// calls is answered as a batch, and a model that broke two must see both.
+    @Test func everyBrokenEnvelopeGetsItsOwnReport() {
+        let text =
+            #"<call name="send"><type>reflect</type></call>"# + "\n"
+            + #"<call name="nope"><target_id>n</target_id></call>"#
+        let bad = malformedCalls(text)
+        #expect(bad.count == 2)
+        #expect(bad.first?.error.contains("a send names its target") == true)
+        #expect(bad.last?.error.contains("`nope` is not a tool") == true)
+    }
+
+    /// A turn that parsed is silent here: nothing to report, nothing to nudge.
+    @Test func aGoodTurnReportsNothing() {
+        let text = #"<call name="send"><target_id>n</target_id><type>reflect</type></call>"#
+        #expect(extractToolCalls(text).count == 1)
+        #expect(malformedCalls(text).isEmpty)
+    }
+
+    /// Emitting no call is a legitimate way to stop. Only an envelope that
+    /// OPENED and failed is a fault.
     @Test func proseWithNoEnvelopeIsSilenceNotAnError() {
-        // The distinction the whole change rests on: emitting no call is a
-        // legitimate way to stop. Only an envelope that OPENED and failed is a fault.
         #expect(malformedCalls("I have finished wiring the aggregator.").isEmpty)
         #expect(malformedCalls("").isEmpty)
     }
 
-    @Test func aGoodCallBesideABrokenOneReportsOnlyTheBrokenOne() {
-        // A partially-read turn dispatched half the model's intent. Which half was
-        // lost is not inferable from the replies it got, so the loss is named.
-        let text =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"m","payload":{"type":"one"}}}</tool_call>"#
-            + #"<tool_call>{"name":"send","arguments":{"target_id":"n","code":"oops}}"#
-        #expect(extractToolCalls(text).map { $0.arguments["target_id"].asString } == ["m"])
-        #expect(malformedCalls(text).count == 1)
-    }
-
-    @Test func everyEnvelopeGetsTheSameVoice() {
-        // `<|tool_call>` was the envelope whose silent drop was documented and
-        // unfixed; it must report like the others now. What is pinned here is
-        // that opening any of the three and failing is never silence.
-        for text in [
-            "<|tool_call>call:a.b{unterminated<tool_call|>",
-            #"<invoke name="send"><parameter name="arguments">{oops</parameter></invoke>"#,
-        ] {
-            #expect(extractToolCalls(text).isEmpty, "\(text)")
-            let bad = malformedCalls(text)
-            #expect(bad.count == 1, "\(text)")
-            #expect(bad.first?["error"].asString?.contains("NOT dispatched") == true, "\(text)")
-        }
-    }
-
-    @Test func theChannelErrorDoesNotLectureAboutJson() {
-        // Its body is not JSON. Advice that does not match the grammar the model
-        // used teaches the wrong lesson — measured live on 2026-08-06.
-        let bad = malformedCalls("<|tool_call>call:a.b{k: 'unclosed}<tool_call|>")[0]
-        let error = bad["error"].asString ?? ""
-        #expect(error.contains("NOT JSON"))
-        #expect(!error.contains(#"\n"#), "the JSON escaping hint must not appear here")
-        #expect(bad["envelope"].asString == CHANNEL_OPEN)
-    }
-
-    @Test func proseMentioningTheTagIsNotReportedAsABrokenCall() {
-        // Measured 2026-08-06: gemma wrote `<tool_call>` inside a sentence and the
-        // first version of this feature answered with a lecture about JSON, costing
-        // a turn. An opener with no call-shaped body is a MENTION.
-        #expect(
-            malformedCalls("You send it in a <tool_call> block. The `kernel_state` agent is root.")
-                .isEmpty)
-    }
-
-    @Test func anUnterminatedButCallShapedBlockStillReports() {
-        // The other side of that rule — nemotron-3-ultra-550b omits the closing tag
-        // on real calls, so a `{`-shaped body is an attempt however it ends.
-        #expect(malformedCalls(#"<tool_call>{"name":"send","arguments":{oops"#).count == 1)
-    }
-
-    @Test func proseIsNotAnAttemptEvenWhenALaterCloserTerminatesIt() {
-        // A stray opener in a sentence, plus the closing tag of a REAL call further
-        // down, forms a "terminated" block out of prose. Requiring the closer let
-        // that through and CLOSED A LOOP: the error echoes the block, the model
-        // quotes the error, the quotation contains the tag, the next scan finds a
-        // fresh opener. Three of run 4's errors on 2026-08-06 were this feeding
-        // itself. Shape decides, always.
-        let text =
-            "My previous call was: `<tool_call>` and it failed. Retrying now."
-            + #"<tool_call>{"name":"send","arguments":{"target_id":"m","payload":{"type":"one"}}}</tool_call>"#
-        #expect(extractToolCalls(text).map { $0.arguments["target_id"].asString } == ["m"])
-        #expect(malformedCalls(text).isEmpty, "the prose mention must not be reported")
-    }
-
+    /// Whatever we echo becomes text the model quotes back. A live `<call` in it
+    /// is indistinguishable from an emitted one, so the FOUR envelope delimiters
+    /// (`<call`, `</call>`, `<bytes>`, `</bytes>`) are broken and the echoed
+    /// block cannot re-arm the scanner. Only those four — the argument tags stay
+    /// verbatim, because a model that cannot read its own block back cannot fix
+    /// it.
     @Test func theEchoedBlockCannotReArmTheScanner() {
-        // Whatever we echo becomes text the model quotes back. A live `<tool_call>`
-        // in it is indistinguishable from an emitted one, so the delimiters are
-        // defanged.
-        let bad = malformedCalls(#"<tool_call>{"name":"send","note":"see <tool_call> oops"#)[0]
-        let echoed = bad["your_block"].asString ?? ""
-        #expect(echoed.contains("oops"), "the text must stay legible")
-        #expect(!echoed.contains(TOOL_OPEN), "the tag must not survive verbatim")
-        #expect(malformedCalls(echoed).isEmpty, "echoing it must not produce a new report")
-    }
-
-    /// THE BLOCK IS SHOWN WHOLE — python's behaviour, and the reason is the fault's
-    /// LOCATION: an unterminated string breaks at the END of a long payload, so a
-    /// head-only echo shows the model text that looks perfectly fine and it re-sends
-    /// the identical broken envelope (measured live_build 2026-08-24). Rust and swift
-    /// capped at 400 chars until 2026-09-02; the cost of the cap was a stuck model,
-    /// the cost of the whole block is context the model can act on.
-    @Test func malformedYourBlockIsShownWhole() {
-        let text =
-            #"<tool_call>{"name":"send","arguments":{"code":""#
-            + String(repeating: "x", count: 40000)
-        let echoed = malformedCalls(text)[0]["your_block"].asString ?? ""
-        #expect(echoed.count > 40000, "the tail must survive: \(echoed.count) chars")
+        let bad = malformedCalls(
+            #"<call name="send"><target_id>notes</target_id><type>write</type>"#
+                + "<bytes>x</bytes><bytes>y</bytes></call>")[0]
+        #expect(bad.yourBlock.contains("target_id"), "the text must stay legible")
+        #expect(!bad.yourBlock.contains("<call"), "the opener must not survive verbatim")
+        #expect(!bad.yourBlock.contains("<bytes>"), "nor the verbatim opener")
+        #expect(malformedCalls(bad.yourBlock).isEmpty, "echoing it must not produce a new report")
     }
 }

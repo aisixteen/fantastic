@@ -52,6 +52,18 @@ public struct AIBackendConfig: Sendable {
     /// state on demand; runs every turn. Default empty (ollama / NIM).
     public var systemPromptExtra: @Sendable (Agent, Kernel) async -> String
 
+    /// A HARD, SMALL window: assemble the SHORT how-to instead of the full one,
+    /// and skip the context/compaction block entirely.
+    ///
+    /// Set by the on-device Apple FM backend alone. Its window is a hard 4096
+    /// tokens and the canonical `SEND_TO_HOWTO` is ~2100 of them, so the full
+    /// block plus the primer reflect exceeded the window before the user's text
+    /// was added — the session refused with `exceededContextWindowSize` and every
+    /// send failed. The compaction block is dropped for a second reason: FM is
+    /// STATELESS by design (history is never fed back), so `recall` and
+    /// `context_status` name affordances that agent does not have.
+    public var compactPrompt: Bool
+
     /// Extra fields merged into the `reflect` reply (e.g. ollama/NIM add
     /// `host` + `model`; FM adds `available` + `model`). Receives the
     /// agent so it can read meta. Pure function — no side effects.
@@ -75,6 +87,7 @@ public struct AIBackendConfig: Sendable {
         sentence: String,
         verbs: JSON,
         stateless: Bool = false,
+        compactPrompt: Bool = false,
         includeAccumulatedOnError: Bool = false,
         reflectExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
         backendStateExtra: @escaping @Sendable (Agent) -> [String: JSON] = { _ in [:] },
@@ -87,6 +100,7 @@ public struct AIBackendConfig: Sendable {
         self.sentence = sentence
         self.verbs = verbs
         self.stateless = stateless
+        self.compactPrompt = compactPrompt
         self.includeAccumulatedOnError = includeAccumulatedOnError
         self.reflectExtra = reflectExtra
         self.backendStateExtra = backendStateExtra

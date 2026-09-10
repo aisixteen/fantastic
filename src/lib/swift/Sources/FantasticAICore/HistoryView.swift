@@ -174,7 +174,7 @@ private func contentOf(_ turn: JSON) -> String {
 ///
 /// FAIL CLOSED. The body drops only if the model actually WROTE the distillation in
 /// the turn that answered it. Measured 2026-08-20 (`live_plan`): the model replied
-/// to several reflects with a bare tool_call and no prose, the body was dropped
+/// to several reflects with a bare call and no prose, the body was dropped
 /// anyway, and it had to re-fetch what it had lost — "The index was dropped from my
 /// view. Let me send it again and, THIS TIME, actually record the facts." Burning
 /// turns re-reading is the exact loop this trim exists to prevent, so a reflect the

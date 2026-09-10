@@ -183,7 +183,7 @@ struct AIBackendTests {
         // 2 and the model is told a different set of rules mid-task. That is why
         // `deliverTurn` carries the prompt along.
         let envelope =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect","tree":"none"}}}</tool_call>"#
+            #"<call name="send"><target_id>core</target_id><type>reflect</type><tree>none</tree></call>"#
         let script = ProviderScript([[envelope], ["seen it " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -191,7 +191,7 @@ struct AIBackendTests {
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("go"),
                 "system_prompt": .string(
-                    "CALLER BLOCK: you drive tools via <tool_call> envelopes."),
+                    "CALLER BLOCK: you drive tools via <call name=…> envelopes."),
                 "client_id": .string("c"),
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the dispatched call's reply never came back")
@@ -414,7 +414,10 @@ struct AIBackendTests {
         // Two sends on one client: turn 2's persisted history must carry
         // turn 1 (the load→append round-trip through the JSONL sidecar).
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["x"])) })
+            // DONE-TERMINATED: a call-less turn is nudged now, and the nudge is
+            // itself a turn — so a fixture that just streams prose grows the
+            // history under the assertion.
+            config: baseConfig { .provider(MockProvider(tokens: ["x ", doneEnvelope])) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("one"),
                 "client_id": .string("c"),
@@ -439,7 +442,8 @@ struct AIBackendTests {
         // `agents/<self>/chat_<client>.jsonl` on the backend's own leg. Read
         // the leg directly: same four turns, in order, one line per turn.
         let stored = await chatStoreRows(kernel: kernel, id: id, client: "c")
-        #expect(stored.map { $0["content"].asString } == ["one", "x", "two", "x"])
+        #expect(stored.map { $0["role"].asString } == ["user", "assistant", "user", "assistant"])
+        #expect(stored.map { $0["content"].asString ?? "" } == ["one", "x " + doneEnvelope, "two", "x " + doneEnvelope])
     }
 
     @Test func historyStaysEmptyWithoutFileBridge() async throws {
@@ -475,7 +479,7 @@ struct AIBackendTests {
         // agent (durable_memory is gone; memory is plain files) and not a
         // loader blob sidecar.
         let (kernel, id) = try await freshMockKernel(
-            config: baseConfig { .provider(MockProvider(tokens: ["ok"])) })
+            config: baseConfig { .provider(MockProvider(tokens: ["ok ", doneEnvelope])) })
         _ = await kernel.send([Item(id, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
@@ -683,7 +687,12 @@ struct AIBackendTests {
     @Test func contendedSendsEmitOneQueuedStatusAndNoBareQueuedEvent() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
-                .provider(MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000))
+                // DONE-TERMINATED: a call-less turn is nudged, and the nudge is a
+                // second submission that contends for the same FIFO lock — a
+                // second `queued` status the count would blame on this test.
+                .provider(
+                    MockProvider(
+                        tokens: ["a", "b", "c ", doneEnvelope], chunkDelayNanos: 40_000_000))
             })
         let sink = EventSink()
         let inbox = kernel.ensureInbox(id)
