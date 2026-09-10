@@ -243,7 +243,7 @@ extension AIBackend {
     // MARK: - verbs
 
     /// Render ONE stored turn for a `recall` reply. Turns are pure text (tool
-    /// calls/replies are inline `<tool_call>`/`<tool_response>` text), so a turn with
+    /// calls/replies are inline `<call name=…>` text), so a turn with
     /// content renders as that content and anything else falls back to the row.
     ///
     /// WHOLE, NOT CAPPED. Rust/swift truncated each turn at 2000 chars until

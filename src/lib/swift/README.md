@@ -78,7 +78,6 @@ kernel modules.
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM, URLSession AsyncBytes SSE (thin over `FantasticAICore`) |
 | nvidia_nim_backend | `FantasticNvidiaNimBackend` | both | hosted LLM, SSE + bearer auth + 429 retry (thin over `FantasticAICore`) |
 | foundation_models_backend | `FantasticFoundationModelsBackend` | both | Apple on-device Foundation Models LLM backend (`foundation_models_backend.tools`; gated by `canImport(FoundationModels)`; thin over `FantasticAICore`) |
-| apple_kvs | `FantasticAppleKVS` | both | synced cross-device KV store (`apple_kvs.tools`; iCloud `NSUbiquitousKeyValueStore`; LIVE-ONLY — gated on iCloud sign-in + network, no local fallback; verbs `set`/`read`/`delete`/`list`/`watch`; Apple-only, reports unavailable elsewhere) |
 | exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the ONE executor: spawns an allowlisted interpreter as a background job (`start` → `{job_id}`); `shim:'python'` prepends the kernel connector; sealed by default |
 | terminal_backend | `FantasticTerminalBackend` | Pro | macOS-only — `forkpty` + DispatchIO |
 
@@ -121,7 +120,6 @@ swift/
     FantasticOllamaBackend/            local LLM SSE
     FantasticNvidiaNimBackend/         hosted LLM SSE
     FantasticFoundationModelsBackend/  Apple on-device LLM
-    FantasticAppleKVS/                 synced cross-device KV (iCloud KVS, live-only)
     FantasticRunnerCore/               shared runner lifecycle (reflect/boot/start/stop);
                                        runner bundles are thin over this
     Fantastic{File,ProxyAgent,Tools,Scheduler,

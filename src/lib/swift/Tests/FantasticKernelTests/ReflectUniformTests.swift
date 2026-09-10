@@ -121,12 +121,16 @@ struct ReflectUniformTests {
     }
 
     /// The authoring doc must teach the FILE+COMMAND execution model — a durable
-    /// program is a FILE you write (stream verbs / send_binary) plus a command you
-    /// run on the general-purpose exec_bridge COMMAND runner. No `code` field.
+    /// program is a FILE you write (the stream verbs, the document verbatim in
+    /// `<bytes>`) plus a command you run on the general-purpose exec_bridge
+    /// COMMAND runner. No `code` field.
     @Test func selfExtensionDocStatesTheFileCommandModel() throws {
         let body = try #require(RootDocs.all.first { $0.key == "self-extension" }?.body)
         #expect(body.contains("write_stream"), "\(body)")
-        #expect(body.contains("send_binary"), "\(body)")
+        #expect(body.contains("<bytes>"), "\(body)")
+        // `send_binary` is GONE: there is no such tool in the call grammar, and
+        // the byte path is the verbatim `<bytes>` value.
+        #expect(!body.contains("send_binary"), "\(body)")
         #expect(body.lowercased().contains("command runner"), "\(body)")
         #expect(body.contains("`code` field"), "\(body)")
         // The superseded script model must be gone, not merely supplemented.
@@ -189,8 +193,8 @@ struct ReflectUniformTests {
     //
     // A durable program is a FILE plus a COMMAND — there is no `code` field
     // (a program embedded as a JSON string is exactly how a call gets lost to
-    // escaping). Write it with the file leg's STREAM verbs or `send_binary`, run
-    // it on the general-purpose exec_bridge COMMAND runner.
+    // escaping). Write it with the file leg's STREAM verbs, the document
+    // verbatim in `<bytes>`, and run it on the exec_bridge COMMAND runner.
 
     @Test func selfExtensionStatesTheFileCommandModel() async throws {
         let kernel = makeKernel()
@@ -199,7 +203,9 @@ struct ReflectUniformTests {
         #expect(s.contains("A DURABLE PROGRAM is a FILE"), "\(s)")
         #expect(s.contains("no `code` field") || s.contains("There is no `code` field"), "\(s)")
         #expect(s.contains("write_stream"), "\(s)")
-        #expect(s.contains("send_binary"), "\(s)")
+        #expect(s.contains("<bytes>"), "\(s)")
+        #expect(!s.contains("send_binary"), "\(s)")
+        #expect(!s.contains("Begin Bytes"), "\(s)")
         #expect(s.contains("COMMAND runner"), "\(s)")
         #expect(s.contains("exec_bridge.tools"), "\(s)")
         // The superseded script phrasing must be gone.

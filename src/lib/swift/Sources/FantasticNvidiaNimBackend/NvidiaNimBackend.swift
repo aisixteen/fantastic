@@ -3,7 +3,7 @@
 // Mirrors Rust's `fantastic-nvidia-nim-backend::NvidiaNimBundle`.
 // Talks to NIM via HTTPS POST + Bearer auth; streams RAW TEXT tokens via
 // Server-Sent Events. NO native tool-calling — ai-core parses the
-// `<tool_call>` envelope from the streamed text.
+// `<call name=…>` envelope from the streamed text.
 //
 // All the agent machinery (history, epoch cancellation, verb
 // dispatch, token/done events, raw tool-call parsing) lives in the shared
@@ -85,7 +85,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
         """
         nvidia_nim_backend — NVIDIA NIM LLM agent (OpenAI-compatible); thin over FantasticAICore.
         Verbs: send, history, interrupt, backend_state; api_key stored in agent meta (set via update_agent); 429 rate-limit retry.
-        Tool-calling is RAW: no native OpenAI tools — provider streams text, FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
+        Tool-calling is RAW: no native OpenAI tools — provider streams text, FantasticAICore parses the <call name=…> envelope (tool_parse).
         """
     }
 
@@ -120,7 +120,7 @@ public final class NvidiaNimBundle: AgentBundle, @unchecked Sendable {
 /// exponential backoff (1s, 2s, 4s). PURE RAW TEXT: yields `.token`s only,
 /// decoded from BOTH of the model's channels (`reasoning_content` wrapped in
 /// `<think>…</think>`, `content` bare — see `decodeNimSSELine`); no native
-/// tool-calls (ai-core parses the `<tool_call>` envelope from the text).
+/// tool-calls (ai-core parses the `<call name=…>` envelope from the text).
 struct NvidiaNimProvider: AIProvider {
     let host: String
     let model: String
@@ -143,7 +143,7 @@ struct NvidiaNimProvider: AIProvider {
                 req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
                 req.headers.add(name: "Accept", value: "text/event-stream")
 
-                // RAW: no native `tools` array — ai-core parses the `<tool_call>`
+                // RAW: no native `tools` array — ai-core parses the `<call name=…>`
                 // envelope out of the streamed content text.
                 var body: OrderedDictionary<String, JSON> = [:]
                 body["model"] = .string(model)

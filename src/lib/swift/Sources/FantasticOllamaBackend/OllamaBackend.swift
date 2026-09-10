@@ -75,7 +75,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
         ollama_backend — local LLM agent; thin over FantasticAICore.
         Per-client chat threads, FIFO lock; verbs: send, history, status, backend_state. \
         No `interrupt`: an in-flight `send` IS a kernel task — kill it with `ps` + `cancel`.
-        Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
+        Tool-calling is RAW: no native ollama tools — provider streams text, FantasticAICore parses the <call name=…> envelope (tool_parse).
         """
     }
 
@@ -129,7 +129,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 /// NDJSON line from BOTH of the model's channels (`message.thinking` wrapped in
 /// `<think>…</think>`, `message.content` bare — see `decodeOllamaLine`). NO
 /// native `tools` array is sent and NO `tool_calls` are read; ai-core parses the
-/// `<tool_call>` envelope from the text. Mirrors Rust/Python ollama providers.
+/// `<call name=…>` envelope from the text. Mirrors Rust/Python ollama providers.
 struct OllamaProvider: AIProvider {
     let host: String
     let model: String
@@ -147,7 +147,7 @@ struct OllamaProvider: AIProvider {
         let think = think
         return AsyncThrowingStream { continuation in
             let task = Task {
-                // RAW: no native `tools` array — ai-core parses the `<tool_call>`
+                // RAW: no native `tools` array — ai-core parses the `<call name=…>`
                 // envelope out of the streamed content text.
                 var options: OrderedDictionary<String, JSON> = ["temperature": .double(temperature)]
                 if let n = numCtx { options["num_ctx"] = .integer(n) }

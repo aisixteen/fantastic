@@ -6,9 +6,11 @@
 //
 // NO NATIVE TOOL-CALLING. Tool-calling here is raw prompt-and-parse owned by
 // FantasticAICore: the provider streams text and the core parses the
-// `<tool_call>` envelope out of it. The optional `tool_use` route declares the
-// ONE `send` tool and TRANSLATES what comes back into that same envelope — it
-// changes what we ASK for, never what we can read.
+// `<call name=…>` envelope out of it. The optional `tool_use` route that
+// declared one `send` tool and translated the returned blocks back is DELETED —
+// a model writing JSON tool calls is writing a grammar this kernel does not
+// parse, and the honest answer is to say so (see the SSE decoder), not to
+// translate a second dialect at the edge.
 //
 // All the agent machinery (history, epoch cancellation, verb dispatch,
 // token/done events, envelope parsing) lives in the shared
@@ -112,8 +114,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                             model: Self.model(agent: agent),
                             apiKey: apiKey,
                             maxTokens: agent.metaValue(forKey: "max_tokens")?.asInt
-                                ?? Int64(DEFAULT_MAX_TOKENS),
-                            toolUse: agent.metaValue(forKey: "tool_use")?.asBool ?? false))
+                                ?? Int64(DEFAULT_MAX_TOKENS)))
                 }
             ))
     }
@@ -122,8 +123,7 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
         """
         anthropic_backend — Anthropic Messages-API LLM agent; thin over FantasticAICore.
         Verbs: send, history, cancel, status, backend_state; the api key comes from the ENVIRONMENT (ANTHROPIC_KEY, else ANTHROPIC_API_KEY) and is never stored; 429 + gateway retry.
-        Tool-calling is RAW: the provider streams text and FantasticAICore parses the <tool_call>/<tool_response> envelope (tool_parse).
-        `tool_use: true` declares the one `send` tool and TRANSLATES the returned blocks into that same envelope — it changes what is asked for, not what can be read.
+        Tool-calling is RAW: the provider streams text and FantasticAICore parses the <call name=…> envelope (tool_parse); a native tool_use block that arrives anyway is a LOUD error.
         `endpoint` overrides the API host; set it for any proxy, or the default host is used with your key and answers 401.
         """
     }
@@ -156,25 +156,6 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// The ONE tool `ai_core` teaches in prose. Sent ONLY on the `tool_use` route.
-/// Its shape must match what the core's parser already expects, because what
-/// comes back is translated into exactly that envelope.
-func anthropicSendTool() -> JSON {
-    .object([
-        "name": .string("send"),
-        "description": .string(
-            "Send a payload to another agent by id and get its reply."),
-        "input_schema": .object([
-            "type": .string("object"),
-            "properties": .object([
-                "target_id": .object(["type": .string("string")]),
-                "payload": .object(["type": .string("object")]),
-            ]),
-            "required": .array([.string("target_id"), .string("payload")]),
-        ]),
-    ])
-}
-
 /// Messages-API SSE provider — `x-api-key` auth, 429 retry with `retry-after`,
 /// and a bounded retry for transient GATEWAY failures.
 struct AnthropicProvider: AIProvider {
@@ -182,7 +163,6 @@ struct AnthropicProvider: AIProvider {
     let model: String
     let apiKey: String
     let maxTokens: Int64
-    let toolUse: Bool
 
     /// 502/503/504/520-524 from a CDN in front of the API is a hiccup, not an
     /// answer: a 1-2s restart once returned a Cloudflare HTML page and killed a
@@ -197,7 +177,6 @@ struct AnthropicProvider: AIProvider {
         let model = model
         let apiKey = apiKey
         let maxTokens = maxTokens
-        let toolUse = toolUse
         return AsyncThrowingStream { continuation in
             let task = Task {
                 if model.isEmpty || model == DEFAULT_MODEL {
@@ -214,7 +193,7 @@ struct AnthropicProvider: AIProvider {
                 body["stream"] = .bool(true)
                 body["messages"] = .array(turns)
                 if let system { body["system"] = .string(system) }
-                if toolUse { body["tools"] = .array([anthropicSendTool()]) }
+                // RAW, always: no native `tools`/`tool_choice`.
                 let payload = JSON.object(body).serialize()
 
                 // VERBATIM — `endpoint` IS the messages URL, as in python

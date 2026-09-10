@@ -1,84 +1,89 @@
 // The scanner: every envelope in a completion, in DOCUMENT ORDER.
 //
 // Ported from the canonical Python `ai_core/tool_parse.py` (`_scan`,
-// `extract_tool_calls`).
+// `extract_tool_calls`, `call_spans`).
+//
+// There is NO agentic loop here and NO native provider tool API: the provider
+// streams plain text, this module reads it. There is also NO JSON anywhere on
+// this path, in either direction. ONE envelope, args inline:
+//
+//     <call name="send">
+//     <target_id>notes</target_id>
+//     <type>patch</type>
+//     <bytes>…verbatim, to the first </bytes>…
+//     </bytes>
+//     </call>
+//
+// The three JSON-era envelopes this module used to accept — the taught
+// `<tool_call>{…}</tool_call>`, Claude's `<invoke>`, the gemma special-token
+// channel — and both `bytes` cuts are DELETED, not deprecated. A model's trained
+// format stopped being the argument the day the measurement went the other way
+// (2026-09-09, qwen3.8-27b: JSON 3/12 correct on shapes that carry a document,
+// bare child tags 12/12).
 //
 // SWIFT-SPECIFIC: the scan indexes over `Array(text)` (`[Character]`) rather
 // than juggling `String.Index`, so its arithmetic matches python's string
-// indices exactly — the step-over-the-OPENER-only rule below is where a
-// hand-port with two index spaces silently drifts. Byte offsets exist in exactly
-// one place in this module, inside `parseOne`'s `parsePrefix` call. The scanning
-// primitives it shares with the body grammars live in `Scanning.swift`.
+// indices exactly — the step-over-the-OPENER-only rule is where a hand-port with
+// two index spaces silently drifts. The primitives live in `Scanning.swift`.
 
 import FantasticJSON
 import Foundation
 
 /// One envelope the scanner found.
 ///
-/// A `nil` `call` means an envelope WAS opened and its body did not parse. The
-/// scanner keeps those instead of dropping them so a caller can tell the two
-/// outcomes apart — see `malformedCalls`.
+/// A `nil` `call` with a `fault` means an envelope WAS opened as a call and its
+/// body did not parse — kept, so `malformedCalls` can say so. A `nil` call with
+/// no fault is the model MENTIONING `<call` in prose: stepped over, so a stray
+/// mention never swallows the real call after it.
 struct ScanHit {
-    /// Which envelope opened (carries its closer, parser and hint).
-    let envelope: Envelope
-    /// The body between the delimiters, verbatim.
+    /// The body between `<call` and `</call>`, verbatim.
     let block: String
     /// The parsed call, or nil when the body did not parse.
     let call: ToolCall?
-    /// Whether the closing tag was present — what separates a real attempt from
-    /// a model merely MENTIONING the tag in prose.
-    let terminated: Bool
+    /// The named fault, when the body was call-shaped and did not parse.
+    let fault: String?
 }
 
 /// Every envelope found, in document order.
-///
-/// Splitting the scan out of `extractToolCalls` keeps ONE implementation of the
-/// envelope precedence rules; two copies would drift the moment a fourth
-/// envelope arrives.
 func scanToolEnvelopes(_ text: String) -> [ScanHit] {
     let chars = Array(text)
     var out: [ScanHit] = []
-    var i = 0
-    while i < chars.count {
-        // Whichever envelope comes first, in document order. Channel before
-        // invoke before taught on a tie (the table's order), preserving python's
-        // precedence.
-        var first: (pos: Int, envelope: Envelope)?
-        for envelope in TOOL_ENVELOPES {
-            guard let pos = findChars(chars, envelope.openerChars, from: i) else { continue }
-            if first == nil || pos < first!.pos { first = (pos, envelope) }
-        }
-        guard let (pos, envelope) = first else { break }
-        let bodyStart = pos + envelope.openerChars.count
-        let end = findChars(chars, envelope.closerChars, from: bodyStart)
+    for env in envelopes(chars) {
         // UNTERMINATED (`end == nil`) is not a truncation guess: the envelope is
         // the LAST thing in the completion, so there is nothing after it to
-        // misread. Observed live from nvidia/nemotron-3-ultra-550b, which emits a
-        // complete, valid call object and simply stops without the closing tag.
-        // Dropping it loses an unambiguous instruction.
-        let block = String(chars[bodyStart..<(end ?? chars.count)])
-        let call = envelope.parse(block)
-        if call == nil, !looksLikeAnAttempt(envelope: envelope, block: block) {
-            // A MENTION, not a call — the model wrote the tag inside a sentence.
-            // Step over the OPENER ONLY. Consuming through `closer` would swallow
-            // whatever follows, and what follows is often the real call: a stray
-            // opener in prose pairs with the closing tag of the genuine call
-            // further down, and the genuine call is then never seen. That
-            // silently cost real instructions long before malformed reporting
-            // existed — and it was still costing them here until this port.
-            i = bodyStart
-            continue
+        // misread.
+        let hi = env.end ?? chars.count
+        let block = String(chars[env.body..<hi])
+        do {
+            guard let call = try parseCall(chars, lo: env.body, hi: hi) else { continue }
+            out.append(ScanHit(block: block, call: call, fault: nil))
+        } catch let m as Malformed {
+            out.append(ScanHit(block: block, call: nil, fault: m.message))
+        } catch {
+            out.append(ScanHit(block: block, call: nil, fault: "\(error)"))
         }
-        out.append(ScanHit(envelope: envelope, block: block, call: call, terminated: end != nil))
-        guard let end else { break }
-        i = end + envelope.closerChars.count
     }
     return out
 }
 
-/// Non-streaming: pull every finalized call out of a complete string. Used by
-/// `Routing.routeReply` on every completion (the dispatch path) and by the
-/// durable-history reader (`AIBackend.deriveReaction`).
+/// Non-streaming: pull every finalized `<call>` out of a complete string.
 func extractToolCalls(_ text: String) -> [ToolCall] {
-    scanToolEnvelopes(text).compactMap { $0.call }
+    scanToolEnvelopes(text).compactMap(\.call)
+}
+
+/// Every COMPLETE call envelope in `text`, verbatim, in source order — what a
+/// history writer keeps out of a dropped thought span (an action taken is not
+/// reasoning). An unterminated opener is not kept: dispatch could not parse it,
+/// and neither is a complete envelope that does not parse — a broken call is
+/// reasoning too.
+func callSpans(_ text: String) -> [String] {
+    let chars = Array(text)
+    var out: [String] = []
+    for env in envelopes(chars) {
+        guard let end = env.end else { break }
+        if let call = try? parseCall(chars, lo: env.body, hi: end), call != nil {
+            out.append(String(chars[env.start..<(end + CLOSE.count)]))
+        }
+    }
+    return out
 }

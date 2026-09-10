@@ -6,7 +6,7 @@
 // After ONE provider pass the output is routed. Two paths, and the FIRST is the
 // model's:
 //
-//   its own `<tool_call>`s — each names a target, a payload and `reply_to`. Every
+//   its own `<call>`s — each names a target, a payload and `reply_to`. Every
 //     call is dispatched and each REPLY is delivered to its own `reply_to`.
 //     `reply_to:'self'` is what makes a chain, one step at a time. NO CALL ENDS
 //     THE TURN — stop is the default, so a one-pass task costs one pass.
@@ -26,6 +26,7 @@
 import FantasticJSON
 import FantasticKernel
 import Foundation
+import OrderedCollections
 import Testing
 
 @testable import FantasticAICore
@@ -36,14 +37,14 @@ import Testing
 private func callEnvelope(
     target: String, payload: JSON, replyTo: String?? = .some("self")
 ) -> String {
-    var args: [(String, JSON)] = [("target_id", .string(target)), ("payload", payload)]
+    var args: OrderedDictionary<String, JSON> = ["target_id": .string(target)]
     if let outer = replyTo {
-        args.append(("reply_to", outer.map(JSON.string) ?? .null))
+        // The literal word `null` is how the notation says "discard it" — there
+        // is no JSON null in a grammar whose values are text.
+        args["reply_to"] = .string(outer ?? "null")
     }
-    var obj: JSON = .object([:])
-    for (k, v) in args { obj[k] = v }
-    let body = JSON.object(["name": .string("send"), "arguments": obj]).serialize()
-    return "<tool_call>\(body)</tool_call>"
+    args["payload"] = payload
+    return renderCall("send", args)
 }
 
 /// A cheap reflect: `tree:"none"` keeps the reply small, so a 3-hop chain's
@@ -57,12 +58,13 @@ struct RoutingTests {
 
     // ─── stop is the default ────────────────────────────────────
 
-    @Test func noCallMeansOnePass() async throws {
-        // THE point of model-owned routing: a one-pass task costs ONE pass. No
-        // `<tool_call>` means the model is finished — nothing schedules another
-        // turn. The second scripted pass exists only so an over-eager chain has
-        // something to consume and fails the count instead of stalling.
-        let script = ProviderScript([["the answer"], ["must never run"]])
+    @Test func doneEndsTheTurnAtOnePass() async throws {
+        // THE point of model-owned routing: a one-pass task costs ONE pass. What
+        // ends it is `done`, EXPLICITLY — stopping is a call, and silence is not
+        // stopping (see `aFirstTurnWithNoCallIsNudgedToo`). The second scripted
+        // pass exists only so an over-eager chain has something to consume and
+        // fails the count instead of stalling.
+        let script = ProviderScript([["the answer " + doneEnvelope], ["must never run"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         let id = ids["mock"]!
@@ -71,10 +73,10 @@ struct RoutingTests {
             ]))])[0].result
         try await waitForHistory(kernel: kernel, id: id, client: "c", count: 2)
         try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(script.calls == 1, "no call must end the turn, got \(script.calls) passes")
+        #expect(script.calls == 1, "done must end the turn, got \(script.calls) passes")
         let msgs = await historyRows(kernel: kernel, id: id, client: "c")
         #expect(msgs.count == 2)
-        #expect(msgs[1]["content"].asString == "the answer")
+        #expect(msgs[1]["content"].asString?.hasPrefix("the answer") == true)
     }
 
     // ─── the model acts, and sees the result ────────────────────
@@ -272,8 +274,8 @@ struct RoutingTests {
     // ─── the three model-facing errors ──────────────────────────
 
     @Test func malformedCallIsReportedNotSwallowed() async throws {
-        // A `<tool_call>` with no target tells the model so, instead of vanishing.
-        let bad = #"<tool_call>{"name":"send","arguments":{"reply_to":"self"}}</tool_call>"#
+        // A `<call>` with no target tells the model so, instead of vanishing.
+        let bad = #"<call name="send"><reply_to>self</reply_to><type>reflect</type></call>"#
         let script = ProviderScript([[bad], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -281,7 +283,9 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
         #expect(await script.waitForCalls(2), "malformed call was swallowed")
-        #expect(script.requestText(1).contains("no target_id"))
+        // The GRAMMAR refuses it — a targetless send never reaches routing now,
+        // so what comes back is the parser's fault line, not `NO_TARGET_ERROR`.
+        #expect(script.requestText(1).contains("a send names its target"))
     }
 
     @Test func aSendWithNoPayloadNamesWhatIsMissing() async throws {
@@ -289,7 +293,7 @@ struct RoutingTests {
         // and came back `'NoneType' object has no attribute 'get'` — a Python
         // error about our internals, naming neither the omitted verb nor the
         // agent. It must say what was missing instead, and must never dispatch.
-        let bad = #"<tool_call>{"name":"send","arguments":{"target_id":"probe"}}</tool_call>"#
+        let bad = #"<call name="send"><target_id>probe</target_id></call>"#
         let script = ProviderScript([[bad], ["ok"]])
         let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -309,9 +313,11 @@ struct RoutingTests {
         // let this ship broken in python: on 2026-08-06 `malformed_calls` returned
         // the right report for gemma's truncated `create_agent` and the model still
         // received nothing, so the run went on believing its agent existed.
+        // A document opened and never closed: the model wrote a program and the
+        // call ran off the end of the turn.
         let broken =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":"#
-            + #"{"type":"create_agent","code":"x = \"unclosed}}</tool_call>"#
+            #"<call name="send"><target_id>core</target_id><type>write</type>"#
+            + #"<bytes>x = "unclosed"#
         let script = ProviderScript([[broken], ["ok"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -330,8 +336,8 @@ struct RoutingTests {
         // that would have said otherwise lives in the body we could not read.
         let good = callEnvelope(target: "probe", payload: .object(["type": .string("noted")]))
         let broken =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"core","#
-            + #""code":"x = \"oops}}</tool_call>"#
+            #"<call name="send"><target_id>core</target_id><path>a</path>"#
+            + #"<path>b</path></call>"#
         // Pass 2 ends the chain EXPLICITLY: every unit is tagged now (python tags
         // them all), so the delivered turn opens with `[reply to …` and a silent
         // follow-up would earn the no-call nudge — correctly, and forever.
@@ -367,45 +373,42 @@ struct RoutingTests {
         #expect(
             NO_TARGET_ERROR == """
                 no target_id, so nothing was dispatched — a send must name the AGENT it \
-                goes to. Shape: {"name":"send","arguments":{"target_id":"<agent>",\
-                "payload":{"type":"<verb>"}}}. Send `{type:'reflect'}` to the kernel for \
-                the list of agent ids.
+                goes to. Shape: <call name="send"><target_id>agent</target_id>\
+                <type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
+                list of agent ids.
                 """)
         #expect(
             noPayloadError(target: "totals") == """
-                send to 'totals' carried no payload, so nothing was dispatched. A payload \
-                is an object whose `type` names the verb, e.g. {"type":"reflect"}.
+                send to 'totals' carried no payload, so nothing was dispatched. A call \
+                names its verb in `<type>`, e.g. <type>reflect</type>.
                 """)
         // The malformed report is composed in `Malformed.swift`; its opening
         // sentence is the part the model keys on.
-        let report = malformedCalls(#"<tool_call>{"name":"send","arguments":{"#)
+        let report = malformedCalls(#"<call name="send"><type>reflect</type></call>"#)
         #expect(report.count == 1)
         #expect(
-            report[0]["error"].asString?.hasPrefix("tool_call NOT dispatched: invalid JSON — ")
-                == true)
-        #expect(report[0]["error"].asString?.contains("Nothing ran.") == true)
+            report[0].error.hasPrefix("call NOT dispatched: a send names its target") == true)
+        #expect(report[0].error.contains("Nothing ran.") == true)
     }
 
-    // ─── translation, not correction ────────────────────────────
+    // ─── the tool set is CLOSED ─────────────────────────────────
 
-    @Test func aVerbNamedToolReachesTheAgent() async throws {
-        // The other half of the same fix: `{"name":"reflect","arguments":
-        // {"target_id":…}}` is a real instruction and must DISPATCH, not earn an
-        // error.
-        let call = #"<tool_call>{"name":"reflect","arguments":{"target_id":"probe"}}</tool_call>"#
+    @Test func aCallNamingSomethingThatIsNotAToolIsRefusedNotTranslated() async throws {
+        // The JSON grammar translated `{"name":"reflect"}` into a send, because a
+        // model that compressed verb and tool into one name still meant something.
+        // The tag grammar does not: `TOOLS` is CLOSED (send/done/await/
+        // inquiry_answer), the verb rides in `<type>`, and a head naming anything
+        // else is a refusal the model can read.
+        let call = #"<call name="reflect"><target_id>probe</target_id></call>"#
         let script = ProviderScript([[call], ["ok"]])
-        let (kernel, ids, _) = await bootMockKernel(
+        let (kernel, ids, recorder) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
-        #expect(await script.waitForCalls(2), "the reflect never came back")
-        let turn2 = script.requestText(1)
-        #expect(turn2.contains(" · probe "), "\(turn2.suffix(300))")
-        #expect(!turn2.contains("no payload"))
-        // The translated verb really arrived as the payload's `type` — the reply
-        // carries `probe`'s own reflect body, which only a real `reflect` produces.
-        #expect(turn2.contains("payload recorder"), "\(turn2.suffix(300))")
+        #expect(await script.waitForCalls(2), "the refusal never reached the model")
+        #expect(script.requestText(1).contains("`reflect` is not a tool"))
+        #expect(await recorder.payloads().isEmpty, "nothing may dispatch from a bad head")
     }
 
     @Test func aCallWrittenMidThoughtStillDispatches() async throws {
@@ -439,8 +442,11 @@ struct RoutingTests {
     @Test func callerSendToHandsOffOnce() async throws {
         // `send_to` delivers this pass's TEXT to a peer — once. It must NOT
         // propagate: a caller cannot spend the model's turns for it.
-        let a = ProviderScript([["the answer from a"], ["a must not run again"]])
-        let b = ProviderScript([["b replied"], ["b must not run again"]])
+        //
+        // It rides the DONE turn, and only that one: a call-less turn is nudged
+        // now rather than ended, so the hand-off would otherwise never fire.
+        let a = ProviderScript([["the answer from a " + doneEnvelope], ["a must not run again"]])
+        let b = ProviderScript([["b replied " + doneEnvelope], ["b must not run again"]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": a, "peer": b]), backendIds: ["mock", "peer"])
         _ = await kernel.send([Item(ids["mock"]!, .object([
@@ -558,6 +564,28 @@ struct RoutingTests {
 
     // ─── the emergence discipline, guarded ──────────────────────
 
+    /// The SHORT how-to, for the one backend with a hard 4096-token window (the
+    /// on-device Apple FM model). Length is the only thing cut: every mechanism
+    /// the model cannot work without has to survive, and no strategy may creep
+    /// in under cover of "it is the compact one".
+    @Test func theCompactHowToTeachesTheSameMechanisms() {
+        for needle in [
+            #"<call name="send">"#,  // the envelope
+            "<target_id>", "<type>", "<reply_to>",  // addressing
+            "<item>",  // lists
+            "<bytes>", "first `</bytes>`",  // the verbatim document
+            #"<call name="done">"#, #"<call name="await">"#,  // stopping and waiting
+            "[reply to <pid>", "ASYNC",  // how replies arrive
+        ] {
+            #expect(SEND_TO_HOWTO_COMPACT.contains(needle), "the compact block dropped \(needle)")
+        }
+        // It is genuinely short — the whole point — and it is NOT the long one.
+        #expect(SEND_TO_HOWTO_COMPACT.count < SEND_TO_HOWTO.count / 2)
+        for banned in ["loop", "iterate", "step by step", "keep going", "final answer"] {
+            #expect(!SEND_TO_HOWTO_COMPACT.lowercased().contains(banned), "strategy leaked: \(banned)")
+        }
+    }
+
     @Test func promptStatesTheMechanismNotAStrategy() async throws {
         // The default system block may state FACTS — how to reach an agent, what
         // reflect returns, where `reply_to` sends the answer. It must NOT name the
@@ -585,7 +613,7 @@ struct RoutingTests {
         // the mechanism IS stated
         #expect(sysBlock.contains("reply_to"))
         #expect(sysBlock.contains("reflect"))
-        #expect(sysBlock.contains("<tool_call>"))
+        #expect(sysBlock.contains(#"<call name="send">"#))
 
         let banned = [
             "loop",
@@ -617,7 +645,7 @@ struct RoutingTests {
             ["thinking out loud, no envelope"],
             ["still just prose"],
             ["ok, finishing"],
-            ["<tool_call>{\"name\":\"done\"}</tool_call>"],
+            [doneEnvelope],
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
@@ -675,18 +703,24 @@ struct RoutingTests {
         #expect(script.calls == 2, "done must end the chain silently")
     }
 
-    @Test func aChatTurnIsNeverNudged() async throws {
-        let script = ProviderScript([["just an answer, no calls"]])
+    /// EVERY call-less turn is nudged, chain or not (python-canonical; user,
+    /// 2026-09-09: "all is tool calls"). The nudge used to fire only when the
+    /// incoming text was itself a reply or a nudge, so a FIRST turn of pure prose
+    /// from a person ended the work silently — the model had decided on a call,
+    /// written it in thought, and never emitted it.
+    @Test func aFirstTurnWithNoCallIsNudgedToo() async throws {
+        let script = ProviderScript([["just an answer, no calls"], [doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
         _ = await kernel.send([Item(ids["mock"]!, .object([
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
             ]))])[0].result
-        try await Task.sleep(nanoseconds: 400_000_000)
-        #expect(script.calls == 1, "prose to a person is the product")
+        #expect(await script.waitForCalls(2), "the first silent turn was not nudged")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(script.calls == 2, "and `done` ends it")
+        #expect(script.requestText(1).contains("[no call was dispatched]"))
     }
-
     // ─── the batch: one deadline, one stamp, one token per turn ─
 
     /// EVERY dispatched model call carries the AI layer's per-call deadline. The
@@ -717,7 +751,7 @@ struct RoutingTests {
     /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
     /// owed no reply, and it is not a silent turn: gating the nudge on the blocks
     /// instead of python's `not calls and not units` tells the model "your turn
-    /// emitted no <tool_call> envelope" about a turn that did — and, on a chat turn,
+    /// emitted no <call> envelope" about a turn that did — and, on a chat turn,
     /// hands that text to `send_to` on top.
     @Test func allFireAndForgetCallsAreNotASilentTurn() async throws {
         let fireAndForget = callEnvelope(

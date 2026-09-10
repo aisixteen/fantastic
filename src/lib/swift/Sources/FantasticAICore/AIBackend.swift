@@ -304,8 +304,8 @@ enum AIPassOutcome {
             return .object([
                 "error": .string(
                     "you were sent an inquiry and did not answer it: emit "
-                        + "<tool_call>{\"name\":\"inquiry_answer\",\"arguments\":"
-                        + "{\"answer\":\"<what you concluded>\"}}</tool_call>"),
+                        + "<call name=\"inquiry_answer\"><answer>what you concluded"
+                        + "</answer></call>"),
                 "reason": .string("unhandled"),
                 "request_id": payload["request_id"],
             ])
@@ -348,7 +348,7 @@ enum AIPassOutcome {
         let systemPrompt = payload["system_prompt"].asString
         // Where this pass's TEXT goes when the model issues no call of its own.
         // A one-shot handoff for the CALLER; the MODEL routes its own work with
-        // `reply_to` inside its `<tool_call>`s. Mirrors python's `send_to`.
+        // `reply_to` inside its `<call>`s. Mirrors python's `send_to`.
         let sendTo: String? = {
             guard let s = payload["send_to"].asString,
                 !s.trimmingCharacters(in: .whitespaces).isEmpty
@@ -481,6 +481,9 @@ enum AIPassOutcome {
         // reach.
         if case .ok(let textOut) = produced {
             let deadline = sendTimeoutSeconds
+            // THE COORDINATION STATE, threaded through so `await` can count what
+            // is actually pending for this agent — its queue and its FIFO lock.
+            let st = runState(agentId.value)
             kernel.spawnTask(agent: agentId, verb: "route_reply") {
                 await routeReply(
                     selfId: agentId, kernel: kernel, text: textOut,
@@ -488,7 +491,8 @@ enum AIPassOutcome {
                     incoming: text,
                     // THE LAYER'S PER-CALL DEADLINE, threaded to every model call
                     // the router dispatches. The kernel defaults nothing.
-                    sendTimeout: deadline)
+                    sendTimeout: deadline,
+                    runState: st)
             }
         }
         return reply
@@ -815,9 +819,21 @@ enum AIPassOutcome {
             blocks = [
                 renderReflect(primer),
                 "You are `\(selfId.value)`. " + renderReflect(me),
-                SEND_TO_HOWTO,
-                CONTEXT_HOWTO,
+                config.compactPrompt ? SEND_TO_HOWTO_COMPACT : SEND_TO_HOWTO,
             ]
+            // A stateless backend has no compaction and no `recall`, so naming
+            // them teaches it verbs it does not answer.
+            if !config.compactPrompt { blocks.append(CONTEXT_HOWTO) }
+            // OPT-IN, on the record. Both verbs exist on every AI, but teaching
+            // them costs every agent prompt tokens for a discipline most runs
+            // never need — and a block like this changes behavior just by being
+            // read. Titles matter only when a strategy STRIPS a body; the
+            // async/rows block only when replies arrive as rows. Each flag turns
+            // its block on INDEPENDENTLY of `context_strategy`, so a comparison
+            // can hold the model's behavior fixed and vary one thing.
+            let flag = { (k: String) in agent.metaValue(forKey: k)?.asBool ?? false }
+            if flag("context_titles") { blocks.append(TITLES_HOWTO) }
+            if flag("context_async") { blocks.append(ASYNC_HOWTO) }
         }
         let extra = await config.systemPromptExtra(agent, kernel)
         if !extra.isEmpty { blocks.append(extra) }

@@ -431,7 +431,8 @@ func freshMockKernel(config: AIBackendConfig) async throws -> (Kernel, AgentId) 
 func bootMockKernel(
     config: AIBackendConfig,
     backendIds: [String],
-    contextWindow: Int64 = 32768
+    contextWindow: Int64 = 32768,
+    meta: OrderedCollections.OrderedDictionary<String, JSON> = [:]
 ) async -> (Kernel, [String: AgentId], PayloadRecorder) {
     let registry = BundleRegistry()
     registry.register("mock_backend.tools", MockBundle(config: config))
@@ -518,17 +519,21 @@ func bootMockKernel(
             ]))])[0].result
         var backendGrant = grant
         backendGrant[legId] = .string("*")
-        let r = await kernel.send([Item(AgentId("core"), .object([
-                "type": .string("create_agent"),
-                "parent_id": .string("core"),
-                "handler_module": .string("mock_backend.tools"),
-                "id": .string(id),
-                "file_bridge_id": .string(legId),
-                "context_window": .integer(contextWindow),
-                "can_call": .object(backendGrant),
-                // Peer backends call each other — accept them (ingress).
-                "callable_by": acceptJSON,
-            ]))])[0].result
+        var create: OrderedCollections.OrderedDictionary<String, JSON> = [
+            "type": .string("create_agent"),
+            "parent_id": .string("core"),
+            "handler_module": .string("mock_backend.tools"),
+            "id": .string(id),
+            "file_bridge_id": .string(legId),
+            "context_window": .integer(contextWindow),
+            "can_call": .object(backendGrant),
+            // Peer backends call each other — accept them (ingress).
+            "callable_by": acceptJSON,
+        ]
+        // Per-test record fields (`nudge_limit`, the context_* flags) ride here so
+        // a case can vary ONE thing without a second boot helper.
+        for (k, v) in meta { create[k] = v }
+        let r = await kernel.send([Item(AgentId("core"), .object(create))])[0].result
         out[id] = AgentId(r["id"].asString ?? id)
     }
     return (kernel, out, recorder)
@@ -608,4 +613,4 @@ func historyRows(kernel: Kernel, id: AgentId, client: String) async -> [JSON] {
 }
 
 /// The explicit end-of-chain call, as the model writes it.
-let doneEnvelope = "<tool_call>{\"name\":\"done\"}</tool_call>"
+let doneEnvelope = "<call name=\"done\"></call>"

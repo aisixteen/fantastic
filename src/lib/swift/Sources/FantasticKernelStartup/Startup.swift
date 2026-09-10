@@ -11,7 +11,6 @@
 //   // ... use kernel
 //   kernel.shutdown()
 
-import FantasticAppleKVS
 import FantasticCliBundle
 import FantasticFile
 import FantasticFoundationModelsBackend
@@ -75,9 +74,6 @@ public func defaultBundleRegistry() -> BundleRegistry {
     r.register("anthropic_backend.tools", AnthropicBundle())
     r.register("llamacpp_backend.tools", LlamaCppBundle())
     r.register("foundation_models_backend.tools", FoundationModelsBackendBundle())
-    // apple_kvs — synced KV (iCloud KVS). Apple-only: the bundle reports
-    // unavailable on non-Apple, mirroring foundation_models_backend.
-    r.register("apple_kvs.tools", AppleKVSBundle())
     #if os(macOS)
         r.register("exec_bridge.tools", ExecBridgeBundle())
         r.register("terminal_backend.tools", TerminalBackendBundle())

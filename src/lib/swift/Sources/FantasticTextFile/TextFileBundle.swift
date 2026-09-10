@@ -203,6 +203,22 @@ public struct TextFileBundle: AgentBundle {
         return nil
     }
 
+    /// A checkpoint id from the payload, whatever the notation typed it as.
+    ///
+    /// A ckpt id IS a pid, and a pid is a NUMBER — so a model writing
+    /// `<ckpt_id>29</ckpt_id>` hands over an integer, and reading it as a string
+    /// only refuses the model its own checkpoint back ("restore: ckpt_id
+    /// required", measured 2026-09-10 on `undo:rust`). Python accepts anything
+    /// truthy here for the same reason.
+    private func ckptArg(_ payload: JSON) -> String? {
+        switch payload["ckpt_id"] {
+        case .string(let s): return s.isEmpty ? nil : s
+        case .integer(let n): return String(n)
+        case .double(let d): return String(d)
+        default: return nil
+        }
+    }
+
     private func ckptPath(_ path: String, _ ckptId: String) -> String {
         "\(CKPT_DIR)/\(path.replacingOccurrences(of: "/", with: "__"))/\(ckptId)"
     }
@@ -337,11 +353,11 @@ public struct TextFileBundle: AgentBundle {
                     + "anywhere writes nothing"),
             "compose": .string(
                 "every content-carrying verb (`write`, `patch`, `append`) takes its "
-                    + "document in `bytes` — send it with `send_binary` in the FENCED "
-                    + "form: the call's JSON stays small with `\"bytes\":\"@body\"`, and "
-                    + "the document rides VERBATIM between two column-0 marker lines "
-                    + "inside the same tool_call — `*** Begin Bytes`, the content (real "
-                    + "newlines, real quotes, nothing escaped), `*** End Bytes`"),
+                    + "document in `bytes`, and `bytes` is VERBATIM: write the document "
+                    + "between `<bytes>` and `</bytes>` exactly as it should land — real "
+                    + "newlines, real quotes, nothing escaped, no fence — then close the "
+                    + "call. The document ends at the first `</bytes>`. A patch names its "
+                    + "edits as tags: <edits><item><path>a.py</path><hunks>2</hunks></item></edits>"),
             "verbs": .object([
                 "reflect": .string("no args — identity, verb guide, and the wired default surface."),
                 "boot": .string("no args — no-op; this agent holds no state to hydrate."),
@@ -744,7 +760,7 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let p): path = p
         }
-        guard let ckptId = payload["ckpt_id"].asString, !ckptId.isEmpty else {
+        guard let ckptId = ckptArg(payload) else {
             return Refusal.missing("restore", "ckpt_id")
         }
         return await locked(fb, [path]) {
@@ -800,7 +816,7 @@ public struct TextFileBundle: AgentBundle {
         case .failure(let e): return e
         case .success(let p): path = p
         }
-        guard let ckptId = payload["ckpt_id"].asString, !ckptId.isEmpty else {
+        guard let ckptId = ckptArg(payload) else {
             return Refusal.missing("drop", "ckpt_id")
         }
         let src = ckptPath(path, ckptId)

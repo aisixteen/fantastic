@@ -245,6 +245,34 @@ struct TextFileTests {
         #expect(read(dir, "c.txt") == "original\n")
     }
 
+    /// A ckpt id IS a pid, and a pid becomes a NUMBER — so a model writing
+    /// `<ckpt_id>29</ckpt_id>` hands over an integer, and reading it as a string
+    /// only refuses the model its own checkpoint back. Measured 2026-09-10 on
+    /// `undo:rust`: twenty consecutive "restore: ckpt_id required".
+    @Test func restoreTakesTheCkptIdAsTheNotationTypedIt() async {
+        let (k, dir) = await openEditor()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = await seed(k, "c.txt", "before\n")
+        let w = await callBin(
+            k,
+            .object([
+                "type": .string("write"), "path": .string("c.txt"),
+                "checkpoint": .bool(true),
+            ]), "after\n")
+        let ck = w["ckpt_id"].asString ?? ""
+        #expect(read(dir, "c.txt") == "after\n")
+        // The model writes the id it was shown; the notation types it as an int
+        // whenever it looks like one.
+        let typed: JSON = Int64(ck).map { JSON.integer($0) } ?? .string(ck)
+        let r = await call(
+            k,
+            .object([
+                "type": .string("restore"), "path": .string("c.txt"), "ckpt_id": typed,
+            ]))
+        #expect(r["error"].asString == nil, "\(r.serialize())")
+        #expect(read(dir, "c.txt") == "before\n")
+    }
+
     @Test func checkpointOfAbsentFileRestoresToAbsence() async {
         let (k, dir) = await openEditor()
         defer { try? FileManager.default.removeItem(at: dir) }

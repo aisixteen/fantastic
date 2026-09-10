@@ -2828,3 +2828,49 @@ async fn the_history_digest_pages_forward() {
         "an unknown cursor pages nothing, never the head again"
     );
 }
+
+/// PER-CLIENT EVENTS LAND ON THE AGENT'S INBOX, tagged with `client_id` — never
+/// on an inbox named after the client.
+///
+/// A synthetic client id has no `Agent`, so it has no watcher set, and a watcher
+/// that subscribed to the AGENT (which is what a `watch` frame names) saw
+/// nothing at all: measured 2026-09-10, `compaction:rust` fired its projection
+/// and pushed no event the harness could observe. Python has always emitted on
+/// the agent (`core.py::_to_caller`). Guarded here because the e2e that caught it
+/// is a paid live run, and this is a one-line regression to reintroduce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "evt_route").await;
+    let mut agent_rx = rebind_backend_inbox(&kernel, &backend);
+
+    let client = "browser_tok";
+    let client_id = AgentId::from(client);
+    let (ctx, mut client_rx) = tokio::sync::mpsc::channel(kernel.inbox_bound);
+    kernel.inboxes.insert(client_id.clone(), ctx);
+
+    for route in [CallerRoute::CliRoundTrip, CallerRoute::PerClientInbox] {
+        crate::events::to_caller(
+            &kernel,
+            &backend,
+            client,
+            route,
+            json!({"type": "token", "delta": "x"}),
+        )
+        .await;
+    }
+
+    let mut seen = Vec::new();
+    while let Ok(v) = agent_rx.try_recv() {
+        seen.push(v);
+    }
+    assert_eq!(seen.len(), 2, "both routes must reach the agent: {seen:?}");
+    for ev in &seen {
+        assert_eq!(ev["client_id"], client, "the event must be TAGGED: {ev}");
+        assert_eq!(ev["source"], backend.as_str());
+    }
+    assert!(
+        client_rx.try_recv().is_err(),
+        "nothing may be emitted on an inbox named after the client"
+    );
+}

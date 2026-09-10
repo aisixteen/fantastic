@@ -30,7 +30,7 @@ struct ThinkingTests {
         // left no cause behind it. The model then read an effect it never
         // caused. Reasoning is still dropped; the INVOCATION is not.
         let call =
-            #"<tool_call>{"name":"send","arguments":{"target_id":"core","payload":{"type":"reflect"}}}</tool_call>"#
+            #"<call name="send"><target_id>core</target_id><type>reflect</type></call>"#
         let raw = "<think>I should check the tree first. \(call)</think>Checking."
         let calls = extractToolCalls(raw)
         #expect(calls.count == 1)
