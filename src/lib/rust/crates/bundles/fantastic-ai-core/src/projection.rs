@@ -271,22 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn the_reaction_reader_sees_the_shapes_the_parser_rewrite_added() {
-        // DELIBERATE widening. Both of these are reactions the reader used to miss:
-        // the first because the scanner gave up without a closing tag, the second
-        // because the verb sat in the tool NAME with no `payload` at all.
+    fn the_reaction_reader_sees_an_unterminated_call() {
+        // AN UNTERMINATED ENVELOPE IS AN ACTION. It is the last thing in the
+        // completion, so there is nothing after it to misread — dispatch runs
+        // it, and the reaction reader must see the same thing dispatch saw.
         let turns = [
+            turn(r#"<call name="send"><target_id>me</target_id><type>recall</type>"#),
             turn(
-                r#"<tool_call>{"name":"send","arguments":{"target_id":"me","payload":{"type":"recall"}}}"#,
-            ),
-            turn(
-                r#"<tool_call>{"name":"write","arguments":{"target_id":"notes","path":"facts.md"}}</tool_call>"#,
+                r#"<call name="send"><target_id>notes</target_id><type>write</type><path>facts.md</path><bytes>x</bytes></call>"#,
             ),
         ];
         let r = reaction_from("me", &turns);
         assert_eq!(r["recalled"], true, "unterminated recall must count: {r}");
         assert_eq!(r["recall_count"], 1);
-        assert_eq!(r["persisted"], true, "verb-in-name write must count: {r}");
+        assert_eq!(r["persisted"], true, "the write must count: {r}");
     }
 
     #[test]
@@ -304,7 +302,7 @@ mod tests {
     #[test]
     fn a_recall_addressed_elsewhere_is_not_this_agents_reaction() {
         let turns = [turn(
-            r#"<tool_call>{"name":"send","arguments":{"target_id":"other","payload":{"type":"recall"}}}</tool_call>"#,
+            r#"<call name="send"><target_id>other</target_id><type>recall</type></call>"#,
         )];
         let r = reaction_from("me", &turns);
         assert_eq!(r["recalled"], false, "{r}");

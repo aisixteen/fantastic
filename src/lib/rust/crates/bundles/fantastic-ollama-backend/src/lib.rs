@@ -17,7 +17,7 @@
 //! reports the whole turn as an empty completion. The deliberation is wrapped in
 //! `<think>…</think>` once per turn (see `fantastic_ai_core::think`). NO `tools`
 //! array is sent and NO `tool_calls` are read — tool-calling is RAW
-//! prompt-and-parse owned by ai-core (the model emits a `<tool_call>` envelope
+//! prompt-and-parse owned by ai-core (the model emits a `<call name=…>` envelope
 //! in the content text).
 
 #![deny(missing_docs)]
@@ -69,7 +69,7 @@ const CFG: BackendConfig = BackendConfig {
 
 /// Provider for ollama's `/api/chat`. PURE RAW TEXT — decodes the NDJSON stream
 /// into `ProviderEvent::Token` content only. NO native tools array is sent and
-/// NO `tool_calls` are read; ai-core parses the `<tool_call>` envelope from text.
+/// NO `tool_calls` are read; ai-core parses the `<call name=…>` envelope from text.
 struct OllamaProvider {
     endpoint: String,
     model: String,
@@ -220,7 +220,7 @@ fn decode_chunk_into(
         }
         out.push(Ok(ProviderEvent::Token(think.to_string())));
     }
-    // RAW: text only. ai-core parses any `<tool_call>` envelope out of it.
+    // RAW: text only. ai-core parses any `<call name=…>` envelope out of it.
     let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
     if !content.is_empty() {
         if let Some(m) = wrap.close_marker() {
@@ -295,7 +295,7 @@ impl Bundle for OllamaBackendBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
         Ok(())
     }
 }

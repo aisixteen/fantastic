@@ -7,7 +7,7 @@
 //! backend uses.
 //!
 //! NO NATIVE TOOL-CALLING: the provider streams text and ai-core parses the
-//! `<tool_call>` envelope out of it.
+//! `<call name=…>` envelope out of it.
 //!
 //! Three deliberate differences from the hosted backends:
 //!
@@ -301,7 +301,7 @@ impl Bundle for LlamaCppBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
         Ok(())
     }
 }

@@ -13,7 +13,7 @@ backends, so a caller retargets by changing one id.
 
 ## ONE pass — and the model routes its own output
 `send` does exactly ONE provider pass. **No loop**: nothing iterates on the
-model's behalf, and emitting no `<tool_call>` ends the turn — stop is the
+model's behalf, and emitting no `<call>` ends the turn — stop is the
 default and costs nothing.
 
 Tool-calling is RAW and belongs to `fantastic-ai-core`. By default this backend
@@ -23,16 +23,20 @@ knowing nothing about it, and ai-core parses and dispatches it. Wire translation
 is just the `system` role → Anthropic's top-level `system` param + alternating
 user/assistant TEXT turns.
 
-**Optional `tool_use` route.** Set `tool_use: true` on the record and this
-provider declares the ONE `send` tool and TRANSLATES the `tool_use` blocks it
-receives back into exactly the same `<tool_call>` text envelope — arguments are
-accumulated from `input_json_delta` fragments and re-emitted when the block
-closes. It is off by default and changes nothing else: ai-core's parser never
-learns a vendor dialect, so RAW stays the contract and the translation lives at
-the edge. Use it only for an endpoint that answers better in its native syntax.
+**No `tool_use` route.** It existed, declared one `send` tool and translated the
+blocks back into a text envelope; it is DELETED. The envelope it translated into
+no longer exists, and a model writing JSON tool calls is writing a grammar this
+kernel does not parse — so a native `tool_use` block is a LOUD ERROR now. Some
+`/cc`-style routes emit one for a request carrying no `tools` key at all, which
+is exactly the case worth failing on: its arguments are JSON nobody reads, and a
+silent drop ends the turn looking finished with the call lost.
 
 ```
-<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>
+<call name="send">
+<target_id>id</target_id>
+<reply_to>self</reply_to>
+<type>verb</type>
+</call>
 ```
 
 Each call is dispatched and its reply delivered to that call's `reply_to`, which

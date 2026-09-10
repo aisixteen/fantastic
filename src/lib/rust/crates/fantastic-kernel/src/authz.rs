@@ -69,11 +69,17 @@ impl Decision {
 /// structural baseline (`$parent: "*"`) silently handed the entire stream to
 /// every direct child of the root — which is how a leaf browser leg could tap it
 /// while holding no grant that names it (production audit, 2026-08-27).
-pub const PRIVILEGED_VERBS: [&str; 4] = [
+pub const PRIVILEGED_VERBS: [&str; 6] = [
     "create_agent",
     "delete_agent",
     "update_agent",
     "state_subscribe",
+    // HYDRATION's pair — reading a conversation WHOLE and writing one into an
+    // agent. `messages` is the grantable read (digests, no bodies); these two
+    // are what a loader does from above, so a wildcard must never carry them:
+    // only a grant that NAMES them opens either.
+    "rows_read",
+    "rows_write",
 ];
 
 /// The remedy shown on any denial: authority descends, it is never self-raised.

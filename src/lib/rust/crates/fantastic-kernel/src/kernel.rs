@@ -82,6 +82,12 @@ pub struct Kernel {
     /// the DURABLE half is installed by the root loader, because the kernel
     /// never touches disk itself.
     pub ledger: crate::ledger::Ledger,
+    /// THE MESSAGE STORE — every message the kernel ever made, id-addressed by
+    /// the one counter. Conversations, reply bodies, agent views and the
+    /// kernel's own `call`/`task` bookkeeping share one append-only table, so
+    /// one stream carries everything. Starts EMPTY, always: a hydrator fills it
+    /// from above and a persister tails it; the kernel never knows disk.
+    pub rows: crate::rows::RowStore,
 
     /// Installed by the ROOT LOADER at boot. `None` = no persistence (no store
     /// wired, or a test kernel): settled outcomes live and die with the process,
@@ -132,6 +138,7 @@ impl Kernel {
             shutdown: Notify::new(),
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
+            rows: crate::rows::RowStore::new(),
             ledger_flusher: Mutex::new(None),
         }
     }

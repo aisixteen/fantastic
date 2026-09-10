@@ -60,7 +60,19 @@ pub async fn on_cancel(
     emit_status(kernel, &state, agent_id, &client_id, route, "done", detail).await;
 }
 
-/// `history` verb.
+/// `history` verb — the conversation at DIGEST resolution, plus the raw turns.
+///
+/// TWO SHAPES, ON PURPOSE. `rows` is python's: `{id, parent, kind, role, head,
+/// bytes}` per row, heads capped at 120 characters, bodies behind `pull` and
+/// text behind `recall` — that is what a MODEL should be handed, and what
+/// python returns and nothing else.
+///
+/// `messages` is the full `{role, content}` list, and it stays because a
+/// SPAWNED runtime has no other way out: the e2e harness builds its entire wire
+/// transcript from this key (`e2e/helpers/host/wire.py`), where python's
+/// in-process reader reads the store directly. Dropping it would leave every
+/// spawned-runtime probe recording zero turns while the run burned its whole
+/// idle window with nothing to show.
 pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let client_id = safe_client(
         payload
@@ -69,11 +81,57 @@ pub async fn history(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             .unwrap_or(DEFAULT_CLIENT_ID),
     );
     let messages = load_history(agent_id, kernel, &client_id).await;
-    json!({"messages": messages, "client_id": client_id})
+    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let after = payload.get("after").and_then(Value::as_i64);
+    let mut digest: Vec<Value> = messages
+        .iter()
+        .filter(|r| r.get("id").is_some())
+        .map(|r| {
+            let content = r.get("content").and_then(Value::as_str).unwrap_or("");
+            json!({
+                "id": r.get("id"),
+                "parent": r.get("parent"),
+                // `kind` FALLS BACK TO `role`: a plain turn carries no kind, and
+                // a reader that switches on it must still see what it is.
+                "kind": r.get("kind").or_else(|| r.get("role")),
+                "role": r.get("role"),
+                // 120 CHARACTERS, newlines flattened — a head is for
+                // recognising a row, not for reading it.
+                "head": content.chars().take(120).collect::<String>().replace('\n', " "),
+                "bytes": content.len(),
+            })
+        })
+        .collect();
+    if let Some(a) = after {
+        // AN UNKNOWN CURSOR PAGES NOTHING, rather than starting over: silently
+        // re-serving the head would read as "no more rows" to a caller that had
+        // already seen them.
+        let at = digest
+            .iter()
+            .position(|d| d["id"].as_i64() == Some(a))
+            .map(|i| i + 1)
+            .unwrap_or(digest.len());
+        digest.drain(..at);
+    }
+    let total = messages.len();
+    let truncated = limit > 0 && digest.len() > limit;
+    if truncated {
+        digest.truncate(limit);
+    }
+    let next = truncated
+        .then(|| digest.last().and_then(|d| d["id"].as_i64()))
+        .flatten();
+    json!({
+        "rows": digest,
+        "next": next,
+        "total": total,
+        "messages": messages,
+        "client_id": client_id,
+    })
 }
 
 /// Render ONE stored turn for a `recall` reply. Turns are pure text (tool
-/// calls/replies are inline `<tool_call>`/`<tool_response>` text), so a turn with
+/// calls/replies are inline `<call name=…>` / its reply tag text), so a turn with
 /// content renders as that content and anything else falls back to the row.
 ///
 /// WHOLE, NOT CAPPED. Rust/swift truncated each turn at 2000 chars until
@@ -411,7 +469,7 @@ pub async fn send(
             last_tool: None,
             // The kernel task this generation IS — how `cancel` reaches it, and
             // how `on_cancel` recognises its own turn.
-            task_id: current_task().map(|t| t.0),
+            task_id: current_task().map(|t| t.0.to_string()),
         });
     }
     emit_status(
@@ -628,8 +686,8 @@ pub fn inquiry_close(out: Value, payload: &Value) -> Value {
     match said {
         None => json!({
             "error": "you were sent an inquiry and did not answer it: emit \
-                      <tool_call>{\"name\":\"inquiry_answer\",\"arguments\":\
-                      {\"answer\":\"<what you concluded>\"}}</tool_call>",
+                      <call name=\"inquiry_answer\"><answer>what you concluded\
+                      </answer></call>",
             "reason": "unhandled",
             "request_id": payload.get("request_id"),
         }),

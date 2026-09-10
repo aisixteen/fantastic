@@ -110,15 +110,16 @@ async fn empty_id_is_refused_bad_arg() {
     assert!(out.pid.is_none(), "{out:?}");
     assert_eq!(out.result["reason"], "bad_arg", "{}", out.result);
     assert_eq!(out.result["arg"], "id");
-    // A colon id that names no execution is the minted namespace — refused too.
+    // AND NOTHING ELSE IS REFUSED. There is no minted namespace to trespass in
+    // any more: a caller supplies a NAME, the kernel supplies every id, so a
+    // name that happens to look like an old pid runs like any other.
     let out = kernel
         .send(vec![
             Item::new(AgentId::from("a"), json!({"type": "poke"})).with_id("a:deadbeef")
         ])
         .await
         .remove(0);
-    assert_eq!(out.result["reason"], "bad_arg", "{}", out.result);
-    assert_eq!(out.result["arg"], "id");
+    assert!(out.pid.is_some(), "{}", out.result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

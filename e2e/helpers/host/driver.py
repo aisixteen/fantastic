@@ -44,7 +44,18 @@ from . import artifacts
 
 BASE = {"$self": "*", "$parent": "*", "$children": "*"}
 #: PRIVILEGED verbs lose their wildcard cover — named explicitly, as everywhere.
-ROOT_VERBS = ["*", "create_agent", "update_agent", "delete_agent"]
+#: `rows_read`/`rows_write` are hydration's pair: a probe that FORKS a
+#: conversation (E37) needs them over the wire, where the in-process path reaches
+#: `root.ctx` directly. Naming them here is the whole point of their being
+#: privileged — a driver says yes on purpose, a wildcard never does it by accident.
+ROOT_VERBS = [
+    "*",
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "rows_read",
+    "rows_write",
+]
 
 #: The HTTP header carrying a caller-chosen execution id. The credential
 #: already rides `X-Fantastic-Auth`; dispatch metadata belongs on the carrier

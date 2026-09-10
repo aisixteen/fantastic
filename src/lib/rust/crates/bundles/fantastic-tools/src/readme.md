@@ -348,7 +348,7 @@ tool-error feedback loop.
 
 ```text
        ┌───────────────────────────┐
-       │  LLM emits tool_call:     │
+       │  LLM emits a call:        │
        │  name="get_weather"       │
        │  args={"city":"Paris"}    │
        └─────────────┬─────────────┘

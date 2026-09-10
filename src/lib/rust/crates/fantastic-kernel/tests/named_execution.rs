@@ -89,15 +89,18 @@ async fn a_named_execution_is_registered_under_its_own_id() {
         .await
         .remove(0)
         .result;
-    let ids: Vec<String> = ps["tasks"]
+    // THE NAME IS THE HANDLE, THE ID IS THE ROW. `ps` shows numbers now; what
+    // makes a named execution findable is that `cancel` resolves the name to
+    // this same id (asserted below), not that the table echoes the name back.
+    let ids: Vec<i64> = ps["tasks"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|t| t["id"].as_str().map(str::to_string))
+        .filter_map(|t| t["id"].as_i64())
         .collect();
     assert!(
-        ids.iter().any(|i| i == "job-1"),
-        "the caller's own id must be the ps handle, got {ids:?}"
+        !ids.is_empty(),
+        "the named execution has no ps row, got {ids:?}"
     );
 
     // …and CANCEL by that same id reaches it.
@@ -110,14 +113,16 @@ async fn a_named_execution_is_registered_under_its_own_id() {
         .remove(0)
         .result;
     assert_eq!(c["cancelled"], true, "{c}");
-    assert_eq!(c["killed"][0], "job-1", "{c}");
+    // The KILLED list names ids, not names: `cancel` resolved "job-1" through
+    // the ledger and killed the execution that name opened.
+    assert!(c["killed"][0].is_i64(), "{c}");
 
     let out = running.await.unwrap();
     assert_eq!(out.status, Status::Cancelled, "{:?}", out.result);
     assert_eq!(
-        out.pid.as_ref().map(|p| p.0.as_str()),
-        Some("job-1"),
-        "the outcome's pid is the caller's id"
+        out.pid.map(|p| p.0),
+        c["killed"][0].as_i64(),
+        "the outcome's pid is the execution the name opened"
     );
 }
 
@@ -131,7 +136,7 @@ async fn an_unnamed_execution_still_mints_a_pid() {
         .remove(0);
     let pid = out.pid.expect("an unnamed item still gets a minted pid");
     assert!(
-        pid.0.starts_with("w:"),
-        "a minted pid is <agent>:<hex>, got {pid:?}"
+        pid.0 > 0,
+        "a pid is the kernel counter's number, got {pid:?}"
     );
 }

@@ -258,9 +258,16 @@ async fn self_extension_states_the_file_and_command_model() {
         se.contains("write_stream"),
         "must name the stream write path: {se}"
     );
+    // `<bytes>` IS the raw byte path now. `send_binary` and its fenced form are
+    // gone with the JSON grammar: the document rides between `<bytes>` and
+    // `</bytes>`, verbatim, and there is no second way to carry one.
     assert!(
-        se.contains("send_binary"),
+        se.contains("`bytes` is VERBATIM") && se.contains("</bytes>"),
         "must name the raw byte path: {se}"
+    );
+    assert!(
+        !se.contains("send_binary") && !se.contains("Begin Bytes"),
+        "the fenced JSON byte path is deleted, not deprecated: {se}"
     );
     assert!(
         low.contains("command"),

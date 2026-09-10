@@ -374,7 +374,12 @@ async fn checkpointed_write_restores_byte_identical() {
     )
     .await;
     let ck = w["ckpt_id"].as_str().expect("ckpt_id").to_string();
-    assert!(ck.contains(':'), "task pid shape: {ck}");
+    // A checkpoint id is the dispatch's pid rendered — a number now, or `op`
+    // when the write came from an operator with no task of its own.
+    assert!(
+        ck == "op" || ck.parse::<i64>().is_ok(),
+        "task pid shape: {ck}"
+    );
     assert_eq!(on_disk(&tmp, "c.txt"), "mutated\n");
     let r = call(
         &k,
@@ -865,4 +870,37 @@ async fn patch_hunk_count_must_be_an_int() {
     }
     // …and the file was not touched by any of them.
     assert_eq!(on_disk(&tmp, "m.py"), "a = 1\n");
+}
+
+/// A CKPT ID IS A PID, and a pid is a NUMBER — so the notation types the
+/// model's `<ckpt_id>29</ckpt_id>` as an integer, and `restore` must take it.
+/// Reading it as a string only refused the model its own checkpoint back
+/// (measured 2026-09-10 on `undo:rust`: "restore: ckpt_id required", twenty
+/// times in one run).
+#[tokio::test]
+async fn restore_takes_the_ckpt_id_as_the_notation_typed_it() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ed) = mk(&tmp).await;
+    seed(&k, &ed, "c.txt", "before\n").await;
+    let w = call_bin(
+        &k,
+        &ed,
+        json!({"type": "write", "path": "c.txt", "checkpoint": true}),
+        b"after\n",
+    )
+    .await;
+    let ck = w["ckpt_id"].as_str().expect("ckpt_id").to_string();
+    assert_eq!(on_disk(&tmp, "c.txt"), "after\n");
+
+    // The model writes the id it was shown; the notation makes it an int when
+    // it looks like one.
+    let numeric: Value = ck.parse::<i64>().map(Value::from).unwrap_or(json!(ck));
+    let r = call(
+        &k,
+        &ed,
+        json!({"type": "restore", "path": "c.txt", "ckpt_id": numeric}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(on_disk(&tmp, "c.txt"), "before\n");
 }

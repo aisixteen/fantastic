@@ -30,11 +30,15 @@ pub mod kernel;
 pub mod ledger;
 pub mod lifecycle;
 pub mod lock;
+pub mod messages_log;
+pub mod messages_xml;
 pub mod outcome;
 pub mod paging;
 pub mod persistence;
 pub mod reflect;
 pub mod refusal;
+pub mod rows;
+pub mod scalar;
 pub mod send;
 pub mod state;
 pub mod storage;
@@ -53,6 +57,8 @@ pub use kernel::{Kernel, StateSubscriber, SubscriberToken, DEFAULT_INBOX_BOUND};
 pub use outcome::{Item, Outcome, Status};
 pub use paging::page;
 pub use refusal::{bad, missing, not_here, refusal, refusal_hint, unknown_agent};
+pub use rows::{Row, RowStore, RowTail};
+pub use scalar::{coerce_scalar, py_strip};
 pub use send::{
     current_origin, current_sender, with_operator, with_sender, CURRENT_ORIGIN, CURRENT_SENDER,
 };

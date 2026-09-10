@@ -240,6 +240,14 @@ async fn dispatch(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     // after the flusher were installed would rewrite what it just read.
     fantastic_kernel::persistence::install_ledger_persistence(&kernel).await;
 
+    // THE DURABLE MESSAGE LOG, on the same seam and for the same reason. It
+    // subscribes at the id HYDRATION saw, not at "now": everything the roster
+    // minted while booting is above that cursor and gets replayed to the pump,
+    // so the window between reading the log and installing the writer loses
+    // nothing. Python has to subscribe before any child exists to get that;
+    // here the replay covers it.
+    fantastic_kernel::messages_log::install_message_pump(&kernel, booted.messages_after);
+
     // Composition decision: a headless host only blocks when it's actually
     // serving something (a web daemon). With nothing to serve there's no point
     // holding the process — boot, report, exit. (The interactive front-end that
@@ -303,22 +311,19 @@ async fn sigterm() {
     std::future::pending::<()>().await
 }
 
-/// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors
-/// the canonical Python CLI's `_coerce` (kernel/_modes.py): case-
-/// insensitive bool → int → float → JSON object/array literal → string.
-/// The JSON case lets callers pass nested payloads, e.g.
-/// `payload={"type":"list_agents"}` or `tags=[1,2]`.
+/// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors the
+/// canonical python CLI's `_coerce` (kernel/modes/parse.py): the SHARED scalar
+/// rule, plus a JSON object/array literal for the OPERATOR.
+///
+/// The scalar half is [`fantastic_kernel::coerce_scalar`], the same function the
+/// model's `<k>v</k>` goes through — ONE rule for text a caller typed, as python
+/// has. The JSON branch is this side only: it lets an operator pass a nested
+/// payload (`payload={"type":"list_agents"}`, `tags=[1,2]`), and the
+/// model↔harness path carries no JSON at all.
 fn parse_kv(v: &str) -> Value {
-    match v.to_ascii_lowercase().as_str() {
-        "true" => return json!(true),
-        "false" => return json!(false),
-        _ => {}
-    }
-    if let Ok(n) = v.parse::<i64>() {
-        return json!(n);
-    }
-    if let Ok(f) = v.parse::<f64>() {
-        return json!(f);
+    let typed = fantastic_kernel::coerce_scalar(v);
+    if !typed.is_string() {
+        return typed;
     }
     // Only attempt JSON when it *looks* like an object/array, so a plain
     // string with a stray brace doesn't get misparsed (matches Python).

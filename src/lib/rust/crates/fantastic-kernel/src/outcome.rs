@@ -196,7 +196,7 @@ impl Outcome {
     #[must_use]
     pub fn to_value(&self) -> Value {
         json!({
-            "pid": self.pid.as_ref().map(|p| p.0.clone()),
+            "pid": self.pid.as_ref().map(|p| p.0),
             "status": self.status.as_str(),
             "result": self.result,
             "attempts": self.attempts,

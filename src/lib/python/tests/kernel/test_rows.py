@@ -143,3 +143,105 @@ async def test_messages_pages_and_caps(root):
 async def test_messages_refuses_a_bad_ids_arg(root):
     r = await _send(root, "kernel", {"type": "messages"})
     assert r["error"] and r["reason"] == "bad_arg"
+
+
+# ── rows_read / rows_write: hydration's pair, operator-only ────────────────
+
+
+async def test_rows_read_returns_whole_rows_oldest_first_and_pages(root):
+    k = root.ctx
+    ids = [k.rows_put("ai", {"role": "user", "content": f"turn {i}"}) for i in range(4)]
+    got = await _send(root, root.id, {"type": "rows_read", "agent": "ai"})
+    assert [r["id"] for r in got["rows"]] == ids
+    # WHOLE, not a digest: `messages` hides bodies on purpose, this one does not.
+    assert got["rows"][0]["content"] == "turn 0"
+    assert got["next"] is None
+
+    page = await _send(root, root.id, {"type": "rows_read", "agent": "ai", "limit": 2})
+    assert [r["id"] for r in page["rows"]] == ids[:2]
+    assert page["next"] == ids[1]
+    rest = await _send(
+        root, root.id, {"type": "rows_read", "agent": "ai", "after": page["next"]}
+    )
+    assert [r["id"] for r in rest["rows"]] == ids[2:]
+    # An agent with no conversation is empty, not an error.
+    assert (await _send(root, root.id, {"type": "rows_read", "agent": "nobody"}))["rows"] == []
+
+
+async def test_rows_write_appends_under_fresh_ids(root):
+    k = root.ctx
+    src = k.rows_put("ai", {"role": "user", "content": "the original"})
+    rows = [
+        {kk: vv for kk, vv in r.items() if kk not in ("id", "agent", "ts")}
+        for r in k.rows_for("ai")
+    ]
+    out = await _send(root, root.id, {"type": "rows_write", "agent": "ai_fork", "rows": rows})
+    assert len(out["ids"]) == 1 and out["ids"][0] != src, "a copy is a NEW row"
+    copied = k.rows_for("ai_fork")
+    assert copied[0]["content"] == "the original"
+    assert copied[0]["agent"] == "ai_fork"
+    # The original is untouched — a fork reads, it does not move.
+    assert [r["id"] for r in k.rows_for("ai")] == [src]
+
+
+async def test_rows_write_refuses_a_row_that_carries_its_own_id(root):
+    # THE STORE IS THE ONLY ALLOCATOR. A caller that could name an id could
+    # collide with a pre-minted one, or overwrite a row it does not own.
+    r = await _send(
+        root,
+        root.id,
+        {"type": "rows_write", "agent": "ai", "rows": [{"id": 7, "content": "x"}]},
+    )
+    assert r["reason"] == "bad_arg" and r["arg"] == "rows"
+    assert "may not carry an `id`" in r["error"]
+
+
+async def test_bad_args_are_named(root):
+    for payload, arg in [
+        ({"type": "rows_read"}, "agent"),
+        ({"type": "rows_write", "agent": "ai"}, "rows"),
+        ({"type": "rows_write", "agent": "ai", "rows": []}, "rows"),
+        ({"type": "rows_write", "agent": "ai", "rows": ["nope"]}, "rows"),
+    ]:
+        r = await _send(root, root.id, payload)
+        assert r["reason"] == "bad_arg" and r["arg"] == arg, (payload, r)
+
+
+async def test_a_wildcard_never_carries_the_pair_but_a_named_grant_does(root):
+    """Reading a conversation WHOLE, and writing one into an agent, is what a
+    LOADER does from above. `messages` is the grantable digest read; these two
+    are PRIVILEGED, so a `*` never carries them — saying yes takes naming them."""
+    await _mk(root, "fb", handler_module="file_bridge.tools", root=".")
+    k = root.ctx
+    k.rows_put("ai", {"role": "user", "content": "private"})
+
+    # Wide open BOTH ways, and it still refuses: `*` is not a yes to these.
+    await _mk(root, "peer", can_call={"kernel_state": "*"})
+    await _send(
+        root,
+        root.id,
+        {"type": "update_agent", "id": root.id, "callable_by": {"peer": "*"}},
+    )
+    for payload in [
+        {"type": "rows_read", "agent": "ai"},
+        {"type": "rows_write", "agent": "ai", "rows": [{"content": "x"}]},
+    ]:
+        with sender_context("peer"):
+            r = await _send(root, "kernel", payload)
+        assert r.get("reason") == "unauthorized", (payload, r)
+    assert len(k.rows_for("ai")) == 1, "nothing was written"
+
+    # NAMED, and it opens — on both sides of the gate.
+    await _send(
+        root,
+        root.id,
+        {"type": "update_agent", "id": "peer", "can_call": {"kernel_state": ["rows_read"]}},
+    )
+    await _send(
+        root,
+        root.id,
+        {"type": "update_agent", "id": root.id, "callable_by": {"peer": ["rows_read"]}},
+    )
+    with sender_context("peer"):
+        r = await _send(root, "kernel", {"type": "rows_read", "agent": "ai"})
+    assert [x["content"] for x in r["rows"]] == ["private"]

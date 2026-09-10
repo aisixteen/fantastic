@@ -117,6 +117,13 @@ _SYSTEM_VERBS = frozenset(
         # agent reads its own rows; anyone else's only when that owner's
         # `callable_by` names the caller for `messages`; the operator sees all.
         "messages",
+        # THE ROW STORE's whole surface, PRIVILEGED. `messages` is the read every
+        # agent may be granted (digests, no bodies); these two are hydration —
+        # reading a conversation WHOLE and writing one into an agent — which is
+        # what a loader does from above. A wildcard never carries them; only a
+        # grant that NAMES them does.
+        "rows_read",
+        "rows_write",
         # Root-only control verb — gated inside its handler to the tree
         # root (a non-root agent answers with an error). Stops the whole
         # kernel process gracefully; see `_verb_shutdown_kernel`.
@@ -189,6 +196,18 @@ _SYSTEM_VERB_DOCS = {
         "title?, level?, refs?}], refused:[ids], next?}. Your own rows always; another "
         "agent's only if its callable_by names you for `messages`. Bodies are behind "
         "that agent's `pull`."
+    ),
+    "rows_read": (
+        "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a wildcard does "
+        "not carry it). That agent's "
+        "rows WHOLE (content included), oldest first — {rows:[…], next?}. The "
+        "hydration read; agents read digests through `messages` instead."
+    ),
+    "rows_write": (
+        "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a wildcard does "
+        "not carry it). Appends rows "
+        "to that agent's conversation, each under a FRESH id — {ids:[int]}. A row "
+        "may not carry an `id`; re-ids are the caller's to remap."
     ),
     "cancel": (
         "args: task_id:str. Kills that task AND ITS SUBTREE — the id names its "
@@ -2094,6 +2113,10 @@ class Agent:
             return self._verb_ledger(payload)
         if verb == "messages":
             return self._verb_messages(payload)
+        if verb == "rows_read":
+            return self._verb_rows_read(payload)
+        if verb == "rows_write":
+            return self._verb_rows_write(payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
         if verb == "shutdown_agents":
@@ -2210,6 +2233,59 @@ class Agent:
             used += n
         nxt = kept[-1]["id"] if len(kept) < len(out) and kept else None
         return {"rows": kept, "refused": refused, "next": nxt}
+
+    def _verb_rows_read(self, payload: dict) -> dict:
+        """args: agent:str (req), after:int?, limit:int?. That agent's rows WHOLE —
+        content included, oldest first — {rows:[…], next:int|None}.
+
+        PRIVILEGED: a wildcard grant never carries it, so reaching it takes a
+        grant that NAMES `rows_read`. This is hydration's read, the one
+        `messages` deliberately is not (digests, no bodies, grantable per
+        owner) — an agent reading another's conversation whole is exactly what
+        the digest exists to prevent, and saying so takes an explicit yes."""
+        agent = payload.get("agent")
+        if not isinstance(agent, str) or not agent.strip():
+            return refusal(BAD_ARG, "rows_read: `agent` must be an agent id", arg="agent")
+        rows = self.ctx.rows_for(agent.strip())
+        after = _as_id(payload.get("after"))
+        if after is not None:
+            ids = [r.get("id") for r in rows]
+            rows = rows[ids.index(after) + 1 :] if after in ids else []
+        try:
+            limit = int(payload.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        truncated = bool(limit) and len(rows) > limit
+        kept = rows[:limit] if truncated else rows
+        return {"rows": kept, "next": kept[-1]["id"] if truncated and kept else None}
+
+    def _verb_rows_write(self, payload: dict) -> dict:
+        """args: agent:str (req), rows:list[dict] (req). Append rows to that agent's
+        conversation, each under a FRESH id — {ids:[int]}, in the order given.
+        PRIVILEGED, for the same reason as `rows_read`: this is what a loader does
+        from above (hydrating a store it just read), and an agent writing into
+        another's conversation is not a thing a WILDCARD should ever say yes to.
+
+        A row may not carry its own `id`: the store is the only allocator. Re-ids
+        are the CALLER's to remap — the kernel does not know which of a row's
+        fields are references, and guessing would corrupt a fold's `refs`."""
+        agent = payload.get("agent")
+        if not isinstance(agent, str) or not agent.strip():
+            return refusal(BAD_ARG, "rows_write: `agent` must be an agent id", arg="agent")
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
+            return refusal(
+                BAD_ARG, "rows_write: `rows` must be a non-empty list of rows", arg="rows"
+            )
+        if any("id" in r and r["id"] is not None for r in rows):
+            return refusal(
+                BAD_ARG,
+                "rows_write: a row may not carry an `id` — the store mints every "
+                "id, and a copy is a NEW row",
+                arg="rows",
+            )
+        aid = agent.strip()
+        return {"ids": [self.ctx.rows_put(aid, dict(r)) for r in rows]}
 
     def _verb_ledger(self, payload: dict) -> dict:
         """No args. EVERY execution and what it became — named under its id,

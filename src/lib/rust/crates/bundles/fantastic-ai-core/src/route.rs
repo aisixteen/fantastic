@@ -4,7 +4,7 @@
 //! After one provider pass, its output goes where it was ADDRESSED. Two paths,
 //! and the first is the model's:
 //!
-//!   the model's own `<tool_call>`s — each names a target, a payload and
+//!   the model's own `<call>`s — each names a target, a payload and
 //!     `reply_to`. All are dispatched, and each reply is delivered to its own
 //!     `reply_to`. `reply_to:'self'` is what makes a chain, and the chain
 //!     continues ONLY because the model asked again. No call ends the turn: stop
@@ -44,7 +44,35 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// let go (record meta `nudge_limit` overrides). A safety bound on an
 /// unattended kernel, not a budget — the harness's max_turns is the outer
 /// backstop. Mirrors python `_NUDGE_LIMIT`.
-const NUDGE_LIMIT: u64 = 24;
+pub(crate) const NUDGE_LIMIT: u64 = 24;
+
+/// ROUTING TURNS with a live batch, per agent — the first summand of `await`'s
+/// `pending`. It counts TURNS, not calls: what the model is waiting for is a
+/// batch's answer, and a batch is answered whole.
+fn inflight() -> &'static Mutex<HashMap<String, u64>> {
+    static INFLIGHT: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn inflight_bump(self_id: &str, by: i64) {
+    let mut m = inflight().lock().expect("inflight poisoned");
+    let e = m.entry(self_id.to_string()).or_insert(0);
+    *e = e.saturating_add_signed(by);
+}
+
+fn inflight_count(self_id: &str) -> u64 {
+    *inflight()
+        .lock()
+        .expect("inflight poisoned")
+        .get(self_id)
+        .unwrap_or(&0)
+}
+
+/// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
+/// a fresh turn: it must WAKE the model, not sit in a return value nobody reads.
+const AWAIT_REFUSED: &str = "[await refused] nothing of yours is in flight and \
+nothing is queued for you, so there is nothing to wait for. Act — make the call — \
+or end the chain with <call name=\"done\"></call>.";
 
 /// (kernel instance, agent id, client id) → consecutive silent chain turns so
 /// far. Scoped to the KERNEL, not the process: two kernels in one process (the
@@ -93,7 +121,10 @@ fn silent_bump(kernel: &Arc<Kernel>, self_id: &str, client_id: &str) -> u64 {
 /// nothing about how to retry, so it kept re-deriving the envelope from the
 /// system prompt instead. Every other error on this path states the fix; this one
 /// used not to.
-pub const NO_TARGET_ERROR: &str = "no target_id, so nothing was dispatched — a send must name the AGENT it goes to. Shape: {\"name\":\"send\",\"arguments\":{\"target_id\":\"<agent>\",\"payload\":{\"type\":\"<verb>\"}}}. Send `{type:'reflect'}` to the kernel for the list of agent ids.";
+pub const NO_TARGET_ERROR: &str = "no target_id, so nothing was dispatched — a \
+send must name the AGENT it goes to. Shape: <call name=\"send\"><target_id>agent\
+</target_id><type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
+list of agent ids.";
 
 /// What a send with no payload gets told, `{target}` filled in.
 ///
@@ -107,7 +138,7 @@ pub const NO_TARGET_ERROR: &str = "no target_id, so nothing was dispatched — a
 pub fn no_payload_error(target: &str) -> String {
     format!(
         "send to '{target}' carried no payload, so nothing was dispatched. \
-         A payload is an object whose `type` names the verb, e.g. {{\"type\":\"reflect\"}}."
+         A call names its verb in `<type>`, e.g. <type>reflect</type>."
     )
 }
 
@@ -201,6 +232,81 @@ fn is_falsy(v: &Value) -> bool {
 /// `{k: v for k, v in args.items() if k != "payload"}`. Shows the model the
 /// ROUTING it wrote, which is the part that was wrong, without re-quoting a
 /// program body at it.
+/// A title lives INSIDE the reply tag, so it may not carry the one character
+/// that closes the tag, nor a newline that would end the tag line. Capped at 140
+/// characters: it is a sentence, not a body.
+fn clean_title(raw: Option<&Value>) -> Option<String> {
+    let text = raw?.as_str()?;
+    let mut out = String::new();
+    let mut gap = false;
+    for c in text.chars() {
+        if c == ']' || c == '\r' || c == '\n' {
+            gap = true;
+        } else {
+            if gap && !out.is_empty() {
+                out.push(' ');
+            }
+            gap = false;
+            out.push(c);
+        }
+    }
+    let out: String = out.trim().chars().take(140).collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// Expand every `<to>` list into one call per recipient, each carrying the whole
+/// list in its payload. A call with no `<to>` passes through untouched.
+fn fan_out(calls: Vec<crate::tool_parse::ToolCall>) -> Vec<crate::tool_parse::ToolCall> {
+    let mut out = Vec::with_capacity(calls.len());
+    for call in calls {
+        let recipients: Vec<String> = match call.arguments.get("to") {
+            Some(Value::Array(items)) if !items.is_empty() => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+        if call.name != "send" || recipients.is_empty() {
+            out.push(call);
+            continue;
+        }
+        let re = call.arguments.get("re").cloned();
+        let base_payload = match call.arguments.get("payload") {
+            Some(Value::Object(p)) => p.clone(),
+            _ => Map::new(),
+        };
+        for r in &recipients {
+            let mut payload = base_payload.clone();
+            // The WHOLE list, in every copy — that is what makes it one message.
+            payload.insert(
+                "to".to_string(),
+                Value::Array(recipients.iter().map(|x| json!(x)).collect()),
+            );
+            if let Some(v) = &re {
+                payload.insert("re".to_string(), v.clone());
+            }
+            let mut args = Map::new();
+            for (k, v) in &call.arguments {
+                // `to` became the fan-out, `re` moved into the payload, and
+                // `target_id` is the recipient this copy goes to.
+                if k != "to" && k != "re" && k != "target_id" && k != "payload" {
+                    args.insert(k.clone(), v.clone());
+                }
+            }
+            args.insert("target_id".to_string(), json!(r));
+            args.insert("payload".to_string(), Value::Object(payload));
+            out.push(crate::tool_parse::ToolCall {
+                id: call.id.clone(),
+                name: "send".to_string(),
+                arguments: args,
+            });
+        }
+    }
+    out
+}
+
 fn you_sent(args: &Map<String, Value>) -> Value {
     let mut out = Map::new();
     for (k, v) in args {
@@ -226,11 +332,10 @@ fn you_sent(args: &Map<String, Value>) -> Value {
 /// so a second consecutive no-call turn arrives with the nudge as its incoming
 /// text — and is NOT nudged again. Mirrors python `_NO_CALL_NUDGE` (canonical;
 /// reinstated 2026-09-01 after repo_map:swift twice stopped mid-task).
-const NO_CALL_NUDGE: &str =
-    "[no call was dispatched] Your turn emitted no <tool_call> envelope, so \
-NOTHING ran — a call decided in thinking does not execute unless the envelope is \
+const NO_CALL_NUDGE: &str = "[no call was dispatched] Your turn emitted no <call> element, so \
+NOTHING ran — a call decided in thinking does not execute unless the element is \
 written out. If the task is unfinished, emit that call now. If it is finished, end \
-the chain explicitly: <tool_call>{\"name\":\"done\"}</tool_call>";
+the chain explicitly: <call name=\"done\"></call>";
 
 /// Honour where this pass's output goes — the DETACHED routing task. The
 /// model's calls are the agent's calls (gated via `with_sender`); `incoming`
@@ -288,6 +393,10 @@ struct Unit {
     verb: String,
     idx: Option<usize>,
     body: Option<String>,
+    /// The model's own one-sentence `<title>` for this call. It rides on the
+    /// reply's tag and is what REMAINS once the body is stripped from the view,
+    /// so it is the call's name forever.
+    title: Option<String>,
 }
 
 /// TEMPORARY ROUTE TRACE. A chain that ends with no reply block and no error is
@@ -311,6 +420,7 @@ struct Block {
     pid: String,
     target: String,
     verb: String,
+    title: Option<String>,
     body: String,
 }
 
@@ -352,11 +462,13 @@ async fn route_reply_gated(
             target: "-".to_string(),
             verb: "-".to_string(),
             idx: None,
-            body: Some(bad.report().to_string()),
+            body: Some(bad.body()),
+            title: None,
         });
     }
 
     let done_called = calls.iter().any(|c| c.name == "done");
+    let await_called = calls.iter().any(|c| c.name == "await");
     let any_calls = !calls.is_empty();
     // ONE TURN, ONE BATCH. Every call the model emitted is dispatched in a
     // SINGLE `kernel.send([...])` — concurrent, side-effect order across
@@ -375,12 +487,19 @@ async fn route_reply_gated(
     // it never re-asks for the missing half.
     let mut items: Vec<Item> = Vec::new();
 
+    // ONE COPY PER RECIPIENT. A `<to>` list is not a group address the kernel
+    // knows about — there is no such thing; every send reaches exactly one
+    // agent. What the list buys is that each copy carries the WHOLE list, so a
+    // recipient can see who else heard it and reply to the same group instead of
+    // forking a private conversation the others never see.
+    let calls = fan_out(calls);
+
     for call in calls {
-        if call.name == "done" || call.name == "inquiry_answer" {
-            // CONTROL CALLS, not dispatches. `done` ends the chain;
-            // `inquiry_answer` hands this turn's answer back to whoever sent the
-            // inquiry (the `inquiry` verb reads it). Neither is a send, neither
-            // is an error, and neither is ever nudged.
+        if call.name == "done" || call.name == "await" || call.name == "inquiry_answer" {
+            // CONTROL CALLS, not dispatches. `done` ends the chain; `await`
+            // stops the turn until something lands; `inquiry_answer` hands this
+            // turn's answer back to whoever sent the inquiry (the `inquiry` verb
+            // reads it). None is a send, none is an error, none is ever nudged.
             continue;
         }
         let args = &call.arguments;
@@ -430,13 +549,21 @@ async fn route_reply_gated(
                     target: "-".to_string(),
                     verb: "-".to_string(),
                     idx: None,
-                    body: Some(body.to_string()),
+                    body: Some(crate::tool_parse::render_reply(&body)),
+                    title: None,
                 });
             }
             continue;
         };
-        let mut binary_blob: Option<Vec<u8>> = None;
-        let Some(Value::Object(payload)) = args.get("payload") else {
+        // AN EMPTY PAYLOAD IS NO PAYLOAD. The grammar always produces the key
+        // (every child that is not routing IS the payload), so `{}` is exactly
+        // what a send with no verb looks like — and dispatching it reaches the
+        // kernel as `payload.type required`, an error about OUR shape rather
+        // than about the verb the model left out.
+        let Some(Value::Object(payload)) = args
+            .get("payload")
+            .filter(|p| p.as_object().is_some_and(|m| !m.is_empty()))
+        else {
             if let Some(rt) = reply_to {
                 let body = json!({
                     "error": no_payload_error(target),
@@ -448,81 +575,35 @@ async fn route_reply_gated(
                     target: target.to_string(),
                     verb: "-".to_string(),
                     idx: None,
-                    body: Some(body.to_string()),
+                    body: Some(crate::tool_parse::render_reply(&body)),
+                    title: None,
                 });
             }
             continue;
         };
 
         let mut payload = payload.clone();
+        // A SELF-CALL INHERITS ITS CONVERSATION. `grep`, `pull` and `recall` are
+        // per-client, and a call the MODEL makes belongs to the client whose
+        // turn it is — python 2026-09-06: without this, every model-issued
+        // `grep` in three e2e runs returned `total=0` against a store full of
+        // matches, because the call landed on the default client.
+        if target == self_id.as_str() && !payload.contains_key("client_id") {
+            payload.insert("client_id".to_string(), json!(client_id));
+        }
         let verb = payload
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_string();
 
-        // send_binary: ONE named payload field is a file's CONTENTS, and a
-        // JSON payload has no bytes type — so a stream sink (`write_stream`)
-        // that wants raw bytes is otherwise unreachable. The model wrote the
-        // program as an ordinary string in `into` (default `bytes`); lift that
-        // field out of the header and dispatch it over the kernel's BINARY
-        // carrier, instead of leaving it in the JSON header. Mirrors python
-        // `core.py`'s send_binary branch.
-        //
-        // It rides the ORDINARY BATCH as an item carrying a blob. Dispatching it
-        // inline through `send_with_binary` gave it no task row, no ledger id,
-        // no timeout and no retries, and the model's reply tag read
-        // `[reply to - · …]` because there was no pid to name (2026-09-02).
-        if call.name == "send_binary" {
-            let field = args
-                .get("into")
-                .and_then(Value::as_str)
-                .unwrap_or("bytes")
-                .to_string();
-            if let Some(Value::String(prog)) = payload.get(&field) {
-                if prog == "@body" {
-                    // A LITERAL "@body" is the fence placeholder with NO
-                    // fenced block — valid JSON, so it parses and would be
-                    // WRITTEN AS THE FILE (measured 2026-09-01, gym:
-                    // `illegal character '@'`). Refuse loud instead.
-                    if let Some(rt) = reply_to {
-                        let err = serde_json::json!({
-                            "error": "send_binary NOT dispatched: `bytes` is the \
-                                      literal placeholder \"@body\" but no fenced \
-                                      block followed. Re-send the SAME call with \
-                                      the program between column-0 marker lines \
-                                      inside the same <tool_call>: the JSON line, \
-                                      then `*** Begin Bytes`, the program verbatim, \
-                                      then `*** End Bytes`.",
-                            "target": target,
-                        });
-                        units.push(Unit {
-                            dest: rt,
-                            target: target.to_string(),
-                            verb: verb.clone(),
-                            idx: None,
-                            body: Some(err.to_string()),
-                        });
-                    }
-                    continue;
-                }
-                let blob = prog.clone().into_bytes();
-                let mut header = payload.clone();
-                header.remove(&field); // rides as the blob, not the JSON header
-                binary_blob = Some(blob);
-                payload = header;
-            }
-            // A non-string `into` field can't binary-carry; fall through and
-            // dispatch it as an ordinary JSON send (python leaves it as-is too).
-        }
-
+        // NO `send_binary`, NO FENCE, NO BLOB LIFT. The document rides in the
+        // payload as `bytes`, verbatim, because the grammar carries it verbatim
+        // — and `text_file` takes exactly that (its `handle` REFUSES
+        // `write`/`patch`/`append` whose `bytes` is not a string). Lifting it
+        // into the item's binary channel would delete the key the target reads
+        // and route to `handle_binary`, which is not where a document goes.
         let mut item = Item::new(AgentId::from(target), Value::Object(payload.clone()));
-        // A `send_binary` call carries its bytes beside the JSON header; the
-        // kernel dispatches it through the binary channel under this same row,
-        // ledger id, timeout and retries.
-        if let Some(blob) = binary_blob {
-            item = item.with_binary(blob);
-        }
         // EVERY dispatched call carries the layer's deadline. The KERNEL
         // defaults nothing, so a call to a handler that never returns used to
         // hang the whole batch forever here — no reply, no timeout block, the
@@ -534,7 +615,11 @@ async fn route_reply_gated(
         // The model may NAME the execution (dedup/join across retries) and may
         // bound its own call. The kernel validates both; a bad value settles
         // that one call as a refusal the model can read.
-        if let Some(id) = args.get("id").and_then(Value::as_str) {
+        // `exec_id`, not `id`: arguments are INLINE now, so a bare `<id>` would
+        // collide with the many verbs whose payload has one (`delete_agent`,
+        // `update_agent`, …). The parser keeps the name at the call level; here
+        // it becomes the item's execution name.
+        if let Some(id) = args.get("exec_id").and_then(Value::as_str) {
             if !id.is_empty() {
                 item = item.with_id(id);
             }
@@ -556,16 +641,24 @@ async fn route_reply_gated(
                 verb,
                 idx: Some(items.len() - 1),
                 body: None,
+                title: clean_title(args.get("title")),
             });
         }
     }
 
+    let had_items = !items.is_empty();
     let outcomes = if items.is_empty() {
         Vec::new()
     } else {
+        // BRACKETED so `await` can see it: while this batch is out, the agent has
+        // something in flight, and that is the honest answer to "is anything
+        // coming?" — the alternative the model reaches for otherwise is
+        // re-issuing the call, which only lengthens the queue that delays it.
+        inflight_bump(self_id.as_str(), 1);
         trace(&format!("dispatching {} item(s)", items.len()));
         let out = kernel.send(items).await;
         trace(&format!("dispatch returned {} outcome(s)", out.len()));
+        inflight_bump(self_id.as_str(), -1);
         out
     };
 
@@ -587,10 +680,9 @@ async fn route_reply_gated(
                     let out = &outcomes[i];
                     let pid = out
                         .pid
-                        .as_ref()
-                        .map(|t| t.0.clone())
+                        .map(|t| t.0.to_string())
                         .unwrap_or_else(|| "-".to_string());
-                    let mut body = out.result.to_string();
+                    let mut body = crate::tool_parse::render_reply(&out.result);
                     // Only reflect bodies are dropped later, so only they carry
                     // the distillation notice.
                     if u.verb == "reflect" {
@@ -605,6 +697,7 @@ async fn route_reply_gated(
                 pid,
                 target: u.target,
                 verb: u.verb,
+                title: u.title,
                 body,
             }
         })
@@ -625,14 +718,19 @@ async fn route_reply_gated(
     // THE GATE IS `not calls and not units`, not `no blocks`: a turn whose calls
     // all carried `reply_to:null` dispatched real work and is owed no reply, and
     // rust nudged it anyway until 2026-09-02 — telling the model "your turn emitted
-    // no <tool_call> envelope" about a turn that did, and then handing that turn's
+    // no <call> element" about a turn that did, and then handing that turn's
     // text to `send_to` on top.
     //
     // An inquiry turn was the OTHER legitimate silent end (emit + stop; the human's
     // answer resumes the chain) — nudging it would stomp the wait.
     let any_blocks = !blocks.is_empty();
-    let chained =
-        incoming.starts_with("[reply to ") || incoming.starts_with("[no call was dispatched]");
+    // EVERY CALL-LESS TURN IS NUDGED, chain or not (user, 2026-09-09: "all is
+    // tool calls"). This used to fire only when the incoming text was itself a
+    // reply or a nudge, so a FIRST turn of pure prose from a person ended the
+    // work silently — the model had decided on a call, written it in thought,
+    // and never emitted it.
+    let _ = &incoming;
+    let chained = true;
     // AN INQUIRY IS A CALL NOW, so there is no silent-turn exemption: a turn that
     // consults someone DISPATCHES and is never silent. This used to scan the
     // model's own prose for the old `{"type":"question"}` line — a text convention
@@ -657,7 +755,51 @@ async fn route_reply_gated(
         trace("delivered");
     }
     if done_called {
-        return; // explicitly finished — nothing more runs, nothing reminds
+        // Explicitly finished — nothing more runs, nothing reminds. A caller's
+        // `send_to` hand-off is the one thing that still applies: the finished
+        // text is what it asked to have delivered.
+        if !any_blocks {
+            if let Some(to) = send_to.as_deref() {
+                deliver(&kernel, to, &text, &client_id, sp, route).await;
+            }
+        }
+        return;
+    }
+    if await_called {
+        // EXPLICIT WAITING. The model stops and nothing reminds it: the next
+        // message that lands wakes it. That is the honest alternative to
+        // re-issuing a call it has not seen answered — this is an ASYNC system,
+        // and a reply in flight is on its way, not lost.
+        //
+        // PENDING is three summands, and all three are needed: this agent's own
+        // in-flight routing turns, the messages already queued for it, and the
+        // turn another message may ALREADY be running under the lock. Routing
+        // happens AFTER the turn released that lock, so "queued" alone would
+        // read empty at exactly the moment something is about to arrive.
+        silent_reset(&kernel, self_id.as_str(), &client_id);
+        let st = state_for(&self_id);
+        let queued = st.queue.lock().expect("queue poisoned").len() as u64;
+        let running = u64::from(st.lock.try_lock().is_err());
+        let pending = inflight_count(self_id.as_str()) + queued + running;
+        if pending > 0 || had_items {
+            let mut detail = Map::new();
+            detail.insert("reason".to_string(), json!("awaiting"));
+            detail.insert("pending".to_string(), json!(pending));
+            emit_status(&kernel, &st, &self_id, &client_id, route, "done", detail).await;
+            return;
+        }
+        // Nothing to wait for: say so, as a turn, so the model acts instead of
+        // waiting forever on an empty inbox.
+        deliver(
+            &kernel,
+            self_id.as_str(),
+            AWAIT_REFUSED,
+            &client_id,
+            sp,
+            route,
+        )
+        .await;
+        return;
     }
     if nudging {
         let streak = silent_bump(&kernel, self_id.as_str(), &client_id);
@@ -739,7 +881,14 @@ async fn deliver_grouped(
             .iter()
             .enumerate()
             .map(|(i, b)| {
+                // The ONE line a reply is known by, forever — in the durable
+                // store, in `recall` pages, and as the stub a stripped body
+                // leaves behind. Optional segments append in THIS order:
+                //     [reply to <pid> · <target> <verb> · "<title>" · N of M in batch <b>]
                 let mut tag = format!("[reply to {} \u{b7} {} {}", b.pid, b.target, b.verb);
+                if let Some(t) = &b.title {
+                    tag.push_str(&format!(" \u{b7} \"{t}\""));
+                }
                 if m > 1 {
                     tag.push_str(&format!(" \u{b7} {} of {m} in batch {token}]", i + 1));
                 } else {
@@ -766,43 +915,46 @@ mod tests {
         assert_eq!(
             NO_TARGET_ERROR,
             "no target_id, so nothing was dispatched — a send must name the AGENT \
-             it goes to. Shape: {\"name\":\"send\",\"arguments\":{\"target_id\":\
-             \"<agent>\",\"payload\":{\"type\":\"<verb>\"}}}. Send \
-             `{type:'reflect'}` to the kernel for the list of agent ids."
+             it goes to. Shape: <call name=\"send\"><target_id>agent</target_id>\
+             <type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
+             list of agent ids."
         );
         assert_eq!(
             no_payload_error("totals"),
-            "send to 'totals' carried no payload, so nothing was dispatched. A \
-             payload is an object whose `type` names the verb, e.g. \
-             {\"type\":\"reflect\"}."
+            "send to 'totals' carried no payload, so nothing was dispatched. A call \
+             names its verb in `<type>`, e.g. <type>reflect</type>."
         );
-        // The third one is composed by the parser, which OWNS the wording (see
-        // `MalformedCall::error` and the literal pin in `tool_parse::tests_malformed`);
-        // what this asserts is that the router delivers THAT, verbatim, with nothing
-        // reworded on the way through.
-        let bad = crate::tool_parse::malformed_calls(
-            "<tool_call>{\"name\":\"send\",\"arguments\":{\"code\":\"x = \\\"unclosed}}</tool_call>",
+        assert_eq!(
+            NO_CALL_NUDGE,
+            "[no call was dispatched] Your turn emitted no <call> element, so \
+             NOTHING ran — a call decided in thinking does not execute unless the \
+             element is written out. If the task is unfinished, emit that call now. \
+             If it is finished, end the chain explicitly: <call name=\"done\"></call>"
         );
+        // The fourth is composed by the parser, which OWNS the wording (see
+        // `MalformedCall::error` and the literal pin in
+        // `tool_parse::tests_malformed`); what this asserts is that the router
+        // delivers THAT, verbatim, with nothing reworded on the way through.
+        let bad =
+            crate::tool_parse::malformed_calls("<call name=\"send\"><type>reflect</type></call>");
         assert_eq!(bad.len(), 1, "one opened, unparseable envelope: {bad:?}");
         assert!(
             bad[0]
                 .error
-                .starts_with("tool_call NOT dispatched: invalid JSON — "),
+                .starts_with("call NOT dispatched: a send names its target"),
             "verbatim prefix: {:?}",
             bad[0].error
         );
         assert!(
-            bad[0].error.ends_with(&format!(
-                ". Nothing ran. {}",
-                crate::tool_parse::hints::JSON_HINT
-            )),
+            bad[0]
+                .error
+                .ends_with(&format!(". Nothing ran. {}", crate::tool_parse::HINT)),
             "verbatim hint: {:?}",
             bad[0].error
         );
-        assert_eq!(
-            bad[0].report()["error"],
-            json!(bad[0].error),
-            "the report the router delivers carries that exact sentence"
+        assert!(
+            bad[0].body().starts_with(&bad[0].error),
+            "the body the router delivers opens with that exact sentence"
         );
     }
 

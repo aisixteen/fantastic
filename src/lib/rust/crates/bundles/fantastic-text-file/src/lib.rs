@@ -111,9 +111,12 @@ fn version_of(data: &[u8]) -> String {
     hex[..16].to_string()
 }
 
-/// This dispatch's kernel task pid — the checkpoint id space.
+/// This dispatch's kernel task pid — the checkpoint id space. A pid is a NUMBER
+/// now (the one counter's), rendered here because a checkpoint id is text.
+/// Outside any dispatch — an operator write — there is no task, and `op` says so
+/// rather than borrowing a number that names nothing.
 fn pid() -> String {
-    current_task().map_or_else(|| "op:00000000".to_string(), |t| t.0)
+    current_task().map_or_else(|| "op".to_string(), |t| t.0.to_string())
 }
 
 // ─── per-document serialization ─────────────────────────────────
@@ -280,6 +283,21 @@ async fn write_atomic(kernel: &Arc<Kernel>, fb: &str, path: &str, data: &[u8]) -
 
 /// `/` in the document path would nest under `.ckpt`; flatten it so every
 /// pre-image of one document lives in ONE listable dir.
+/// A checkpoint id from the payload, whatever the notation typed it as.
+///
+/// A ckpt id IS a pid, and a pid is a NUMBER now — so a model writing
+/// `<ckpt_id>29</ckpt_id>` hands over an integer, and reading it as a string
+/// only refused the model its own checkpoint back ("restore: ckpt_id required",
+/// measured 2026-09-10 on `undo:rust`). Python accepts anything truthy here for
+/// the same reason.
+fn ckpt_arg(payload: &Value) -> Option<String> {
+    match payload.get("ckpt_id") {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 fn ckpt_path(path: &str, ckpt_id: &str) -> String {
     format!("{CKPT_DIR}/{}/{ckpt_id}", path.replace('/', "__"))
 }
@@ -425,11 +443,12 @@ async fn reflect_reply(agent: &Agent) -> Value {
             concatenated in `edits` order, split by the per-edit `hunks` count; \
             any failure anywhere writes nothing",
         "compose": "every content-carrying verb (`write`, `patch`, `append`) \
-            takes its document in `bytes` — send it with `send_binary` in the \
-            FENCED form: the call's JSON stays small with `\"bytes\":\"@body\"`, \
-            and the document rides VERBATIM between two column-0 marker lines \
-            inside the same tool_call — `*** Begin Bytes`, the content (real \
-            newlines, real quotes, nothing escaped), `*** End Bytes`",
+            takes its document in `bytes`, and `bytes` is VERBATIM: write the \
+            document between `<bytes>` and `</bytes>` exactly as it should land — \
+            real newlines, real quotes, nothing escaped, no fence — then close \
+            the call. The document ends at the first `</bytes>`. A patch names \
+            its edits as tags: \
+            <edits><item><path>a.py</path><hunks>2</hunks></item></edits>",
         "verbs": {
             "reflect": "no args — identity, verb guide, and the wired default surface.",
             "boot": "no args — no-op; this agent holds no state to hydrate.",
@@ -439,8 +458,8 @@ async fn reflect_reply(agent: &Agent) -> Value {
             "append": "args: path:str (req), bytes:bytes (req — one raw chunk), on:str? — appends (creates if absent); {path, size, version}.",
             "checkpoint": "args: path:str (req), on:str? — commit a pre-image now, mutation-free; {ckpt_id, path, version}.",
             "checkpoints": "args: path:str (req), on:str? — the pre-images held for a document; {path, ckpts:[{id, size}]}.",
-            "restore": "args: path:str (req), ckpt_id:str (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}.",
-            "drop": "args: path:str (req), ckpt_id:str (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}.",
+            "restore": "args: path:str (req), ckpt_id (req), on:str?, if_match:str? — atomic restore of the pre-image (or delete, if it was absent); {restored:true, path, version|deleted}.",
+            "drop": "args: path:str (req), ckpt_id (req), on:str? — discard one pre-image (retention is the caller's); {dropped:true}.",
         },
     })
 }
@@ -862,13 +881,10 @@ async fn restore_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(ckpt_id) = payload
-        .get("ckpt_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(ckpt_id) = ckpt_arg(payload) else {
         return missing("restore", "ckpt_id");
     };
+    let ckpt_id = ckpt_id.as_str();
     let _held = hold(fb, &[&path]).await;
     if let Some(err) = if_match_guard(kernel, fb, &path, payload).await {
         return err;
@@ -912,14 +928,10 @@ async fn drop_reply(kernel: &Arc<Kernel>, fb: &str, payload: &Value) -> Value {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let Some(ckpt_id) = payload
-        .get("ckpt_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(ckpt_id) = ckpt_arg(payload) else {
         return missing("drop", "ckpt_id");
     };
-    let src = ckpt_path(&path, ckpt_id);
+    let src = ckpt_path(&path, &ckpt_id);
     let r = leg_call(kernel, fb, json!({"type": "delete", "path": src.clone()})).await;
     if !r.is_object() || r.get("error").is_some() {
         return r;

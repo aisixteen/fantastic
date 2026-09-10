@@ -94,9 +94,15 @@ async fn mk_kernel(tmp: &TempDir, endpoint: Option<String>) -> (Arc<Kernel>, Age
 
 /// Register a synthetic client inbox so we can drain events emitted by
 /// the bundle via `to_caller`.
-fn open_client_inbox(kernel: &Arc<Kernel>, client_id: &str) -> tokio::sync::mpsc::Receiver<Value> {
+/// The AGENT's inbox, where per-client events land tagged with their
+/// `client_id` — python's routing, and what a `watch` on the agent mirrors. It
+/// used to open an inbox named after the CLIENT, which no watcher ever sees.
+fn open_client_inbox(
+    kernel: &Arc<Kernel>,
+    agent_id: &AgentId,
+) -> tokio::sync::mpsc::Receiver<Value> {
     let (tx, rx) = tokio::sync::mpsc::channel(256);
-    kernel.inboxes.insert(AgentId::from(client_id), tx);
+    kernel.inboxes.insert(agent_id.clone(), tx);
     rx
 }
 
@@ -205,7 +211,7 @@ async fn send_streams_tokens_via_sse() {
         .await;
 
     let client_id = "test_client";
-    let mut rx = open_client_inbox(&kernel, client_id);
+    let mut rx = open_client_inbox(&kernel, &nim);
     let send_kernel = Arc::clone(&kernel);
     let nim_for_task = nim.clone();
     let join = tokio::spawn(async move {
@@ -323,7 +329,7 @@ async fn thinking_streams_wrapped_and_persists_stripped() {
         .await;
 
     let client_id = "test_think";
-    let _rx = open_client_inbox(&kernel, client_id);
+    let _rx = open_client_inbox(&kernel, &nim);
     let reply = kernel
         .send(vec![Item::new(
             nim.clone(),
@@ -369,7 +375,10 @@ async fn rate_limit_retry_once_then_succeeds() {
         .mount(&server)
         .await;
     // Then: success.
-    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+    // `done` because a call-less turn is nudged: without it this stub answers the
+    // nudge with the same body forever and `expect(1)` fails on the count rather
+    // than on the retry this test is about.
+    let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok<call name=\\\"done\\\"></call>\"}}]}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
@@ -382,7 +391,7 @@ async fn rate_limit_retry_once_then_succeeds() {
         .await;
 
     let client_id = "test_rl";
-    let mut rx = open_client_inbox(&kernel, client_id);
+    let mut rx = open_client_inbox(&kernel, &nim);
     let send_kernel = Arc::clone(&kernel);
     let nim_for_task = nim.clone();
     let join = tokio::spawn(async move {
@@ -446,13 +455,13 @@ async fn rate_limit_retry_once_then_succeeds() {
         saw_rate_status,
         "expected status(waiting_on=rate_limit) event"
     );
-    assert_eq!(tokens, "ok");
-    assert_eq!(r["response"], "ok");
+    assert_eq!(tokens, "ok<call name=\"done\"></call>");
+    assert_eq!(r["response"], "ok<call name=\"done\"></call>");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_envelope_split_across_sse_chunks_dispatches() {
-    // A `<tool_call>` split across two SSE chunks must REASSEMBLE and dispatch.
+    // A `<call>` split across two SSE chunks must REASSEMBLE and dispatch.
     // This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
     // — "just TEXT, nothing parsed, nothing dispatched"). That was a gap, not a
     // principle: python's ai_core has dispatched this envelope since 2026-08-02 and
@@ -472,9 +481,8 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
     // Address the nvidia agent's OWN file agent: its write lands on disk, which is
     // proof the dispatch happened and not just that nothing crashed.
     let whole = format!(
-        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"{fid}\",\
-         \"payload\":{{\"type\":\"mkdir\",\"path\":\"routed\"}},\
-         \"reply_to\":null}}}}</tool_call>"
+        "<call name=\"send\"><target_id>{fid}</target_id><reply_to>null</reply_to>\
+         <type>mkdir</type><path>routed</path></call>"
     );
     let split = whole.len() / 2;
     let (part_1, part_2) = whole.split_at(split);
@@ -493,7 +501,7 @@ async fn an_envelope_split_across_sse_chunks_dispatches() {
         .await;
 
     let client_id = "test_tool";
-    let _rx = open_client_inbox(&kernel, client_id);
+    let _rx = open_client_inbox(&kernel, &nim);
     let reply = kernel
         .send(vec![Item::new(
             nim.clone(),
@@ -543,7 +551,7 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .await;
 
     let client_id = "test_int";
-    let _rx = open_client_inbox(&kernel, client_id);
+    let _rx = open_client_inbox(&kernel, &nim);
     let send_kernel = Arc::clone(&kernel);
     let nim_for_task = nim.clone();
     let join = tokio::spawn(async move {
@@ -572,9 +580,8 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .expect("tasks")
         .iter()
         .find(|t| t["agent"] == json!(nim.as_str()) && t["verb"] == json!("send"))
-        .and_then(|t| t["id"].as_str())
-        .expect("the in-flight send must be in `ps`")
-        .to_string();
+        .and_then(|t| t["id"].as_i64())
+        .expect("the in-flight send must be in `ps`");
     let r = kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),

@@ -237,7 +237,13 @@ async fn only_settled_rows_cross_the_restart() {
         serde_json::from_slice(&std::fs::read(store.join("ledger.json")).unwrap()).unwrap();
     assert_eq!(doc["v"], 1, "the sidecar is version-stamped");
     let rows = doc["rows"].as_object().expect("rows object");
-    assert!(rows.contains_key("settled-1"), "the settled row is missing");
+    // The sidecar keys by the KERNEL id and carries the caller's name as a
+    // field — which is what lets that name still join its execution after the
+    // restart.
+    assert!(
+        rows.values().any(|r| r["name"] == "settled-1"),
+        "the settled row is missing"
+    );
     // EVERY persisted row carries a terminal outcome — nothing in flight
     // crosses the restart. Work that never completed did not complete.
     for (id, r) in rows {

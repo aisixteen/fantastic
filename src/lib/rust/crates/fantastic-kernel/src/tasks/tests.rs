@@ -31,21 +31,21 @@ use std::time::Duration;
 #[derive(Default)]
 pub(crate) struct Shared {
     /// (agent, task_id, task_still_in_the_table_when_the_hook_ran)
-    hooks: Mutex<Vec<(String, String, bool)>>,
+    hooks: Mutex<Vec<(String, i64, bool)>>,
     /// Resources currently held, keyed by the task holding them.
-    held: Mutex<HashSet<String>>,
+    held: Mutex<HashSet<i64>>,
     /// How many times a counting handler actually RAN.
     runs: Mutex<usize>,
 }
 
 impl Shared {
-    pub(crate) fn hook_log(&self) -> Vec<(String, String, bool)> {
+    pub(crate) fn hook_log(&self) -> Vec<(String, i64, bool)> {
         self.hooks.lock().expect("hooks poisoned").clone()
     }
     pub(crate) fn run_count(&self) -> usize {
         *self.runs.lock().expect("runs poisoned")
     }
-    pub(crate) fn held_ids(&self) -> HashSet<String> {
+    pub(crate) fn held_ids(&self) -> HashSet<i64> {
         self.held.lock().expect("held poisoned").clone()
     }
 }
@@ -163,7 +163,7 @@ impl Bundle for SlowBundle {
                             .find(|t| t["agent"] == json!(victim) && t["verb"] == json!("slow"))
                             .cloned()
                     })
-                    .and_then(|t| t["id"].as_str().map(str::to_string));
+                    .and_then(|t| t["id"].as_i64());
                 match found {
                     None => json!({"error": "no victim task"}),
                     Some(task_id) => {
@@ -194,11 +194,11 @@ impl Bundle for SlowBundle {
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
         let alive = kernel.tasks.contains(task_id);
-        self.sh.hooks.lock().expect("hooks poisoned").push((
-            agent_id.0.clone(),
-            task_id.0.clone(),
-            alive,
-        ));
+        self.sh
+            .hooks
+            .lock()
+            .expect("hooks poisoned")
+            .push((agent_id.0.clone(), task_id.0, alive));
         self.sh
             .held
             .lock()
@@ -283,7 +283,7 @@ async fn row_for(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> Option<Va
         .find(|t| t["agent"] == json!(agent.0) && t["verb"] == json!(verb))
 }
 
-async fn cancel(kernel: &Arc<Kernel>, task_id: &str) -> Value {
+async fn cancel(kernel: &Arc<Kernel>, task_id: i64) -> Value {
     kernel
         .send(vec![Item::new(
             AgentId::from("kernel"),
@@ -306,10 +306,10 @@ async fn wait_until<F: Fn() -> bool>(what: &str, f: F) {
 }
 
 /// Wait until `agent`'s `verb` dispatch shows up in the table, then return its id.
-async fn wait_for_task(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> String {
+async fn wait_for_task(kernel: &Arc<Kernel>, agent: &AgentId, verb: &str) -> i64 {
     for _ in 0..300 {
         if let Some(row) = row_for(kernel, agent, verb).await {
-            return row["id"].as_str().expect("task id").to_string();
+            return row["id"].as_i64().expect("task id");
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -345,21 +345,15 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     let parent = row_for(&kernel, &a, "chain").await.expect("a's chain row");
     let child = row_for(&kernel, &b, "slow").await.expect("b's slow row");
 
-    // Task id IS a pid: "<agent_id>:<8 hex>". The token is OPAQUE on purpose — a
-    // visible counter reads as a SEQUENCE, and messaging is async (a send may return
-    // once, several times, or never). Measured 2026-08-20 on python: a model inferred
-    // ordering from the number and re-polled forever instead of matching on the id.
-    for (row, agent) in [(&parent, &a), (&child, &b)] {
-        let id = row["id"].as_str().expect("id");
-        let (aid, token) = id.rsplit_once(':').expect("<agent>:<token>");
-        assert_eq!(aid, agent.0);
-        assert_eq!(token.len(), 8, "token is 8 hex chars, got {token:?}");
-        assert!(
-            token
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "token is lowercase hex, got {token:?}"
-        );
+    // A TASK ID IS A MESSAGE ID — the one counter's number, positive and
+    // ascending. It used to be an opaque `<agent>:<8 hex>` token, hashed so a
+    // model could not read an ordering into it (measured 2026-08-20 in python:
+    // one inferred ordering from `<agent>:<n>` and re-polled forever). Python
+    // reversed that trade: one number naming one thing in `ps`, `cancel`, the
+    // ledger, a reply tag and the message log is worth more than a number that
+    // hides its order.
+    for row in [&parent, &child] {
+        assert!(row["id"].as_i64().expect("id") > 0);
     }
     // The tree: b's dispatch is a child of a's dispatch. a's caller is the test
     // task — not a dispatch — so a's task is a root (init-owned).
@@ -410,16 +404,16 @@ async fn cancel_kills_the_whole_subtree() {
     let b_task = wait_for_task(&kernel, &b, "slow").await;
     let a_task = wait_for_task(&kernel, &a, "chain").await;
 
-    let r = cancel(&kernel, &a_task).await;
+    let r = cancel(&kernel, a_task).await;
     assert_eq!(r["cancelled"], json!(true));
     // Leaves-up: the child is killed before the parent that awaits it.
     assert_eq!(r["killed"], json!([b_task, a_task]));
 
     // The subtree is GONE from the table.
-    let live: HashSet<String> = rows(&kernel)
+    let live: HashSet<i64> = rows(&kernel)
         .await
         .iter()
-        .filter_map(|t| t["id"].as_str().map(str::to_string))
+        .filter_map(|t| t["id"].as_i64())
         .collect();
     assert!(
         !live.contains(&a_task) && !live.contains(&b_task),
@@ -438,12 +432,9 @@ async fn cancel_kills_the_whole_subtree() {
     let log = sh.hook_log();
     assert_eq!(
         log.iter()
-            .map(|(agent, tid, _)| (agent.as_str(), tid.as_str()))
+            .map(|(agent, tid, _)| (agent.as_str(), *tid))
             .collect::<Vec<_>>(),
-        vec![
-            (b.0.as_str(), b_task.as_str()),
-            (a.0.as_str(), a_task.as_str())
-        ],
+        vec![(b.0.as_str(), b_task), (a.0.as_str(), a_task)],
     );
     assert!(
         log.iter().all(|(_, _, alive)| *alive),
@@ -459,7 +450,8 @@ async fn cancel_unknown_or_finished_task_is_honest() {
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
 
-    let r = cancel(&kernel, "no_such_agent:7").await;
+    // An id the counter never handed out: nothing to kill, and it says so.
+    let r = cancel(&kernel, 999_999).await;
     assert_eq!(r, json!({"cancelled": false, "killed": []}));
 
     // A task id that WAS live and is now finished (we just cancelled it).
@@ -474,7 +466,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
         }
     });
     let task_id = wait_for_task(&kernel, &a, "slow").await;
-    let first = cancel(&kernel, &task_id).await;
+    let first = cancel(&kernel, task_id).await;
     assert_eq!(first["cancelled"], json!(true));
     let reply = tokio::time::timeout(Duration::from_secs(2), caller)
         .await
@@ -482,7 +474,7 @@ async fn cancel_unknown_or_finished_task_is_honest() {
         .expect("caller must not panic");
     assert_eq!(reply, json!({"cancelled": true}));
 
-    let again = cancel(&kernel, &task_id).await;
+    let again = cancel(&kernel, task_id).await;
     assert_eq!(again, json!({"cancelled": false, "killed": []}));
 
     // A malformed call fails LOUD; it does not report a phantom success.
@@ -533,10 +525,10 @@ async fn agent_cancels_another_agents_task() {
     assert_eq!(r["cancelled"], json!(true));
     assert_eq!(r["killed"], json!([victim_task]));
 
-    let live: HashSet<String> = rows(&kernel)
+    let live: HashSet<i64> = rows(&kernel)
         .await
         .iter()
-        .filter_map(|t| t["id"].as_str().map(str::to_string))
+        .filter_map(|t| t["id"].as_i64())
         .collect();
     assert!(!live.contains(&victim_task));
     let reply = tokio::time::timeout(Duration::from_secs(2), caller)
@@ -573,7 +565,7 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
     })
     .await;
 
-    let r = cancel(&kernel, &task_id).await;
+    let r = cancel(&kernel, task_id).await;
     assert_eq!(r["cancelled"], json!(true));
 
     assert!(
@@ -632,7 +624,7 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
     assert_eq!(job_row["parent"], json!(a_task), "init-adoption");
 
     // Killing the OUTER task reaches the forked job through the adopted link.
-    let r = cancel(&kernel, &a_task).await;
+    let r = cancel(&kernel, a_task).await;
     assert_eq!(r["cancelled"], json!(true));
     assert_eq!(r["killed"], json!([job, a_task]));
     assert!(
