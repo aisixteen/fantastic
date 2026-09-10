@@ -1,8 +1,8 @@
 # WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
 # or a backend name — those live in e2e/backends/.
-id: recall_through_folds
+id: recall_early
 group: coding
-title: "after several folds, recall reaches the very first instruction and grep reaches inside a fold"
+title: "after a long run, recall and grep reach the very first instruction and a stored body"
 runner: probe.py
 runtimes: [python]
 costs: turns
@@ -13,4 +13,4 @@ limits:
   no_progress_turns: 10
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "12000"}  # this test MEASURES folds: it keeps the squeeze (the harness default is 32k)
+env: {E2E_WINDOW: "12000"}  # the squeeze the fold family measures under (the harness default is 32k)

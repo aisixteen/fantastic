@@ -1,8 +1,8 @@
 # WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
 # or a backend name — those live in e2e/backends/.
-id: folds_x_chains
+id: facts_x_chains
 group: coding
-title: "four roots sent over time, folds firing across them, a question about an early folded one"
+title: "four roots sent over time, four clean reports, a question about an early one answered from the store"
 runner: probe.py
 runtimes: [python]
 costs: turns
