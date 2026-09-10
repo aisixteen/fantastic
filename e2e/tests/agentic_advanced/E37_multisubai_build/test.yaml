@@ -1,0 +1,17 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: multisubai_build
+group: agentic_advanced
+title: the creator builds the three-solver team, sleeps, is woken by its conclusion, validates, deletes the fleet, stops
+runner: probe.py
+runtimes: [python]
+costs: turns
+# FOUR LANES inside one test (creator + three solvers). Run alone.
+long: true
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 0
+  turn_chars: 120000
+  turn_seconds: 600
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "600"}

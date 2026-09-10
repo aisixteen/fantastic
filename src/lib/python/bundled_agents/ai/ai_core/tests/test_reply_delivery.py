@@ -223,3 +223,35 @@ async def test_the_models_exec_id_rides_the_item_as_its_id():
     await _route_reply("ai", k, named, "cli", None, None, 42.0, "")
     assert k.items[0]["id"] == "job-alpha" and k.items[0]["retries"] == 2
     assert k.items[0]["payload"] == {"type": "withdraw"}
+
+
+async def test_to_fans_out_one_copy_per_recipient_carrying_the_list_and_msg():
+    """`<to>` becomes N kernel items; every copy carries the whole list, the sending
+    turn's id (`msg`) and the answered message (`re`)."""
+
+    class _K(_Kernel):
+        def __init__(self):
+            super().__init__()
+            self.items = []
+
+        async def send(self, batch):
+            self.items.extend(batch)
+            return await super().send(batch)
+
+    k = _K()
+    call = render_call(
+        "send",
+        {
+            "to": ["solver_2", "solver_3"],
+            "re": 398,
+            "reply_to": None,
+            "payload": {"type": "send", "text": "CANDIDATE 586"},
+        },
+    )
+    await _route_reply("ai", k, call, "cli", None, None, 42.0, "", turn_id=412)
+    peers = [i for i in k.items if i["target"] in ("solver_2", "solver_3")]
+    assert [i["target"] for i in peers] == ["solver_2", "solver_3"]
+    for i in peers:
+        assert i["payload"]["to"] == ["solver_2", "solver_3"]
+        assert i["payload"]["msg"] == 412 and i["payload"]["re"] == 398
+        assert i["payload"]["text"] == "CANDIDATE 586"

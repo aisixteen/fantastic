@@ -51,3 +51,55 @@ async def test_a_read_stream_reply_with_bytes_renders(seeded_kernel, store_agent
         assert "hello bytes" in t3, t3[-700:]
     finally:
         ot._providers.pop(oid, None)
+
+
+async def test_a_message_from_another_agent_opens_with_the_kernel_vouched_header(
+    seeded_kernel, store_agent
+):
+    """The receiver sees WHO sent it, to WHOM, and under which number — from the
+    dispatch context, not the sender's prose."""
+    from kernel import _current_sender
+
+    oid = await _make_ollama(seeded_kernel)
+    # A REAL peer: the gate is two-sided, so the sender must exist, reach `oid`,
+    # and be accepted by it — the operator (sender None) gets no header.
+    seeded_kernel.create("", id="solver_1", can_call={oid: "*"})
+    rec = seeded_kernel.get(oid) or {}
+    await seeded_kernel.send(
+        [
+            {
+                "target": seeded_kernel.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": oid,
+                    "callable_by": {**(rec.get("callable_by") or {}), "solver_1": "*"},
+                },
+            }
+        ]
+    )
+    fp = _FakeProvider([['<call name="done"></call>']])
+    ot._providers[oid] = fp
+    token = _current_sender.set("solver_1")
+    try:
+        out = await seeded_kernel.send(
+            [
+                {
+                    "target": oid,
+                    "payload": {
+                        "type": "send",
+                        "text": "CANDIDATE 586",
+                        "to": ["solver_2", oid],
+                        "msg": 412,
+                        "re": 398,
+                    },
+                }
+            ]
+        )
+        assert await _until_calls(fp, 1), out
+        incoming = fp.requests[0][-1]["content"]
+        assert incoming.startswith(
+            f"[from solver_1 · to solver_2, {oid} · msg 412 · re 398]\nCANDIDATE 586"
+        ), incoming[:200]
+    finally:
+        _current_sender.reset(token)
+        ot._providers.pop(oid, None)

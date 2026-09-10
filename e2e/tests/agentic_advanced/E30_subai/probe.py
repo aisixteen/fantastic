@@ -197,7 +197,13 @@ def box(title: str, body: str, mark: str = "|") -> None:
 
 
 def _ai_meta(
-    agent_id: str, *, think: bool, store, root, backend: str | None = None
+    agent_id: str,
+    *,
+    think: bool,
+    store,
+    root,
+    backend: str | None = None,
+    extra_reach: dict | None = None,
 ) -> dict:
     """One record shape per backend. `brain` answers with thinking OFF — one completion
     per send, no loop; `ai` is the BUILDER.
@@ -260,6 +266,8 @@ def _ai_meta(
             "web": "*",
         },
     }
+    if extra_reach:
+        meta["can_call"].update(extra_reach)
     if agent_id == "brain":
         meta["description"] = "A AI agent: one completion per send. No loop of its own."
     if backend == "anthropic":
@@ -748,6 +756,11 @@ async def run(
     extra_agents=None,
     brain_backend: str | None = None,
     banner: str = "build a sub-agentic routine that survives the conversation",
+    fixture=None,
+    scorer=None,
+    mine: set | None = None,
+    extra_reach: dict | None = None,
+    prefix: str = "subai_",
 ):
     """The probe, parameterized. ONE fixture and ONE `score` for every arm — a second
     copy of the scoring path is how two arms diverge silently, which the emergence
@@ -760,10 +773,11 @@ async def run(
     # kernel's legs are granted from ABOVE and cannot raise their own authority.
     # `MINE` is that same set (minus the root ids it also carries), so the two
     # cannot drift. Ignored in process, where the probe IS the operator.
+    mine = mine or MINE
     root, core, close_kernel = await open_kernel(
-        "subai_", reach=sorted(MINE - {"kernel_state", "core"})
+        prefix, reach=sorted(mine - {"kernel_state", "core"})
     )
-    store = await build_fixture(root, interpreter=interpreter)
+    store = await (fixture or build_fixture)(root, interpreter=interpreter)
     if extra_agents is not None:
         await extra_agents(root)
 
@@ -790,7 +804,9 @@ async def run(
             [
                 {
                     "target": root.id,
-                    "payload": _ai_meta("ai", think=True, store=store, root=root),
+                    "payload": _ai_meta(
+                        "ai", think=True, store=store, root=root, extra_reach=extra_reach
+                    ),
                 }
             ]
         )
@@ -1124,7 +1140,7 @@ async def run(
     # language: 0/4`, `final turn length: 0 chars` and `writes=0` no matter what
     # the model did. Measured 2026-09-03: the rust lane's own turns mention the
     # readme twice and the log holds nine of them, all of it scored as silence.
-    return await score(
+    return await (scorer or score)(
         root, store["id"], total, total + CANARY_VALUE, spy.transcript
     )
 

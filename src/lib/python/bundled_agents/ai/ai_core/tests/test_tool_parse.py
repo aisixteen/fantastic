@@ -280,3 +280,23 @@ def test_grant_maps_keyed_by_ids_and_relative_tokens_are_tags():
         ]
         == p
     )
+
+
+def test_a_send_may_name_several_recipients_with_to():
+    text = (
+        '<call name="send"><to><item>solver_2</item><item>solver_3</item></to>'
+        "<re>412</re><type>send</type><text>CANDIDATE 586</text></call>"
+    )
+    a = _one(text)["arguments"]
+    assert a["to"] == ["solver_2", "solver_3"] and a["re"] == 412
+    assert "target_id" not in a and a["payload"] == {
+        "type": "send",
+        "text": "CANDIDATE 586",
+    }
+    assert _one(render_call("send", a))["arguments"] == a
+
+
+def test_a_send_with_neither_target_nor_to_is_refused_naming_both():
+    _refused(
+        '<call name="send"><type>reflect</type></call>', "<target_id>", "<to><item>"
+    )
