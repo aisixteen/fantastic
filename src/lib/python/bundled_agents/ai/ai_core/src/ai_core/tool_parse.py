@@ -32,8 +32,8 @@ blocks, OpenHands/cline per-parameter tags, codex freeform grammar).
 
 Rules (all of them):
 - Envelope `<call name="<tool>">…</call>`. Tools: `send`, `done`, `inquiry_answer`.
-- `send`: `target_id`, `reply_to`, `title`, `timeout`, `retries`, `exec_id` are
-  CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
+- `send`: `target_id` (or `to`, a list of recipients — one copy each), `re`,
+  `reply_to`, `title`, `timeout`, `retries`, `exec_id` are CALL-level and stay there; every other child IS the payload (`type` names the verb). Other tools: the children
   are the arguments.
 - An element with child elements → dict; children all named `<item>` → list;
   text → scalar typed by the ONE rule shared with the CLI (`kernel.modes.parse.
@@ -68,7 +68,16 @@ _TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")
 # kernel item's caller-chosen execution name is `exec_id` HERE (core maps it onto the
 # item's `id`): a bare `<id>` would collide with the many verbs whose payload has an
 # `id` (`delete_agent`, `update_agent`, …) now that arguments are inline.
-_ROUTING = ("target_id", "reply_to", "title", "timeout", "retries", "exec_id")
+_ROUTING = (
+    "target_id",
+    "to",
+    "re",
+    "reply_to",
+    "title",
+    "timeout",
+    "retries",
+    "exec_id",
+)
 # The tools. Any other `name` is refused with the shape — a verb is `<type>`, never
 # the tool name (a compression small models made under the JSON grammar).
 TOOLS = ("send", "done", "inquiry_answer")
@@ -222,13 +231,22 @@ def parse_call(block: str) -> dict | None:
     if name != "send":
         return {"id": _mint_id(), "name": name, "arguments": fields}
     target = fields.pop("target_id", None)
-    if not isinstance(target, str) or not target.strip():
+    to = fields.pop("to", None)
+    if isinstance(to, str) and to.strip():
+        to = [to.strip()]
+    if isinstance(to, list):
+        to = [str(t).strip() for t in to if str(t).strip()]
+    if (not isinstance(target, str) or not target.strip()) and not to:
         raise _Malformed(
-            "a send names its target: `<target_id>agent id</target_id>` as the first "
-            "child of the call"
+            "a send names its target: `<target_id>agent id</target_id>`, or several "
+            "recipients as `<to><item>id</item><item>id</item></to>`"
         )
-    args: dict = {"target_id": target.strip()}
-    for key in _ROUTING[1:]:
+    args: dict = {}
+    if isinstance(target, str) and target.strip():
+        args["target_id"] = target.strip()
+    if to:
+        args["to"] = to
+    for key in _ROUTING[2:]:
         if key in fields:
             args[key] = fields.pop(key)
     args["payload"] = fields

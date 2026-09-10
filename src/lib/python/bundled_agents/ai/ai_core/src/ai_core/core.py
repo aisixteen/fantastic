@@ -90,7 +90,7 @@ from ai_core.tool_parse import (
     malformed_calls,
     render_reply,
 )
-from kernel import current_task
+from kernel import current_origin, current_task
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -383,7 +383,7 @@ def _row_ids_for_incoming(self_id: str, text: str, kernel) -> tuple[int, int | N
     turn that made the calls (`↑`) on its first tag; anything else is a ROOT — a fresh
     message from a person or a peer."""
     rid = _mint_row_id(self_id, kernel)
-    m = _TAG_LINKS.match(text or "")
+    m = _TAG_LINKS.match(str(text or ""))
     return rid, (_as_id(m.group(1)) if m else None)
 
 
@@ -657,6 +657,23 @@ line two, with "quotes" and anything else
 </bytes>
 </call>
 Which verbs take a body is each agent's own story — reflect it; every one names `bytes`.
+
+## Talking to several agents at once
+A send may name several recipients instead of one:
+<call name="send">
+<to><item>solver_2</item><item>solver_3</item></to>
+<type>send</type>
+<text>…</text>
+</call>
+Every recipient gets its own copy, and every copy opens with the same header:
+[from solver_1 · to solver_2, solver_3 · msg 412]
+`msg` is the id of the turn that sent it — the same number in every copy, so a group
+can refer to one message; a message from any agent opens with `[from … · msg N]`.
+Reply to a group message with the SAME `<to>` list (everyone except yourself) and
+`<re>412</re>` naming it; a reply sent to fewer agents, or to someone who was not on
+the list, forks a private conversation the others will never see. What a peer must
+know goes in the text: cite your own facts in words, never an id from your own
+history — it means nothing to them.
 
 A `<call>` IS AN INVOCATION, WHEREVER YOU WRITE IT — including inside your own
 thinking. The envelope is parsed out of everything you emit and dispatched the
@@ -1189,6 +1206,47 @@ async def _route_reply(
             )
         )
     done_called = any(c.get("name") == "done" for c in calls)
+    # ONE MESSAGE, SEVERAL RECIPIENTS. A send with `to` fans out here into one item
+    # per recipient — the kernel's batch is already one-to-many — and every copy
+    # carries the whole list (`to`), the sending turn's id (`msg`, the same number in
+    # every copy, so the group can refer to one message) and the message it answers
+    # (`re`). A single-recipient message to a peer carries `msg` too, so it can be
+    # answered by number. Nothing is shared: each copy is a row in its own tree.
+    expanded: list[dict] = []
+    for call in calls:
+        a = call.get("arguments") or {}
+        to = a.get("to")
+        if call.get("name") == "send" and isinstance(to, list) and to:
+            recipients = [str(t).strip() for t in to if str(t).strip()]
+            base = {k: v for k, v in a.items() if k not in ("to", "re", "target_id")}
+            for r in recipients:
+                payload = dict(a.get("payload") or {})
+                payload["to"] = recipients
+                payload["msg"] = turn_id
+                if "re" in a:
+                    payload["re"] = a["re"]
+                expanded.append(
+                    {**call, "arguments": {**base, "target_id": r, "payload": payload}}
+                )
+        else:
+            if (
+                call.get("name") == "send"
+                and isinstance(a.get("payload"), dict)
+                and a["payload"].get("type") == "send"
+            ):
+                payload = dict(a["payload"])
+                payload.setdefault("msg", turn_id)
+                if "re" in a:
+                    payload["re"] = a["re"]
+                call = {
+                    **call,
+                    "arguments": {
+                        **{k: v for k, v in a.items() if k != "re"},
+                        "payload": payload,
+                    },
+                }
+            expanded.append(call)
+    calls = expanded
     for call in calls:
         if call.get("name") in ("done", "inquiry_answer"):
             # CONTROL CALLS, not dispatches. `done` ends the chain;
@@ -2146,6 +2204,29 @@ def _make_send(cfg: Backend):
                     "client_id": client_id,
                 }
         text = payload.get("text", "")
+        # A message is TEXT whatever the caller typed: the tag grammar types a bare
+        # number (`<text>586</text>` → 586, measured 2026-09-10 multisubai, a
+        # TypeError in the turn), and "586" is a perfectly good message.
+        if isinstance(text, (int, float)) and not isinstance(text, bool):
+            text = str(text)
+        # WHO SAID IT, TO WHOM, UNDER WHICH NUMBER. A message from another AGENT
+        # opens with a header the KERNEL vouches for (the sender is the dispatch's
+        # own context, never the sender's prose): `[from solver_1 · to solver_2,
+        # solver_3 · msg 412 · re 398]`; `current_origin` is the caller the gate saw.
+        # Without it a peer's message arrived
+        # anonymous (measured 2026-09-10 multisubai: solvers signed their prose
+        # by hand), and a group message was indistinguishable from a private one.
+        sender = current_origin()
+        if sender and sender != id:
+            parts = [f"from {sender}"]
+            to = payload.get("to")
+            if isinstance(to, list) and to:
+                parts.append("to " + ", ".join(str(t) for t in to))
+            if payload.get("msg") is not None:
+                parts.append(f"msg {payload.get('msg')}")
+            if payload.get("re") is not None:
+                parts.append(f"re {payload.get('re')}")
+            text = f"[{' · '.join(parts)}]\n{text}"
         send_id = _new_send_id()
         entry = {
             "client_id": client_id,
