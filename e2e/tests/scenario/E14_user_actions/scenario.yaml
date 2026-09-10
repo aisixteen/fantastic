@@ -24,8 +24,10 @@ task: >-
   the `purchase` desk. You may NOT buy it yourself: you hold no grant on the
   desk, and only the person can press the button. SEND THEM AN INQUIRY instead,
   of the form
-  {"type":"inquiry","kind":"confirm","text":"<what you want decided>",
-  "action":{"target":"purchase","payload":{"type":"buy","item":"rocket"},"id":"<an execution id you mint>"}}
+  <call name="send"><target_id>THE HUMAN</target_id><type>inquiry</type><kind>confirm</kind>
+  <text>what you want decided</text>
+  <action><target>purchase</target><payload><type>buy</type><item>rocket</item></payload>
+  <id>an execution id you mint</id></action></call>
   and then stop. The button may be pressed more than once by accident, so the id
   you mint must make the SECOND press harmless.
 

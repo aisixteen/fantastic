@@ -285,14 +285,15 @@ def main(scenario_id: str) -> int:
 
         # THE TRANSCRIPT. The chain ran where this runner could not see it, so a
         # failure reads as silence unless the agent's own history is read.
-        hist = k.send("ai", {"type": "history", "client_id": "probe"})
-        msgs = hist.get("messages") if isinstance(hist, dict) else None
-        if isinstance(msgs, list):
-            print(f"\n  --- {len(msgs)} turns ---")
-            for m in msgs:
-                print(
-                    f"\n  {str(m.get('role', '?')).upper()}: {str(m.get('content', ''))[:700]}"
-                )
+        # `history` is a DIGEST — {rows: [{id, parent, kind, role, head, bytes}],
+        # next, total}; the key was `messages` before the ledger move and the dump
+        # printed nothing for a whole day of failures.
+        hist = k.send("ai", {"type": "history", "client_id": "probe", "limit": 200})
+        rows = hist.get("rows") if isinstance(hist, dict) else None
+        if isinstance(rows, list):
+            print(f"\n  --- {hist.get('total')} rows ---")
+            for r in rows:
+                print(f"  {r.get('id')} ← {r.get('parent')} {str(r.get('kind')):8} {r.get('head', '')}")
 
         for agent, got in seen.items():
             print(f"\n  {agent}.read -> {got}")

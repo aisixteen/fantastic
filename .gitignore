@@ -29,3 +29,6 @@ e2e/backends/sampling.json
 e2e/backends/connection.local.env
 # Staged kernel artifacts — built from source on demand, never committed.
 e2e/dist/
+
+# local model-proxy connections (one file per model)
+e2e/backends/local/

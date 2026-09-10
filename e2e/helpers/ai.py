@@ -207,7 +207,9 @@ async def connect(
         return (
             ev.get("type") == "status"
             and ev.get("phase") == "done"
-            and det.get("reason") not in (None, "ok")
+            # `awaiting` is the model's EXPLICIT wait (`<call name="await">`): a benign
+            # end of turn, not a failure — the next delivery wakes it (2026-09-10).
+            and det.get("reason") not in (None, "ok", "awaiting")
         )
 
     if core is None:
