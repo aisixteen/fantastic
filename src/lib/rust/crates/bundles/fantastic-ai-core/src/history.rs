@@ -1,115 +1,75 @@
-//! Per-client chat history — an append-only JSONL sidecar on the AI's own leg.
+//! The agent's conversation — rows in the KERNEL's message store.
 //!
-//! One file per client at `agents/<self>/chat_<safe_client>.jsonl`, ONE JSON
-//! line per turn, written through the `file_bridge` the AI names in its
-//! `file_bridge_id`. The encoding is ai_core's PRIVATE choice as a consumer
-//! (this code is its only reader; models get turns through `history`/`recall`)
-//! — the substrate imposes no format on anyone.
+//! AGENT ID IS CONVERSATION ID. A second conversation is a second agent, so
+//! there is no client dimension here: `history`, `recall` and the model view all
+//! read the same list whoever asks. Python's law, ported 2026-09-10 — until then
+//! this was a per-client JSONL sidecar at `agents/<self>/chat_<client>.jsonl` on
+//! the AI's own file leg, and two clients on one agent kept two threads that
+//! could not see each other.
 //!
-//! This replaced the `<self>_chat` durable_memory child when durable_memory was
-//! deleted (memory is plain FILES now). Line index == store index — load-bearing
-//! for `recall.before` and `derive_reaction`, exactly as in python.
+//! What is stored is the CONVERSATION: a turn, a delivered reply, a fold mark, a
+//! recall decision. The kernel's own bookkeeping — a `call` row per batch item,
+//! a `task` row per fork, a `body` row per dehydrated reply, a `view` row per
+//! projection — lives in the same table and is filtered out here.
 //!
-//! Mirrors python `ai_core.core._chat_path` / `_load_history` / `_save_history`
-//! (python is the immutable reference).
+//! LIST INDEX IS STORE INDEX, and it is load-bearing: `recall.before` pages
+//! backward by it and `projection::derive_reaction` marks a compaction with it.
+//! Both are positions in THIS list, so both hold as long as one list is what
+//! every reader sees.
+//!
+//! Mirrors python `ai_core.core._load_history` / `_save_history` (python is the
+//! immutable reference).
 
-use crate::helpers::{file_bridge_id, safe_client};
-use fantastic_kernel::send::with_operator;
 use fantastic_kernel::{AgentId, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-/// read chunk size on the stream verbs.
-const CHUNK: usize = 65536;
+/// The kernel's own bookkeeping kinds. In the same table, never the conversation.
+const BOOKKEEPING: [&str; 4] = ["call", "task", "body", "view"];
 
-/// The chat sidecar's path on the agent's OWN file leg.
-fn chat_path(self_id: &AgentId, client_id: &str) -> String {
-    format!("agents/{}/chat_{}.jsonl", self_id.0, safe_client(client_id))
-}
-
-/// The client's conversation, parsed line-by-line off the sidecar. Empty on a
-/// missing leg, a missing file, or unreadable content. A torn tail line (a
-/// crash mid-append) is skipped rather than poisoning the whole history.
+/// The agent's conversation, oldest first.
 ///
-/// BOOKKEEPING, PROCESSED FROM ABOVE — the same standing as the loader's
-/// persist_blob and the old chat-store create: the agent does not choose to
-/// have a conversation log. Confused-deputy-safe by construction: the target
-/// is the record's OWN `file_bridge_id` (operator-set), the verb is literal,
-/// and the path is self-scoped (`agents/<self>/…`, client sanitized).
-pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, client_id: &str) -> Vec<Value> {
-    let Some(fb) = file_bridge_id(self_id, kernel) else {
-        return Vec::new();
-    };
-    let leg = AgentId::from(fb.as_str());
-    let path = chat_path(self_id, client_id);
-    let mut raw: Vec<u8> = Vec::new();
-    let mut offset: u64 = 0;
-    loop {
-        let (r, body) = with_operator(kernel.send_with_binary(
-            &leg,
-            json!({"type": "read_stream", "path": path, "offset": offset, "length": CHUNK}),
-            Vec::new(),
-        ))
-        .await;
-        if !r.is_object() || r.get("error").is_some() {
-            break;
-        }
-        if !body.is_empty() {
-            raw.extend_from_slice(&body);
-        }
-        let eof = r.get("eof").and_then(Value::as_bool).unwrap_or(true);
-        if eof || body.is_empty() {
-            break;
-        }
-        offset = r
-            .get("next_offset")
-            .and_then(Value::as_u64)
-            .unwrap_or(offset + body.len() as u64);
-    }
-    if raw.is_empty() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&raw);
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(Value::is_object)
+/// Nothing is read from disk here: persistence of the store is the kernel's
+/// concern (a loader hydrates it, a persister tails it), never this bundle's.
+pub async fn load_history(self_id: &AgentId, kernel: &Arc<Kernel>, _client_id: &str) -> Vec<Value> {
+    kernel
+        .rows
+        .for_agent(self_id)
+        .into_iter()
+        .filter(|r| {
+            !r.get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| BOOKKEEPING.contains(&k))
+        })
+        .map(Value::Object)
         .collect()
 }
 
-/// APPEND this turn's new messages — one `write_stream` (absent offset =
-/// append-at-end, creates the file) per turn, one JSON line each.
+/// Append this pass's turns to the conversation.
 ///
-/// The durable record is never trimmed — the projection only shapes what the
-/// model is shown, so compaction and `recall` need the FULL conversation on
-/// the next turn. PROCESSED FROM ABOVE — see `load_history`: own leg, literal
-/// verb, self-scoped path. Without this every fixture would need a
-/// can_call/callable_by pair just so an AI can keep its own history.
+/// A turn is `{role, content}` plus whatever the caller carries; the store adds
+/// the id, the agent and the timestamp. A pre-minted `id` is accepted, which is
+/// what lets a turn name itself in the reply tags it sends before its own row
+/// exists.
 pub async fn append_history(
     self_id: &AgentId,
     kernel: &Arc<Kernel>,
-    client_id: &str,
+    _client_id: &str,
     new_turns: &[Value],
 ) {
-    if new_turns.is_empty() {
-        return;
-    }
-    let Some(fb) = file_bridge_id(self_id, kernel) else {
-        return;
-    };
-    let leg = AgentId::from(fb.as_str());
-    let path = chat_path(self_id, client_id);
     for turn in new_turns {
-        let mut line = match serde_json::to_string(turn) {
-            Ok(s) => s,
-            Err(_) => continue,
+        let row: Map<String, Value> = match turn {
+            Value::Object(m) => m.clone(),
+            other => {
+                let mut m = Map::new();
+                m.insert("content".to_string(), json!(other.to_string()));
+                m
+            }
         };
-        line.push('\n');
-        let _ = with_operator(kernel.send_with_binary(
-            &leg,
-            json!({"type": "write_stream", "path": path}),
-            line.into_bytes(),
-        ))
-        .await;
+        // A refused row is the hydrator's mistake, not the model's — say it and
+        // keep the rest of the turn, rather than dropping a conversation.
+        if let Err(e) = kernel.rows.put(self_id, row) {
+            eprintln!("  [history] {self_id}: {e}");
+        }
     }
 }

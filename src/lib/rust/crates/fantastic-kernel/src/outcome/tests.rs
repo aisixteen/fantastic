@@ -71,12 +71,14 @@ fn a_frame_id_becomes_the_execution_id() {
 #[test]
 fn the_wire_shape_is_pid_status_result_attempts() {
     let o = Outcome::new(
-        Some(crate::tasks::TaskId::from("desk:0badf00d")),
+        Some(crate::tasks::TaskId(412)),
         Status::Completed,
         serde_json::json!({"ok": true}),
     );
     let v = o.to_value();
-    assert_eq!(v["pid"], "desk:0badf00d");
+    // A PID IS A NUMBER on the wire — the kernel counter's, the same one `ps`,
+    // `cancel`, the ledger and the message log name.
+    assert_eq!(v["pid"], 412);
     assert_eq!(v["status"], "completed");
     assert_eq!(v["result"]["ok"], true);
     assert_eq!(v["attempts"], 1);

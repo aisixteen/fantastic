@@ -134,14 +134,12 @@ struct Dispatch {
     verb: String,
     sender: AgentId,
     timeout: Option<f64>,
-    /// The ledger key: the caller's id, or the minted pid for an unnamed item.
-    exec_id: String,
-    /// The task-table handle. For a NAMED execution this IS `exec_id`, so `ps`
-    /// and `cancel` speak the caller's own id; an unnamed one carries its minted
-    /// pid. A retry re-registers under the same handle either way.
+    /// The execution's id — the kernel counter's number, and the ledger key.
+    exec_id: i64,
+    /// The task-table handle. It IS `exec_id`: one number names the execution in
+    /// `ps`, in `cancel`, in the ledger and in the reply. A retry re-registers
+    /// under the same handle.
     task_id: TaskId,
-    /// Whether the caller named this execution (its id is the handle).
-    named: bool,
     /// A RAW request body: present ⇒ dispatch through the BINARY channel.
     binary: Option<Vec<u8>>,
 }
@@ -235,30 +233,16 @@ impl Kernel {
                 )))
             }
         };
-        if let Some(id) = &item.id {
-            // ONE ID SPACE: a caller id may not be empty and may not sit in the
-            // kernel-minted `<agent>:<hex>` namespace unless it NAMES an existing
-            // execution (re-fetch / join by pid) — minted ids are referenced,
-            // never created.
-            if id.is_empty() {
-                return Launched::Settled(Outcome::refused(crate::refusal::bad(
-                    "send",
-                    "id",
-                    "a non-empty string",
-                )));
-            }
-            if id.contains(':') && !self.ledger.has(id) {
-                let mut r = crate::refusal::refusal(
-                    crate::refusal::BAD_ARG,
-                    format!(
-                        "send: id {id:?} is in the kernel-minted pid namespace (':') and \
-                         names no known execution — minted ids can be referenced, never \
-                         created"
-                    ),
-                );
-                crate::refusal::with(&mut r, "arg", json!("id"));
-                return Launched::Settled(Outcome::refused(r));
-            }
+        // A NAME MAY NOT BE EMPTY. Everything else about the caller's id is the
+        // ledger's business: a name it has seen JOINS that execution, a name it
+        // has not opens a new one, and there is no namespace to trespass in
+        // because the caller never supplies an id at all — only a name.
+        if item.id.as_deref() == Some("") {
+            return Launched::Settled(Outcome::refused(crate::refusal::bad(
+                "send",
+                "id",
+                "a non-empty string",
+            )));
         }
 
         // Resolve target. Special id `"kernel"` aliases to the root.
@@ -290,26 +274,27 @@ impl Kernel {
         let sender = current_sender().unwrap_or_else(|| target.id.clone());
         let origin = current_sender();
 
-        // ONE ID SPACE, ONE HANDLE. A NAMED execution registers in the task
-        // table under the caller's own id, so `ps` shows that id and `cancel
-        // task_id=<id>` kills it — the id the caller already holds IS the
-        // handle. Minting a second, private pid for a named item meant the
-        // caller could not cancel or find its own execution (measured
-        // 2026-09-02). An UNNAMED item still mints, and the mint stays
-        // SYNCHRONOUS: the pid exists before the first await, which is what
-        // makes a whole batch visible in `ps` at once.
-        let named = item.id.is_some();
-        let task_id = match &item.id {
-            Some(id) => TaskId(id.clone()),
-            None => self.tasks.mint(&target.id),
-        };
-        let exec_id = item.id.unwrap_or_else(|| task_id.0.clone());
+        // ONE ID SPACE, AND THE KERNEL OWNS IT. A caller supplies a NAME — a
+        // handle it chose, "ensure this ran" — and the kernel supplies the id
+        // from its single counter. Re-sending the same name JOINS the execution
+        // that name already opened; it never starts a second one and never mints
+        // into the kernel's space. The mint stays SYNCHRONOUS: the pid exists
+        // before the first await, which is what makes a whole batch visible in
+        // `ps` at once.
+        let name = item.id.clone();
+        let joined = name.as_deref().and_then(|n| self.ledger.resolve_name(n));
+        let exec_id = joined.unwrap_or_else(|| self.rows.mint_id());
+        let task_id = TaskId(exec_id);
         let retries = item.retries.unwrap_or(0);
 
-        match self
-            .ledger
-            .open(&exec_id, &target.id, &verb, retries, named, origin.clone())
-        {
+        match self.ledger.open(
+            exec_id,
+            &target.id,
+            &verb,
+            retries,
+            name.as_deref(),
+            origin.clone(),
+        ) {
             crate::ledger::Opened::Refused(r) => {
                 self.tasks.forget(&task_id);
                 return Launched::Settled(Outcome::refused(*r));
@@ -353,7 +338,6 @@ impl Kernel {
             timeout: item.timeout,
             exec_id,
             task_id,
-            named,
             binary: item.binary,
         }))
     }
@@ -379,7 +363,6 @@ impl Kernel {
             timeout,
             exec_id,
             task_id,
-            named,
             binary,
         } = d;
 
@@ -387,7 +370,7 @@ impl Kernel {
         // The pid of the attempt that actually SETTLED — a retry re-dispatches
         // under a fresh row, so the last one is what the outcome names.
         let (pid, reply, status) = loop {
-            self.ledger.attempt(&exec_id);
+            self.ledger.attempt(exec_id);
             let mut this_pid: Option<TaskId> = None;
             let (reply, status) = self
                 .run_dispatch(
@@ -396,23 +379,19 @@ impl Kernel {
                     &verb,
                     Some(&mut this_pid),
                     timeout,
-                    next_pid.clone(),
+                    next_pid,
                     binary.clone(),
                 )
                 .await;
-            if !self.ledger.should_retry(&exec_id, status) {
+            if !self.ledger.should_retry(exec_id, status) {
                 break (this_pid, reply, status);
             }
-            // Same exec id across attempts; a fresh task row per attempt, because
-            // the previous one is already forgotten. Cancelling the execution
-            // kills the current attempt AND this loop — a cancel is absorbing.
-            // A retry is the SAME execution, so it re-registers under the SAME
-            // id: cancelling that id kills the current attempt AND the loop.
-            next_pid = if named {
-                TaskId(exec_id.clone())
-            } else {
-                self.tasks.mint(&target.id)
-            };
+            // A RETRY IS THE SAME EXECUTION, so it re-registers under the SAME
+            // id — named or not. It used to mint a fresh pid for an unnamed
+            // retry, so `cancel <pid>` on attempt two missed the work it was
+            // aimed at. Cancelling the id kills the current attempt AND this
+            // loop: a cancel is absorbing.
+            next_pid = TaskId(exec_id);
         };
 
         let mut reply = reply;
@@ -442,7 +421,7 @@ impl Kernel {
 
         let out = self
             .ledger
-            .settle(&exec_id, Outcome::new(pid, status, reply));
+            .settle(exec_id, Outcome::new(pid, status, reply));
         // The DURABLE half, if a loader installed one. The kernel does not know
         // what this writes or where.
         self.ledger_settled();
@@ -527,16 +506,16 @@ impl Kernel {
         task_id: TaskId,
         binary: Option<Vec<u8>>,
     ) -> (Value, Status) {
-        // The pid was minted in the SYNCHRONOUS launch phase and is already the
-        // ledger key for an unnamed execution — minting a second one here would
-        // split the two apart, so the row and the reply would name different
-        // things and a pid could not re-fetch its own outcome.
+        // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
+        // key — minting a second one here would split the two apart, so the row
+        // and the reply would name different things and a pid could not
+        // re-fetch its own outcome.
         //
         // Register BEFORE spawning: the row (and its stop handle) must exist
         // the instant the handler can run, or a nested `send` could claim a
         // parent that isn't in the table yet.
         if let Some(slot) = task_out {
-            *slot = Some(task_id.clone());
+            *slot = Some(task_id);
         }
         let handle = TaskHandle::new();
         self.tasks.register(
@@ -556,7 +535,7 @@ impl Kernel {
             // spawn `CURRENT_SENDER` becomes the target, so this is the last
             // place the origin is still visible.
             let origin = current_sender();
-            let tid = task_id.clone();
+            let tid = task_id;
             let cancel = handle.cancel_signal();
             let killed = handle.killed_flag();
             tokio::spawn(async move {
@@ -604,7 +583,7 @@ impl Kernel {
         // Also the row's self-cleaner: dropped on every exit path.
         let _guard = DispatchGuard {
             kernel: Arc::clone(self),
-            id: task_id.clone(),
+            id: task_id,
             handle,
         };
 
@@ -627,7 +606,7 @@ impl Kernel {
                     Ok(j) => j,
                     Err(_) => {
                         let k = Arc::clone(self);
-                        let tid = task_id.clone();
+                        let tid = task_id;
                         with_operator(async move { k.cancel_task(&tid).await }).await;
                         return (
                             crate::refusal::refusal(

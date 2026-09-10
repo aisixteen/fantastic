@@ -5,7 +5,7 @@
 //! cache, prompt assembly, agentic loop (incl. RAW tool-call parsing + reply
 //! routing), status phase machine, and history persistence live in ai-core. NO
 //! native tools — Fantastic NEVER sends OpenAI `tools`/`tool_choice` nor reads
-//! `delta.tool_calls`; the model emits a `<tool_call>` envelope in the text.
+//! `delta.tool_calls`; the model emits a `<call name=…>` envelope in the text.
 //!
 //! A reasoning model streams its deliberation as `delta.reasoning_content` and
 //! only its conclusion as `delta.content`; both are read and the deliberation is
@@ -252,7 +252,7 @@ impl Provider for NimProvider {
 
 /// Drain the SSE body, split into `data:` lines, parse JSON, emit content
 /// tokens in order. PURE RAW TEXT — no native `tool_calls` are read; ai-core
-/// parses the `<tool_call>` envelope out of the token text.
+/// parses the `<call name=…>` envelope out of the token text.
 async fn consume_sse(
     resp: reqwest::Response,
 ) -> Result<Vec<Result<ProviderEvent, String>>, String> {
@@ -400,7 +400,7 @@ impl Bundle for NvidiaNimBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
         Ok(())
     }
 }
@@ -461,7 +461,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "emits": {
             "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
             "token": "{type:'token', text, source, client_id} — streaming chunk.",
-            "say": "{type:'say', text, source, client_id} — per tool_call summary plus rate-limit notices.",
+            "say": "{type:'say', text, source, client_id} — per call summary plus rate-limit notices.",
             "status": "{type:'status', source, client_id, ts, phase, detail} — phase machine: queued|thinking|streaming|tool_calling|done. detail.waiting_on='rate_limit' + wait_s during 429 backoff.",
             "done": "{type:'done', source, client_id} — back-compat end marker.",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. compacted: detail={strategy, dropped_turns, kept_turns, summarized}. too_small: detail={context_window, system_tokens, hint} (model NOT called). Pull counterpart: the context_status verb.",

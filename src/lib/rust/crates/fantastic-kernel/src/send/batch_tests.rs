@@ -158,9 +158,11 @@ async fn a_bad_timeout_is_refused_not_guessed() {
 }
 
 #[tokio::test]
-async fn an_id_may_not_borrow_the_minted_pid_namespace() {
-    // `<agent>:<hex>` is the kernel's to mint. A caller that could spell one
-    // could collide with — or address — an execution it does not own.
+async fn a_name_that_looks_like_an_old_pid_is_just_a_name() {
+    // THE NAMESPACE IS GONE. A caller used to be refused an id shaped
+    // `<agent>:<hex>` because that was the kernel's to mint. It mints numbers
+    // now and a caller supplies only NAMES, so there is nothing to collide with
+    // and nothing to refuse: this is an ordinary named execution.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_ns").await;
@@ -170,9 +172,8 @@ async fn an_id_may_not_borrow_the_minted_pid_namespace() {
             Item::new(a.clone(), json!({"type": "fast"})).with_id("b_ns:deadbeef")
         ])
         .await;
-    assert_eq!(out[0].status, Status::Failed);
-    assert_eq!(out[0].result["reason"], "bad_arg");
-    assert_eq!(out[0].result["arg"], "id");
+    assert_eq!(out[0].status, Status::Completed);
+    assert!(out[0].pid.expect("a pid").0 > 0);
 }
 
 #[tokio::test]
@@ -232,7 +233,7 @@ async fn cancelling_one_item_leaves_its_siblings_alone() {
             .into_iter()
             .find(|r| r["verb"] == "slow")
         {
-            victim = row["id"].as_str().map(String::from);
+            victim = row["id"].as_i64();
             break;
         }
     }

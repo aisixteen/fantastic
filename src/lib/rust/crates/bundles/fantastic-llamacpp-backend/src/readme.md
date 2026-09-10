@@ -4,7 +4,7 @@ Verbs: send, history, recall, context_status, status, reflect. No api_key verb: 
 server usually has none, so this backend is available by default rather than refusing.
 
 Tool-calling is RAW: the provider streams text and ai_core parses the
-`<tool_call>`/`<tool_response>` envelope (tool_parse). No native tools array is sent.
+`<call name=…>` envelope (tool_parse). No native tools array is sent.
 
 `endpoint` defaults to http://127.0.0.1:8080/v1.
 

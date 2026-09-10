@@ -93,7 +93,7 @@ async fn a_binary_item_reaches_the_binary_channel_with_a_real_pid() {
     assert_eq!(out.result["written"], payload.len(), "{}", out.result);
     assert_eq!(*seen.lock().unwrap(), payload, "bytes must ride verbatim");
     let pid = out.pid.expect("a batched binary item has a real pid");
-    assert!(pid.0.starts_with("sink:"), "{pid:?}");
+    assert!(pid.0 > 0, "{pid:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,7 +110,8 @@ async fn a_named_binary_item_dedups_like_any_other() {
         .await
         .remove(0);
     assert_eq!(out.result["written"], 3, "{}", out.result);
-    assert_eq!(out.pid.as_ref().map(|p| p.0.as_str()), Some("job-b"));
+    let first_pid = out.pid.expect("a named item has a pid");
+    assert!(first_pid.0 > 0);
 
     // The SAME id re-sent returns the recorded outcome and runs nothing.
     let again = kernel

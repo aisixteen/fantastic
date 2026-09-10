@@ -9,7 +9,7 @@ module header. Every backend speaks it, so any caller retargets by changing one 
 
 ## ONE pass — and the model routes its own output
 `send` does exactly ONE provider pass. **No loop**: nothing iterates on the
-model's behalf, and emitting no `<tool_call>` ends the turn — stop is the
+model's behalf, and emitting no `<call>` ends the turn — stop is the
 default and costs nothing.
 
 Tool-calling is RAW and belongs to `fantastic-ai-core`. `OllamaProvider` never
@@ -18,7 +18,11 @@ envelope as TEXT, this transport streams that text through knowing nothing about
 it, and ai-core parses and dispatches it.
 
 ```
-<tool_call>{"name":"send","arguments":{"target_id":"<id>","payload":{"type":"<verb>"},"reply_to":"self"}}</tool_call>
+<call name="send">
+<target_id>id</target_id>
+<reply_to>self</reply_to>
+<type>verb</type>
+</call>
 ```
 
 Each call is dispatched and its reply delivered to that call's `reply_to`, which

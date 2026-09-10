@@ -82,7 +82,18 @@ DEFAULT_CALLABLE_BY: dict[str, object] = {
 # child of the root — which is how a leaf browser leg could tap it while holding
 # no grant that names it (dataroom audit, 2026-08-27).
 PRIVILEGED_VERBS: frozenset[str] = frozenset(
-    {"create_agent", "delete_agent", "update_agent", "state_subscribe"}
+    {
+        "create_agent",
+        "delete_agent",
+        "update_agent",
+        "state_subscribe",
+        # HYDRATION's pair — reading a conversation WHOLE and writing one into
+        # an agent. `messages` is the grantable read (digests, no bodies); these
+        # two are what a loader does from above, so a wildcard must never carry
+        # them: only a grant that NAMES them opens either.
+        "rows_read",
+        "rows_write",
+    }
 )
 
 # The remedy shown on any denial: authority descends, it is never self-raised.

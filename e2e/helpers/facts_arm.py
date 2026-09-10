@@ -62,10 +62,23 @@ async def call(root, target, payload):
 async def store_rows(root, core, aid: str) -> list[dict]:
     """The agent's whole durable store, for SCORING. In process it is read directly
     (`history` now answers at digest resolution, under the inline cap — a probe that
-    scores calls and tokens needs the rows themselves). Over the wire it pages `recall`
-    from the newest turn back until the store is exhausted."""
+    scores calls and tokens needs the rows themselves). Over the wire it asks the
+    kernel for the same rows (`rows_read`), and falls back to paging `recall` for a
+    runtime that has no such verb — `recall` carries the text but not the ids, so a
+    probe that scores ROWS needs the first path."""
     if core is not None:
         return await core._load_history(aid, root)
+    whole = await call(root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200})
+    if isinstance(whole, dict) and "rows" in whole:
+        out = list(whole.get("rows") or [])
+        after = whole.get("next")
+        while after is not None:
+            whole = await call(
+                root, "kernel", {"type": "rows_read", "agent": aid, "limit": 200, "after": after}
+            )
+            out += list((whole or {}).get("rows") or [])
+            after = (whole or {}).get("next")
+        return out
     out: list[dict] = []
     before = None
     while True:
@@ -372,21 +385,64 @@ async def copy_rows(root, src: str, dst: str) -> int:
     """FORK from above: the source's rows re-minted under the destination id, parents
     re-linked through the same map so the chains survive. Ids come from the kernel's one
     counter and the table is one dict — copying an id verbatim would clobber the
-    original's row, so every copy is re-minted. In-process only."""
-    ctx = root.ctx
+    original's row, so every copy is re-minted.
+
+    IN PROCESS BY DEFAULT (`root.ctx`), over the wire through the kernel's own
+    `rows_read`/`rows_write` when there is no ctx to reach. The two paths do the
+    SAME arithmetic — the wire one just asks the kernel for what the in-process
+    one takes directly — so a fork means the same thing on every runtime."""
     remap: dict[int, int] = {}
-    # The CONVERSATION forks; the kernel's own bookkeeping (a `call` row per send, a
-    # `task` row per fork) is the original's ledger and stays with it.
-    for r in ctx.rows_for(src):
+
+    def forked(r: dict) -> dict | None:
+        """One source row as its copy, or None when it is not the conversation.
+        The kernel's own bookkeeping (a `call` row per send, a `task` row per
+        fork, a `body`, a `view`) is the ORIGINAL's ledger and stays with it —
+        bodies and views resolve through ids the copy does not have."""
         if r.get("kind") in ("call", "task", "body", "view"):
-            continue  # bookkeeping, and bodies/views resolve through the original's ids
+            return None
         row = {k: v for k, v in r.items() if k not in ("id", "agent", "ts")}
         if row.get("parent") in remap:
             row["parent"] = remap[row["parent"]]
         if row.get("refs"):
             row["refs"] = [remap.get(x, x) for x in row["refs"]]
-        remap[r["id"]] = ctx.rows_put(dst, row)
+        return row
+
+    ctx = getattr(root, "ctx", None)
+    if ctx is not None:
+        for r in ctx.rows_for(src):
+            row = forked(r)
+            if row is not None:
+                remap[r["id"]] = ctx.rows_put(dst, row)
+        return len(remap)
+
+    # ONE ROW PER CALL, because a parent inside the same batch has no new id
+    # until its copy lands — the remap is built as it goes, exactly as above.
+    for r in await _wire_rows(root, src):
+        row = forked(r)
+        if row is None:
+            continue
+        out = await call(root, "kernel", {"type": "rows_write", "agent": dst, "rows": [row]})
+        ids = (out or {}).get("ids") or []
+        assert ids, f"rows_write refused a fork row: {out}"
+        remap[r["id"]] = ids[0]
     return len(remap)
+
+
+async def _wire_rows(root, aid: str) -> list[dict]:
+    """An agent's rows WHOLE, over the wire — the kernel's `rows_read`, paged."""
+    out: list[dict] = []
+    after = None
+    while True:
+        payload = {"type": "rows_read", "agent": aid, "limit": 200}
+        if after is not None:
+            payload["after"] = after
+        r = await call(root, "kernel", payload)
+        page = (r or {}).get("rows") or []
+        out += page
+        after = (r or {}).get("next")
+        if after is None:
+            break
+    return out
 
 
 async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeout: float = 300.0) -> dict:

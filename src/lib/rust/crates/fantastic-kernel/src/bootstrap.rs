@@ -97,6 +97,11 @@ pub struct BootedKernel {
     /// Ids of every agent loaded during hydration (excluding root).
     /// Useful for boot-time `boot` verb dispatch.
     pub loaded: Vec<AgentId>,
+    /// The highest message id the log held at hydration — where a persister
+    /// should subscribe. Everything minted after this point (the roster's own
+    /// boot traffic included) is REPLAYED to it, so the pump can be installed
+    /// later without losing what happened in between.
+    pub messages_after: i64,
 }
 
 /// Drives the boot sequence. Caller fills `bundles` first.
@@ -181,10 +186,29 @@ fn boot_disk(
     let _rx = kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
 
+    // THE MESSAGE LOG, COLD — before any child exists, so a hydrated id can
+    // never collide with one a booting agent mints. A cut or foreign log is
+    // LOUD: half a conversation is worse than none, and the operator truncates
+    // at the last complete row rather than the kernel guessing.
+    let messages_after = match crate::messages_log::hydrate_messages(kernel, &fantastic_dir) {
+        Ok(0) => 0,
+        Ok(n) => {
+            println!("  [messages] hydrated {n} row(s)");
+            kernel.rows.next_id() - 1
+        }
+        Err(e) => {
+            return Err(KernelError::Persistence {
+                path: fantastic_dir.join(crate::messages_log::MESSAGES_FILE),
+                source: std::io::Error::other(e),
+            })
+        }
+    };
+
     let loaded = persistence::load_children(kernel, &kernel.bundles, Arc::clone(&root))?;
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded,
+        messages_after,
     })
 }
 
@@ -214,6 +238,8 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded: Vec::new(),
+        // In memory: nothing was read, so a persister starts at the beginning.
+        messages_after: 0,
     })
 }
 

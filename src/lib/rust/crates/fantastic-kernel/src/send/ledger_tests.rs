@@ -93,24 +93,21 @@ async fn an_unnamed_execution_is_ledgered_under_its_pid() {
         .send(vec![Item::new(a.clone(), json!({"type": "count"}))])
         .await
         .remove(0);
-    let pid = out.pid.clone().expect("a dispatched item has a pid");
+    let pid = out.pid.expect("a dispatched item has a pid");
 
     let rows = ledger_rows(&kernel).await;
     let row = rows
         .iter()
-        .find(|r| r["id"] == pid.0)
+        .find(|r| r["id"] == serde_json::json!(pid.0))
         .expect("the unnamed execution has a row");
     assert_eq!(row["named"], false);
     assert_eq!(row["status"], "completed");
 
-    // Re-fetch BY PID returns the recorded outcome; it never re-runs.
-    let refetched = kernel
-        .send(vec![
-            Item::new(a.clone(), json!({"type": "count"})).with_id(pid.0.clone())
-        ])
-        .await
-        .remove(0);
-    assert_eq!(refetched.result["run"], 1);
+    // AND IT CANNOT BE RE-FETCHED, because nobody named it. A pid is the
+    // kernel's; a caller joins an execution through the NAME it gave, and an
+    // unnamed one has none. That is the trade: re-fetchability is what a name
+    // buys, and this row is here to be READ (`ledger`), not re-entered.
+    assert_eq!(row["name"], serde_json::Value::Null);
     assert_eq!(sh.run_count(), 1);
 }
 
@@ -162,7 +159,10 @@ async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
 
     // It is INSPECTABLE — terminal non-completed rows are the dead-letter queue.
     let rows = ledger_rows(&kernel).await;
-    let dead = rows.iter().find(|r| r["id"] == "dead-1").expect("the row");
+    let dead = rows
+        .iter()
+        .find(|r| r["name"] == "dead-1")
+        .expect("the row");
     assert_eq!(dead["status"], "failed");
     assert_eq!(dead["attempts"], 2);
 
@@ -209,7 +209,10 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
 
     // The OWNER is still running — the joiner's timeout did not reach it.
     let rows = ledger_rows(&kernel).await;
-    let row = rows.iter().find(|r| r["id"] == "long-1").expect("the row");
+    let row = rows
+        .iter()
+        .find(|r| r["name"] == "long-1")
+        .expect("the row");
     assert_eq!(row["status"], "in_flight", "the joiner killed the owner");
     owner.abort();
 }
@@ -229,13 +232,14 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
         ])
         .await;
 
-    // The operator sees it.
-    let ids: Vec<String> = ledger_rows(&kernel)
-        .await
+    // The operator sees it. The row is found by the NAME it carries — the id is
+    // the kernel's and the caller never learns it except through the outcome.
+    let rows = ledger_rows(&kernel).await;
+    let mine = rows
         .iter()
-        .map(|r| r["id"].as_str().unwrap().to_string())
-        .collect();
-    assert!(ids.contains(&"operator-job".to_string()));
+        .find(|r| r["name"] == "operator-job")
+        .expect("the operator's own row");
+    let mine = mine["id"].as_i64().unwrap();
 
     // An AGENT reading the ledger sees only its own origins — not this one.
     let seen = crate::send::with_sender(AgentId::from("l_scope"), async {
@@ -249,14 +253,14 @@ async fn the_ledger_verb_is_scoped_to_what_you_originated() {
             .result
     })
     .await;
-    let agent_ids: Vec<String> = seen["executions"]
+    let agent_ids: Vec<i64> = seen["executions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| r["id"].as_str().unwrap().to_string())
+        .map(|r| r["id"].as_i64().unwrap())
         .collect();
     assert!(
-        !agent_ids.contains(&"operator-job".to_string()),
+        !agent_ids.contains(&mine),
         "an agent read another origin's rows: {agent_ids:?}"
     );
 }
@@ -319,7 +323,7 @@ async fn a_cancelled_execution_stays_cancelled() {
             .iter()
             .find(|r| r["verb"] == "slow")
         {
-            victim = row["id"].as_str().map(String::from);
+            victim = row["id"].as_i64();
             break;
         }
     }

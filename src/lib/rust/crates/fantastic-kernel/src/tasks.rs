@@ -40,39 +40,42 @@ use crate::agent::AgentId;
 use crate::kernel::Kernel;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 use tokio::task_local;
 
-/// A task id — `"<agent_id>:<n>"`. A pid.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TaskId(pub String);
+/// A task id — a message id. A pid.
+///
+/// ONE NUMBER NAMES ONE THING. It comes from the kernel's single counter
+/// ([`crate::rows::RowStore::mint_id`]), the same allocator a conversation row, a
+/// reply body and a forked task take theirs from, so the id in `ps` is the id in
+/// `cancel`, in the ledger, in a reply tag and in the message log.
+///
+/// There is NO `From<&str>`. A string arriving from outside is a NAME — a
+/// caller-chosen execution handle the ledger resolves — and letting one become a
+/// pid is exactly the ambiguity the counter exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TaskId(pub i64);
 
 impl TaskId {
-    /// Borrow the underlying string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// The underlying number.
+    #[must_use]
+    pub fn get(self) -> i64 {
+        self.0
     }
 }
 
-impl From<&str> for TaskId {
-    fn from(s: &str) -> Self {
-        TaskId(s.to_string())
-    }
-}
-
-impl From<String> for TaskId {
-    fn from(s: String) -> Self {
-        TaskId(s)
+impl From<i64> for TaskId {
+    fn from(n: i64) -> Self {
+        TaskId(n)
     }
 }
 
 impl std::fmt::Display for TaskId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -94,7 +97,7 @@ task_local! {
 
 /// The current task id, or `None` outside any dispatch.
 pub fn current_task() -> Option<TaskId> {
-    CURRENT_TASK.try_with(|t| t.clone()).ok()
+    CURRENT_TASK.try_with(|t| *t).ok()
 }
 
 /// `true` iff the calling task has been marked killed by an in-flight
@@ -177,33 +180,12 @@ struct TaskEntry {
     handle: TaskHandle,
 }
 
+#[derive(Default)]
 struct Inner {
     tasks: HashMap<TaskId, TaskEntry>,
-    /// Per-agent task counter — the non-reuse guarantee. Hashed out of view by
-    /// [`TaskTable::mint`]; never surfaced, because a visible counter reads as a
-    /// sequence and messaging is async.
-    seq: HashMap<AgentId, u64>,
+    /// Registration order — what `ps` sorts by. Non-reuse is the kernel
+    /// counter's job now, not this table's.
     order: u64,
-    /// Per-table, never persisted — makes the minted token opaque across runs.
-    salt: u64,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        // Address-derived: no RNG dependency in this crate, and the value only has to
-        // be unpredictable-enough and per-process. Ids are process-local and never
-        // persisted, so this is not a security boundary.
-        let seed = Box::into_raw(Box::new(0u8));
-        let salt = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
-        // SAFETY: the allocation was just made by `Box::new` and is not used again.
-        unsafe { drop(Box::from_raw(seed)) };
-        Self {
-            tasks: HashMap::new(),
-            seq: HashMap::new(),
-            order: 0,
-            salt,
-        }
-    }
 }
 
 /// The live table of in-flight work. Lives on the [`Kernel`]; `ps` reads it,
@@ -223,35 +205,16 @@ impl TaskTable {
         Self::default()
     }
 
-    /// Next task id for `agent_id` — `"<agent_id>:<8 lowercase hex>"`.
-    ///
-    /// OPAQUE on purpose. A visible counter reads as a SEQUENCE, and messaging here is
-    /// fully async: a send may return once, several times, or never, and replies arrive
-    /// out of order. Measured 2026-08-20 (python): with `<agent>:<n>` a model inferred
-    /// ordering from the number, decided "the reply queue is running ahead of me", and
-    /// re-polled forever instead of matching on the id. The monotonic `seq` is KEPT —
-    /// it is what guarantees non-reuse — but it is hashed out of view, and a collision
-    /// with a live row re-rolls rather than aliasing two dispatches onto one id.
-    ///
-    /// The salt is per-table and never persisted, so ids are unguessable across runs and
-    /// carry no meaning outside this process. Matching the SHAPE is what parity needs;
-    /// the hash itself is an implementation detail (python uses keyed blake2b).
-    pub fn mint(&self, agent_id: &AgentId) -> TaskId {
-        let mut inner = self.inner.lock().expect("task table poisoned");
-        loop {
-            let n = inner.seq.entry(agent_id.clone()).or_insert(0);
-            *n += 1;
-            let n = *n;
-            let mut h = DefaultHasher::new();
-            inner.salt.hash(&mut h);
-            agent_id.0.hash(&mut h);
-            n.hash(&mut h);
-            let id = TaskId(format!("{}:{:08x}", agent_id.0, h.finish() as u32));
-            if !inner.tasks.contains_key(&id) {
-                return id;
-            }
-        }
-    }
+    // NO MINTER HERE ANY MORE. `TaskTable::mint` used to hand out
+    // `"<agent>:<8 hex>"` from a per-agent counter, hashed and salted so a
+    // visible sequence could not be read as an ordering (measured 2026-08-20 in
+    // python: a model inferred ordering from `<agent>:<n>`, decided "the reply
+    // queue is running ahead of me", and re-polled forever). Python reversed that
+    // trade: ONE int64 counter allocates every id in the kernel, so `ps`,
+    // `cancel`, the ledger, a reply tag and the message log all name the same
+    // number — and a number that names one thing everywhere is worth more than
+    // one that hides its order. The allocator is `kernel.rows.mint_id()`; the
+    // caller mints, and this table only registers.
 
     /// Put one in-flight task in the table.
     ///
@@ -272,7 +235,7 @@ impl TaskTable {
         inner.order += 1;
         let order = inner.order;
         inner.tasks.insert(
-            id.clone(),
+            *id,
             TaskEntry {
                 agent: agent_id.clone(),
                 parent,
@@ -315,7 +278,7 @@ impl TaskTable {
                     json!({
                         "id": id.0,
                         "agent": e.agent.0,
-                        "parent": e.parent.as_ref().map(|p| p.0.clone()),
+                        "parent": e.parent.as_ref().map(|p| p.0),
                         "verb": e.verb,
                         "started_at": e.started_at,
                     }),
@@ -369,13 +332,13 @@ impl TaskTable {
     /// — SYNCHRONOUS, no `await`, so a parent cannot resume between its child's
     /// death and its own. Returns the ids actually killed (the table only ever
     /// holds LIVE work).
-    fn abort_subtree(&self, ids: &[TaskId]) -> Vec<String> {
+    fn abort_subtree(&self, ids: &[TaskId]) -> Vec<i64> {
         let mut inner = self.inner.lock().expect("task table poisoned");
         let mut killed = Vec::new();
         for tid in ids {
             if let Some(entry) = remove_and_reparent(&mut inner, tid) {
                 entry.handle.stop();
-                killed.push(tid.0.clone());
+                killed.push(tid.0);
             }
         }
         killed
@@ -389,7 +352,7 @@ fn walk(id: &TaskId, kids: &HashMap<&TaskId, Vec<&TaskId>>, out: &mut Vec<TaskId
             walk(c, kids, out);
         }
     }
-    out.push(id.clone());
+    out.push(*id);
 }
 
 /// Remove one row, re-parenting its surviving children to its parent.
@@ -397,7 +360,7 @@ fn remove_and_reparent(inner: &mut Inner, id: &TaskId) -> Option<TaskEntry> {
     let entry = inner.tasks.remove(id)?;
     for e in inner.tasks.values_mut() {
         if e.parent.as_ref() == Some(id) {
-            e.parent = entry.parent.clone();
+            e.parent = entry.parent;
         }
     }
     Some(entry)
@@ -434,7 +397,9 @@ impl Kernel {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let task_id = self.tasks.mint(agent_id);
+        // THE COUNTER, not a table-local sequence: a fork is a message, and its
+        // id comes from the one allocator like every other id in the kernel.
+        let task_id = TaskId(self.rows.mint_id());
         let handle = TaskHandle::new();
         self.tasks
             .register(&task_id, agent_id, verb, current_task(), handle.clone());
@@ -443,9 +408,9 @@ impl Kernel {
         let killed = handle.killed_flag();
         let guard = ForgetOnDrop {
             kernel: Arc::clone(self),
-            id: task_id.clone(),
+            id: task_id,
         };
-        let tid = task_id.clone();
+        let tid = task_id;
         tokio::spawn(async move {
             let _guard = guard;
             CURRENT_TASK

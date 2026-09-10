@@ -6,7 +6,6 @@
 use super::*;
 use crate::agent_loop::BackendConfig;
 use crate::events::CallerRoute;
-use crate::helpers::safe_client;
 use crate::provider::{Provider, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
@@ -155,24 +154,19 @@ async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
     false
 }
 
-/// `<tool_call>` exactly as [`crate::assembly::SEND_TO_HOWTO`] teaches it.
+/// A `<call>` exactly as [`crate::assembly::SEND_TO_HOWTO`] teaches it, BUILT BY
+/// THE RENDERER so a fixture cannot drift from the grammar the parser accepts.
 /// `reply_to`: `Some(v)` writes the key (`"self"`, another id, `"null"`),
 /// `None` OMITS it — the two are NOT the same, and which is which is the
 /// behaviour half these tests exist for.
 fn call_envelope(target: &str, payload: Value, reply_to: Option<&str>) -> String {
     let mut args = Map::new();
     args.insert("target_id".into(), json!(target));
-    args.insert("payload".into(), payload);
     if let Some(rt) = reply_to {
-        args.insert(
-            "reply_to".into(),
-            if rt == "null" { Value::Null } else { json!(rt) },
-        );
+        args.insert("reply_to".into(), json!(rt));
     }
-    format!(
-        "<tool_call>{}</tool_call>",
-        json!({"name": "send", "arguments": Value::Object(args)})
-    )
+    args.insert("payload".into(), payload);
+    crate::tool_parse::render_call("send", &args)
 }
 
 /// One pass that emits one whole text chunk.
@@ -234,7 +228,7 @@ impl Bundle for MockBundle {
         task_id: &fantastic_kernel::TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
         Ok(())
     }
 }
@@ -821,7 +815,13 @@ async fn recall_pages_durable_store_and_context_status_shape() {
 async fn history_persists_and_round_trips() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "hist").await;
-    script(&backend, vec![pass("ack")], Duration::ZERO);
+    // `done` because a call-less turn is nudged now: without it the chain runs
+    // on and the LAST stored turn is the nudge's answer, not this one.
+    script(
+        &backend,
+        vec![pass("ack"), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let _rx = rebind_backend_inbox(&kernel, &backend);
     let client_id = "browser_hist";
     let _ = kernel
@@ -847,36 +847,40 @@ async fn history_persists_and_round_trips() {
     );
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "ping");
-    let last = messages.last().unwrap();
-    assert_eq!(last["role"], "assistant");
-    assert_eq!(last["content"], "ack");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"], "ack");
 
-    // WHERE it lives: an append-only JSONL sidecar on the AI's OWN leg —
-    // `agents/<self>/chat_<client>.jsonl`, one JSON line per turn. NOT a chat
-    // agent (durable_memory is gone; memory is plain files) and NOT a loader
-    // blob sidecar (that channel routed through whatever provider the LOADER
-    // discovered, and dropped every write when none was wired).
-    let sidecar = tmp.path().join(".fantastic").join(format!(
-        "agents/{}/chat_{}.jsonl",
-        backend,
-        safe_client(client_id)
-    ));
+    // WHERE IT LIVES: the KERNEL's row store, one table for every agent, keyed
+    // by the one counter. It used to be an append-only JSONL sidecar on the AI's
+    // own leg (`agents/<self>/chat_<client>.jsonl`) — a private encoding this
+    // bundle chose, and a per-CLIENT split that gave two clients on one agent
+    // two threads that could not see each other. Agent id is conversation id
+    // now, so one list is what every reader gets.
+    let rows = kernel.rows.for_agent(&backend);
+    // ONE ROW PER TURN — list index == store index (recall/reaction paging).
+    // Four turns: the ping, the call-less answer, the nudge it earned, and the
+    // `done` that ended the chain.
+    assert_eq!(rows.len(), 4, "one row per message: {rows:#?}");
+    assert_eq!(rows[0]["role"], "user");
+    assert_eq!(rows[0]["content"], "ping");
+    assert_eq!(rows[1]["role"], "assistant");
+    assert_eq!(rows[1]["content"], "ack");
+    assert_eq!(rows[2]["role"], "user");
+    assert!(rows[2]["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("[no call was dispatched]"));
+    // Every row carries the id the counter gave it, ascending.
+    let ids: Vec<i64> = rows.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+    // NOTHING went to the AI's file leg. Persisting the store is a loader's job.
     assert!(
-        sidecar.exists(),
-        "chat never persisted through the AI's own leg: {sidecar:?}"
+        !tmp.path()
+            .join(".fantastic")
+            .join(format!("agents/{backend}"))
+            .exists(),
+        "the AI wrote a conversation sidecar on its own leg"
     );
-    let raw = std::fs::read_to_string(&sidecar).unwrap();
-    let turns: Vec<Value> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    // ONE LINE PER TURN — line index == store index (recall/reaction paging).
-    assert_eq!(turns.len(), 2, "one JSONL line per message: {raw:?}");
-    assert_eq!(turns[0]["role"], "user");
-    assert_eq!(turns[0]["content"], "ping");
-    assert_eq!(turns[1]["role"], "assistant");
-    assert_eq!(turns[1]["content"], "ack");
 
     // No chat AGENT exists any more — the sidecar is a file, not a child.
     let chat_id = format!("{backend}_chat");
@@ -928,7 +932,11 @@ async fn chat_persists_with_no_loader_provider_wired() {
     );
     let backend = add_backend(&kernel, &backend_id, &file_id).await;
 
-    script(&backend, vec![pass("ack")], Duration::ZERO);
+    script(
+        &backend,
+        vec![pass("ack"), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let _rx2 = rebind_backend_inbox(&kernel, &backend);
     let _ = kernel
         .send(vec![Item::new(
@@ -950,16 +958,26 @@ async fn chat_persists_with_no_loader_provider_wired() {
     let messages = h["messages"].as_array().expect("messages array");
     assert_eq!(
         messages.len(),
-        2,
+        4,
         "history came back empty with no loader provider: {h:#?}"
     );
     assert_eq!(messages[0]["content"], "ping");
     assert_eq!(messages[1]["content"], "ack");
-    // …and it is REALLY on disk, in the leg the AI named — the JSONL sidecar.
-    let sidecar = leg_root.join(format!("agents/{backend_id}/chat_cli.jsonl"));
+    // …and it is REALLY in the KERNEL's row store, not on the AI's file leg.
+    // The conversation stopped being this bundle's private JSONL sidecar on
+    // 2026-09-10: rows are the kernel's, one table, and putting them on disk is
+    // a loader's job that no agent asks for.
+    let rows = kernel.rows.for_agent(&backend);
+    assert_eq!(
+        rows.len(),
+        4,
+        "the conversation is not in the store: {rows:#?}"
+    );
+    assert_eq!(rows[0]["content"], "ping");
+    assert!(rows.iter().all(|r| r["agent"] == json!(backend.as_str())));
     assert!(
-        sidecar.exists(),
-        "nothing was written through the AI's own leg: {sidecar:?}"
+        !leg_root.join(format!("agents/{backend_id}")).exists(),
+        "the AI wrote a conversation sidecar on its own leg"
     );
 }
 
@@ -1003,9 +1021,8 @@ async fn kernel_cancel_kills_an_in_flight_send() {
         .expect("tasks")
         .iter()
         .find(|t| t["agent"] == json!(backend.as_str()) && t["verb"] == json!("send"))
-        .and_then(|t| t["id"].as_str())
-        .expect("the in-flight send must be in `ps`")
-        .to_string();
+        .and_then(|t| t["id"].as_i64())
+        .expect("the in-flight send must be in `ps`");
 
     // …and kill it with the universal system verb.
     let r = kernel
@@ -1092,18 +1109,18 @@ async fn status_during_in_flight_shows_phase() {
 // looks exactly like a routing bug.
 
 /// THE point of model-owned routing: a one-pass task costs ONE pass. No
-/// `<tool_call>` means the model is finished — nothing schedules another turn.
+/// `<call name="done">` means the model is finished — nothing schedules another turn.
 ///
 /// The second scripted pass is the trap: it must never be served. Before the
 /// shared script box existed the mock replayed pass 1 on every send, so an
 /// over-eager chain looked identical to a correct stop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_call_means_one_pass() {
+async fn a_call_less_chain_is_bounded_by_the_nudge_limit() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_stop").await;
     let s = script(
         &backend,
-        vec![pass("the answer"), pass("must never run")],
+        vec![pass("the answer"), pass("still no call")],
         Duration::ZERO,
     );
     let r = kernel
@@ -1116,10 +1133,13 @@ async fn no_call_means_one_pass() {
         .result;
     assert_eq!(r["final"], "the answer");
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // EVERY call-less turn is nudged (user, 2026-09-09: "all is tool calls"), so
+    // a model that never calls is bounded by `nudge_limit` and not by the shape
+    // of its first turn: NUDGE_LIMIT reminders plus the turn that started it.
     assert_eq!(
         s.passes_served(),
-        1,
-        "no call must end the turn, got {} passes",
+        (crate::route::NUDGE_LIMIT + 1) as usize,
+        "the limit bounds it, got {} passes",
         s.passes_served()
     );
 }
@@ -1134,7 +1154,7 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
         &backend,
         vec![
             pass(call_envelope("core", json!({"type": "list_agents"}), None)),
-            pass(r#"done looking <tool_call>{"name":"done"}</tool_call>"#),
+            pass(r#"done looking <call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
@@ -1160,7 +1180,7 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     // PID, then target AND verb — a bare `[reply to core]` is unmatchable with two in
     // flight, and target+verb alone is not unique either
     assert!(
-        turn2.contains(" · core list_agents]") && turn2.contains("[reply to core:"),
+        turn2.contains(" \u{b7} core list_agents]") && turn2.contains("[reply to "),
         "untagged reply: {turn2}"
     );
     assert!(
@@ -1183,7 +1203,7 @@ async fn a_self_chain_does_not_deadlock() {
         vec![
             pass(hop.clone()),
             pass(hop),
-            pass(r#"enough <tool_call>{"name":"done"}</tool_call>"#),
+            pass(r#"enough <call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
@@ -1406,14 +1426,17 @@ async fn a_failed_call_comes_back_to_the_model() {
     );
 }
 
-/// A `<tool_call>` with no target tells the model so, instead of vanishing — and
+/// A `<call>` with no target tells the model so, instead of vanishing — and
 /// it names the SHAPE, because a bare fault taught gemma-4-12B nothing about how
 /// to retry (2026-08-06).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_with_no_target_is_reported_not_swallowed() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_notgt").await;
-    let bad = r#"<tool_call>{"name":"send","arguments":{"reply_to":"self"}}</tool_call>"#;
+    // THE PARSER owns this refusal now: a `send` that names neither
+    // `<target_id>` nor `<to>` never becomes a call at all, so what reaches the
+    // model is the grammar's sentence, naming BOTH ways to address one.
+    let bad = r#"<call name="send"><reply_to>self</reply_to><type>reflect</type></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
     let _ = kernel
         .send(vec![Item::new(
@@ -1425,9 +1448,9 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
         .result;
     assert!(until_passes(&s, 2).await, "the bad call was swallowed");
     let turn2 = s.request(1);
-    assert!(turn2.contains("no target_id"), "{turn2}");
+    assert!(turn2.contains("a send names its target"), "{turn2}");
     assert!(
-        turn2.contains("Send `{type:'reflect'}` to the kernel"),
+        turn2.contains("<target_id>agent id</target_id>") && turn2.contains("<to><item>"),
         "it must state the fix, not just the fault: {turn2}"
     );
 }
@@ -1440,7 +1463,7 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
 async fn a_send_with_no_payload_names_what_is_missing() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_nopl").await;
-    let bad = r#"<tool_call>{"name":"send","arguments":{"target_id":"totals"}}</tool_call>"#;
+    let bad = r#"<call name="send"><target_id>totals</target_id></call>"#;
     let s = script(&backend, vec![pass(bad), pass("ok")], Duration::ZERO);
     let _ = kernel
         .send(vec![Item::new(
@@ -1471,8 +1494,8 @@ async fn an_unparseable_call_reaches_the_model_as_an_error() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_broken").await;
     let broken = concat!(
-        r#"<tool_call>{"name":"send","arguments":{"target_id":"kernel","payload":"#,
-        r#"{"type":"create_agent","parent_id":"kernel","code":"x = \"unclosed}}</tool_call>"#
+        r#"<call name="send"><target_id>kernel</target_id><type>create_agent</type>"#,
+        r#"<parent_id>kernel<code>x = "unclosed</code></call>"#
     );
     let s = script(&backend, vec![pass(broken), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -1500,7 +1523,7 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
     let text = format!(
         "{}{}",
         call_envelope("core", json!({"type": "list_agents"}), Some("null")),
-        r#"<tool_call>{"name":"send","arguments":{"target_id":"n","code":"oops}}"#
+        r#"<call name="send"><target_id>n</target_id><code>oops"#
     );
     let s = script(&backend, vec![pass(text), pass("ok")], Duration::ZERO);
     let _ = kernel
@@ -1518,14 +1541,15 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
     assert!(s.request(1).contains("NOT dispatched"), "{}", s.request(1));
 }
 
-/// The other half of the verb-in-the-tool-name fix:
-/// `{"name":"reflect","arguments":{"target_id":…}}` is a real instruction and must
-/// DISPATCH, not earn an error.
+/// A VERB IN THE TOOL SLOT IS REFUSED BY NAME. The JSON grammar used to guess —
+/// `{"name":"reflect",…}` was rewritten into a send of `{type:"reflect"}` — and
+/// the guess is gone: the tools are a closed set, and a verb goes in `<type>`.
+/// The refusal says exactly that, so the model retries from it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_verb_named_tool_reaches_the_agent() {
+async fn a_verb_in_the_tool_slot_is_refused_by_name() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "rt_verb").await;
-    let call = r#"<tool_call>{"name":"reflect","arguments":{"target_id":"core"}}</tool_call>"#;
+    let call = r#"<call name="reflect"><target_id>core</target_id></call>"#;
     let s = script(&backend, vec![pass(call), pass("ok")], Duration::ZERO);
     let _ = kernel
         .send(vec![Item::new(
@@ -1535,13 +1559,17 @@ async fn a_verb_named_tool_reaches_the_agent() {
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 2).await, "the reflect never came back");
+    assert!(until_passes(&s, 2).await, "the refusal never came back");
     let turn2 = s.request(1);
+    assert!(turn2.contains("`reflect` is not a tool"), "{turn2}");
     assert!(
-        turn2.contains(" · core reflect]") && turn2.contains("[reply to core:"),
-        "{turn2}"
+        turn2.contains("<type>reflect</type>"),
+        "it must show where the verb goes: {turn2}"
     );
-    assert!(!turn2.contains("no payload"), "{turn2}");
+    assert!(
+        turn2.contains("send, done, await, inquiry_answer"),
+        "it must name the closed set: {turn2}"
+    );
 }
 
 /// `send_to` delivers this pass's TEXT to a peer — once. It must NOT propagate: a
@@ -1551,14 +1579,22 @@ async fn a_caller_send_to_hands_off_once() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp, "rt_hand").await;
     let b = add_peer(&kernel, &tmp, &a).await;
+    // `done`, because a call-less turn is NUDGED now and never reaches the
+    // hand-off: the caller's `send_to` applies to a FINISHED turn.
     let fa = script(
         &a,
-        vec![pass("the answer from a"), pass("a must not run again")],
+        vec![
+            pass(r#"the answer from a <call name="done"></call>"#),
+            pass("a must not run again"),
+        ],
         Duration::ZERO,
     );
     let fb = script(
         &b,
-        vec![pass("b replied"), pass("b must not run again")],
+        vec![
+            pass(r#"b replied <call name="done"></call>"#),
+            pass("b must not run again"),
+        ],
         Duration::ZERO,
     );
     let _ = kernel
@@ -1697,7 +1733,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         vec![
             pass(call_envelope(&raiser, json!({"type": "reflect"}), None)),
             // ends the chain explicitly — a silent turn is now nudged again
-            pass("saw it <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("saw it <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -1725,7 +1761,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
         &backend,
         vec![
             pass(call_envelope(&raiser, json!({"type": "panic"}), None)),
-            pass("saw the panic too <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("saw the panic too <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -1772,7 +1808,7 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     // the mechanism IS stated
     assert!(sys_block.contains("reply_to"), "{sys_block}");
     assert!(sys_block.contains("reflect"), "{sys_block}");
-    assert!(sys_block.contains("<tool_call>"), "{sys_block}");
+    assert!(sys_block.contains("<call name="), "{sys_block}");
 
     let banned = [
         "loop",
@@ -1879,7 +1915,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
             pass("thinking out loud, no envelope"),
             pass("still just prose"),
             pass("ok, finishing"),
-            pass("<tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("<call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -1956,7 +1992,7 @@ async fn a_done_call_ends_the_chain_without_a_nudge() {
                 json!({"type": "reflect", "tree": "none"}),
                 None,
             )),
-            pass(r#"finished. <tool_call>{"name":"done"}</tool_call>"#),
+            pass(r#"finished. <call name="done"></call>"#),
         ],
         Duration::ZERO,
     );
@@ -1974,12 +2010,18 @@ async fn a_done_call_ends_the_chain_without_a_nudge() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_chat_turn_is_never_nudged() {
+async fn a_first_turn_with_no_call_is_nudged_too() {
+    // NOT an exemption for prose. A first turn from a person that decides on a
+    // call in thought and never emits it used to end the work silently; now it
+    // is reminded exactly once, and `done` closes it.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ndg3").await;
     let s = script(
         &backend,
-        vec![pass("just an answer, no calls")],
+        vec![
+            pass("just an answer, no calls"),
+            pass(r#"right — <call name="done"></call>"#),
+        ],
         Duration::ZERO,
     );
     let _ = kernel
@@ -1991,7 +2033,11 @@ async fn a_chat_turn_is_never_nudged() {
         .remove(0)
         .result;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(s.passes_served(), 1, "prose to a person is the product");
+    assert_eq!(
+        s.passes_served(),
+        2,
+        "the silent turn earns one reminder, and `done` ends it"
+    );
 }
 
 // ── the batch: one deadline, one stamp, one token per turn ───────────
@@ -2010,7 +2056,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
     let _sb = script(&b, vec![pass("too late")], Duration::from_secs(2));
     let sa = script(
         &a,
-        vec![pass("read it <tool_call>{\"name\":\"done\"}</tool_call>")],
+        vec![pass("read it <call name=\"done\"></call>")],
         Duration::ZERO,
     );
     let call = call_envelope(
@@ -2044,7 +2090,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
 /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
 /// owed no reply, and it is not a silent turn: rust nudged it anyway until
 /// 2026-09-02 (gating on the blocks instead of python's `not calls and not
-/// units`), telling the model "your turn emitted no <tool_call> envelope" about a
+/// units`), telling the model "your turn emitted no <call> element" about a
 /// turn that did — and, on a chat turn, handing that text to `send_to` on top.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
@@ -2112,7 +2158,7 @@ async fn the_batch_stamp_lives_inside_the_reply_tag() {
                 call_envelope("core", json!({"type": "list_agents"}), Some("self")),
                 call_envelope("core", json!({"type": "list_agents"}), Some("self")),
             )),
-            pass("both back <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("both back <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -2167,7 +2213,7 @@ async fn two_identical_turns_get_different_batch_tokens() {
         vec![
             pass(twice.clone()),
             pass(twice),
-            pass("enough <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("enough <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -2208,7 +2254,7 @@ async fn reflect_replies_carry_the_distillation_nudge() {
                 ),
                 call_envelope("core", json!({"type": "list_agents"}), Some("self")),
             )),
-            pass("SEEN core <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("SEEN core <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -2288,9 +2334,15 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
 async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "q1").await;
+    // Both passes END their chain: a call-less turn is nudged now, and each
+    // nudge is another submission queueing behind the same lock — which is the
+    // very thing this test counts.
     script(
         &backend,
-        vec![pass("first"), pass("second")],
+        vec![
+            pass(r#"first <call name="done"></call>"#),
+            pass(r#"second <call name="done"></call>"#),
+        ],
         Duration::from_millis(400),
     );
     let mut rx = rebind_backend_inbox(&kernel, &backend);
@@ -2458,7 +2510,7 @@ async fn a_batch_of_calls_without_reply_to_all_come_back() {
     // message and the model is asked again.
     let sa = script(
         &a,
-        vec![pass("seen <tool_call>{\"name\":\"done\"}</tool_call>")],
+        vec![pass("seen <call name=\"done\"></call>")],
         Duration::ZERO,
     );
     // Seven targets that all answer — the fixture's own file leg, reflected.
@@ -2509,10 +2561,7 @@ async fn routing_survives_the_dispatch_that_spawned_it() {
         .join("\n");
     let sa = script(
         &a,
-        vec![
-            pass(&first),
-            pass("seen <tool_call>{\"name\":\"done\"}</tool_call>"),
-        ],
+        vec![pass(&first), pass("seen <call name=\"done\"></call>")],
         Duration::ZERO,
     );
     // ONE send, exactly as a caller makes it. Turn 1 emits the batch; the
@@ -2558,7 +2607,7 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
         &a,
         vec![
             pass(envs.join("\n")),
-            pass("seen <tool_call>{\"name\":\"done\"}</tool_call>"),
+            pass("seen <call name=\"done\"></call>"),
         ],
         Duration::ZERO,
     );
@@ -2573,5 +2622,209 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
         "turn 2 never ran — a batch containing a peer AI delivered nothing \
          (passes={})",
         sa.passes_served()
+    );
+}
+
+// ── await: the honest wait ───────────────────────────────────────────────────
+
+/// `await` with nothing of the agent's in flight and nothing queued is REFUSED,
+/// and the refusal says what to do instead. Twin of python's
+/// `test_await_with_nothing_in_flight_is_refused_and_told_what_to_do`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn await_with_nothing_in_flight_is_refused_and_told_what_to_do() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "aw1").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"waiting <call name="await"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "hi"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the refusal never woke it");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.passes_served(), 2, "and nothing else ran");
+    let turn2 = s.request(1);
+    assert!(turn2.contains("[await refused]"), "{turn2}");
+    assert!(turn2.contains("nothing of yours is in flight"), "{turn2}");
+}
+
+/// The honest wait: something is QUEUED for the agent, so `await` ends the turn
+/// with no nudge and no refusal — and the queued message is the next turn. Twin
+/// of python's `test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "aw2").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"waiting <call name="await"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(300),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(b, json!({"type": "send", "text": "one"}))])
+            .await
+            .remove(0)
+            .result
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "two"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = first.await.expect("first send");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.passes_served(), 2, "the queued message is the next turn");
+    for n in 0..2 {
+        let t = s.request(n);
+        assert!(!t.contains("[await refused]"), "pass {n}: {t}");
+        assert!(!t.contains("[no call was dispatched]"), "pass {n}: {t}");
+    }
+    assert!(s.request(1).contains("two"), "{}", s.request(1));
+}
+
+/// A `<to>` list becomes ONE COPY PER RECIPIENT, and every copy carries the whole
+/// list — that is what lets a recipient answer the group instead of forking a
+/// private conversation the others never see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_to_list_fans_out_one_copy_per_recipient_carrying_the_list() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp, "fan").await;
+    let b = add_peer(&kernel, &tmp, &a).await;
+    let call = format!(
+        r#"<call name="send"><to><item>{b}</item><item>{a}</item></to><re>412</re>
+<type>send</type><text>CANDIDATE 586</text><reply_to>null</reply_to></call>"#
+    );
+    let fa = script(
+        &a,
+        vec![pass(call), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let fb = script(
+        &b,
+        vec![pass(r#"heard <call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&fb, 1).await, "the peer never got its copy");
+    let peer_turn = fb.request(0);
+    assert!(peer_turn.contains("CANDIDATE 586"), "{peer_turn}");
+    // Its OWN copy reached `a` too — a fan-out addresses every name on the list,
+    // including the sender when the sender lists itself.
+    assert!(until_passes(&fa, 2).await, "the sender never got its copy");
+}
+
+/// `history` answers TWO shapes and both are load-bearing: `rows` is the digest
+/// a MODEL is handed (python's, heads capped, bodies behind `pull`), `messages`
+/// is the full text a SPAWNED runtime's harness has no other way to read.
+#[tokio::test]
+async fn history_answers_the_digest_and_the_full_turns() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "hdig").await;
+    let long = "x".repeat(300);
+    script(
+        &backend,
+        vec![pass(long.clone()), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "ping"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let h = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "history"}))])
+        .await
+        .remove(0)
+        .result;
+
+    let rows = h["rows"].as_array().expect("rows");
+    let head = rows[1]["head"].as_str().unwrap();
+    assert_eq!(head.chars().count(), 120, "a head is capped: {head:?}");
+    assert_eq!(rows[1]["bytes"], 300, "…and says how big the whole is");
+    assert_eq!(rows[1]["kind"], "assistant", "kind falls back to role");
+    assert!(rows[0]["id"].as_i64().unwrap() > 0);
+    assert_eq!(h["total"], rows.len());
+
+    // The full text is still there, whole, for the wire harness.
+    let messages = h["messages"].as_array().expect("messages");
+    assert_eq!(messages[1]["content"], long);
+}
+
+/// Paging: `limit` cuts the page, `next` names where to resume, and an `after`
+/// the store does not know pages NOTHING rather than starting over.
+#[tokio::test]
+async fn the_history_digest_pages_forward() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "hpage").await;
+    script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "ping"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let page = |args: Value| {
+        let kernel = Arc::clone(&kernel);
+        let backend = backend.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(backend, args)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let first = page(json!({"type": "history", "limit": 1})).await;
+    assert_eq!(first["rows"].as_array().unwrap().len(), 1);
+    let next = first["next"].as_i64().expect("a cursor");
+    let second = page(json!({"type": "history", "after": next})).await;
+    assert!(
+        second["rows"].as_array().unwrap()[0]["id"]
+            .as_i64()
+            .unwrap()
+            > next,
+        "the second page must resume past the cursor"
+    );
+    let nowhere = page(json!({"type": "history", "after": 999_999})).await;
+    assert!(
+        nowhere["rows"].as_array().unwrap().is_empty(),
+        "an unknown cursor pages nothing, never the head again"
     );
 }

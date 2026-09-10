@@ -18,7 +18,7 @@
 //! Wire translation: ai-core's plain messages → Anthropic's top-level `system`
 //! param + alternating user/assistant TEXT turns. NO native tools — Fantastic
 //! NEVER uses Anthropic `tool_use`; tool-calling is RAW prompt-and-parse owned
-//! by ai-core (the model emits a `<tool_call>` envelope in the text). Response
+//! by ai-core (the model emits a `<call name=…>` envelope in the text). Response
 //! `content_block_delta`(`text_delta` + `thinking_delta`) → `ProviderEvent::Token`;
 //! the reasoning channel is wrapped once per turn in `<think>…</think>`.
 
@@ -176,7 +176,7 @@ fn no_key_error() -> String {
 
 /// Split ai-core's messages into Anthropic's top-level `system` string + the
 /// `messages` array of plain user/assistant TEXT turns. Tool calls/replies are
-/// already inline text (`<tool_call>`/`<tool_response>`); ai-core's
+/// already inline text (`<call name=…>` / its reply tag); ai-core's
 /// `render_for_model` mapped tool replies to user-role text before we see them,
 /// so there is NO tool_use/tool_result translation. System blocks concatenate;
 /// empty turns are dropped (Anthropic rejects empty content).
@@ -205,29 +205,6 @@ fn translate_messages(messages: &[Value]) -> (Option<String>, Vec<Value>) {
     (system, out)
 }
 
-/// The ONE tool `ai_core` teaches in prose. Sent ONLY on the `tool_use` route,
-/// and it is a TRANSLATION of the same contract — not a second one. Kept beside
-/// the translator so the two can never describe different things.
-fn send_tool() -> Value {
-    json!({
-        "name": "send",
-        "description":
-            "Reach any agent by id. The payload's `type` names the verb; \
-             {type:'reflect'} returns that agent's verbs and state. `reply_to` is \
-             where the reply goes — omit for yourself, name another agent to hand it \
-             to them, or null to discard.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "target_id": {"type": "string"},
-                "payload": {"type": "object"},
-                "reply_to": {"type": ["string", "null"]},
-            },
-            "required": ["target_id", "payload"],
-        },
-    })
-}
-
 // ── Anthropic provider (x-api-key + event-typed SSE + 429 retry) ─────
 
 struct AnthropicProvider {
@@ -235,11 +212,6 @@ struct AnthropicProvider {
     endpoint: String,
     model: String,
     max_tokens: u64,
-    /// OFF BY DEFAULT (#16). On, this provider declares the one `send` tool and
-    /// TRANSLATES the `tool_use` blocks back into the same `<tool_call>` text
-    /// `ai_core` parses. RAW stays the contract: the shared parser never learns
-    /// a vendor dialect, this adapter just speaks one at the edge.
-    tool_use: bool,
     kernel: Arc<Kernel>,
     client_id: String,
 }
@@ -268,10 +240,12 @@ impl Provider for AnthropicProvider {
                 not guess one. Name a model on the agent record (model=...)."
                 .to_string());
         }
-        // RAW by default: no native `tools`/`tool_choice` — ai-core parses the
-        // `<tool_call>` envelope out of the streamed text. The optional
-        // `tool_use` route declares the one `send` tool and translates what
-        // comes back into that same envelope (#16).
+        // RAW, always: no native `tools`/`tool_choice` — ai-core parses the
+        // `<call name=…>` envelope out of the streamed text. The optional
+        // `tool_use` route that declared one `send` tool and translated the
+        // blocks back is DELETED: a model writing JSON tool calls is writing a
+        // grammar this kernel does not parse, and the honest answer is to say so
+        // (see `decode_sse_line`), not to translate a second dialect at the edge.
         let (system, anthropic_messages) = translate_messages(messages);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
@@ -280,9 +254,6 @@ impl Provider for AnthropicProvider {
         body.insert("messages".into(), json!(anthropic_messages));
         if let Some(sys) = system {
             body.insert("system".into(), json!(sys));
-        }
-        if self.tool_use {
-            body.insert("tools".into(), json!([send_tool()]));
         }
         let body = Value::Object(body);
 
@@ -371,16 +342,14 @@ impl Provider for AnthropicProvider {
 /// `event:` line + a `data:` JSON line; the JSON carries its own `type`, so we
 /// dispatch on that. PURE RAW TEXT — both `text_delta` and `thinking_delta` are
 /// emitted (the latter wrapped in `<think>…</think>`); no
-/// native `tool_use` is read (ai-core parses the `<tool_call>` envelope).
+/// native `tool_use` is read (ai-core parses the `<call name=…>` envelope), and a
+/// tool_use block that arrives anyway is a loud error.
 /// Per-line SSE decode state — everything the old drain-to-`Vec` loop kept in
 /// locals, made explicit so the parse can run one line at a time.
 struct SseState {
     buf: Vec<u8>,
     stop: bool,
     stop_reason: Option<String>,
-    saw_tool_use: bool,
-    tool_name: Option<String>,
-    tool_args: String,
     wrap: fantastic_ai_core::think::ThinkWrap,
 }
 
@@ -390,9 +359,6 @@ impl SseState {
             buf: Vec::new(),
             stop: false,
             stop_reason: None,
-            saw_tool_use: false,
-            tool_name: None,
-            tool_args: String::new(),
             wrap: fantastic_ai_core::think::ThinkWrap::new(),
         }
     }
@@ -403,13 +369,11 @@ impl SseState {
     /// finished; a create_agent turn stopped mid-`code`, the partial parsed as an
     /// unterminated envelope, and the chain died with no visible cause. A
     /// `/cc`-style route returns `tool_use` blocks for a request carrying no
-    /// `tools` key at all, so gating on our own flag failed EVERY such turn.
+    /// `tools` key at all — those now raise in `decode_sse_line`, so a
+    /// `stop_reason` of `tool_use` with no block seen is an anomaly and says so.
     fn terminality(&self) -> Option<String> {
         match self.stop_reason.as_deref() {
             Some("end_turn") | Some("stop_sequence") => None,
-            // The model stopped to CALL something. That is a finished turn, not
-            // a truncated one — the blocks are the answer.
-            Some("tool_use") if self.saw_tool_use => None,
             Some(other) => Some(format!(
                 "anthropic stream ended without end_turn: stop_reason={other:?}"
             )),
@@ -436,48 +400,28 @@ fn decode_sse_line(st: &mut SseState, line: &str) -> Result<Vec<ProviderEvent>, 
         return Ok(out);
     };
     match obj.get("type").and_then(Value::as_str).unwrap_or("") {
-        // A tool_use block can arrive whether or not WE declared tools — some
-        // routes emit them regardless. Record what came, and let the terminality
-        // check read that rather than our own request flag.
+        // A NATIVE tool_use BLOCK IS A LOUD ERROR. Its arguments are JSON we do
+        // not read: the model wrote a call in a grammar this kernel does not
+        // speak, and a silent drop would end the turn looking finished with the
+        // call lost. Some `/cc`-style routes emit these for a request carrying
+        // no `tools` key at all — that is exactly the case worth failing on.
         "content_block_start" => {
             let cb = obj.get("content_block");
             if cb.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
-                st.saw_tool_use = true;
-                st.tool_name = Some(
-                    cb.and_then(|b| b.get("name"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("send")
-                        .to_string(),
-                );
-                st.tool_args.clear();
-            }
-        }
-        "content_block_stop" => {
-            // One `tool_use` block finished: re-emit it as the text envelope
-            // `ai_core` parses — the same shape a raw-route model would have
-            // written itself. TRANSLATE, never adopt.
-            if let Some(name) = st.tool_name.take() {
-                let args: Value = serde_json::from_str(if st.tool_args.is_empty() {
-                    "{}"
-                } else {
-                    &st.tool_args
-                })
-                .unwrap_or_else(|_| json!({}));
-                out.push(ProviderEvent::Token(format!(
-                    "<tool_call>{}</tool_call>",
-                    json!({"name": name, "arguments": args})
-                )));
-                st.tool_args.clear();
+                let name = cb
+                    .and_then(|b| b.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                return Err(format!(
+                    "anthropic stream carried a native tool_use block ({name:?}): \
+                     the model wrote a JSON tool call, which this kernel does not \
+                     parse — calls are `<call name=…>` text"
+                ));
             }
         }
         "content_block_delta" => {
             let delta = obj.get("delta").cloned().unwrap_or(Value::Null);
             let dtype = delta.get("type").and_then(Value::as_str);
-            if dtype == Some("input_json_delta") {
-                if let Some(t) = delta.get("partial_json").and_then(Value::as_str) {
-                    st.tool_args.push_str(t);
-                }
-            }
             // BOTH CHANNELS ARE READ. A reasoning model streams its thought as
             // `thinking_delta` and its answer as `text_delta`; reading only the
             // latter drops the thought entirely — and with it any tool call the
@@ -653,7 +597,7 @@ impl Bundle for AnthropicBundle {
         task_id: &TaskId,
         kernel: &Arc<Kernel>,
     ) -> Result<(), BundleError> {
-        verbs::on_cancel(agent_id, task_id.as_str(), kernel, CFG.route).await;
+        verbs::on_cancel(agent_id, &task_id.0.to_string(), kernel, CFG.route).await;
         Ok(())
     }
 
@@ -682,18 +626,11 @@ async fn send_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         .get("max_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_MAX_TOKENS);
-    // OFF unless the record says otherwise: RAW prompt-and-parse is the
-    // contract, and this route is a per-endpoint adapter, not a new default.
-    let tool_use = helpers::agent_meta(agent_id, kernel)
-        .get("tool_use")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let provider: Arc<dyn Provider> = Arc::new(AnthropicProvider {
         self_id: agent_id.clone(),
         endpoint: helpers::meta_string_or(agent_id, kernel, "endpoint", DEFAULT_ENDPOINT),
         model: helpers::meta_string_or(agent_id, kernel, "model", DEFAULT_MODEL),
         max_tokens,
-        tool_use,
         kernel: Arc::clone(kernel),
         client_id,
     });
@@ -744,7 +681,7 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         "emits": {
             "queued": "{type:'queued', source, client_id, send_id} — back-compat queue notice.",
             "token": "{type:'token', text, source, client_id} — streaming chunk.",
-            "say": "{type:'say', text, source, client_id} — per tool_call summary plus rate-limit notices.",
+            "say": "{type:'say', text, source, client_id} — per call summary plus rate-limit notices.",
             "status": "{type:'status', source, client_id, ts, phase, detail} — phase machine: queued|thinking|streaming|tool_calling|done. detail.waiting_on='rate_limit' + wait_s during 429 backoff.",
             "done": "{type:'done', source, client_id} — back-compat end marker.",
             "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail:{...}} — the Context Protocol push half. Pull counterpart: the context_status verb.",

@@ -51,7 +51,15 @@ pub async fn to_caller(
             }
         }
         CallerRoute::PerClientInbox => {
-            kernel.emit(&AgentId::from(client_id), ev).await;
+            // ON THE AGENT'S INBOX, tagged with `client_id` — not on an inbox
+            // named after the client. A synthetic client id has no Agent, so it
+            // has no watcher set, and a watcher that subscribed to the AGENT
+            // (which is what a `watch` frame names) never saw these events at
+            // all: measured 2026-09-10, `compaction:rust` fired its projection
+            // and pushed nothing the harness could observe. The browser's WS
+            // subscription mirrors the agent's inbox and filters to its own id,
+            // which is what the tag is for.
+            kernel.emit(self_id, ev).await;
         }
     }
 }

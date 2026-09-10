@@ -28,6 +28,11 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             // NAMED and unnamed executions and what they became. Terminal
             // non-completed rows ARE the dead-letter queue.
             | "ledger"
+            // CONVERSATION ROWS BY ID, gated INSIDE against each row's owner.
+            | "messages"
+            // THE ROW STORE's whole surface — hydration's pair, PRIVILEGED.
+            | "rows_read"
+            | "rows_write"
             // THE BLOB CHANNEL — an agent's sidecars, persisted through the
             // loader's discovered store. The consumer never computes a path and
             // never wires a provider of its own.
@@ -70,6 +75,19 @@ pub fn kernel_verb_docs() -> Value {
         // while their replies carried the unnamed rows too), which is the worst
         // of the three: a caller reading a reflect learned the verb existed only
         // from the code.
+        "rows_read": "args: agent:str (req), after:int?, limit:int?. PRIVILEGED (a \
+    wildcard does not carry it). \
+    That agent's rows WHOLE (content included), oldest first — {rows:[…], next?}. \
+    The hydration read; agents read digests through `messages` instead.",
+        "rows_write": "args: agent:str (req), rows:list[dict] (req). PRIVILEGED (a \
+    wildcard does not carry it). \
+    Appends rows to that agent's conversation, each under a FRESH id — {ids:[int]}. \
+    A row may not carry an `id`; re-ids are the caller's to remap.",
+        "messages": "args: ids:list[int] (req), limit:int?, after:int?. Conversation \
+    rows by id, at DIGEST resolution — {rows:[{id, agent, parent, kind, role, head, \
+    bytes, title?, level?, refs?}], refused:[ids], next?}. Your own rows always; \
+    another agent's only if its callable_by names you for `messages`. Bodies are \
+    behind that agent's `pull`.",
         "ledger": "No args. EVERY execution and what it became — named under its id, \
     unnamed under its minted pid — {executions:[{id, target, status, attempts, \
     retries, named, outcome?}]}, paged, scoped to what YOU originated. \
@@ -174,6 +192,19 @@ pub(super) async fn handle_kernel_verb(
             });
             json!({ "executions": rows, "next": next })
         }
+        // CONVERSATION ROWS BY ID. Gated INSIDE, per row, against the OWNER's
+        // `callable_by` — a root verb skips ingress, so the same check `gate`
+        // runs is re-run here or this would be a side channel around it. Refused
+        // ids are LISTED, never silently dropped: a caller must be able to tell
+        // "not yours" from "not there".
+        "messages" => messages(kernel, payload),
+        // THE ROW STORE's whole surface. `messages` is the read an owner may
+        // GRANT per row (digests, no bodies); these two are hydration — reading
+        // a conversation whole and writing one into an agent — which is what a
+        // loader does from above. PRIVILEGED, so a wildcard never carries them:
+        // saying yes takes a grant that NAMES them.
+        "rows_read" => rows_read(kernel, payload),
+        "rows_write" => rows_write(kernel, payload),
         "persist_blob" => crate::persistence::persist_blob(kernel, payload).await,
         "load_blob" => crate::persistence::load_blob(kernel, payload).await,
         "ps" => {
@@ -192,8 +223,25 @@ pub(super) async fn handle_kernel_verb(
         // group). Each bundle's `on_cancel` hook runs BEFORE the abort so real
         // resources (OS subprocesses, PTYs, sockets) die with it. An unknown or
         // already-finished id returns {cancelled:false} — it does not pretend.
-        "cancel" => match payload.get("task_id").and_then(Value::as_str) {
-            Some(t) if !t.is_empty() => kernel.cancel_task(&TaskId::from(t)).await,
+        // A pid is a NUMBER now, so `task_id` may arrive as one, as the decimal
+        // string a URL or a form carries, or as the NAME a caller gave its own
+        // execution — the ledger resolves that last case. An id that resolves to
+        // nothing is an honest `{cancelled:false}`, not a refusal: python does
+        // not pretend to know whether a stranger's id ever existed.
+        "cancel" => match payload.get("task_id") {
+            Some(Value::Number(n)) if n.as_i64().is_some() => {
+                kernel.cancel_task(&TaskId(n.as_i64().unwrap())).await
+            }
+            Some(Value::String(t)) if !t.is_empty() => {
+                let id = t
+                    .parse::<i64>()
+                    .ok()
+                    .or_else(|| kernel.ledger.resolve_name(t));
+                match id {
+                    Some(n) => kernel.cancel_task(&TaskId(n)).await,
+                    None => json!({"cancelled": false, "killed": []}),
+                }
+            }
             _ => crate::refusal::missing("cancel", "task_id"),
         },
         "shutdown_kernel" => {
@@ -331,4 +379,283 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // on this runtime for the call that succeeded, so a model read success as
     // failure and retried.
     json!({ "updated": true, "id": rec.id, "agent": rec_value })
+}
+
+/// The `messages` verb — conversation rows by id, at digest resolution.
+///
+/// A port of python's `_verb_messages`. Bodies never appear here: a `head` is
+/// 120 characters and the whole thing is behind the owning agent's `pull`.
+fn messages(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    let ids: Vec<Option<i64>> = match payload.get("ids") {
+        Some(Value::Array(a)) => a.iter().map(as_id).collect(),
+        _ => Vec::new(),
+    };
+    if ids.is_empty() || ids.iter().any(Option::is_none) {
+        let mut r = crate::refusal::refusal(
+            crate::refusal::BAD_ARG,
+            "messages: `ids` must be a non-empty list of message ids (ints)",
+        );
+        crate::refusal::with(&mut r, "arg", json!("ids"));
+        return r;
+    }
+    let mut ids: Vec<i64> = ids.into_iter().flatten().collect();
+    if let Some(after) = payload.get("after").and_then(as_id) {
+        if let Some(at) = ids.iter().position(|i| *i == after) {
+            ids.drain(..=at);
+        }
+    }
+
+    let caller = crate::send::current_origin();
+    let root_id = kernel.root().map(|r| r.id.0.clone());
+    let mut decided: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut out: Vec<Value> = Vec::new();
+    let mut refused: Vec<i64> = Vec::new();
+
+    for id in ids {
+        let Some(row) = kernel.rows.get_one(id) else {
+            refused.push(id);
+            continue;
+        };
+        let owner = row
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !may_read(
+            kernel,
+            caller.as_ref(),
+            &owner,
+            root_id.as_deref(),
+            &mut decided,
+        ) {
+            refused.push(id);
+            continue;
+        }
+        out.push(digest(id, &row));
+    }
+
+    // DIGESTS FIT WHERE THEY ARE GOING: page by `limit`, and never past ~32KB.
+    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize;
+    const CAP_BYTES: usize = 32 * 1024;
+    let mut kept: Vec<Value> = Vec::new();
+    let mut used = 0usize;
+    for d in &out {
+        if limit > 0 && kept.len() >= limit {
+            break;
+        }
+        let n = d.to_string().len();
+        if used + n > CAP_BYTES {
+            break;
+        }
+        used += n;
+        kept.push(d.clone());
+    }
+    let next = (kept.len() < out.len())
+        .then(|| kept.last().and_then(|d| d["id"].as_i64()))
+        .flatten();
+    json!({"rows": kept, "refused": refused, "next": next})
+}
+
+/// A message id from whatever the caller wrote: an int, or the decimal string a
+/// URL or a form carries. A bool is not an id.
+fn as_id(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// May `caller` read a row owned by `owner`? Its own always; another's only when
+/// that owner's `callable_by` names it for `messages`; the operator sees all.
+fn may_read(
+    kernel: &Arc<Kernel>,
+    caller: Option<&AgentId>,
+    owner: &str,
+    root_id: Option<&str>,
+    decided: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    let Some(caller) = caller else { return true };
+    if caller.0 == owner {
+        return true;
+    }
+    if let Some(known) = decided.get(owner) {
+        return *known;
+    }
+    let allowed = kernel
+        .agents
+        .get(&AgentId::from(owner))
+        .map(|e| {
+            let holder = e.value();
+            let grant = holder
+                .meta
+                .read()
+                .expect("meta lock poisoned")
+                .get("callable_by")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let children: std::collections::HashSet<String> =
+                holder.child_ids().into_iter().map(|c| c.0).collect();
+            crate::authz::authorize_call(
+                &grant,
+                "messages",
+                caller.0.as_str(),
+                holder.id.0.as_str(),
+                holder.parent_id.as_ref().map(|p| p.0.as_str()),
+                &children,
+                root_id,
+                // A ROOT VERB SKIPS INGRESS, which is why this runs at all — but
+                // it is the OWNER's ingress being re-checked, not an egress
+                // escalation, so privileged-verb cover does not apply.
+                false,
+            )
+            .allowed
+        })
+        .unwrap_or(false);
+    decided.insert(owner.to_string(), allowed);
+    allowed
+}
+
+/// One row at DIGEST resolution — never its body.
+fn digest(id: i64, row: &crate::rows::Row) -> Value {
+    let content = row.get("content").and_then(Value::as_str).unwrap_or("");
+    let mut d = json!({
+        "id": id,
+        "agent": row.get("agent"),
+        "parent": row.get("parent"),
+        "kind": row.get("kind").or_else(|| row.get("role")),
+        "role": row.get("role"),
+        "head": content.chars().take(120).collect::<String>().replace('\n', " "),
+        "bytes": content.len(),
+    });
+    let m = d.as_object_mut().expect("digest is an object");
+    if let Some(t) = row.get("title").filter(|v| !v.is_null()) {
+        m.insert("title".to_string(), t.clone());
+    }
+    if let Some(l) = row.get("level").filter(|v| !v.is_null()) {
+        m.insert("level".to_string(), l.clone());
+    }
+    if let Some(Value::Array(r)) = row.get("refs") {
+        m.insert("refs".to_string(), json!(r.len()));
+    }
+    match row.get("kind").and_then(Value::as_str) {
+        Some("call") | Some("task") => {
+            m.insert(
+                "verb".to_string(),
+                row.get("verb").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(n) = row.get("name").filter(|v| !v.is_null()) {
+                m.insert("name".to_string(), n.clone());
+            }
+            if let Some(status) = row.get("status").filter(|v| !v.is_null()) {
+                m.insert("status".to_string(), status.clone());
+            }
+        }
+        Some("view") => {
+            // A VIEW DIGEST SAYS HOW MUCH IT HOLDS, never the array itself.
+            let n = row.get("ids").and_then(Value::as_array).map_or(0, Vec::len);
+            m.insert("ids".to_string(), json!(n));
+            m.insert(
+                "budget".to_string(),
+                row.get("budget").cloned().unwrap_or(Value::Null),
+            );
+            m.insert(
+                "title".to_string(),
+                row.get("why").cloned().unwrap_or(Value::Null),
+            );
+        }
+        _ => {}
+    }
+    d
+}
+
+/// `rows_read` — one agent's conversation WHOLE, oldest first.
+fn rows_read(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    let Some(agent) = payload
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        let mut r = crate::refusal::refusal(
+            crate::refusal::BAD_ARG,
+            "rows_read: `agent` must be an agent id",
+        );
+        crate::refusal::with(&mut r, "arg", json!("agent"));
+        return r;
+    };
+    let mut rows: Vec<Value> = kernel
+        .rows
+        .for_agent(&AgentId::from(agent))
+        .into_iter()
+        .map(Value::Object)
+        .collect();
+    if let Some(after) = payload.get("after").and_then(as_id) {
+        // AN UNKNOWN CURSOR PAGES NOTHING, never the head again.
+        let at = rows
+            .iter()
+            .position(|r| r["id"].as_i64() == Some(after))
+            .map(|i| i + 1)
+            .unwrap_or(rows.len());
+        rows.drain(..at);
+    }
+    let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let truncated = limit > 0 && rows.len() > limit;
+    if truncated {
+        rows.truncate(limit);
+    }
+    let next = truncated
+        .then(|| rows.last().and_then(|r| r["id"].as_i64()))
+        .flatten();
+    json!({"rows": rows, "next": next})
+}
+
+/// `rows_write` — append rows to an agent's conversation, each under a fresh id.
+fn rows_write(kernel: &Arc<Kernel>, payload: &Value) -> Value {
+    let Some(agent) = payload
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        let mut r = crate::refusal::refusal(
+            crate::refusal::BAD_ARG,
+            "rows_write: `agent` must be an agent id",
+        );
+        crate::refusal::with(&mut r, "arg", json!("agent"));
+        return r;
+    };
+    let bad_rows = |msg: &str| {
+        let mut r = crate::refusal::refusal(crate::refusal::BAD_ARG, msg);
+        crate::refusal::with(&mut r, "arg", json!("rows"));
+        r
+    };
+    let Some(rows) = payload.get("rows").and_then(Value::as_array) else {
+        return bad_rows("rows_write: `rows` must be a non-empty list of rows");
+    };
+    if rows.is_empty() || !rows.iter().all(Value::is_object) {
+        return bad_rows("rows_write: `rows` must be a non-empty list of rows");
+    }
+    // THE STORE IS THE ONLY ALLOCATOR. A caller that could name an id could
+    // collide with a pre-minted one, or overwrite a row it does not own — and a
+    // COPY is a new row, not the same row twice.
+    if rows
+        .iter()
+        .any(|r| r.get("id").is_some_and(|v| !v.is_null()))
+    {
+        return bad_rows(
+            "rows_write: a row may not carry an `id` — the store mints every id, \
+             and a copy is a NEW row",
+        );
+    }
+    let agent = AgentId::from(agent);
+    let mut ids = Vec::with_capacity(rows.len());
+    for r in rows {
+        let row = r.as_object().expect("checked above").clone();
+        match kernel.rows.put(&agent, row) {
+            Ok(id) => ids.push(id),
+            Err(e) => return bad_rows(&format!("rows_write: {e}")),
+        }
+    }
+    json!({"ids": ids})
 }

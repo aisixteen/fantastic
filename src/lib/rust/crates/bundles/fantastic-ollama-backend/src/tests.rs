@@ -4,7 +4,6 @@
 //! / state / assembly behaviour is tested in `fantastic-ai-core`.
 
 use super::*;
-use fantastic_ai_core::helpers::safe_client;
 use fantastic_ai_core::think::{THINK_CLOSE, THINK_OPEN};
 use fantastic_kernel::Agent;
 use fantastic_kernel::Item;
@@ -213,9 +212,8 @@ async fn an_envelope_dispatches_and_streams_verbatim() {
     // Address the backend's OWN file agent: its write is observable on disk, which
     // is proof the dispatch happened and not just that nothing crashed.
     let envelope = format!(
-        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"ff_{backend}\",\
-         \"payload\":{{\"type\":\"mkdir\",\"path\":\"routed\"}},\
-         \"reply_to\":null}}}}</tool_call>"
+        "<call name=\"send\"><target_id>ff_{backend}</target_id>\
+         <reply_to>null</reply_to><type>mkdir</type><path>routed</path></call>"
     );
     let body = ndjson_body(&[json!({"message": {"content": envelope}, "done": true})]);
     Mock::given(method("POST"))
@@ -550,28 +548,22 @@ async fn history_persists_and_round_trips() {
     assert_eq!(last["role"], "assistant");
     assert_eq!(last["content"], "ack");
 
-    // The turns live in an append-only JSONL sidecar on the backend's OWN leg
-    // (`agents/<self>/chat_<client>.jsonl`, one JSON line per turn) — not in a
-    // chat agent (durable_memory is gone) and not in a loader blob sidecar,
-    // whose writes vanished whenever the loader had no provider.
-    let sidecar = tmp.path().join(".fantastic").join(format!(
-        "agents/{}/chat_{}.jsonl",
-        backend,
-        safe_client(client_id)
-    ));
+    // The turns live in the KERNEL's row store — one table, keyed by the one
+    // counter, agent id IS conversation id. They used to be an append-only
+    // JSONL sidecar on the backend's own leg, split per client; that split gave
+    // two clients on one agent two threads that could not see each other, and
+    // the encoding was this bundle's private choice rather than the kernel's.
+    let rows = kernel.rows.for_agent(&backend);
+    assert_eq!(rows.len(), 2, "one row per message: {rows:#?}");
+    assert_eq!(rows[0]["content"], "ping");
+    assert_eq!(rows[1]["content"], "ack");
     assert!(
-        sidecar.exists(),
-        "chat never persisted through the backend's own leg: {sidecar:?}"
+        !tmp.path()
+            .join(".fantastic")
+            .join(format!("agents/{backend}"))
+            .exists(),
+        "the backend wrote a conversation sidecar on its own leg"
     );
-    let raw = std::fs::read_to_string(&sidecar).unwrap();
-    let turns: Vec<serde_json::Value> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(turns.len(), 2, "one JSONL line per message: {raw:?}");
-    assert_eq!(turns[0]["content"], "ping");
-    assert_eq!(turns[1]["content"], "ack");
     assert!(
         !kernel.agents.contains_key(&fantastic_kernel::AgentId::from(
             format!("{backend}_chat").as_str()

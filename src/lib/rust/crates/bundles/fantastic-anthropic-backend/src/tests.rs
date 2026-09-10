@@ -109,9 +109,15 @@ async fn mk_kernel_with(
 
 /// Register a synthetic client inbox so we can drain events emitted by
 /// the bundle via `to_caller`.
-fn open_client_inbox(kernel: &Arc<Kernel>, client_id: &str) -> tokio::sync::mpsc::Receiver<Value> {
+/// The AGENT's inbox, where per-client events land tagged with their
+/// `client_id` — python's routing, and what a `watch` on the agent mirrors. It
+/// used to open an inbox named after the CLIENT, which no watcher ever sees.
+fn open_client_inbox(
+    kernel: &Arc<Kernel>,
+    agent_id: &AgentId,
+) -> tokio::sync::mpsc::Receiver<Value> {
     let (tx, rx) = tokio::sync::mpsc::channel(256);
-    kernel.inboxes.insert(AgentId::from(client_id), tx);
+    kernel.inboxes.insert(agent_id.clone(), tx);
     rx
 }
 
@@ -283,7 +289,7 @@ async fn send_streams_tokens_via_event_typed_sse() {
         .await;
 
     let client_id = "test_client";
-    let mut rx = open_client_inbox(&kernel, client_id);
+    let mut rx = open_client_inbox(&kernel, &ant);
     let send_kernel = Arc::clone(&kernel);
     let ant_for_task = ant.clone();
     let join = tokio::spawn(async move {
@@ -327,7 +333,7 @@ async fn send_streams_tokens_via_event_typed_sse() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_envelope_split_across_text_deltas_dispatches() {
-    // A `<tool_call>` split across two `text_delta`s must REASSEMBLE and dispatch.
+    // A `<call>` split across two `text_delta`s must REASSEMBLE and dispatch.
     // This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
     // — "just TEXT, nothing parsed, nothing dispatched"). That was a gap, not a
     // principle: python's ai_core has dispatched this envelope since 2026-08-02 and
@@ -349,9 +355,8 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
     // Address the anthropic agent's OWN file agent: its write lands on disk, which
     // is proof the dispatch happened and not just that nothing crashed.
     let whole = format!(
-        "<tool_call>{{\"name\":\"send\",\"arguments\":{{\"target_id\":\"{fid}\",\
-         \"payload\":{{\"type\":\"mkdir\",\"path\":\"routed\"}},\
-         \"reply_to\":null}}}}</tool_call>"
+        "<call name=\"send\"><target_id>{fid}</target_id><reply_to>null</reply_to>\
+         <type>mkdir</type><path>routed</path></call>"
     );
     let split = whole.len() / 2;
     let (part_1, part_2) = whole.split_at(split);
@@ -376,7 +381,7 @@ async fn an_envelope_split_across_text_deltas_dispatches() {
         .await;
 
     let client_id = "test_tool";
-    let _rx = open_client_inbox(&kernel, client_id);
+    let _rx = open_client_inbox(&kernel, &ant);
     let reply = kernel
         .send(vec![Item::new(
             ant.clone(),
@@ -422,7 +427,10 @@ async fn rate_limit_retry_once_then_succeeds() {
         .await;
     let body = sse(&[
         json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+        // `done` because a call-less turn is nudged: without it this stub answers
+        // the nudge with the same body forever and the mock's `expect(1)` fails
+        // on the count rather than on the retry this test is about.
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok<call name=\"done\"></call>"}}),
         json!({"type":"content_block_stop","index":0}),
         // The real API always sends stop_reason before message_stop; a mock without
         // it now reads as a cut stream (the provider raises), which is the point.
@@ -441,7 +449,7 @@ async fn rate_limit_retry_once_then_succeeds() {
         .await;
 
     let client_id = "test_rl";
-    let mut rx = open_client_inbox(&kernel, client_id);
+    let mut rx = open_client_inbox(&kernel, &ant);
     let send_kernel = Arc::clone(&kernel);
     let ant_for_task = ant.clone();
     let join = tokio::spawn(async move {
@@ -491,19 +499,21 @@ async fn rate_limit_retry_once_then_succeeds() {
         saw_rate_status,
         "expected status(waiting_on=rate_limit) event"
     );
-    assert_eq!(tokens, "ok");
-    assert_eq!(r["response"], "ok");
+    assert_eq!(tokens, "ok<call name=\"done\"></call>");
+    assert_eq!(r["response"], "ok<call name=\"done\"></call>");
 }
 
-// ── #16 — the OPTIONAL `tool_use` route ─────────────────────────────
+// ── the RAW route is the only route ──────────────────────────────────
 //
-// RAW is the contract and stays the default. This route exists so an endpoint
-// that answers better in its native syntax can be used WITHOUT teaching the
-// shared parser a vendor dialect: the provider declares the one `send` tool and
-// translates what comes back into the same `<tool_call>` text envelope.
+// RAW is the contract, and there is no longer an opt-out. The `tool_use` route
+// that declared one `send` tool and translated the blocks back into a text
+// envelope is DELETED: the envelope it translated INTO no longer exists, and a
+// model writing JSON tool calls is writing a grammar this kernel does not parse.
+// Saying so is the honest answer; translating a second dialect at the edge was a
+// way of not saying it.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_raw_route_declares_no_tools_by_default() {
+async fn the_raw_route_declares_no_tools() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
     // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
@@ -536,31 +546,25 @@ async fn the_raw_route_declares_no_tools_by_default() {
     let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert!(
         sent.get("tools").is_none(),
-        "the default route put a native `tools` key on the wire: {sent}"
+        "a native `tools` key went on the wire: {sent}"
     );
 }
 
+/// A NATIVE `tool_use` BLOCK IS A LOUD ERROR, not a silent drop. Some
+/// `/cc`-style routes emit one for a request carrying no `tools` key at all —
+/// and its arguments are JSON this kernel does not read, so a dropped block ends
+/// the turn looking finished with the call lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_tool_use_route_declares_send_and_translates_blocks_back_to_raw() {
+async fn a_native_tool_use_block_is_a_loud_error_not_a_silent_drop() {
     let server = MockServer::start().await;
     let tmp = tempfile::TempDir::new().unwrap();
-    // `endpoint` is the messages URL VERBATIM (py parity) — not a base.
     let endpoint = format!("{}/v1/messages", server.uri());
-    let mut extra = Map::new();
-    extra.insert("tool_use".into(), json!(true));
-    let (kernel, ant, _fid) = mk_kernel_with(&tmp, Some(endpoint), extra).await;
+    let (kernel, ant, _fid) = mk_kernel(&tmp, Some(endpoint)).await;
     let _key = KeyEnv::set(Some("sk-ant-x")).await;
-
-    // A native tool_use block, arguments split across `input_json_delta`
-    // fragments exactly as the real endpoint streams them.
     let body = sse(&[
         json!({"type":"message_start","message":{"id":"m","role":"assistant","content":[]}}),
         json!({"type":"content_block_start","index":0,
                "content_block":{"type":"tool_use","id":"tu_1","name":"send","input":{}}}),
-        json!({"type":"content_block_delta","index":0,
-               "delta":{"type":"input_json_delta","partial_json":"{\"target_id\":\"core\","}}),
-        json!({"type":"content_block_delta","index":0,
-               "delta":{"type":"input_json_delta","partial_json":"\"payload\":{\"type\":\"reflect\"}}"}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
         json!({"type":"message_stop"}),
@@ -570,36 +574,18 @@ async fn the_tool_use_route_declares_send_and_translates_blocks_back_to_raw() {
         .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
-
     let reply = kernel
         .send(vec![Item::new(
             ant.clone(),
-            json!({"type": "send", "text": "go", "client_id": "t"}),
+            json!({"type": "send", "text": "do it", "client_id": "t"}),
         )])
         .await
         .remove(0)
         .result;
-
-    // The ONE `send` tool was declared — a translation of the same contract.
-    let reqs = server.received_requests().await.unwrap();
-    let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    let tools = sent
-        .get("tools")
-        .and_then(Value::as_array)
-        .expect("no tools declared");
-    assert_eq!(tools.len(), 1, "more than the one `send` tool: {tools:?}");
-    assert_eq!(tools[0]["name"], "send");
-
-    // And the block came back as the SAME text envelope a raw-route model would
-    // have written itself — this is what keeps ai-core's parser dialect-free.
-    let text = reply["response"].as_str().unwrap_or("");
+    let err = reply["error"].as_str().unwrap_or_default();
     assert!(
-        text.contains("<tool_call>") && text.contains("\"name\":\"send\""),
-        "tool_use block was not translated into the raw envelope: {text:?}"
-    );
-    assert!(
-        text.contains("\"target_id\":\"core\""),
-        "input_json_delta fragments were not reassembled: {text:?}"
+        err.contains("native tool_use block") && err.contains("<call name="),
+        "the block was swallowed: {reply:#?}"
     );
 }
 
@@ -616,7 +602,6 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             endpoint: "http://127.0.0.1:1/v1/messages".to_string(),
             model: m,
             max_tokens: 16,
-            tool_use: false,
             kernel: Arc::clone(&kernel),
             client_id: "cli".to_string(),
         };

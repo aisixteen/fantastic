@@ -5,7 +5,7 @@
 //!
 //! A backend does ONE provider pass per `send` — **no loop, no agent menu**. But
 //! tool-calling IS this crate's, and RAW: the provider streams plain text, [`tool_parse`]
-//! reads the `<tool_call>` envelope out of it, and [`route`] dispatches what the
+//! reads the `<call name=…>` envelope out of it, and [`route`] dispatches what the
 //! completion named, delivering each reply to its own `reply_to`. A chain advances
 //! one pass at a time and only because the model asked again — no call ends the
 //! turn, and stop is the default. Nothing iterates on the model's behalf, and no
@@ -41,7 +41,7 @@
 //! - `send` args `{text:str, client_id:str?, system_prompt:str?, send_to:str?}` →
 //!   `{response:str, final:str, client_id:str}` on success,
 //!   `{error:str, client_id:str}` on failure. ONE pass, then [`route`] honours
-//!   where its output was addressed: the model's own `<tool_call>`s first, else
+//!   where its output was addressed: the model's own `<call>`s first, else
 //!   `send_to` hands the pass's TEXT to that agent id once (no propagation). A
 //!   `system_prompt` override replaces the default system block whole.
 //!   `_call_stack` is reserved for the recursion guard, refused BEFORE the FIFO

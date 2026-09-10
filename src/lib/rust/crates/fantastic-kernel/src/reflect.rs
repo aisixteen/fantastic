@@ -288,14 +288,17 @@ pub fn apply_reflect_flags(
                  to escaping. Assemble these THREE pieces and you have built something \
                  that persists and re-runs, with no `code` field at all:\n\
                  1. WRITE THE PROGRAM TO A FILE: never carry file contents in a JSON \
-                 string. Use the file leg's STREAM verbs — {type:'write_stream', path, \
-                 bytes, truncate:true} to write, {type:'read_stream', path, offset} to \
-                 read, one raw chunk at a time — or `send_binary` (same call, but write \
-                 the program VERBATIM in a fenced block: `\"bytes\":\"@body\"` in the JSON, then the program between column-0 `*** Begin Bytes` / `*** End Bytes` lines, nothing escaped). That is \
-                 the only byte path; the string read/write verbs are gone.\n\
+                 string. Use the file leg's STREAM verbs — <type>write_stream</type> \
+                 <path>…</path> <truncate>true</truncate> <bytes>…</bytes> to write, \
+                 <type>read_stream</type> <path>…</path> <offset>0</offset> to read, one \
+                 raw chunk at a time. `bytes` is VERBATIM: the program between \
+                 `<bytes>` and `</bytes>` exactly as written, real newlines, nothing \
+                 escaped. That is the only byte path; the string read/write verbs are \
+                 gone.\n\
                  2. RUN IT: the executor is a general-purpose COMMAND runner. Reflect \
                  it, read its `allowed` regexes, then send \
-                 {type:'start', command:'<path>', args:[...]}; poll {type:'status'}. \
+                 <type>start</type> <command>path</command> <args><item>…</item></args>; \
+                 poll <type>status</type>. \
                  It runs commands, not inline programs.\n\
                  3. RE-RUN: the file is durable on disk, so the SAME `start` command run \
                  again later re-executes the SAME program against whatever the inputs \
@@ -318,7 +321,8 @@ pub fn apply_reflect_flags(
                  COMPOSE the agents you were given for everything else (`list_agents`, \
                  reflect each, send). CREATE/DELETE plain agents (create_agent with a \
                  handler_module and grants, delete_agent) work as before. Read \
-                 {type:'reflect', readme:'self-extension'} — send it to 'kernel' (the \
+                 <type>reflect</type> <readme>self-extension</readme> — send it to \
+                 'kernel' (the \
                  manual lives on the ROOT, not on any other agent) — for the fd wire + \
                  detail."
             ),
@@ -334,7 +338,15 @@ pub fn apply_reflect_flags(
         );
         obj.insert(
             "docs".to_string(),
-            json!("This kernel's manual is a keyed doc tree. To read it, send 'kernel' a reflect payload with a string `readme` field: {type:'reflect', readme:'index'} lists every topic with its ~token cost; {type:'reflect', readme:'<key>'} opens one (e.g. readme:'self-extension', readme:'streams'); {type:'reflect', readme:true} is the short orientation. The field is named exactly `readme` (a string) - not 'readme_key'. Read only what a task needs."),
+            json!(
+                "This kernel's manual is a keyed doc tree. To read it, send 'kernel' \
+                 a reflect with a string `readme` field: <type>reflect</type> \
+                 <readme>index</readme> lists every topic with its ~token cost; \
+                 <readme>key</readme> opens one (e.g. self-extension, streams); \
+                 <readme>true</readme> is the short orientation. The field is named \
+                 exactly `readme` (a string) - not 'readme_key'. Read only what a task \
+                 needs."
+            ),
         );
     }
     match payload.get("tree").and_then(Value::as_str).unwrap_or("all") {
