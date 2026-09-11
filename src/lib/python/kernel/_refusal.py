@@ -48,6 +48,7 @@ EXISTS = "exists"  # an id that is already taken (carries `id`)
 UNHANDLED = "unhandled"  # the agent has no such verb (carries `verb`)
 NOT_FOUND = "not_found"  # the named THING is absent — a path, a job, a key
 DRAINING = "draining"  # the kernel is stopping; no new roots are accepted
+NO_CONSUMER = "no_consumer"  # watch: the watcher has no registered inbox
 
 # Transport codes — a leg that could not carry the call at all. Owned by
 # `relay_connector` today; listed here because they share the field, and a caller
@@ -70,6 +71,7 @@ CODES = frozenset(
         UNHANDLED,
         NOT_FOUND,
         DRAINING,
+        NO_CONSUMER,
         NOT_CONNECTED,
         TRANSPORT_ERROR,
         TRANSPORT_CLOSED,

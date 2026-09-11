@@ -70,6 +70,7 @@ async def wired(seeded_kernel):
 
 async def test_an_ungranted_agent_cannot_watch_another(wired):
     with sender_context("nosy"):
+        wired.ctx.ensure_inbox("nosy")  # a watcher registers first
         denial = wired.watch("secret", "nosy")
     assert denial is not None, "an ungranted watch was allowed — read side-channel"
     assert denial["reason"] == "unauthorized"
@@ -114,6 +115,7 @@ async def test_an_explicit_watch_grant_is_honoured(wired):
         ]
     )
     with sender_context("nosy"):
+        wired.ctx.ensure_inbox("nosy")  # a watcher registers first
         denial = wired.watch("secret", "nosy")
     assert denial is None, denial
     assert "nosy" in wired.ctx.agents["secret"]._watcher_ids
@@ -122,6 +124,7 @@ async def test_an_explicit_watch_grant_is_honoured(wired):
 async def test_an_operator_watch_stays_ungated(wired):
     # `sender=None` is the origin root of trust — the bootstrap wiring a
     # renderer, a test driver. Same rule as send.
+    wired.ctx.ensure_inbox("cli")
     assert wired.watch("secret", "cli") is None
     assert "cli" in wired.ctx.agents["secret"]._watcher_ids
 

@@ -201,9 +201,9 @@ async def test_inbox_bounded_drops_oldest(kernel):
     overflow (so a slow consumer doesn't block the whole substrate)."""
     target = "x"
     kernel.create("file_bridge.tools", id=target)
+    q = kernel.ctx.ensure_inbox(target)  # the test is the reader, and registers first
     for i in range(INBOX_BOUND + 50):
         await kernel.emit(target, {"type": "spam", "n": i})
-    q = kernel.ctx.inboxes[target]
     assert q.qsize() <= INBOX_BOUND
     last = None
     while not q.empty():

@@ -434,3 +434,65 @@ def test_a_fold_inherits_its_first_members_parent():
     assert folds.chains(a + [f])[0] == [0, 1, 2, 3], (
         "the fold sits in the chain it collapsed"
     )
+
+
+def test_three_adjacent_folds_at_the_head_fold_as_a_group():
+    """THE OTHER DIRECTION OF THE SAME KNOB. The test above pins the CEILING (no
+    linked list of summaries); this pins the FLOOR — folds must actually coalesce.
+
+    A real run folds ONCE per turn at most: each projection drops the view under
+    the watermark and stops. So the head accumulates folds one at a time, and the
+    threshold is the whole story. At FOLD_RUN=4 a run that produced three folds
+    never nested at all — measured 2026-09-11, `nested_folds` and `flat_roots`
+    both ended `levels [1]`, a head that grows one fold per span forever. The
+    synthetic budget fixtures cannot show this: they fold many times inside ONE
+    call and sail past four.
+
+    So the rule is exercised directly, at exactly the count that failed."""
+    from ai_core.strategies.fold import KEEP_TAIL, next_span
+
+    goal = _row("user", "GOAL", "user:goal")
+    heads = [_fold("ai", [], f"fold {i}", "body", False, parent=None) for i in range(3)]
+    for i, f in enumerate(heads):
+        f["id"] = 1000 + i
+    tail = [_row("user", f"t{i}", f"user:t{i}") for i in range(KEEP_TAIL + 1)]
+    rows = [goal] + heads + tail
+    span = next_span(rows, rows)
+    # The three folds are at indices 1-3; anything else means the rule skipped
+    # them and took ordinary rows, so they would never coalesce.
+    assert span == [1, 2, 3], (
+        f"three adjacent folds at the head must fold as a group, got {span} "
+        f"(kinds {[rows[i].get('kind') for i in span]})"
+    )
+
+
+async def test_the_head_is_coalesced_even_when_the_view_already_fits():
+    """Folds at the head used to coalesce ONLY while the view was over the
+    watermark. A projection that dropped under it left its adjacent folds
+    standing, and they stayed standing — the next projection folds ordinary rows
+    first and only revisits the head when it is over budget with FOLD_RUN folds
+    already there. So a session grew one fold per span at the head, forever,
+    which is the growth FOLD_RUN exists to stop. Measured 2026-09-11 on
+    `flat_roots`: three level-1 folds and no nesting across 51 turns.
+
+    Here the body ALREADY FITS the budget, so the fold loop never runs; only the
+    tidy pass can produce the level-2 fold."""
+    k = _K()
+    goal = _row("user", "GOAL", "user:goal")
+    # Each fold must COVER real rows, or `render` has nowhere to place it and
+    # the view never shows it at all.
+    src = [_row("user", f"s{i}", f"user:s{i}") for i in range(6)]
+    heads = []
+    for i in range(3):
+        refs = [src[2 * i]["id"], src[2 * i + 1]["id"]]
+        f = _fold("ai", refs, f"f{i}", "b", False, parent=src[2 * i].get("parent"))
+        f["id"] = 2000 + i
+        heads.append(f)
+    tail = [_row("user", f"t{i}", f"user:t{i}") for i in range(7)]
+    body = [goal] + src + heads + tail
+    huge = estimate_tokens(body) * 100  # comfortably under budget
+    await get_strategy("fold")(body, [], {}, _ctx(huge, k))
+    levels = [r.get("level", 1) for r in k.rows_of() if r.get("kind") == "fold"]
+    assert levels and max(levels) >= 2, (
+        f"the head was left uncoalesced while under budget: {levels}"
+    )

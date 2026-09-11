@@ -371,7 +371,11 @@ async def boot(
         # A bad rule must not leave the just-built transport leaked/open.
         await _teardown(id)
         return {"error": f"bridge: bad auth rule: {e}"}
-    st.read_task = asyncio.create_task(_read_loop(id, kernel))
+    # REGISTERED: the read loop outlives this `boot` dispatch and re-emits
+    # every inbound frame for the life of the leg.
+    st.read_task = kernel.ctx.tasks[
+        kernel.ctx.spawn_task(id, "read_loop", _read_loop(id, kernel))
+    ]["_task"]
     await kernel.emit(id, {"type": "bridge_up"})
     return {"booted": True, "transport": kind}
 

@@ -56,6 +56,7 @@ from kernel._refusal import (
     EXISTS,
     INVALID_META,
     LOCKED,
+    NO_CONSUMER,
     NOT_HERE,
     TIMEOUT,
     UNAUTHORIZED,
@@ -77,6 +78,7 @@ from kernel._kernel import (
     _in_shutdown,
     CANCELLED,
     COMPLETED,
+    ERRORED,
     FAILED,
     Kernel,
     TIMED_OUT,
@@ -343,10 +345,14 @@ class Agent:
             self._meta[_field] = _merged
         self.ctx = ctx
         self.ctx.register(self)
-        # Inbox lives on ctx — same dict that synthetic browser clients
-        # share, so the webapp proxy's ctx.ensure_inbox(client_id) and
-        # routing fanout both look up here.
-        self._inbox: asyncio.Queue = self.ctx.ensure_inbox(self.id)
+        # NO INBOX HERE. A queue exists iff a READER registered it —
+        # `ctx.ensure_inbox(id)` IS that registration, and the only callers
+        # that make one are the callers that then drain it (the web_ws proxy
+        # for a browser client, exec_bridge for a relay proxy, a test that
+        # asserts on traffic). Minting one per agent at construction gave
+        # every agent a 256-slot ring that NOTHING in the tree read: it
+        # filled once and then evicted one payload per message, forever, for
+        # the life of the process. Fanout now puts only on queues that exist.
         # No disk I/O here — the agent is pure in-memory. A loader agent
         # subscribes to the `added` event below and persists this record;
         # `Kernel.load()` rehydrates from records the loader read back.
@@ -1037,7 +1043,15 @@ class Agent:
                 return outcome(None, COMPLETED, reply)
             if not d.flags_done:
                 reply = await self._apply_reflect_flags(d.target, d.payload, reply)
-            return self._record(d, outcome(d.pid, COMPLETED, reply))
+            # FAILURE IS A STATUS. A handler that RAN and said no — a missing
+            # path, a patch that did not match, a refusal it composed itself —
+            # settles `errored`, not `completed`. The reply is kept verbatim
+            # either way; what changes is that a reader learns the outcome from
+            # `status` instead of parsing `result`.
+            settled = (
+                ERRORED if isinstance(reply, dict) and reply.get("error") else COMPLETED
+            )
+            return self._record(d, outcome(d.pid, settled, reply))
         except asyncio.CancelledError:
             cur = asyncio.current_task()
             if cur is not None and cur.cancelling() > 0:
@@ -1097,8 +1111,21 @@ class Agent:
         return out
 
     def _stamp_call(self, pid: int | None, out: dict) -> None:
-        """The call row takes the outcome's STATUS (and a refusal's error/reason),
-        never the result body — bodies are the reply's business."""
+        """Settle the call: stamp the live row AND append a `settle` row.
+
+        THE SETTLE IS ITS OWN ROW because the stamp alone never reached disk.
+        The call row is appended at LAUNCH and the stamp MUTATES that dict in
+        place; the loader's pump renders rows on a 0.15 s debounce, so
+        `messages.xml` carried an outcome only for calls that happened to
+        settle inside that window. Everything slower — every AI turn, every
+        job, every stream — was written down as a launch with no ending, and a
+        cold read could not tell "never settled" from "settled late". A row is
+        append-only by contract (`Kernel.rows_put`), so the ending has to be
+        an append, not an edit.
+
+        The stamp stays: live readers (`messages` digests, the `ledger` verb)
+        read it off the call row and must keep working. Hydration replays the
+        settle rows onto their parents to rebuild exactly that state."""
         row = self.ctx.rows.get(pid) if pid is not None else None
         if row is None:
             return
@@ -1109,6 +1136,26 @@ class Agent:
             if res.get("reason"):
                 stamp["reason"] = res.get("reason")
         row["outcome"] = stamp
+        # ON THE ROOT, not on the settled call's agent. A settle is KERNEL
+        # bookkeeping — the ledger's half of a dispatch — and an agent's row
+        # list is read as its CONVERSATION by everything from the model's own
+        # history to a fork's `copy_rows`. Every one of those readers filters
+        # bookkeeping by an enumerated set of kinds, hardcoded independently in
+        # five places, so a new kind on an agent's list is conversation to
+        # whichever reader has not been told about it. Measured 2026-09-11:
+        # `settle` reached a model's prompt as a turn reading `null`, and
+        # `thread_fork` copied settles as conversation and lost its arithmetic.
+        # The root's list is already nobody's conversation; `agent` stays a
+        # FIELD so the ending still names what it ended.
+        self.ctx.rows_put(
+            self.ctx.root.id,
+            {
+                "kind": "settle",
+                "parent": pid,
+                "settled": row.get("agent") or self.id,
+                "outcome": stamp,
+            },
+        )
 
     def advertises(self, verb: str) -> bool:
         """Whether this agent's bundle answers `verb` (its `VERBS` table)."""
@@ -1765,11 +1812,25 @@ class Agent:
             denial = self._gate(sender_id, "watch", src, {})
             if denial is not None:
                 return denial
+        # A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
+        # queue, which meant a caller could watch and never drain: the
+        # payloads piled up to `INBOX_BOUND` and were then evicted one per
+        # message, forever, with nothing to say so. `ensure_inbox` is the
+        # registration; making one here on the watcher's behalf invented a
+        # consumer that did not exist.
+        if tgt_id not in self.ctx.inboxes:
+            return refusal(
+                NO_CONSUMER,
+                f"watch: {tgt_id!r} has no registered inbox, so nothing would "
+                "read what is mirrored there",
+                hint=(
+                    f"register the reader first — ctx.ensure_inbox({tgt_id!r}) "
+                    "— then watch"
+                ),
+                watcher=tgt_id,
+                src=src_id,
+            )
         src._watcher_ids.add(tgt_id)
-        # Make sure tgt has an inbox (synthetic clients need to
-        # be addressable; we lazy-create here so callers don't
-        # have to ensure_inbox first).
-        self.ctx.ensure_inbox(tgt_id)
         return None
 
     def authorize_state_subscribe(self, watcher_id: str) -> dict | None:
@@ -2042,8 +2103,9 @@ class Agent:
 
         Watchers may be agents OR synthetic ids (browser WS clients
         registered by the webapp proxy). Both have entries in
-        `ctx.inboxes`. Fanout puts on `ctx.inboxes[watcher_id]`
-        regardless.
+        `ctx.inboxes`. Fanout puts on `ctx.inboxes[watcher_id]` when one is
+        there and skips silently when it is not — an id with no registered
+        reader has no queue, by construction.
 
         State events carry the full payload (`payload` field) for
         observers — bundle tests + telemetry pane both subscribe.
@@ -2053,7 +2115,9 @@ class Agent:
         """
         sender = _current_sender.get()
         summary = _summarize_payload(payload)
-        self._put_drop_oldest(self._inbox, payload)
+        own = self.ctx.inboxes.get(self.id)
+        if own is not None:
+            self._put_drop_oldest(own, payload)
         self.ctx.publish_state(
             {
                 "agent_id": self.id,
@@ -2245,7 +2309,9 @@ class Agent:
         the digest exists to prevent, and saying so takes an explicit yes."""
         agent = payload.get("agent")
         if not isinstance(agent, str) or not agent.strip():
-            return refusal(BAD_ARG, "rows_read: `agent` must be an agent id", arg="agent")
+            return refusal(
+                BAD_ARG, "rows_read: `agent` must be an agent id", arg="agent"
+            )
         rows = self.ctx.rows_for(agent.strip())
         after = _as_id(payload.get("after"))
         if after is not None:
@@ -2271,11 +2337,19 @@ class Agent:
         fields are references, and guessing would corrupt a fold's `refs`."""
         agent = payload.get("agent")
         if not isinstance(agent, str) or not agent.strip():
-            return refusal(BAD_ARG, "rows_write: `agent` must be an agent id", arg="agent")
-        rows = payload.get("rows")
-        if not isinstance(rows, list) or not rows or not all(isinstance(r, dict) for r in rows):
             return refusal(
-                BAD_ARG, "rows_write: `rows` must be a non-empty list of rows", arg="rows"
+                BAD_ARG, "rows_write: `agent` must be an agent id", arg="agent"
+            )
+        rows = payload.get("rows")
+        if (
+            not isinstance(rows, list)
+            or not rows
+            or not all(isinstance(r, dict) for r in rows)
+        ):
+            return refusal(
+                BAD_ARG,
+                "rows_write: `rows` must be a non-empty list of rows",
+                arg="rows",
             )
         if any("id" in r and r["id"] is not None for r in rows):
             return refusal(

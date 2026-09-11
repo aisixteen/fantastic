@@ -415,7 +415,10 @@ def _res_of(row: dict) -> str:
 # The store holds the kernel's bookkeeping (`call`, `task`) and the conversation's
 # out-of-line parts (`body` rows behind `pull`/`grep`, `view` rows behind the view).
 # The CONVERSATION a reader sees is everything else.
-_BOOKKEEPING = frozenset({"call", "task", "body", "view"})
+# WHAT IS NOT CONVERSATION. This is an allow-list of kinds to HIDE, so a kind
+# added to the kernel and forgotten here lands in the model's prompt — which is
+# how `settle` first arrived as a turn reading `null` (2026-09-11).
+_BOOKKEEPING = frozenset({"call", "task", "body", "view", "settle"})
 
 
 async def _load_history(self_id: str, kernel) -> list[dict]:
@@ -806,12 +809,11 @@ def _deliver_soon(kernel, target, text, client_id, system_prompt) -> None:
     the same contract `exec_bridge` uses for a forked job. Fire-and-forget without
     that is the orphan bug.
     """
-    task = asyncio.create_task(
-        _deliver(kernel, target, text, client_id, system_prompt, born=born)
-    )
+    coro = _deliver(kernel, target, text, client_id, system_prompt, born=born)
     try:
-        kernel.ctx.spawn_task(target, "deliver_reply", task)
+        kernel.ctx.spawn_task(target, "deliver_reply", coro)
     except Exception:  # noqa: BLE001 — a stub kernel in tests has no ctx
+        task = asyncio.create_task(coro)
         _ORPHAN_DELIVERIES.add(task)
         task.add_done_callback(_ORPHAN_DELIVERIES.discard)
 
@@ -1128,7 +1130,7 @@ def without_thinking(text: str) -> str:
 # because the model can debug the first and cannot even see the second.
 
 
-# THE NO-CALL NUDGE — one runtime reminder when a CHAIN turn dispatched nothing.
+# THE NO-CALL NUDGE — a turn that dispatched nothing is TRY AGAIN.
 #
 # Measured 2026-08-25 (`live_subai`, twice) and re-confirmed 2026-09-01
 # (`repo_map:swift`, twice): mid-task the model decides its next action INSIDE
@@ -1136,18 +1138,16 @@ def without_thinking(text: str) -> str:
 # envelope — or stops early believing itself finished. Every agent harness
 # treats "no action emitted" as a control decision, not an ending;
 # interactively a human says "continue" — an unattended chain has nobody, so
-# the runtime says it, ONCE. DONE is EXPLICIT now: the `done` tool call ends a
-# chain silently and is never nudged.
+# the runtime says it.
 #
-# Why once: the nudge is itself a chain turn, so a second consecutive no-call
-# turn arrives with the nudge as its incoming text — and is NOT nudged again.
-# No counter, no per-chain state.
-#: Consecutive silent chain turns the reminder tolerates before the chain is
-#: let go (record meta `nudge_limit` overrides). A safety bound on an unattended
-#: kernel, not a budget — the harness's max_turns is the outer backstop.
-_NUDGE_LIMIT = 24
-#: (kernel instance, agent id, client id) → consecutive silent chain turns so far.
-_silent: dict[tuple[int, str, str], int] = {}
+# THERE IS NO STREAK AND NO CAP. A call-less turn is not a fact about how many
+# times the model has been quiet; it means "you emitted no call, try again",
+# and it means that every time. The chain ends where the model says it ends:
+# `done` (finished) or `await` (waiting on what is in flight). Those two are
+# the ONLY exits — nothing else counts turns on the model's behalf, because a
+# counter that gives up mid-task ends the work silently, which is the exact
+# failure the nudge exists to prevent. Spend is bounded OUTSIDE, by whoever
+# owns the budget (the harness's max_turns).
 # WHAT AN AGENT HAS IN FLIGHT: the number of its own routing turns whose batch is
 # still settling (the calls it made, not yet answered). Per agent id. Read by
 # `await` — the one control call that asks "is anything of mine still coming?".
@@ -1466,7 +1466,7 @@ async def _route_reply(
         # (a status event the user sees), not a silence the harness must read.
         # HONEST OR REFUSED: with nothing of this agent's in flight and nothing
         # queued for it, awaiting is stalling, and it is told so.
-        _silent.pop((id(kernel), self_id, client_id), None)
+        #
         # Routing runs AFTER the turn released its lock, so "queued" is the queue
         # plus a turn another message may already be running under that lock.
         pending = (
@@ -1482,7 +1482,6 @@ async def _route_reply(
         _deliver_soon(kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt)
         return
     if done_called:
-        _silent.pop((id(kernel), self_id, client_id), None)
         # Explicitly finished — nothing more runs, nothing reminds. A caller's
         # `send_to` hand-off is the one thing that still applies: the finished
         # text is what it asked to have delivered.
@@ -1490,37 +1489,17 @@ async def _route_reply(
             _deliver_soon(kernel, send_to, text, client_id, system_prompt)
         return
     if not calls and not units:
-        # A CHAIN turn (its incoming text was a delivered reply, or a nudge) that
-        # dispatched nothing is REMINDED AGAIN — the model is queried until it
-        # emits a call or `done`. Until 2026-09-01 the reminder fired ONCE and a
-        # second silent turn ended the chain silently; a planning-heavy model
-        # (E30 subai) wrote prose for two turns and the run read as finished with
-        # the task untouched. EVERY turn, not only a chained one (user, 2026-09-09:
-        # "all is tool calls"): a first turn from a person that answers in prose
-        # and emits nothing is the same silence — the model ends it with `done`
-        # or acts. Bounded by `nudge_limit` on the record (default 24 consecutive
-        # silent turns) so an unattended kernel cannot spin forever on a model
-        # that never calls; the harness's max_turns is the outer backstop.
+        # TRY AGAIN. Every turn, chained or not (user, 2026-09-09: "all is tool
+        # calls"): a first turn from a person that answers in prose and emits
+        # nothing is the same silence as a mid-chain one — the model ends it
+        # with `done`, waits with `await`, or acts. No streak, no cap: both
+        # exits are above this branch and both already returned.
         #
         # ASKING IS A CALL, so there is no question-turn exemption. A turn that
         # asks the human DISPATCHES (`send` to the human agent) and is therefore
         # never silent; the answer arrives as that call's reply.
-        chained = True
-        if chained:
-            # Scoped to the KERNEL instance, not the process: two kernels in one
-            # process (the test suite, an app embedding several) may carry the
-            # same agent/client ids.
-            key = (id(kernel), self_id, client_id)
-            streak = _silent.get(key, 0) + 1
-            _silent[key] = streak
-            rec = kernel.get(self_id) or {}
-            limit = int(rec.get("nudge_limit") or _NUDGE_LIMIT)
-            if streak <= limit:
-                _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
-            else:
-                _silent.pop(key, None)
-            return
-    _silent.pop((id(kernel), self_id, client_id), None)
+        _deliver_soon(kernel, self_id, _NO_CALL_NUDGE, client_id, system_prompt)
+        return
     if calls:
         return  # the model routed its own work; a caller's hand-off does not apply
     if send_to is not None:
@@ -2375,25 +2354,23 @@ def _make_send(cfg: Backend):
         # just held and deadlock until `send_timeout`. The task row makes the chain
         # visible in `ps` and reachable by `cancel`.
         if isinstance(reply, dict) and not reply.get("error"):
-            task = asyncio.create_task(
-                _route_reply(
-                    id,
-                    kernel,
-                    reply.get("response", ""),
-                    client_id,
-                    send_to,
-                    system_prompt,
-                    # The AI layer's per-tool-call deadline. The kernel defaults
-                    # nothing; this is where a default belongs — the same knob
-                    # that bounds a generation bounds a call to one.
-                    cfg.send_timeout,
-                    # The text this turn ANSWERED — what tells routing whether
-                    # this was a chain turn (a delivered reply) or a chat turn.
-                    text,
-                    turn_id=reply.get("turn_id"),
-                )
+            coro = _route_reply(
+                id,
+                kernel,
+                reply.get("response", ""),
+                client_id,
+                send_to,
+                system_prompt,
+                # The AI layer's per-tool-call deadline. The kernel defaults
+                # nothing; this is where a default belongs — the same knob
+                # that bounds a generation bounds a call to one.
+                cfg.send_timeout,
+                # The text this turn ANSWERED — what tells routing whether
+                # this was a chain turn (a delivered reply) or a chat turn.
+                text,
+                turn_id=reply.get("turn_id"),
             )
-            kernel.ctx.spawn_task(id, "route_reply", task)
+            kernel.ctx.spawn_task(id, "route_reply", coro)
         return reply
 
     return _send

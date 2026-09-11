@@ -110,7 +110,19 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
     return fr
 
 
-FOLD_RUN = 4  # adjacent folds at the head of the view before they fold as a group
+#: Adjacent folds at the head of the view before they fold as a group.
+#:
+#: THREE, not four. A real run folds at most once per turn — each projection
+#: drops the view under the watermark and stops — so the head accumulates folds
+#: one at a time and this threshold is the whole story. At four it never fired:
+#: measured 2026-09-11, `nested_folds` and `flat_roots` both ended `levels [1]`,
+#: a head that grows one fold per span forever, which is the growth this
+#: constant exists to stop.
+#:
+#: Three still skips-then-batches, so depth grows as log₃ of the history rather
+#: than one level per cut (the 2026-09-06 measurement: twelve levels in 26 cuts,
+#: when every span began on the previous fold).
+FOLD_RUN = 3
 
 
 def next_span(
@@ -161,6 +173,23 @@ async def fold(
             rows.append(await write_fold(ctx, rows, span))
             folded += 1
             view = render(rows)
+    # TIDY THE HEAD, budget or no budget. Coalescing used to happen only while
+    # the view was OVER the watermark, so a projection that dropped under it left
+    # its adjacent folds standing — and they stayed standing, because the next
+    # projection folds ordinary rows first and only revisits the head when it is
+    # over budget with `FOLD_RUN` folds already there. A session therefore grew
+    # one fold per span at the head, forever.
+    #
+    # Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so the
+    # run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting
+    # once fewer than `FOLD_RUN` remain.
+    while True:
+        span = next_span(rows, view)
+        if not span or not all(is_fold(rows[i]) for i in span):
+            break
+        rows.append(await write_fold(ctx, rows, span))
+        folded += 1
+        view = render(rows)
     # Stage two and three: strip bodies in what is left, then cut — strip's own logic.
     out = await strip(view, system_block, rec, ctx)
     return Projection(

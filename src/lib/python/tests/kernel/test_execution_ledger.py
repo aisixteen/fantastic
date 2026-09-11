@@ -888,7 +888,10 @@ async def test_joining_is_authorized_against_the_verb_that_execution_ran(
                 [{"target": "vault", "id": "job1", "payload": {"type": "privileged"}}]
             )
         )[0]
-    assert a["status"] == "completed", a
+    # `errored`: the vault HANDLER ran and answered "unknown verb". A semantic
+    # no, not a transport failure — and a settled outcome either way, which is
+    # what makes the join below the thing under test.
+    assert a["status"] == "errored", a
 
     with sender_context("bob"):
         b = (

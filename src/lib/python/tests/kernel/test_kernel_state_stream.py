@@ -166,6 +166,7 @@ async def test_subscriber_receives_emit_events(seeded_kernel):
 async def test_subscriber_sees_real_agent_watcher_fanout(seeded_kernel):
     """A real agent that watches B: when send hits B, tap fires for
     B AND for A's mirrored put. Both are real agents."""
+    seeded_kernel.ctx.ensure_inbox("kernel_state")  # the watcher registers first
     seeded_kernel.watch("cli", "kernel_state")  # kernel_state watches cli
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
