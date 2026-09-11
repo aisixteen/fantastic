@@ -324,7 +324,12 @@ async def _boot(id, payload, kernel):
     """Idempotent. Starts the tick loop. Persistence is THROUGH the loader; a write
     failfasts only when no store is wired (reads are empty until then)."""
     if id not in _tick_tasks or _tick_tasks[id].done():
-        _tick_tasks[id] = asyncio.create_task(_tick_loop(id, kernel))
+        # REGISTERED. The tick loop outlives this `boot` dispatch and fires
+        # sends for the life of the agent; a bare `create_task` left it out of
+        # `ps`, beyond `cancel`, and running under the boot dispatch's scope —
+        # so every schedule it fired was rowed under a task that had ended.
+        tid = kernel.ctx.spawn_task(id, "tick_loop", _tick_loop(id, kernel))
+        _tick_tasks[id] = kernel.ctx.tasks[tid]["_task"]
     return {"running": True}
 
 

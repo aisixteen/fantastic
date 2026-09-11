@@ -58,8 +58,8 @@ async def test_send_system_verb_answered_natively(seeded_kernel):
 
 async def test_emit_puts_on_inbox(kernel):
     kernel.create("file_bridge.tools", id="t")
+    q = kernel.ctx.ensure_inbox("t")  # the test is the reader
     await kernel.emit("t", {"type": "hello", "n": 1})
-    q = kernel.ctx.inboxes["t"]
     msg = q.get_nowait()
     assert msg["n"] == 1
 
@@ -67,6 +67,7 @@ async def test_emit_puts_on_inbox(kernel):
 async def test_emit_fans_out_to_watchers(kernel):
     kernel.create("file_bridge.tools", id="src")
     kernel.create("file_bridge.tools", id="watcher")
+    kernel.ctx.ensure_inbox("watcher")
     kernel.watch("src", "watcher")
     await kernel.emit("src", {"type": "x", "n": 42})
     # watcher's inbox got the mirror.
@@ -76,20 +77,21 @@ async def test_emit_fans_out_to_watchers(kernel):
 async def test_unwatch_stops_routing(kernel):
     kernel.create("file_bridge.tools", id="src")
     kernel.create("file_bridge.tools", id="w")
+    kernel.ctx.ensure_inbox("w")
     kernel.watch("src", "w")
     kernel.unwatch("src", "w")
     await kernel.emit("src", {"type": "x"})
-    assert kernel.ctx.inboxes["w"].empty()
+    assert kernel.ctx.ensure_inbox("w").empty()
 
 
 async def test_send_also_fanouts_to_inbox(seeded_kernel):
     """`send` fans the payload out (drops on inbox) before invoking
     the handler — so watchers / state subscribers see traffic events."""
+    q = seeded_kernel.ctx.ensure_inbox("kernel_state")  # the test is the reader
     (
         await seeded_kernel.send(
             [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
         )
     )[0]["result"]
-    q = seeded_kernel.ctx.inboxes["kernel_state"]
     msg = q.get_nowait()
     assert msg["type"] == "list_agents"

@@ -76,8 +76,8 @@ async def test_create_agent_requires_handler_module(seeded_kernel):
 
 
 async def test_create_agent_emits_agent_created(seeded_kernel):
+    seeded_kernel.ctx.ensure_inbox("watcher")  # a watcher registers first
     seeded_kernel.watch("kernel_state", "watcher")
-    seeded_kernel.ctx.ensure_inbox("watcher")
     (
         await seeded_kernel.send(
             [

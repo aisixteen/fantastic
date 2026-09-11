@@ -165,7 +165,9 @@ async def test_rows_read_returns_whole_rows_oldest_first_and_pages(root):
     )
     assert [r["id"] for r in rest["rows"]] == ids[2:]
     # An agent with no conversation is empty, not an error.
-    assert (await _send(root, root.id, {"type": "rows_read", "agent": "nobody"}))["rows"] == []
+    assert (await _send(root, root.id, {"type": "rows_read", "agent": "nobody"}))[
+        "rows"
+    ] == []
 
 
 async def test_rows_write_appends_under_fresh_ids(root):
@@ -175,7 +177,9 @@ async def test_rows_write_appends_under_fresh_ids(root):
         {kk: vv for kk, vv in r.items() if kk not in ("id", "agent", "ts")}
         for r in k.rows_for("ai")
     ]
-    out = await _send(root, root.id, {"type": "rows_write", "agent": "ai_fork", "rows": rows})
+    out = await _send(
+        root, root.id, {"type": "rows_write", "agent": "ai_fork", "rows": rows}
+    )
     assert len(out["ids"]) == 1 and out["ids"][0] != src, "a copy is a NEW row"
     copied = k.rows_for("ai_fork")
     assert copied[0]["content"] == "the original"
@@ -235,7 +239,11 @@ async def test_a_wildcard_never_carries_the_pair_but_a_named_grant_does(root):
     await _send(
         root,
         root.id,
-        {"type": "update_agent", "id": "peer", "can_call": {"kernel_state": ["rows_read"]}},
+        {
+            "type": "update_agent",
+            "id": "peer",
+            "can_call": {"kernel_state": ["rows_read"]},
+        },
     )
     await _send(
         root,

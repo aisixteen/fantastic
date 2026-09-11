@@ -115,7 +115,10 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                     raise
                 return
 
-    drain_task = asyncio.create_task(drain_outbound())
+    # REGISTERED: this loop lives as long as the socket does.
+    drain_task = kernel.ctx.tasks[
+        kernel.ctx.spawn_task(host_agent_id, "ws_drain", drain_outbound())
+    ]["_task"]
 
     async def _send_envelope(envelope: dict) -> None:
         # Browser tab can close mid-call: an ollama `send` holds the WS
@@ -328,7 +331,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 continue
             ftype = frame.get("type")
             if ftype == "call":
-                t = asyncio.create_task(_on_call(frame))
+                # REGISTERED: `_on_call` DISPATCHES — it is real work, and a
+                # bare task left it out of `ps` and running under whatever
+                # scope opened the socket.
+                t = kernel.ctx.tasks[
+                    kernel.ctx.spawn_task(host_agent_id, "ws_call", _on_call(frame))
+                ]["_task"]
                 pending.add(t)
                 t.add_done_callback(pending.discard)
             else:

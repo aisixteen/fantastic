@@ -314,6 +314,10 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
         )
     )[0]["result"]
     sch_id = r["schedule_id"]
+    # THE READERS REGISTER FIRST. A queue exists iff someone called
+    # `ensure_inbox`, so a reader that arrives after the tick sees nothing.
+    q = seeded_kernel.ctx.ensure_inbox("cli")
+    own = seeded_kernel.ctx.ensure_inbox(sid)
     (
         await seeded_kernel.send(
             [{"target": sid, "payload": {"type": "tick_now", "schedule_id": sch_id}}]
@@ -323,14 +327,12 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
     # contract also echoed `schedule_fired` at the target, so a live program's
     # on_message saw every tick twice (measured 2026-08-07 — opus had to design a
     # filter around it). Telemetry rides the scheduler's OWN inbox + history.
-    q = seeded_kernel.ctx.ensure_inbox("cli")
     msgs = []
     while not q.empty():
         msgs.append(q.get_nowait())
     types = [m["type"] for m in msgs]
     assert "say" in types
     assert "schedule_fired" not in types, "telemetry echoed at the target again"
-    own = seeded_kernel.ctx.ensure_inbox(sid)
     own_types = []
     while not own.empty():
         own_types.append(own.get_nowait()["type"])

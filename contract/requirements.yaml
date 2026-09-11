@@ -34,7 +34,7 @@ requirements:
     title: "the hydration verdict matches the declaration, on the loud channel"
   - id: C1
     level: MUST
-    title: "resume after suspension continues the run — script minds: test_mind_plumbed ASK; AI chains: tests/conformance/test_c1_suspend_resume"
+    title: "asking the human is a CALL and its reply resumes the run — tests/conformance/test_c1_suspend_resume, tests/kernel/test_inquiry_plumbed"
   - id: C14
     level: MUST
     title: "cancel stops a live dispatch before its next step, observably"

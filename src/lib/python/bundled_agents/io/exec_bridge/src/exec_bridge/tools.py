@@ -240,9 +240,9 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
     def release(src, proxy, task):
         """Give a proxy back: unwatch, DROP THE INBOX ROW, cancel the drain.
 
-        The `inboxes.pop` is the step that used to be missing. `emit` auto-vivifies
-        a row it finds, so a leaked proxy keeps every later payload on `src` being
-        copied into a Queue nobody drains — one per (job, watched src), forever."""
+        The `inboxes.pop` is the step that used to be missing: a leaked proxy
+        keeps every later payload on `src` being copied into a Queue nobody
+        drains — one per (job, watched src), forever."""
         kernel.unwatch(src, proxy)
         kernel.ctx.inboxes.pop(proxy, None)
         task.cancel()
@@ -302,21 +302,39 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                 src = m.get("src")
                 if src and src not in subs:
                     proxy = f"_xbw_{job_id}_{src}"
+                    # REGISTER THE READER FIRST. `watch` refuses a watcher
+                    # with no inbox, and the drain task below is what reads
+                    # this one — so claim the queue before asking to be
+                    # watched, not after.
+                    kernel.ctx.ensure_inbox(proxy)
                     # THE KERNEL DECIDES. `watch` is gated exactly like a send (it
                     # IS a read of the source), so it can refuse — and a refusal
                     # discarded here left the program with a subscription that
                     # simply never fired. Tell it, and register NOTHING.
                     denial = kernel.watch(src, proxy)
                     if denial is not None:
+                        # REGISTER NOTHING on a refusal — the queue we claimed a
+                        # line ago has no watcher feeding it and no drain task
+                        # reading it, so it would sit in `ctx.inboxes` forever.
+                        kernel.ctx.inboxes.pop(proxy, None)
                         push({"op": "event", "src": src, "payload": denial})
                         await writer.drain()
                         continue
-                    t = asyncio.create_task(
-                        drain(
-                            proxy,
-                            lambda p, s=src: {"op": "event", "src": s, "payload": p},
+                    # REGISTERED: a drain lives as long as the subscription.
+                    t = kernel.ctx.tasks[
+                        kernel.ctx.spawn_task(
+                            id,
+                            "watch_drain",
+                            drain(
+                                proxy,
+                                lambda p, s=src: {
+                                    "op": "event",
+                                    "src": s,
+                                    "payload": p,
+                                },
+                            ),
                         )
-                    )
+                    ]["_task"]
                     subs[src] = (proxy, t)
             elif op == "unwatch":
                 ent = subs.pop(m.get("src"), None)
@@ -332,12 +350,18 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel):
                     if prev is not None:
                         release(owner_id, prev["proxy"], prev["task"])
                     proxy = f"_xbself_{job_id}"
+                    kernel.ctx.ensure_inbox(proxy)
                     denial = kernel.watch(owner_id, proxy)
                     if denial is not None:
+                        kernel.ctx.inboxes.pop(proxy, None)
                         push({"op": "event", "src": owner_id, "payload": denial})
                         await writer.drain()
                         continue
-                    t = asyncio.create_task(drain(proxy, _inbox_framer))
+                    t = kernel.ctx.tasks[
+                        kernel.ctx.spawn_task(
+                            id, "inbox_drain", drain(proxy, _inbox_framer)
+                        )
+                    ]["_task"]
                     self_sub[0] = (proxy, t)
                     _owner_inbox[owner_id] = {
                         "job_id": job_id,
@@ -503,12 +527,17 @@ async def _start(id, payload, kernel):
         "ctrl_sock": parent_sock,
         "ctrl_task": None,
     }
-    _jobs[job_id]["ctrl_task"] = asyncio.create_task(
-        _serve_ctrl(parent_sock, id, job_id, kernel)
-    )
-    task = asyncio.create_task(_pump(id, job_id, process, kernel))
-    _jobs[job_id]["task"] = task
-    _jobs[job_id]["task_id"] = kernel.ctx.spawn_task(id, "start", task)
+    # THE PUMP IS THE JOB'S TASK. Its id is minted here and installed inside
+    # the fork, so everything the job does — including a program's sends over
+    # the control fd — is parented to work that is still alive.
+    tid = kernel.ctx.spawn_task(id, "start", _pump(id, job_id, process, kernel))
+    _jobs[job_id]["task_id"] = tid
+    _jobs[job_id]["task"] = kernel.ctx.tasks[tid]["_task"]
+    # The relay is the job's too: a program's `kernel.send` must be rowed under
+    # the job, not under the `start` dispatch that settles the moment we return.
+    _jobs[job_id]["ctrl_task"] = kernel.ctx.tasks[
+        kernel.ctx.spawn_task(id, "relay", _serve_ctrl(parent_sock, id, job_id, kernel))
+    ]["_task"]
     await kernel.emit(id, {"type": "job_started", "job_id": job_id})
     return {"job_id": job_id, "status": "running"}
 

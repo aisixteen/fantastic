@@ -160,8 +160,13 @@ async def test_shutdown_agents_tells_advertisers_waits_then_cancels_the_rest(
     )
     await asyncio.wait_for(_run_flag.setdefault(b, asyncio.Event()).wait(), timeout=2)
     # a keepalive loop (a persister) survives the quiet phase
-    keep = asyncio.create_task(asyncio.sleep(30))
-    kid = k.spawn_task(seeded_kernel.id, "message_pump", keep, keepalive=True)
+    # THE KERNEL CREATES THE TASK — it hands over a coroutine, not an
+    # already-running Task, because only the kernel can mint the id the fork
+    # must run under.
+    kid = k.spawn_task(
+        seeded_kernel.id, "message_pump", asyncio.sleep(30), keepalive=True
+    )
+    keep = k.tasks[kid]["_task"]
     out = (
         await seeded_kernel.send(
             [{"target": "kernel", "payload": {"type": "shutdown_agents"}}]
@@ -258,7 +263,17 @@ async def test_the_pump_appends_every_row_but_its_own_calls(seeded_kernel, store
     # boot the root: ledger rehydrate + the pump subscribes at the highest id present
     await root.send([{"target": root.id, "payload": {"type": "boot"}}])
     pump = getattr(root, "_message_pump", None)
-    assert pump is not None and pump.seen >= k.next_id - 1
+    assert pump is not None
+    # CATCHES UP, rather than starting at the top. `boot` itself now settles —
+    # and a settle is a row — so ids keep arriving after the pump computed its
+    # start point. `rows_stream(after)` replays everything above that point, so
+    # what matters is that no id is missed, not that `seen` equals the high
+    # water mark at the instant boot returned.
+    for _ in range(100):
+        if pump.seen >= k.next_id - 1:
+            break
+        await asyncio.sleep(0.02)
+    assert pump.seen >= k.next_id - 1, (pump.seen, k.next_id)
     before = _lines(Path(".fantastic"))
     a = await _mk(root, "sp_p")
     for i in range(3):
@@ -272,7 +287,12 @@ async def test_the_pump_appends_every_row_but_its_own_calls(seeded_kernel, store
     assert rid in ids and any(
         r.get("kind") == "body" and r["parent"] == rid for r in lines
     )
-    assert all(r["kind"] == "call" for r in lines if r["agent"] == a and r.get("kind"))
+    # A dispatch writes TWO rows now: the `call` at launch and its `settle`.
+    assert all(
+        r["kind"] in ("call", "settle")
+        for r in lines
+        if r["agent"] == a and r.get("kind")
+    )
     own = [r for r in lines if r.get("kind") == "call" and r["agent"] == store_agent]
     assert own == [], "the pump's own writes to the store never enter the log"
     assert not any(
@@ -394,3 +414,50 @@ def test_an_unknown_log_version_refuses(tmp_path, monkeypatch):
     (root / _MESSAGES_FILE).write_text('<messages v="9">\n')
     with pytest.raises(RuntimeError, match="unknown log version"):
         read_messages(root)
+
+
+async def test_a_slow_settle_still_reaches_the_log(seeded_kernel, store_agent):
+    """THE BUG THE SETTLE ROW EXISTS FOR. The call row is appended at LAUNCH and
+    the outcome used to be stamped onto that same dict in place; the pump renders
+    rows on a 0.15 s debounce, so a call that settled after its launch row had
+    already been written left NO ending on disk. Everything slow — every AI turn,
+    every job, every stream — was recorded as a beginning with no end, and a cold
+    read could not tell "never settled" from "settled late".
+
+    Here the handler takes 0.4 s, comfortably past the debounce."""
+    root = seeded_kernel
+    await root.send([{"target": root.id, "payload": {"type": "boot"}}])
+
+    async def _slow(id, payload, kernel):
+        if payload.get("type") in ("boot", "shutdown"):
+            return None
+        if payload.get("type") == "reflect":
+            return {"id": id, "sentence": "slow", "verbs": {}}
+        await asyncio.sleep(0.4)
+        return {"ok": True}
+
+    import sys
+    import types
+
+    m = types.ModuleType("slow_settle.tools")
+    m.handler = _slow
+    sys.modules["slow_settle.tools"] = m
+    root.create("slow_settle.tools", id="slowpoke")
+
+    out = (await root.send([{"target": "slowpoke", "payload": {"type": "work"}}]))[0]
+    pid = out["pid"]
+    assert out["status"] == "completed"
+    await asyncio.sleep(0.5)
+
+    lines = _lines(Path(".fantastic"))
+    call = next((r for r in lines if r["id"] == pid), None)
+    assert call is not None, f"the launch row never reached the log: {lines}"
+    settle = next(
+        (r for r in lines if r.get("kind") == "settle" and r.get("parent") == pid),
+        None,
+    )
+    assert settle is not None, (
+        "the call settled 0.4 s after launch and the log records no ending — "
+        f"rows on disk: {[(r['id'], r.get('kind')) for r in lines]}"
+    )
+    assert settle["outcome"]["status"] == "completed", settle

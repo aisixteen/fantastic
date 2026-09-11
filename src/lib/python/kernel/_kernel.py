@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+from collections.abc import Coroutine
 import importlib
 import json
 import sys
@@ -213,9 +214,20 @@ def sender_context(sender_id: str):
 # itself stays LIVE-ONLY (an entry is forgotten the moment its task ends); an
 # outcome is returned to the caller and retained nowhere.
 #
-#   completed — the target's handler ran and returned; `result` is its reply
-#               VERBATIM. May be None; may be a domain {"error": ...} — the
-#               kernel does not introspect domain replies.
+#   completed — the target's handler ran and returned an answer that is not an
+#               error. `result` is its reply VERBATIM; may be None.
+#   errored   — the handler RAN and said NO: it returned a dict carrying a
+#               truthy `error`. A semantic failure — a missing path, a patch
+#               that did not match, a refusal the handler itself composed.
+#               `result` is that reply, verbatim.
+#
+#               Until 2026-09-11 this settled `completed`, on the rule that the
+#               kernel does not introspect domain replies. The rule did not
+#               survive contact with its own storage: `_stamp_call` already
+#               read `error`/`reason` off the result and wrote them onto the
+#               durable row BESIDE `status: completed`, so one row said both
+#               "fine" and "failed". Failure is a STATUS; nothing downstream
+#               should have to parse a result to learn it.
 #   failed    — no handler answer exists: the kernel refused before dispatch
 #               (gate denial, unknown agent, malformed item) or the handler
 #               raised ({"error": f"{type}: {e}", "raised": True}).
@@ -228,6 +240,7 @@ def sender_context(sender_id: str):
 # Invariant: `pid is None` ⟺ nothing was ever in the task table (refusals,
 # malformed items, the kernel-reflect fast path).
 COMPLETED = "completed"
+ERRORED = "errored"
 FAILED = "failed"
 CANCELLED = "cancelled"
 TIMED_OUT = "timed_out"
@@ -586,14 +599,21 @@ class Kernel:
         entry is forgotten when the task ends (done-callback), cancelled or
         not, so the table only ever holds LIVE work.
 
-        A parent that is no longer in the table is dropped to None — the task
-        is a root, adopted by init. This is not defensive slack: a bundle's
-        long-lived loop (a bridge read loop, a job's connector relay) inherits
-        the contextvar of the dispatch that created it, and that dispatch is
-        long gone; a `send` it issues now must not claim a dead parent, or the
-        `ps` tree would lie."""
-        if parent is not None and parent not in self.tasks:
-            parent = None
+        A PARENT IS ALWAYS ALIVE. There used to be a silent `parent = None`
+        here for the case where `_current_task` named a task that had already
+        ended, defended in a comment as init-adoption. It was the fingerprint
+        of a bug, not a rule: an UNREGISTERED fork (a bare `create_task` in a
+        bundle) kept using the scope of the dispatch that made it, so work
+        registered later claimed a dead parent — and converting that to None
+        put the work OUTSIDE every subtree, where `cancel` on its caller could
+        never reach it.
+
+        Measured over a full suite run: 97 hits before, 45 after `spawn_task`
+        began minting each registered fork its own id, 0 once the bare forks
+        (scheduler tick, bridge read loop, ws drain + call, exec drains, the
+        persistence writer) were registered too. Nothing absorbs it now — if a
+        dead parent ever reappears, `forget_task`'s re-parenting is what should
+        have handled it, and the row is wrong."""
         entry = {
             "id": task_id,
             "agent": agent_id,
@@ -613,13 +633,32 @@ class Kernel:
         return entry
 
     def spawn_task(
-        self, agent_id: str, verb: str, task: "asyncio.Task", *, keepalive: bool = False
+        self,
+        agent_id: str,
+        verb: str,
+        coro: "Coroutine[Any, Any, Any]",
+        *,
+        keepalive: bool = False,
     ) -> int:
-        """Register BACKGROUND work a bundle forked out of a dispatch (an OS
-        subprocess pump, a PTY reader) — work that OUTLIVES the dispatch that
-        started it. Bundles call this so their real work is visible to `ps`
-        and killable by `cancel`; without it the dispatch returns, its entry
-        drops, and the resource is unreachable (that is the orphan bug).
+        """Fork BACKGROUND work out of a dispatch (an OS subprocess pump, a PTY
+        reader) — work that OUTLIVES the dispatch that started it. Bundles call
+        this so their real work is visible to `ps` and killable by `cancel`;
+        without it the dispatch returns, its entry drops, and the resource is
+        unreachable (that is the orphan bug).
+
+        THE KERNEL CREATES THE TASK, because only the kernel can mint the id
+        the task must run under. It takes a COROUTINE, not an
+        `asyncio.Task`: a caller that created the task itself had already
+        started it under the DISPATCH's scope, so `_current_task` inside the
+        fork named the forking dispatch — which settles moments later. Every
+        send the fork then made was rowed with a parent that was already gone
+        (measured 2026-09-11: a program's sends through the exec relay carried
+        the settled `start` pid), and `register_task` had to paper over the
+        same case by dropping a dead parent to None. The fork now runs under
+        its OWN id.
+
+        Sender and origin ride the copied context untouched — a fork acts as
+        whoever forked it, which is what the gate must see.
 
         Parent = the dispatch that forked it, so the fork stays inside the
         caller's process group. A FORK IS A MESSAGE: the task's id is the id of
@@ -629,6 +668,9 @@ class Kernel:
         task_id = self.rows_put(
             agent_id, {"kind": "task", "verb": verb, "parent": parent}
         )
+        ctx = contextvars.copy_context()
+        ctx.run(_current_task.set, task_id)
+        task = asyncio.create_task(coro, context=ctx)
         self.register_task(
             task_id, agent_id, verb, task, parent=parent, keepalive=keepalive
         )
@@ -1080,9 +1122,16 @@ class Kernel:
             del self.well_known[name]
 
     def ensure_inbox(self, id: str) -> asyncio.Queue:
-        """Lazy-create an inbox queue for `id`. Used by agents at
-        construction AND by the webapp WS proxy for synthetic browser
-        client ids."""
+        """Register `id` as a READER and hand back its queue.
+
+        This call IS the registration: a queue exists iff someone called this
+        to get one, and every caller that does drains it (the webapp WS proxy
+        for a synthetic browser client, exec_bridge for a relay proxy, a test
+        asserting on traffic). Nothing else mints one — an agent does not get
+        a queue merely by existing, and `watch` refuses a watcher that has not
+        registered rather than inventing a consumer on its behalf.
+
+        Idempotent, so a reader may call it defensively before every read."""
         q = self.inboxes.get(id)
         if q is None:
             from kernel._kernel import INBOX_BOUND  # avoid forward ref

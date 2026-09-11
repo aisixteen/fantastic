@@ -91,8 +91,15 @@ class RelayTransport(_BaseTransport):
         heartbeat: float = DEFAULT_HEARTBEAT,
         identity: dict | None = None,
         ws: Any = None,
+        spawn: Any = None,
     ) -> None:
         self._dialer = dialer
+        # HOW THIS TRANSPORT FORKS. Production passes the kernel's
+        # `spawn_task`-backed callable, so the heartbeat is a `ps` row under its
+        # connector and `cancel` reaches it; a bare task left a loop that pings
+        # the relay forever with nobody able to see or stop it. A test that
+        # builds a transport directly has no kernel and gets a plain task.
+        self._spawn = spawn or (lambda _name, coro: asyncio.create_task(coro))
         self._partner = partner_guid
         self._reconnect = reconnect
         self._heartbeat = heartbeat
@@ -121,6 +128,7 @@ class RelayTransport(_BaseTransport):
         reconnect: float = DEFAULT_RECONNECT,
         identity: dict | None = None,
         dialer: Dialer | None = None,
+        spawn: Any = None,
     ) -> "RelayTransport":
         dialer = dialer or _default_dialer(relay_url, guid, token)
         t = cls(
@@ -129,6 +137,7 @@ class RelayTransport(_BaseTransport):
             reconnect=reconnect,
             heartbeat=heartbeat,
             identity=identity,
+            spawn=spawn,
         )
         # Eager first dial. On failure: one-shot (reconnect<=0) raises so boot
         # fails loudly; otherwise swallow it — recv() auto-connects in the
@@ -160,7 +169,9 @@ class RelayTransport(_BaseTransport):
         if self._hb_task is not None:
             self._hb_task.cancel()
         self._hb_task = (
-            asyncio.create_task(self._heartbeat_loop()) if self._heartbeat > 0 else None
+            self._spawn("relay_heartbeat", self._heartbeat_loop())
+            if self._heartbeat > 0
+            else None
         )
 
     async def _on_socket_open(self) -> None:
@@ -439,6 +450,10 @@ async def build_transport(
         heartbeat=heartbeat,
         reconnect=reconnect,
         identity=_identity_from_record(rec),
+        # The heartbeat becomes this connector's own registered work.
+        spawn=lambda name, coro: kernel.ctx.tasks[
+            kernel.ctx.spawn_task(rec["id"], name, coro)
+        ]["_task"],
     )
 
 

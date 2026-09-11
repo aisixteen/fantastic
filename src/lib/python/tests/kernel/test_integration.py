@@ -115,6 +115,9 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
             ]
         )
     )[0]["result"]
+    # THE READER REGISTERS FIRST — a queue exists iff someone called
+    # `ensure_inbox`, so a reader arriving after the tick sees nothing.
+    q = seeded_kernel.ctx.ensure_inbox("cli")
     (
         await seeded_kernel.send(
             [
@@ -129,7 +132,6 @@ async def test_scheduler_fires_through_kernel_send(seeded_kernel, store_agent):
     # cli's inbox got the say payload ONLY — one delivery per tick. The
     # `schedule_fired` telemetry rides the scheduler's own inbox, not the target's
     # (the target-echo doubled every delivery to a live program's on_message).
-    q = seeded_kernel.ctx.ensure_inbox("cli")
     msgs = []
     while not q.empty():
         msgs.append(q.get_nowait())

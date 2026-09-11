@@ -94,6 +94,17 @@ def hydrate_messages(kernel, root_dir: Path) -> int:
     kernel.next_id = max(kernel.next_id, next_id)
     for r in rows:
         kernel.rows_put(r["agent"], r)
+    # REPLAY THE ENDINGS. A settle is its own row, so the call it settles comes
+    # back off disk as it was WRITTEN — at launch, with no outcome. Stamping it
+    # here rebuilds the state a live kernel had, and it is the only reason the
+    # log can answer "how did this end" for a call that settled after the
+    # pump's debounce (which is most of them: every AI turn, every job).
+    for r in rows:
+        if r.get("kind") != "settle":
+            continue
+        call = kernel.rows.get(r.get("parent"))
+        if call is not None and r.get("outcome") is not None:
+            call["outcome"] = r["outcome"]
     return len(rows)
 
 
@@ -513,11 +524,11 @@ class _MessagePump:
     def start(self, after: int) -> None:
         self.seen = after
         self.written = after
-        reader = asyncio.create_task(self._read(after))
-        flusher = asyncio.create_task(self._flush_loop())
-        for verb, t in zip(self.VERBS, (reader, flusher)):
-            self.kernel.spawn_task(self.agent.id, verb, t, keepalive=True)
-        self._tasks = [reader, flusher]
+        ids = [
+            self.kernel.spawn_task(self.agent.id, verb, coro, keepalive=True)
+            for verb, coro in zip(self.VERBS, (self._read(after), self._flush_loop()))
+        ]
+        self._tasks = [self.kernel.tasks[i]["_task"] for i in ids]
 
     def _skip(self, row: dict) -> bool:
         store = _find_store(self.agent)
@@ -525,6 +536,13 @@ class _MessagePump:
             return row.get("verb") in self.VERBS
         if row.get("kind") == "call" and row.get("agent") == store:
             return row.get("origin") is None  # the loader's own persistence traffic
+        # A SETTLE FOLLOWS ITS CALL. The pump's own writes are skipped so that
+        # persisting a row does not itself produce a row to persist; their
+        # endings must be skipped for the same reason, or the recursion comes
+        # back through the other half.
+        if row.get("kind") == "settle":
+            parent = self.kernel.rows.get(row.get("parent"))
+            return parent is not None and self._skip(parent)
         return False
 
     async def _read(self, after: int) -> None:
@@ -640,7 +658,15 @@ class _FlushLoop:
         for a in self.kernel.agents.values():
             self._paths[a.id] = a._root_path
         self._unsub = self.kernel.add_state_subscriber(self._on_state)
-        self._task = asyncio.create_task(self._run())
+        # REGISTERED, and KEEPALIVE: the persistence writer must outlive the
+        # quiet phase of `shutdown_agents` (it is what flushes what shutdown
+        # produced). A bare task left every write it made — read_stream,
+        # write_stream, rename on the store — rowed under the dispatch that
+        # booted the loader, which ends immediately.
+        tid = self.kernel.spawn_task(
+            self.agent.id, "persist_writer", self._run(), keepalive=True
+        )
+        self._task = self.kernel.tasks[tid]["_task"]
 
     def _on_state(self, evt: dict) -> None:
         kind = evt.get("kind")
@@ -969,8 +995,7 @@ def _install_ledger_flusher(agent) -> None:
             finally:
                 state["running"] = False
 
-        task = asyncio.create_task(run())
-        agent.ctx.spawn_task(agent.id, "ledger_flush", task)
+        agent.ctx.spawn_task(agent.id, "ledger_flush", run())
 
     agent.ctx.ledger_flusher = kick
 

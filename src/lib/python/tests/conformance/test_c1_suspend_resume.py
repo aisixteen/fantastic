@@ -1,38 +1,71 @@
-"""C1 — resume after suspension continues the run (the AI-chain variant).
+"""C1 — resume after asking continues the run (the AI-chain variant).
 
 The exemplar (`openai-agents/tests/test_hitl_session_scenario.py`) interrupts a
 run for human input and asserts the answer resumes it at the exact point. In
-this paradigm suspension needs NO machinery: a turn that asks and emits no call
-ENDS the chain; durable history holds the question; the human's answer arrives
-as the next `send`, and that turn resumes with full context. The assertions
-that make it C1 rather than "just chat":
+this paradigm there is NO SUSPENSION MACHINERY, and since 2026-09-11 there is
+no suspension either: ASKING IS A CALL. The chain `send`s an `inquiry` to the
+`user` agent and the human's answer comes back as THAT CALL'S REPLY, in the
+next turn, tagged and correlated like any other. Nothing is scraped out of
+prose and nothing waits on a convention.
 
-  1. work done BEFORE the ask happened exactly once and is NOT re-run on resume
-     (the ledger's dedup is what makes this assertable, not just observable);
-  2. the resumed turn CONTINUES — the post-answer side effect lands after it;
-  3. the structured question shape (`{type:'inquiry', request_id, kind, ...}`)
-     survives to the asker verbatim, so a UI can render it and correlate.
+What made the old shape untenable: the mind asked by printing a JSON blob and
+emitting no call, and a call-less turn ENDED the chain. A turn that emits no
+call is now `try again`, so a printed question is not an ending — it is a model
+that forgot to act. The three claims that make this C1 rather than "just chat"
+survive the change unaltered:
 
-The script-mind variant of C1 was already pinned in `test_mind_plumbed` (the
-ASK flow); the registry row points at both.
+  1. work done BEFORE the ask happened exactly once and is NOT re-run after the
+     answer (the ledger's dedup is what makes this assertable, not just
+     observable);
+  2. the chain CONTINUES — the post-answer side effect lands after it;
+  3. the structured question reaches the HUMAN verbatim (`request_id`, `kind`,
+     `options`), read off the desk's own record of the call it received, so a
+     UI can render it and correlate the answer.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 
 import pytest
 
 from ai_core import core
 
 QUESTION = {
-    "type": "inquiry",
     "request_id": "q-color",
     "kind": "single",
-    "question": "Which label do I write?",
+    "text": "Which label do I write?",
     "options": ["red", "green"],
 }
+
+#: What the desk was actually handed, per agent id — the SCORE. A model that
+#: only talks about asking leaves this empty.
+_ASKED: dict[str, list] = {}
+
+
+async def _user_handler(id, payload, kernel):
+    """The human, as an ordinary agent: the answer IS the reply."""
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb == "reflect":
+        return {"id": id, "sentence": "the human", "verbs": {"inquiry": "ask me"}}
+    if verb == "inquiry":
+        _ASKED.setdefault(id, []).append(
+            {k: v for k, v in payload.items() if k != "type"}
+        )
+        return {"answer": "green", "request_id": payload.get("request_id")}
+    if verb == "asked":
+        return {"asked": _ASKED.get(id, [])}
+    return {"error": f"user: unknown verb {verb!r}", "reason": "unhandled"}
+
+
+_user_mod = types.ModuleType("c1_user.tools")
+_user_mod.handler = _user_handler
+sys.modules["c1_user.tools"] = _user_mod
 
 
 def _call(verb_payload: dict) -> str:
@@ -46,6 +79,16 @@ def _call(verb_payload: dict) -> str:
             "reply_to": "self",
             "exec_id": f"c1-{verb_payload['path']}",
         },
+    )
+
+
+def _ask() -> str:
+    """The ask, as a CALL to the human. Its reply is the answer."""
+    from ai_core.tool_parse import render_call
+
+    return render_call(
+        "send",
+        {"target_id": "c1_user", "payload": {"type": "inquiry", **QUESTION}},
     )
 
 
@@ -64,21 +107,28 @@ class _FakeProvider:
         if self.calls == 1:
             # step 1: a side effect, then next turn will hold its reply
             yield _call({"type": "write", "path": "step1", "bytes": "done"})
-        elif "green" in last and "[reply to" not in last:
-            # THE RESUME TURN: the human's answer — continue exactly here
-            yield _call({"type": "write", "path": "step2", "bytes": "green-label"})
         elif "[reply to" in last:
             if "step2" in last:
-                yield "FINISHED."
+                yield "FINISHED. " + '<call name="done"></call>'
+            elif "green" in last:
+                # THE ANSWER CAME BACK AS THE REPLY — continue exactly here.
+                yield _call({"type": "write", "path": "step2", "bytes": "green-label"})
             else:
-                # step 1's reply came back → now we need the human: ask + stop
-                yield "I need a decision.\n" + json.dumps(QUESTION) + "\n"
+                # step 1's reply came back → now we need the human. ASKING IS A
+                # CALL: the chain does not end here, it waits on this reply.
+                yield "I need a decision. " + _ask()
         else:
-            yield "unexpected turn"
+            yield "unexpected turn " + '<call name="done"></call>'
 
 
 @pytest.fixture
 async def wired(seeded_kernel, store_agent):
+    _ASKED.clear()
+    seeded_kernel.create(
+        "c1_user.tools",
+        id="c1_user",
+        callable_by={"c1_ai": "*"},
+    )
     seeded_kernel.create(
         "text_file.tools",
         id="c1_store",
@@ -107,7 +157,7 @@ async def wired(seeded_kernel, store_agent):
         # nowhere durable to land and the recorded ask this test reads back
         # never persists.
         file_bridge_id=store_agent,
-        can_call={"cli": "*", "c1_store": "*"},
+        can_call={"cli": "*", "c1_store": "*", "c1_user": "*"},
     )
     fp = _FakeProvider()
     core._providers["c1_ai"] = fp
@@ -138,10 +188,12 @@ async def _settle(fp, want_calls, timeout=5.0):
     await asyncio.sleep(0.1)  # let routing drain
 
 
-async def test_a_chain_suspends_on_a_question_and_the_answer_resumes_it(wired):
+async def test_a_chain_asks_the_human_and_the_answer_resumes_it(wired):
     kernel, fp = wired
 
-    # ── phase 1: run until the ask ──
+    # ONE send. The chain does step 1, asks the human, reads the answer as that
+    # call's reply, does step 2 and finishes — no second `send` from outside,
+    # because nothing suspended.
     first = (
         await kernel.send(
             [
@@ -152,41 +204,22 @@ async def test_a_chain_suspends_on_a_question_and_the_answer_resumes_it(wired):
             ]
         )
     )[0]["result"]
-    await _settle(fp, 2)
-    # SUSPENDED: the ask turn emitted no call, the chain is over, step1 done
-    assert await _value(kernel, "step1") == "done"
-    assert await _value(kernel, "step2") is None, "step2 must WAIT for the human"
-
-    # the structured question reached the asker verbatim (renderable + correlatable)
     assert first is not None
-    hist = (
-        await kernel.send(
-            [{"target": "c1_ai", "payload": {"type": "recall", "limit": 100}}]
-        )
-    )[0]["result"]["messages"]
-    ask_texts = [m["content"] for m in hist if m["role"] == "assistant"]
-    ask = next((t for t in ask_texts if "request_id" in t), None)
-    assert ask, f"no structured question in: {ask_texts}"
-    q = json.loads(ask[ask.index("{") : ask.rindex("}") + 1])
-    assert q == QUESTION
+    await _settle(fp, 4)
 
-    calls_at_suspend = fp.calls
+    # CLAIM 3 — the structured question reached the HUMAN verbatim, read off the
+    # desk's own record of the call it received, not out of the model's prose.
+    asked = (await kernel.send([{"target": "c1_user", "payload": {"type": "asked"}}]))[
+        0
+    ]["result"]["asked"]
+    assert len(asked) == 1, f"the human was asked {len(asked)} times: {asked}"
+    assert {k: asked[0][k] for k in QUESTION} == QUESTION, asked[0]
 
-    # ── phase 2: the human answers — a plain next send, nothing special ──
-    (
-        await kernel.send(
-            [
-                {
-                    "target": "c1_ai",
-                    "payload": {"type": "send", "text": "q-color: green"},
-                }
-            ]
-        )
-    )[0]["result"]
-    await _settle(fp, calls_at_suspend + 2)
-
-    # ── the C1 claims ──
-    assert await _value(kernel, "step2") == "green-label", "resume did not continue"
+    # CLAIM 2 — the chain CONTINUED past the answer.
+    assert await _value(kernel, "step1") == "done"
+    assert await _value(kernel, "step2") == "green-label", (
+        "the answer did not resume it"
+    )
     # completed pre-ask work ran exactly ONCE: the named execution's ledger row
     led = (await kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
@@ -194,9 +227,8 @@ async def test_a_chain_suspends_on_a_question_and_the_answer_resumes_it(wired):
     rows = {r.get("name"): r for r in led["executions"] if r.get("name")}
     assert rows["c1-step1"]["attempts"] == 1, "suspension re-ran completed work"
     assert rows["c1-step2"]["status"] == "completed"
-    # and the resume turn saw its full pre-suspension history
-    resume_msgs = fp.requests[calls_at_suspend]
-    joined = json.dumps(resume_msgs)
+    # and the turn that continued saw its full pre-ask history
+    joined = json.dumps(fp.requests[-1])
     assert "step1" in joined and "request_id" in joined, (
-        "the resumed turn lost its pre-suspension context"
+        "the continuing turn lost its pre-ask context"
     )

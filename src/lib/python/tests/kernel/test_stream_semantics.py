@@ -21,7 +21,9 @@ TOKENS = [f"tok{i:02d}" for i in range(12)]
 
 
 def _drain(kernel, inbox_id: str) -> list[dict]:
-    q = kernel.ctx.inboxes[inbox_id]
+    # THE TEST IS THE READER, so it registers. A queue exists iff someone
+    # called `ensure_inbox` for it; nothing mints one on an agent's behalf.
+    q = kernel.ctx.ensure_inbox(inbox_id)
     out = []
     while not q.empty():
         out.append(q.get_nowait())
@@ -29,6 +31,14 @@ def _drain(kernel, inbox_id: str) -> list[dict]:
 
 
 async def _agent(kernel, aid: str) -> None:
+    """Create the agent AND register this test as the reader of its inbox.
+
+    A queue exists iff someone called `ensure_inbox` for it — an agent does not
+    get one merely by existing, and nothing mints one on its behalf. Every test
+    below drains this agent, so the registration belongs here, before the
+    traffic: a reader that arrives after the emits sees an empty queue, which is
+    the honest semantics and not a bug to paper over.
+    """
     (
         await kernel.send(
             [
@@ -44,6 +54,7 @@ async def _agent(kernel, aid: str) -> None:
             ]
         )
     )[0]["result"]
+    kernel.ctx.ensure_inbox(aid)
 
 
 async def _stream(kernel, src: str, tokens=TOKENS) -> None:
@@ -92,8 +103,9 @@ async def test_two_watchers_of_one_source_see_the_same_events_in_the_same_order(
     the SAME sequence. Two consumers that disagree about order cannot be
     reconciled by anything downstream."""
     await _agent(kernel, "src")
-    kernel.watch("src", "w1")
-    kernel.watch("src", "w2")
+    for w in ("w1", "w2"):
+        kernel.ctx.ensure_inbox(w)  # a watcher is a reader; it registers first
+        kernel.watch("src", w)
 
     await _stream(kernel, "src")
 
@@ -106,8 +118,9 @@ async def test_dropping_one_subscriber_does_not_disturb_the_others(kernel):
     """STREAM-ORDER-004. A consumer leaving is routine; it must not truncate or
     reorder anyone else's view."""
     await _agent(kernel, "src")
-    kernel.watch("src", "stay")
-    kernel.watch("src", "leave")
+    for w in ("stay", "leave"):
+        kernel.ctx.ensure_inbox(w)
+        kernel.watch("src", w)
 
     await kernel.emit("src", {"type": "token", "text": "first"})
     kernel.unwatch("src", "leave")
@@ -129,6 +142,7 @@ async def test_two_producers_do_not_interleave_into_one_subscriber_out_of_order(
     still come out intact, or a consumer cannot demultiplex them."""
     for aid in ("p1", "p2"):
         await _agent(kernel, aid)
+        kernel.ctx.ensure_inbox("mux")
         kernel.watch(aid, "mux")
 
     await asyncio.gather(
@@ -210,4 +224,43 @@ async def test_emit_never_invokes_a_handler(kernel, verb):
     and a `done` would be indistinguishable from a call."""
     await _agent(kernel, "quiet")
     await kernel.emit("quiet", {"type": verb})
-    assert not kernel.ctx.inboxes["quiet"].empty()
+    assert not kernel.ctx.ensure_inbox("quiet").empty()
+
+
+# ─── a queue exists iff a reader registered it ──────────────────
+
+
+async def test_an_agent_has_no_inbox_until_a_reader_registers_one(kernel):
+    """A QUEUE EXISTS IFF A READER REGISTERED IT. Until 2026-09-11 every agent
+    got one at construction and NOTHING in the tree read it: a 256-slot ring
+    that filled once and then evicted one payload per message, for the life of
+    the process. `ensure_inbox` IS the registration; an agent does not get a
+    queue merely by existing."""
+    await _agent(kernel, "lonely")
+    kernel.ctx.inboxes.pop("lonely", None)  # undo _agent's registration
+    assert "lonely" not in kernel.ctx.inboxes
+
+    await kernel.emit("lonely", {"type": "token", "text": "x"})
+    assert "lonely" not in kernel.ctx.inboxes, "an emit allocated a queue"
+
+    q = kernel.ctx.ensure_inbox("lonely")
+    assert q.empty(), "the reader arrived after the emit; it sees nothing"
+    await kernel.emit("lonely", {"type": "token", "text": "y"})
+    assert q.get_nowait()["text"] == "y"
+
+
+async def test_watch_without_a_registered_inbox_is_refused(kernel):
+    """`watch` used to lazy-create the watcher's queue, which meant a caller
+    could watch and never drain: payloads piled to INBOX_BOUND and were then
+    evicted one per message, with nothing to say so. Inventing a consumer on
+    the caller's behalf is the bug; refusing names it."""
+    await _agent(kernel, "src_agent")
+    denial = kernel.watch("src_agent", "ghost")
+    assert denial is not None and denial["reason"] == "no_consumer", denial
+    assert denial["watcher"] == "ghost" and denial["src"] == "src_agent"
+    assert "ghost" not in kernel.ctx.inboxes, "the refusal still minted a queue"
+
+    kernel.ctx.ensure_inbox("ghost")
+    assert kernel.watch("src_agent", "ghost") is None
+    await kernel.emit("src_agent", {"type": "token", "text": "seen"})
+    assert kernel.ctx.inboxes["ghost"].get_nowait()["text"] == "seen"

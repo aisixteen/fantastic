@@ -182,14 +182,34 @@ async def _write_all(fd: int, buf: bytes) -> int:
 
 
 def _attach_reader(agent_id: str, kernel) -> None:
+    """Attach the PTY reader, and REGISTER it as this agent's work.
+
+    `loop.add_reader` captures the calling context, so every emit the callback
+    made ran under the scope of the dispatch that attached it — a `boot` or a
+    `restart` that ended immediately. Worse, the reader is long-lived work that
+    appeared in no `ps` row: a PTY streaming into a kernel could not be found,
+    and `cancel` could not reach it.
+
+    The fd callback stays (it is the flow-control design ported from VSCode's
+    terminal); what is registered is a holder task that OWNS the attachment and
+    detaches on cancel. Cancelling it is what stops the reader.
+    """
     state = _procs.get(agent_id)
     if not state or state.get("reader_attached"):
         return
     loop = asyncio.get_event_loop()
     fd = state["fd"]
     os.set_blocking(fd, False)
+
+    async def _hold() -> None:
+        try:
+            await asyncio.Event().wait()  # lives until cancelled
+        finally:
+            _detach_reader(agent_id)
+
     loop.add_reader(fd, _on_readable, agent_id, kernel)
     state["reader_attached"] = True
+    state["reader_task"] = kernel.ctx.spawn_task(agent_id, "pty_reader", _hold())
 
 
 def _detach_reader(agent_id: str) -> None:

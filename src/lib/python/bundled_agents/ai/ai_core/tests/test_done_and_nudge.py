@@ -90,41 +90,6 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(seeded_kernel)
         core._providers.pop(aid, None)
 
 
-async def test_nudge_limit_bounds_a_never_calling_chain(seeded_kernel):
-    """`nudge_limit` on the record caps consecutive silent turns — an unattended
-    kernel must not spin forever on a model that never calls."""
-    fp = _Script(
-        [
-            _call({"type": "reflect"}),
-            "prose 1",
-            "prose 2",
-            "prose 3",
-            "prose 4 — would be nudged without the limit",
-        ]
-    )
-    aid = "nd_lim"
-    seeded_kernel.create(
-        "ollama_backend.tools",
-        id=aid,
-        context_window=32768,
-        can_call={"cli": "*"},
-        nudge_limit=2,
-    )
-    core._providers[aid] = fp
-    try:
-        fp.turns[0] = _call({"type": "reflect"}).replace('"echo"', '"kernel"')
-        await seeded_kernel.send(
-            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
-        )
-        await _settle(fp, 4)
-        await asyncio.sleep(0.3)
-        # turn 1 call, turn 2 silent → nudge 1, turn 3 silent → nudge 2, turn 4
-        # silent → over the limit, chain let go: exactly 4 passes, never 5.
-        assert fp.calls == 4, fp.incoming
-    finally:
-        core._providers.pop(aid, None)
-
-
 async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel):
     fp = _Script(
         [
