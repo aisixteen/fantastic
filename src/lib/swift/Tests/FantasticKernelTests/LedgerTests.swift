@@ -208,3 +208,56 @@ struct LedgerTests {
         #expect(p["next"].asString != nil, "a further page must be named")
     }
 }
+
+extension LedgerTests {
+    /// FAILURE IS A STATUS. A handler that RAN and said no — here an unknown
+    /// verb, but equally a missing path or a patch that did not match — settles
+    /// `errored`, not `completed`.
+    ///
+    /// It used to settle `completed`, on the rule that the kernel does not
+    /// introspect domain replies, while the durable row already carried the
+    /// error copied off the result beside `status: completed`. One row said both
+    /// "fine" and "failed". Python and rust each had a test that moved when this
+    /// changed; swift had none, so the old behaviour was unpinned here.
+    @Test func aHandlerThatSaysNoSettlesErrored() async {
+        let runs = Runs()
+        let k = await makeKernel(runs)
+
+        let out = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("nope_unknown")]))
+        ])[0]
+        #expect(out.status == .errored, "\(out.status) — \(out.result.serialize())")
+        #expect(out.result["error"].asString == "unknown verb")
+
+        // AN ERRORED EXECUTION IS STILL AN EXECUTION: the ledger lists what work
+        // BECAME, and a refusal is an outcome like any other.
+        let led = await k.send([
+            Item(AgentId("kernel"), .object(["type": .string("ledger")]))
+        ])[0].result
+        // BY PID — the agent also has a child-boot row under the same target.
+        let pid = out.pid.map { String($0.value) }
+        let row = (led["executions"].asArray ?? []).first { $0["id"].asString == pid }
+        #expect(row != nil, "the errored execution vanished: \(led.serialize())")
+        #expect(row?["status"].asString == "errored", "\(row?.serialize() ?? "-")")
+    }
+
+    /// A THROW is `failed`, not `errored` — the two are different facts and the
+    /// retry engine only re-spends the transport class.
+    @Test func aThrowStaysFailedAndErroredNeverRetries() async {
+        let runs = Runs()
+        runs.setFailUntil(99)  // always throws
+        let k = await makeKernel(runs)
+
+        let thrown = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("work")]), retries: 2)
+        ])[0]
+        #expect(thrown.status == .failed, "\(thrown.status)")
+        #expect(thrown.attempts == 3, "a throw is retried: \(thrown.attempts)")
+
+        let said = await k.send([
+            Item(AgentId("desk"), .object(["type": .string("nope")]), retries: 2)
+        ])[0]
+        #expect(said.status == .errored)
+        #expect(said.attempts == 1, "a semantic no is never re-sent: \(said.attempts)")
+    }
+}

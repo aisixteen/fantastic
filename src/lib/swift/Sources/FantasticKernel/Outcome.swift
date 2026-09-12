@@ -26,8 +26,20 @@ import Foundation
 
 /// How one batch item ended.
 public enum Status: String, Sendable {
-    /// The handler ran and returned; `result` is its reply verbatim.
+    /// The handler ran and returned an answer that is not an error; `result` is
+    /// its reply verbatim.
     case completed
+    /// The handler RAN AND SAID NO: it returned an object carrying a truthy
+    /// `error`. A semantic failure — a missing path, a patch that did not match,
+    /// a refusal the handler composed itself. `result` is that reply, verbatim.
+    ///
+    /// This used to settle `completed`, on the rule that the kernel does not
+    /// introspect domain replies. The rule did not survive contact with its own
+    /// storage: the durable row already carried the error copied off the result
+    /// beside `status: completed`, so one row said both "fine" and "failed".
+    /// Failure is a STATUS; nothing downstream should have to parse a result to
+    /// learn it.
+    case errored
     /// No handler answer exists — refused before dispatch, or the handler threw.
     case failed
     /// Killed via `cancel` while the batch awaited it.

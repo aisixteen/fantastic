@@ -72,11 +72,18 @@ public enum Refusal {
     /// The call outlived its deadline.
     public static let timeout = "timeout"
 
+    /// The kernel is stopping; no new roots are accepted.
+    public static let draining = "draining"
+    /// `watch`: the watcher has no registered inbox, so nothing would read what
+    /// is mirrored there. Registering a consumer is what `watch` requires, not
+    /// what it does.
+    public static let noConsumer = "no_consumer"
+
     /// Every legal code. A value outside this set is a programming error.
     public static let codes: Set<String> = [
         unauthorized, unknownAgent, missingArg, badArg, invalidMeta, locked,
         notHere, exists, unhandled, notFound, notConnected, transportError,
-        transportClosed, timeout,
+        transportClosed, timeout, draining, noConsumer,
     ]
 
     /// How many live ids an `unknownAgent` refusal carries — enough to name the

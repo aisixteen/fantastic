@@ -214,15 +214,13 @@ public final class Kernel: @unchecked Sendable {
         inboxLock.lock()
         let continuation = _inboxes[id]
         inboxLock.unlock()
+        // AN INBOX EXISTS IFF A READER REGISTERED IT. Delivery to an id nobody
+        // holds a stream for is a no-op. This used to auto-vivify, which minted
+        // a buffer for a consumer that never arrived: it filled to `inboxBound`
+        // and then evicted one payload per message, forever, with nothing to say
+        // so. `ensureInbox` IS the registration.
         if let continuation = continuation {
             _ = continuation.yield(payload)
-        } else {
-            // Auto-vivify for synthetic ids (browser clients), then deliver.
-            _ = ensureInbox(id)
-            inboxLock.lock()
-            let c = _inboxes[id]
-            inboxLock.unlock()
-            _ = c?.yield(payload)
         }
     }
 
@@ -251,8 +249,26 @@ public final class Kernel: @unchecked Sendable {
                 return denial
             }
         }
+        // A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
+        // watcher's inbox, so a caller could watch and never drain: the mirror
+        // went into a buffer nobody read. Registering a consumer is what `watch`
+        // requires, not what it does.
+        let known: Bool = {
+            inboxLock.lock()
+            defer { inboxLock.unlock() }
+            return _inboxes[watcher] != nil
+        }()
+        guard known else {
+            return Refusal.make(
+                Refusal.noConsumer,
+                "watch: \(watcher.value) has no registered inbox, so nothing "
+                    + "would read what is mirrored there",
+                extra: [
+                    ("watcher", .string(watcher.value)),
+                    ("src", .string(src.value)),
+                ])
+        }
         srcAgent.addWatcher(watcher)
-        ensureInbox(watcher)
         return nil
     }
 

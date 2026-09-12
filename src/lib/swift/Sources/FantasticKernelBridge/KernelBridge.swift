@@ -246,10 +246,13 @@ public actor InMemoryBridge {
         // the caller already passed the LOCAL gate to reach this bridge at all.
         // Gating again with a foreign id would refuse every legitimate
         // `watch_remote`.
+        // THE READER REGISTERS FIRST: `watch` refuses a watcher with no inbox,
+        // and the drain task below is what reads this one — so claim the stream
+        // before asking to be watched.
+        let stream = remote.ensureInbox(watcherId)
         KernelTaskLocals.$currentSender.withValue(nil) {
             remote.watch(src: target, watcher: watcherId)
         }
-        let stream = remote.ensureInbox(watcherId)
 
         let task = Task {
             for await event in stream {
