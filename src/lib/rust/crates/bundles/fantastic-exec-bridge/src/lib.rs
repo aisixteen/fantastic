@@ -629,20 +629,22 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     let job_id = format!("{:08x}", rand_job_id());
 
     let (rd, wr) = ctrl.into_split();
-    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS. The kernel stamps the sender
-    // task-local around every handler dispatch, but a `tokio::spawn` does not
-    // inherit it — so the relay used to forward frames with NO sender, i.e. as
-    // the OPERATOR, ungated (measured live 2026-09-01, E30 subai:rust: a spawned
-    // program "is privileged as the root", reaching any agent). Python's relay
-    // task inherits the handler's contextvar and is gated as this agent; re-enter
-    // that identity here for parity — the runner's `can_call` bounds its programs.
-    let owner = agent_id.clone();
+    // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS — carried by `spawn_task` now,
+    // not re-entered by hand here. A `tokio::spawn` inherits no task-local, so
+    // the relay used to forward frames with NO sender, i.e. as the OPERATOR,
+    // ungated (measured live 2026-09-01, E30 subai:rust: a spawned program "is
+    // privileged as the root", reaching any agent). The runner's `can_call`
+    // bounds its programs.
     // The relay's stop signal, held on the job row. `teardown` raises it instead of
     // aborting this task, so the relay leaves by its own read loop and the proxy
     // release after that loop actually runs.
     let stop = Arc::new(tokio::sync::Notify::new());
-    let ctrl_task = tokio::spawn(fantastic_kernel::send::with_sender(
-        owner,
+    // REGISTERED: the relay outlives this `start` dispatch and issues a send per
+    // frame the program writes, so it belongs in `ps` and within reach of
+    // `cancel` like the pump below.
+    let ctrl_task = kernel.spawn_task(
+        agent_id,
+        "relay",
         crate::relay::serve(
             rd,
             wr,
@@ -651,7 +653,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             Arc::clone(kernel),
             Arc::clone(&stop),
         ),
-    ));
+    );
 
     // spawn_task + row insert in ONE critical section, so no window exists in which a
     // live pid has no row. The task body takes its inputs BY VALUE — reading our own

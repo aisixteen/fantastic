@@ -163,6 +163,10 @@ async fn rows_survive_a_restart_and_the_counter_continues() {
                 .clone(),
         )
         .unwrap();
+    // The AI's OWN rows — what life 2 must find under that id again. The store
+    // holds more than these: a dispatch settles with a `settle` row on the ROOT
+    // (the ending the log would otherwise never record at all), so the log's
+    // count and this agent's count are no longer the same number.
     let live = k1.rows.for_agent(&ai);
     let next_before = k1.rows.next_id();
 
@@ -181,7 +185,14 @@ async fn rows_survive_a_restart_and_the_counter_continues() {
     // ── life 2: a FRESH kernel on the same dir ─────────────────────────
     let k2 = kernel_at(&store);
     let n = fantastic_kernel::messages_log::hydrate_messages(&k2, &store).expect("hydrates");
-    assert_eq!(n, live.len(), "every row came back");
+    // EVERY row the log wrote comes back — its own `<row` count is the truth,
+    // not one agent's slice of it.
+    assert_eq!(n, text.matches("<row").count(), "every row came back");
+    assert!(
+        n >= live.len(),
+        "at least the AI's own rows: {n} < {}",
+        live.len()
+    );
 
     // THE COUNTER CONTINUES above everything it read — a fresh mint can never
     // collide with a hydrated id.

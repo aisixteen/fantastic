@@ -76,3 +76,29 @@ async def open_kernel(prefix: str = "probe_", reach: list[str] | None = None):
     k = HostKernel(spec, wd, reach=list(reach or [])).boot()
     root = WireRoot(k)
     return root, None, root.close
+
+
+async def reopen_kernel(root):
+    """A NEW KERNEL PROCESS on the SAME directory — the wire twin of
+    `_testkit.boot_root()` after `ctx.shutdown()`.
+
+    The first process must already be gone (`root.ctx.shutdown()` stops it and
+    waits). The tree under `.fantastic` is what survives: records, rows, the
+    message log. `HostKernel.seed` is idempotent on an existing tree — it boots
+    a seed process only when `agent.json` is absent, then rewrites the driver's
+    own records (web/ws/rest) to the same bytes — so booting again here is the
+    restart the probe means, not a fresh kernel wearing the old directory.
+
+    In process there is nothing to reopen: `boot_root()` is the caller's, and it
+    keeps its own `core` module state. This returns `None` there so a probe can
+    branch on it the way it branches on `core`.
+    """
+    k = getattr(root, "k", None)
+    if k is None:
+        return None
+    from helpers.host.wire import WireRoot
+    from helpers.host.driver import HostKernel
+
+    spec = {"cmd": k.cmd, "root_id": k.root_id, "env": {}}
+    k2 = HostKernel(spec, k.workdir, reach=list(k.reach)).boot()
+    return WireRoot(k2)

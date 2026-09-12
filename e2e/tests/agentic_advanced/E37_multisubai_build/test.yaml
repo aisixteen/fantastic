@@ -4,7 +4,7 @@ id: multisubai_build
 group: agentic_advanced
 title: the creator builds the three-solver team, sleeps, is woken by its conclusion, validates, deletes the fleet, stops
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 # FOUR LANES inside one test (creator + three solvers). Run alone.
 long: true

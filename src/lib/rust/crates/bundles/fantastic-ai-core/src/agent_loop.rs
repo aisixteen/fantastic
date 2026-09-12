@@ -65,11 +65,26 @@ pub async fn run_generation(
     client_id: &str,
     cfg: BackendConfig,
     system_prompt: Option<String>,
-) -> Result<String, String> {
+) -> Result<(String, i64), String> {
     // `messages` is the FULL conversation (persistence source). Projection shapes
     // the MODEL view to fit the window ONCE at entry, prepending the canonical
     // [context-notice]; the durable store is never trimmed by it. A caller-supplied
     // `system_prompt` replaces the default system block (a caller teaches its tools).
+    // A RECALL OWED FROM THE LAST FOLD BATCH runs first, so this turn is
+    // assembled over the head the recall chose — python `_recall_due`.
+    let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
+    if due {
+        let _ = crate::retrieval::context_recall(self_id, &json!({}), kernel, Some(provider)).await;
+    }
+    // ROW IDS FOR THIS TURN — python `_row_ids_for_incoming` + `_mint_row_id`:
+    // the incoming row (a root, or a delivered reply that names the turn it
+    // answers with `↑N` on its first tag) and the assistant row that answers
+    // it. Pre-minted so this turn's reply tags can name the assistant row
+    // before it exists, and so every row carries the `parent` the fold
+    // machinery derives chains from.
+    let in_id = kernel.rows.mint_id();
+    let in_parent = incoming_parent(user_text);
+    let turn_id = kernel.rows.mint_id();
     let (messages, store_len) = assemble_messages(
         self_id,
         state,
@@ -148,15 +163,25 @@ pub async fn run_generation(
     // APPEND this send's user + assistant turns to the durable chat store so
     // context management (compaction/recall) has the FULL conversation next turn.
     let new_turns = vec![
-        json!({"role": "user", "content": user_text}),
+        json!({"role": "user", "content": user_text, "id": in_id, "parent": in_parent}),
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what gets parsed and what the caller
         // receives; only durable history loses the `<think>` spans, because a
         // reasoning model re-fed its own prior deliberation drowns in it
         // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
         // 2026-08-02).
-        json!({"role": "assistant", "content": without_thinking(&last_text)}),
+        json!({"role": "assistant", "content": without_thinking(&last_text), "id": turn_id, "parent": in_id}),
     ];
     append_history(self_id, kernel, client_id, &new_turns).await;
-    Ok(last_text)
+    Ok((last_text, turn_id))
+}
+
+/// The turn a delivered reply answers: `↑N` on the FIRST tag of the incoming
+/// text — python `_TAG_LINKS`. Anything else is a ROOT.
+fn incoming_parent(text: &str) -> Option<i64> {
+    let rest = text.strip_prefix("[reply to ")?;
+    let head = &rest[..rest.find(']')?];
+    let (_, after) = head.split_once('↑')?;
+    let tok: String = after.chars().take_while(|c| !c.is_whitespace()).collect();
+    tok.parse::<i64>().ok()
 }

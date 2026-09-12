@@ -4,7 +4,7 @@ id: superlong_chain
 group: coding
 title: "one chain, 40 reads at a 12k window — it folds its own past in spans and the view holds only folds + tail"
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

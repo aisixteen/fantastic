@@ -396,3 +396,33 @@ fn item_beside_other_tags_is_a_field() {
         json!({"type": "buy", "item": "rocket"})
     );
 }
+
+#[test]
+fn a_call_written_inside_bytes_is_document_not_envelope() {
+    // MEASURED 2026-09-12 (peer_review:rust, 4 consecutive failures): the coder
+    // wrote a reviewer's error text VERBATIM into a file — and that text quoted
+    // `<call name="inquiry_answer">…</call>`. Python parses ONE `send` with a
+    // `bytes` payload; rust split it into five malformed blocks. `<bytes>` is
+    // verbatim to its FIRST closer: nothing inside it is an envelope.
+    let t = "<call name=\"send\">\n<target_id>editor</target_id>\n<type>write</type>\n<path>review.md</path>\n<bytes><error>you were sent an inquiry and did not answer it: emit <call name=\n\"inquiry_answer\"><answer>what you concluded</answer></call></error>\n<reason>unhandled</reason>\n<request_id></request_id>\n</bytes>\n</call>";
+    let calls = crate::tool_parse::extract_tool_calls(t);
+    assert_eq!(
+        calls.len(),
+        1,
+        "one envelope, not {}: {calls:?}",
+        calls.len()
+    );
+    assert_eq!(calls[0].name, "send");
+    let bytes = calls[0]
+        .arguments
+        .get("payload")
+        .and_then(|p| p.get("bytes"))
+        .and_then(|b| b.as_str())
+        .unwrap_or("");
+    assert!(
+        bytes.contains("<call name=\n\"inquiry_answer\">"),
+        "the inner call is DOCUMENT: {bytes:?}"
+    );
+    let bad = crate::tool_parse::malformed_calls(t);
+    assert!(bad.is_empty(), "nothing is malformed: {bad:?}");
+}

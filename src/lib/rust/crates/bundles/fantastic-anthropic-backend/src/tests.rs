@@ -115,8 +115,8 @@ async fn mk_kernel_with(
 fn open_client_inbox(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
-) -> tokio::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::channel(256);
+) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(agent_id.clone(), tx);
     rx
 }
@@ -602,6 +602,7 @@ async fn unset_model_is_the_sentinel_and_chat_fails_loud() {
             endpoint: "http://127.0.0.1:1/v1/messages".to_string(),
             model: m,
             max_tokens: 16,
+            sampling: Map::new(),
             kernel: Arc::clone(&kernel),
             client_id: "cli".to_string(),
         };

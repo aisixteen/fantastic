@@ -15,11 +15,11 @@ use crate::storage::StorageMode;
 use crate::tasks::TaskTable;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 
 /// Bounded inbox capacity per agent — matches Python's `INBOX_BOUND`.
 /// 256 fits a chat-paced workload comfortably and bounds memory on a
@@ -47,7 +47,7 @@ pub struct Kernel {
     /// Flat global id → Agent. The only routing table.
     pub agents: DashMap<AgentId, Arc<Agent>>,
     /// Per-id inbox (agents + synthetic browser client ids).
-    pub inboxes: DashMap<AgentId, mpsc::Sender<Value>>,
+    pub inboxes: DashMap<AgentId, crate::inbox::InboxSender>,
     /// Active state-event taps (telemetry, debugging). Keyed by token
     /// for clean detach.
     state_subscribers: RwLock<Vec<(SubscriberToken, StateSubscriber)>>,
@@ -72,6 +72,11 @@ pub struct Kernel {
     /// in-kernel verb stop the process remotely (over web_rest / web_ws),
     /// not just via an OS signal.
     shutdown: Notify,
+    /// DRAINING. Set by `shutdown_agents`; a NEW ROOT send is refused with
+    /// `draining` while it holds, so nothing fresh enters a tree that is
+    /// stopping — a send with a live parent task still passes, because that is
+    /// work already in flight finishing itself.
+    draining: std::sync::atomic::AtomicBool,
     /// The TASK TABLE — every in-flight dispatch, a tree through the send
     /// chain. The `ps` system verb reads it; `cancel` kills a task and its
     /// subtree. See [`crate::tasks`].
@@ -94,6 +99,13 @@ pub struct Kernel {
     /// exactly like the tree's own auto-flush law. Called at every settle.
     ledger_flusher: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
+
+/// One bound for every agent's `shutdown` turn. Python
+/// `Kernel.SHUTDOWN_VERB_TIMEOUT`.
+const SHUTDOWN_VERB_TIMEOUT: f64 = 30.0;
+/// How long in-flight work may take to settle before it is cancelled. Python
+/// `Kernel.QUIET_TIMEOUT`.
+const QUIET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Default for Kernel {
     fn default() -> Self {
@@ -136,6 +148,7 @@ impl Kernel {
             inbox_bound: bound,
             storage,
             shutdown: Notify::new(),
+            draining: std::sync::atomic::AtomicBool::new(false),
             tasks: TaskTable::new(),
             ledger: crate::ledger::Ledger::default(),
             rows: crate::rows::RowStore::new(),
@@ -160,6 +173,102 @@ impl Kernel {
         self.shutdown.notified().await;
     }
 
+    /// Is the kernel draining? New ROOT sends are refused while it is.
+    #[must_use]
+    pub fn draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// THE AGENT HALF OF A GRACEFUL STOP — also the `shutdown_agents` kernel
+    /// verb.
+    ///
+    /// 1. DRAIN: new roots are refused; sends with a live parent task still pass.
+    /// 2. `shutdown` VERB: every live agent is told, all at once, bounded. For
+    ///    an AI it is a turn ("the kernel is stopping; persist what matters");
+    ///    its tools work, because the kernel keeps serving.
+    /// 3. QUIET: wait for the task table to empty (keepalive loops excepted),
+    ///    bounded; the rest is cancelled through the normal `cancel_task` path,
+    ///    so `on_cancel` hooks run and subtrees die with their roots.
+    ///
+    /// Idempotent: a second call answers the same shape and shuts nothing new.
+    /// The kernel keeps serving afterwards — reads, `messages`, the persister —
+    /// until the process exits.
+    ///
+    /// WHO GETS TOLD differs from python by one step and only one. Python asks
+    /// each agent's bundle whether its `VERBS` table carries `shutdown`, because
+    /// a python bundle may fail to import and then advertises nothing. A rust
+    /// bundle is compiled in and every one answers `shutdown` (a no-op, or real
+    /// teardown), so the set is every live agent and there is no import to fail.
+    pub async fn shutdown_agents(self: &Arc<Self>) -> Value {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // WHO GETS TOLD: every agent whose bundle ADVERTISES `shutdown` — the
+        // verb in its reflect map — exactly python's `advertises("shutdown")`
+        // over the bundle's VERBS table. Not every agent: a bundle that merely
+        // ACCEPTS the verb as a lifecycle no-op is not asking to be told, and a
+        // face that treats it as a teardown must never be told by the stop it
+        // is carrying (the web listener, 2026-09-12). Reflect is read under the
+        // shutdown scope so the drain gate lets the kernel's own reads through.
+        let all: Vec<AgentId> = self.agents.iter().map(|e| e.key().clone()).collect();
+        let mut targets: Vec<AgentId> = Vec::new();
+        if !all.is_empty() {
+            let asks: Vec<crate::Item> = all
+                .iter()
+                .map(|id| crate::Item::new(id.clone(), json!({"type": "reflect"})))
+                .collect();
+            let seen = crate::send::with_shutdown(self.send(asks)).await;
+            for (id, o) in all.iter().zip(seen.iter()) {
+                let advertises = o
+                    .result
+                    .get("verbs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|v| v.contains_key("shutdown"));
+                if advertises {
+                    targets.push(id.clone());
+                }
+            }
+        }
+        let mut shut: Vec<String> = Vec::new();
+        if !targets.is_empty() {
+            {
+                let items: Vec<crate::Item> = targets
+                    .iter()
+                    .map(|id| {
+                        crate::Item::new(id.clone(), json!({"type": "shutdown"}))
+                            .with_timeout(SHUTDOWN_VERB_TIMEOUT)
+                    })
+                    .collect();
+                // EXEMPT FROM THE DRAIN GATE: this IS the shutdown.
+                let outs = crate::send::with_shutdown(self.send(items)).await;
+                for (id, o) in targets.iter().zip(outs.iter()) {
+                    if o.status == crate::outcome::Status::Completed {
+                        shut.push(id.0.clone());
+                    }
+                }
+            }
+        }
+        // The dispatch running THIS verb is in the table too; it is not
+        // pending work.
+        let me = crate::tasks::current_task();
+        let deadline = std::time::Instant::now() + QUIET_TIMEOUT;
+        while std::time::Instant::now() < deadline && !self.tasks.pending(me).is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let mut cancelled: Vec<Value> = Vec::new();
+        for tid in self.tasks.pending(me) {
+            // ROOTS ONLY: the subtree dies with its root, so cancelling a child
+            // here would race the parent's own teardown.
+            if !self.tasks.is_root(&tid) {
+                continue;
+            }
+            let out = self.cancel_task(&tid).await;
+            if let Some(killed) = out.get("killed").and_then(Value::as_array) {
+                cancelled.extend(killed.iter().cloned());
+            }
+        }
+        json!({"drained": true, "shut": shut, "cancelled": cancelled})
+    }
+
     /// Install the durable-ledger write-through. The kernel calls it after every
     /// settle and knows NOTHING about what it does — the loader owns the disk,
     /// exactly as it owns the `.fantastic` layout.
@@ -180,8 +289,8 @@ impl Kernel {
     /// Register an agent in the flat index + auto-vivify its inbox.
     /// Returns the bound channel receiver so the caller can drain it
     /// (typically a fanout loop or a per-bundle handler task).
-    pub fn register(&self, agent: Arc<Agent>) -> mpsc::Receiver<Value> {
-        let (tx, rx) = mpsc::channel(self.inbox_bound);
+    pub fn register(&self, agent: Arc<Agent>) -> crate::inbox::InboxReceiver {
+        let (tx, rx) = crate::inbox::inbox(self.inbox_bound);
         self.inboxes.insert(agent.id.clone(), tx);
         self.agents.insert(agent.id.clone(), agent);
         rx

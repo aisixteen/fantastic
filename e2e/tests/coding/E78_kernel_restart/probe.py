@@ -96,6 +96,14 @@ async def _ask(root, aid: str, text: str, *, timeout: float = 240.0) -> None:
         await asyncio.sleep(1.0)
 
 
+def _hydrated(before: list[dict], after: list[dict]) -> bool:
+    """`after` starts with exactly `before`'s ids, and any row past them is the
+    booted agent's own `recall` (see the check that calls this)."""
+    ids0 = [r["id"] for r in before]
+    ids1 = [r["id"] for r in after]
+    return ids1[: len(ids0)] == ids0 and all(r.get("kind") == "recall" for r in after[len(ids0):])
+
+
 async def main():
     root, core, close = await open_kernel(prefix="coding_restart_", reach=[FB, "work_fb", "notes", "ai_a", "ai_b", "cli", "user"])
     try:
@@ -115,16 +123,25 @@ async def main():
         folds_b1 = sum(1 for r in rows_b1 if r.get("kind") == "fold")
         top1 = root.ctx.next_id
         bodies1 = sum(1 for r in root.ctx.rows_for("ai_b") if r.get("kind") == "body")
-        # ── STOP: the agent half, then the kernel's teardown (no exit — same process) ──
+        # ── STOP: the agent half, then the kernel's teardown ──
+        # In process the teardown is `ctx.shutdown()` (same process, no exit).
+        # Over the wire the kernel IS a process: `ctx.shutdown()` there is
+        # `shutdown_kernel` + waiting for it to exit, and the "new kernel on the
+        # same dir" below is a second process on the same tree.
         stop = await call(root, root.id, {"type": "shutdown_agents"})
         await root.ctx.shutdown()
         log = Path(".fantastic/messages.xml")
         lines1 = log.read_text().count("<row ") if log.exists() else 0
         # ── A NEW KERNEL on the same dir ──
-        from _testkit import boot_root
+        if core is not None:
+            from _testkit import boot_root
 
-        core._providers.clear(); core._projection.clear(); core._compaction_mark.clear()
-        root2 = boot_root()
+            core._providers.clear(); core._projection.clear(); core._compaction_mark.clear()
+            root2 = boot_root()
+        else:
+            from helpers.kernel import reopen_kernel
+
+            root2 = await reopen_kernel(root)
         top2 = root2.ctx.next_id
         rows_a2, rows_b2 = await store_rows(root2, core, "ai_a"), await store_rows(root2, core, "ai_b")
         view_b = await read_view(core, root2, "ai_b")
@@ -155,8 +172,14 @@ async def main():
             # the restart, whatever their count.
             ("the log holds every row landed", lines1 >= len(rows_a1) + len(rows_b1)),
             ("the counter continues above every hydrated id", top2 >= top1),
-            ("a hydrated its own rows only", [r["id"] for r in rows_a2] == [r["id"] for r in rows_a1]),
-            ("b hydrated its own rows only", [r["id"] for r in rows_b2] == [r["id"] for r in rows_b1]),
+            # THE HYDRATED ROWS ARE THE PREFIX, byte for byte. In process the
+            # rows are read before `boot` is sent by hand; a SPAWNED kernel boots
+            # every agent as it comes up, and boot-with-a-store runs
+            # `context_recall`, which appends one `[recall …]` row. That row is
+            # the reboot's own first act, not a hydration error — so anything
+            # after the prefix may only be a recall row (measured 2026-09-12).
+            ("a hydrated its own rows only", _hydrated(rows_a1, rows_a2)),
+            ("b hydrated its own rows only", _hydrated(rows_b1, rows_b2)),
             ("b's folds are back", sum(1 for r in rows_b2 if r.get("kind") == "fold") == folds_b1),
             # A VIEW EXISTS ONLY ONCE A FOLD DID. Scored when life 1 folded;
             # otherwise the fact is "no folds, no view" — true on both sides.

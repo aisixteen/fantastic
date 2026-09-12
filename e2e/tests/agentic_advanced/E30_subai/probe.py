@@ -66,6 +66,7 @@ from helpers import (
     verdict,
 )
 from helpers.kernel import open_kernel
+from helpers.rows import rows_for
 
 # The probe runs in a fresh tmpdir, and the `.env` autoloader reads CWD — so a key in
 # the repo root would never be found. Load it here, before any chdir. Shell wins.
@@ -686,11 +687,7 @@ async def score(root, store_id, total, new_total, transcript):
         # The kernel's rows, whole — the `history` verb is a DIGEST (120-char heads),
         # which hid every `start` (measured 2026-09-10: ticks_received=0 with the
         # routine demonstrably running).
-        msgs = [
-            r
-            for r in root.ctx.rows_for(aid)
-            if r.get("kind") not in ("call", "task", "body", "view")
-        ]
+        msgs = await rows_for(root, aid, conversation_only=True)
         ticks_seen += sum(
             1
             for m in msgs

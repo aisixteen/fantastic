@@ -378,3 +378,163 @@ impl Bundle for UserProbe {
         Ok(Some(reply))
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// ORACLE — a fixed body of knowledge that answers QUESTIONS.
+// ─────────────────────────────────────────────────────────────────
+
+/// An ORACLE — a fixed body of knowledge that answers QUESTIONS,
+/// deterministically.
+///
+/// One of the pieces of the multi-agent test: each solver has its own oracle,
+/// and the oracle knows only its own ledger. It is NOT a model (no lane, exact,
+/// cheap): `ask` is keyword search over the ledger lines on the record — every
+/// word of 3+ letters in the question is matched case-insensitively, the lines
+/// that hit the MOST keywords come back, at most `limit` of them. So a precise
+/// question ("which room is Dana in") answers, and "tell me everything" returns
+/// noise, which is the point: the solver must work out what to ask.
+///
+/// Knowledge is POLICY ON THE RECORD (`lines`), written by the fixture; the
+/// bundle holds nothing. `asked` on reflect is the tally the scorer reads — a
+/// solver that only TALKS about its oracle leaves it at zero.
+///
+/// Mirrors `e2e/probes/oracle_probe/tools.py`.
+#[derive(Default)]
+pub struct OracleProbe {
+    /// How many questions this oracle really answered. THE SCORE.
+    asked: Counter,
+}
+
+pub const ORACLE_MODULE: &str = "oracle_probe.tools";
+
+const ORACLE_SENTENCE: &str =
+    "An oracle: a ledger of facts I answer questions about. Send me `ask` with a \
+     precise `question`; I return the ledger lines that match its words. I know \
+     only my own ledger.";
+
+const ORACLE_ASK_DOC: &str =
+    "args: question:str (req), limit:int? (default 6). Keyword search over my \
+     ledger — the lines matching the most words of the question come back as \
+     {answers:[str], matched:int}. Ask precisely; a vague question returns noise.";
+
+/// Every `[A-Za-z0-9_]{3,}` run in `q`, lowercased — python's
+/// `re.findall(r"[A-Za-z0-9_]{3,}", q)`. No regex crate: a hand scan.
+fn keywords(q: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in q.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            cur.push(c);
+        } else {
+            if cur.chars().count() >= 3 {
+                let w = cur.to_lowercase();
+                if !out.contains(&w) {
+                    out.push(w);
+                }
+            }
+            cur.clear();
+        }
+    }
+    if cur.chars().count() >= 3 {
+        let w = cur.to_lowercase();
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
+
+#[async_trait]
+impl Bundle for OracleProbe {
+    fn name(&self) -> &str {
+        "oracle_probe"
+    }
+
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let reply = match verb {
+            "boot" | "shutdown" => Value::Null,
+            "reflect" => json!({
+                "id": agent_id.as_str(),
+                "sentence": ORACLE_SENTENCE,
+                "verbs": {"ask": ORACLE_ASK_DOC},
+                "asked": self.asked.get(),
+            }),
+            "ask" => {
+                // The tag grammar types a bare number; a number is a question too.
+                let q = match payload.get("question") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Number(n)) => n.to_string(),
+                    _ => String::new(),
+                };
+                if q.trim().is_empty() {
+                    json!({
+                        "error": "oracle_probe: ask: `question` must be a non-empty string",
+                        "reason": "bad_arg", "arg": "question",
+                    })
+                } else {
+                    let lines: Vec<String> = kernel
+                        .agents
+                        .get(agent_id)
+                        .and_then(|a| a.record().meta.get("lines").cloned())
+                        .and_then(|v| v.as_array().cloned())
+                        .map(|a| {
+                            a.iter()
+                                .map(|l| match l {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if lines.is_empty() {
+                        // NO DEFAULT. An unwired oracle says so rather than
+                        // inventing knowledge it was never given.
+                        json!({
+                            "error": "oracle_probe: no `lines` on this agent's record — the \
+                                      operator wires what this oracle knows",
+                            "reason": "not_connected",
+                        })
+                    } else {
+                        self.asked.bump();
+                        let limit = payload
+                            .get("limit")
+                            .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+                            .filter(|&n| n != 0)
+                            .unwrap_or(6)
+                            .clamp(1, 20) as usize;
+                        let words = keywords(&q);
+                        let mut scored: Vec<(usize, String)> = lines
+                            .into_iter()
+                            .filter_map(|ln| {
+                                let low = ln.to_lowercase();
+                                let hits = words.iter().filter(|w| low.contains(*w)).count();
+                                (hits > 0).then_some((hits, ln))
+                            })
+                            .collect();
+                        // MOST HITS FIRST, then by the line itself — python's
+                        // `key=lambda t: (-t[0], t[1])`, so the same ledger
+                        // answers the same question the same way on both hosts.
+                        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                        let matched = scored.len();
+                        json!({
+                            "answers": scored.into_iter().take(limit)
+                                .map(|(_, ln)| ln).collect::<Vec<_>>(),
+                            "matched": matched,
+                        })
+                    }
+                }
+            }
+            other => json!({
+                "error": format!("oracle_probe: unknown verb {other:?}; verbs: [\"ask\"]"),
+                "reason": "unhandled",
+            }),
+        };
+        Ok(Some(reply))
+    }
+}

@@ -72,9 +72,16 @@ pub const TRANSPORT_CLOSED: &str = "transport_closed";
 /// The call outlived its deadline.
 pub const TIMEOUT: &str = "timeout";
 
+/// The kernel is stopping; no new roots are accepted.
+pub const DRAINING: &str = "draining";
+/// `watch`: the watcher has no registered inbox, so nothing would read what is
+/// mirrored there. Registering a consumer is what `watch` requires, not what it
+/// does.
+pub const NO_CONSUMER: &str = "no_consumer";
+
 /// The closed set. Each names a KIND of refusal, not a call site — two verbs
 /// that fail for the same reason share a code, and a caller branches on the code.
-pub const CODES: [&str; 14] = [
+pub const CODES: [&str; 16] = [
     UNAUTHORIZED,
     UNKNOWN_AGENT,
     MISSING_ARG,
@@ -89,6 +96,8 @@ pub const CODES: [&str; 14] = [
     TRANSPORT_ERROR,
     TRANSPORT_CLOSED,
     TIMEOUT,
+    DRAINING,
+    NO_CONSUMER,
 ];
 
 /// How many live ids an `unknown_agent` refusal carries. Enough to name the

@@ -4,7 +4,7 @@ id: fold_long
 group: coding
 title: "24 fillers, 8 rules over 4 files — folds fire in batches and the rules still bind"
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

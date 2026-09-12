@@ -29,8 +29,20 @@ use serde_json::{json, Value};
 /// How one batch item ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// The handler ran and returned; `result` is its reply verbatim.
+    /// The handler ran and returned an answer that is not an error; `result` is
+    /// its reply verbatim.
     Completed,
+    /// The handler RAN AND SAID NO: it returned a map carrying a truthy `error`.
+    /// A semantic failure — a missing path, a patch that did not match, a
+    /// refusal the handler composed itself. `result` is that reply, verbatim.
+    ///
+    /// This used to settle `Completed`, on the rule that the kernel does not
+    /// introspect domain replies. The rule did not survive contact with its own
+    /// storage: the durable row already carried `error`/`reason` copied off the
+    /// result BESIDE `status: completed`, so one row said both "fine" and
+    /// "failed". Failure is a STATUS; nothing downstream should have to parse a
+    /// result to learn it.
+    Errored,
     /// No handler answer exists — refused before dispatch, or the handler panicked.
     Failed,
     /// Killed via `cancel` while the batch awaited it.
@@ -46,6 +58,7 @@ impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Completed => "completed",
+            Status::Errored => "errored",
             Status::Failed => "failed",
             Status::Cancelled => "cancelled",
             Status::TimedOut => "timed_out",

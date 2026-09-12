@@ -46,7 +46,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::{Mutex, Notify};
-use tokio::task::JoinHandle;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "terminal_backend.tools";
@@ -119,7 +118,7 @@ struct PtyState {
     /// Environment overrides applied at spawn time.
     env: Vec<(String, String)>,
     /// Handle to the spawned reader task. Aborted on `stop`/`on_delete`.
-    reader_task: Mutex<Option<JoinHandle<()>>>,
+    reader_task: Mutex<Option<fantastic_kernel::TaskId>>,
     /// PTY writer (taken once from the master at spawn time; reused for
     /// every `write` / `paste_image` since `take_writer` errors on
     /// second call). A std mutex inside an `Arc` so the BLOCKING
@@ -208,7 +207,7 @@ impl Bundle for TerminalBackendBundle {
             "paste_image" => paste_image_text_reply(agent_id, payload).await,
             "interrupt" => signal_reply(agent_id, libc::SIGINT),
             "signal" => signal_verb_reply(agent_id, payload),
-            "stop" => stop_reply(agent_id).await,
+            "stop" => stop_reply(agent_id, kernel).await,
             "output" => output_reply(agent_id, payload),
             other => json!({"error": format!("unknown verb {other:?}")}),
         };
@@ -248,12 +247,8 @@ impl Bundle for TerminalBackendBundle {
         Ok((reply, Vec::new()))
     }
 
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
-        let _ = stop_reply(agent_id).await;
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        let _ = stop_reply(agent_id, kernel).await;
         Ok(())
     }
 }
@@ -692,7 +687,7 @@ fn output_reply(agent_id: &AgentId, payload: &Value) -> Value {
     json!({"output": trimmed})
 }
 
-async fn stop_reply(agent_id: &AgentId) -> Value {
+async fn stop_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let removed = TERMINALS.lock().remove(agent_id);
     let Some(state) = removed else {
         return json!({"stopped": false, "reason": "not running"});
@@ -705,9 +700,10 @@ async fn stop_reply(agent_id: &AgentId) -> Value {
     }
     // Wake any paused reader so it can observe EOF and exit cleanly.
     state.resume_notify.notify_waiters();
-    // Abort the reader task so it doesn't outlive the agent's record.
-    if let Some(task) = state.reader_task.lock().await.take() {
-        task.abort();
+    // Cancel the reader so it doesn't outlive the agent's record — through the
+    // TABLE, so it takes the same path an operator's `cancel` would.
+    if let Some(tid) = state.reader_task.lock().await.take() {
+        kernel.cancel_task(&tid).await;
     }
     // Reap. The aborted reader never reaches `cleanup_on_exit`'s wait,
     // and portable-pty's Child has no reaping Drop — without this every
@@ -854,12 +850,19 @@ async fn spawn_pty(
             .try_clone_reader()
             .map_err(|e| format!("clone_reader: {e}"))?
     };
-    let task = tokio::spawn(reader_loop(
-        agent_id.clone(),
-        Arc::clone(kernel),
-        Arc::clone(&state),
-        reader,
-    ));
+    // REGISTERED: the PTY reader runs for the life of the terminal and emits
+    // every chunk the shell writes. A bare spawn left a stream nobody could find
+    // in `ps` or stop with `cancel`, running under no identity at all.
+    let task = kernel.spawn_task(
+        agent_id,
+        "pty_reader",
+        reader_loop(
+            agent_id.clone(),
+            Arc::clone(kernel),
+            Arc::clone(&state),
+            reader,
+        ),
+    );
     *state.reader_task.lock().await = Some(task);
     Ok(pid)
 }

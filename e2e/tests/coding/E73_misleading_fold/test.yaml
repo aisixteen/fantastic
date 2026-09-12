@@ -4,7 +4,7 @@ id: misleading_fold
 group: coding
 title: "a planted fold whose summary contradicts its members — does the model verify by descending?"
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

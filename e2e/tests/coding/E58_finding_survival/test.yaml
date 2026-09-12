@@ -4,7 +4,7 @@ id: finding_survival
 group: coding
 title: a FINDING the model must notice, checkpoint unprompted, and report after its read is gone
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

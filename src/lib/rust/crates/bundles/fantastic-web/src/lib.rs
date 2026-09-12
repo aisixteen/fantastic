@@ -164,7 +164,14 @@ impl Bundle for WebBundle {
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel).await,
             "boot" => boot_reply(agent_id, kernel).await,
-            "stop" | "shutdown" => stop_reply(agent_id),
+            // NO `shutdown` VERB HERE. It was an alias of `stop`, and
+            // `shutdown_agents` sends `shutdown` to every agent that advertises
+            // it — so the graceful stop tore down the listener the operator was
+            // watching the stop THROUGH (measured 2026-09-12, kernel_restart:rust:
+            // `Connection refused` on the very next request). Python's web face
+            // advertises no such verb and survives; the listener dies with the
+            // process, through `on_shutdown`, exactly as python's does.
+            "stop" => stop_reply(agent_id),
             other => json!({"error": format!("unknown verb {other:?}")}),
         };
         Ok(Some(reply))
@@ -188,7 +195,6 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
             "reflect": "Identity + bound port + running flag. No args.",
             "boot": "Spawn the listener on `port`. Idempotent.",
             "stop": "Cancel the listener task. Idempotent.",
-            "shutdown": "Alias of stop.",
         }
     })
 }
@@ -623,12 +629,14 @@ struct RestOwner(AgentId);
 /// place the vector grows. The handles that remain are exactly the ones a
 /// disconnect still has to abort.
 fn track_call(
-    pending: &std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    handle: tokio::task::JoinHandle<()>,
+    kernel: &std::sync::Arc<Kernel>,
+    pending: &std::sync::Mutex<Vec<fantastic_kernel::TaskId>>,
+    id: fantastic_kernel::TaskId,
 ) {
     let mut p = pending.lock().expect("pending poisoned");
-    p.retain(|h| !h.is_finished());
-    p.push(handle);
+    // LIVENESS COMES FROM THE TABLE, which holds only running work.
+    p.retain(|t| kernel.tasks.contains(t));
+    p.push(id);
 }
 
 /// The INGRESS gate on a REST leg — python parity (`web_rest/tools.py::_gate`).
@@ -1368,7 +1376,10 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
     // frame). Mirrors py web_ws, which sends binary reply frames the same way.
     let (bin_tx, mut bin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(state.kernel.inbox_bound);
     // Hook the synthetic client inbox into the kernel.
-    let (inbox_tx, mut inbox_rx) = tokio::sync::mpsc::channel::<Value>(state.kernel.inbox_bound);
+    // THE READER REGISTERS FIRST, and the queue drops the OLDEST at the bound —
+    // a browser that stalls catches up on the freshest frames rather than
+    // freezing on stale ones.
+    let (inbox_tx, mut inbox_rx) = fantastic_kernel::inbox::inbox(state.kernel.inbox_bound);
     state.kernel.inboxes.insert(client_id.clone(), inbox_tx);
 
     // Auto-watch the host agent (Python parity — see web/_proxy.py:135).
@@ -1383,7 +1394,7 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
     // Pending `call` tasks — cancelled on disconnect so long-lived
     // sends (ollama / nvidia streaming, slow tools) release their
     // locks immediately. Python: `pending: set[asyncio.Task]`.
-    let pending_calls: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+    let pending_calls: Arc<std::sync::Mutex<Vec<fantastic_kernel::TaskId>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // State-stream subscription tokens — remove on disconnect to
@@ -1486,8 +1497,14 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                 // the JoinHandle so disconnect can abort it, releasing
                 // any kernel-side locks the dispatch holds.
                 let frame_id = id.clone();
-                let handle = tokio::spawn(async move {
-                    let reply = fantastic_kernel::send::with_sender(sender_for_scope, async {
+                // REGISTERED: a frame handler DISPATCHES, so it is real work —
+                // a `ps` row, reachable by `cancel`, and its send is parented to
+                // it instead of becoming a root. `spawn_task` carries this
+                // scope's identity into the fork, so the hand-rolled
+                // `with_sender` that used to do it here is gone.
+                let spawner = Arc::clone(&state.kernel);
+                let handle = spawner.spawn_task(&sender_for_scope, "ws_call", async move {
+                    let reply = {
                         // THE FRAME ID IS THE EXECUTION ID. One id space: the
                         // correlation id a client already sends NAMES the
                         // execution, so the same id arriving twice — a
@@ -1504,8 +1521,7 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                             .await
                             .remove(0)
                             .result
-                    })
-                    .await;
+                    };
                     if let Some(id) = id {
                         // Always wrap as `type:"reply"` with the verb's
                         // reply inside `data`. Verb-level errors travel
@@ -1521,7 +1537,7 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
                         let _ = out.send(frame.to_string()).await;
                     }
                 });
-                track_call(&pending_calls, handle);
+                track_call(&state.kernel, &pending_calls, handle);
             }
             "emit" => {
                 let Some(target) = target else { continue };
@@ -1653,9 +1669,13 @@ async fn ws_loop(state: AppState, socket: WebSocket, host_agent_id: AgentId) {
     //    unwind (ollama_backend honors CancelledError, releases its
     //    FIFO lock, emits done).
     {
-        let mut p = pending_calls.lock().expect("pending poisoned");
-        for h in p.drain(..) {
-            h.abort();
+        let ids: Vec<_> = {
+            let mut p = pending_calls.lock().expect("pending poisoned");
+            p.drain(..).collect()
+        };
+        for t in ids {
+            // Through the TABLE — `on_cancel` runs, as for any cancel.
+            state.kernel.cancel_task(&t).await;
         }
     }
     // 2. Unwatch every src this WS subscribed to.

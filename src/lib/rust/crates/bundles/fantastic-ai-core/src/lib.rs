@@ -83,17 +83,20 @@ pub mod agent_loop;
 pub mod assembly;
 pub mod context;
 pub mod events;
+pub mod folds;
 pub mod helpers;
 pub mod history;
 pub mod history_view;
 pub mod projection;
 pub mod provider;
+pub mod retrieval;
 pub mod route;
 pub mod state;
 pub mod strategies;
 pub mod think;
 pub mod tool_parse;
 pub mod verbs;
+pub mod view;
 
 pub use agent_loop::{run_generation, BackendConfig};
 pub use events::CallerRoute;
@@ -105,3 +108,5 @@ pub use verbs::{CANCEL_DOC, SEND_TIMEOUT_SECS};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_folds;

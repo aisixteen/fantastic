@@ -4,7 +4,7 @@ id: pull_by_choice
 group: coding
 title: "eight bodies digested, the spec names the one that matters — pull only that one"
 runner: probe.py
-runtimes: [python]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

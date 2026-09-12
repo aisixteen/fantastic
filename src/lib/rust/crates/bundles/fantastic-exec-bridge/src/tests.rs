@@ -613,14 +613,14 @@ async fn the_child_self_reaps_when_the_control_socket_closes() {
 
 // ─── durable jobs, end to end ───────────────────────────────────
 
-fn inbox(kernel: &Arc<Kernel>, id: &AgentId) -> tokio::sync::mpsc::Receiver<Value> {
-    let (tx, rx) = tokio::sync::mpsc::channel(kernel.inbox_bound);
+fn inbox(kernel: &Arc<Kernel>, id: &AgentId) -> fantastic_kernel::inbox::InboxReceiver {
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel.inboxes.insert(id.clone(), tx);
     rx
 }
 
 async fn until(
-    rx: &mut tokio::sync::mpsc::Receiver<Value>,
+    rx: &mut fantastic_kernel::inbox::InboxReceiver,
     pred: impl Fn(&Value) -> bool,
     secs: u64,
 ) -> Option<Value> {
@@ -1069,7 +1069,7 @@ async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     kernel
         .emit(&AgentId::from("secret"), json!({"type": "ping"}))
         .await;
-    assert!(spy.try_recv().is_err(), "the watcher row leaked");
+    assert!(spy.try_recv().is_none(), "the watcher row leaked");
 
     stop.notify_one();
     tokio::time::timeout(Duration::from_secs(5), relay)
@@ -1120,7 +1120,7 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     let mut spies: Vec<_> = proxies.iter().map(|p| inbox(&kernel, p)).collect();
     kernel.emit(&a, json!({"type": "ping"})).await;
     for (p, spy) in proxies.iter().zip(spies.iter_mut()) {
-        assert!(spy.try_recv().is_err(), "{p} left a watcher row");
+        assert!(spy.try_recv().is_none(), "{p} left a watcher row");
     }
 }
 

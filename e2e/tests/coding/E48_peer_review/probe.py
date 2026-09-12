@@ -138,6 +138,23 @@ async def main():
         led = await _call(root, "kernel", {"type": "ledger"})
         inquired_peer = [r for r in (led.get("executions") or [])
                       if r.get("target") == "ai_rev"]
+        # THE LEDGER VIEW IS ORIGIN-SCOPED on every runtime: a caller sees the
+        # executions IT originated; only the operator sees all. In process the
+        # probe IS the operator. Over the wire it arrives as the `rest` agent and
+        # the coder's `ai -> ai_rev` row is not its to see — so the same proof
+        # is read off the coder's OWN rows: a `[reply to <pid> · ai_rev inquiry`
+        # tag is written only for a call the kernel really dispatched, and
+        # names the row the ledger holds (measured 2026-09-11/12: four rust runs
+        # scored "never inquired" with the inquiry plainly in the transcript).
+        if not inquired_peer and core is None:
+            # The coder's ROWS, not its transcript: a delivered reply is a
+            # user-role row, and the connector's transcript keeps assistant
+            # turns only.
+            coder_rows = await store_rows(root, core, "ai")
+            inquired_peer = [r for r in coder_rows
+                             if r.get("role") == "user"
+                             and str(r.get("content") or "").startswith("[reply to ")
+                             and " · ai_rev inquiry" in str(r.get("content")).split("\n", 1)[0]]
         checks = [
             ("the coder applied the flawed change", applied),
             ("the coder INQUIRED of the reviewer (ledger row)", bool(inquired_peer)),

@@ -15,7 +15,6 @@ use fantastic_kernel::Item;
 use serde_json::{json, Map};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
 
 /// Build a unique agent id from a tempdir's basename — guarantees no
 /// collision across parallel tests.
@@ -38,7 +37,12 @@ async fn mk_term(
     tmp: &TempDir,
     prefix: &str,
     cmd: Option<Vec<&str>>,
-) -> (Arc<Kernel>, AgentId, AgentId, mpsc::Receiver<Value>) {
+) -> (
+    Arc<Kernel>,
+    AgentId,
+    AgentId,
+    fantastic_kernel::inbox::InboxReceiver,
+) {
     let mut kernel = Kernel::new();
     kernel
         .bundles
@@ -112,7 +116,7 @@ async fn mk_term(
     // emits the reader fires to self. (Done after create_agent +
     // its auto-boot — neither calls back into our rx, and the
     // reader hasn't started yet because `auto_start=false`.)
-    let (tx, rx) = mpsc::channel(kernel.inbox_bound);
+    let (tx, rx) = fantastic_kernel::inbox::inbox(kernel.inbox_bound);
     kernel
         .inboxes
         .insert(AgentId::from(term_id_str.as_str()), tx);
@@ -128,7 +132,7 @@ async fn mk_term(
 /// Collect events from `rx` up to `deadline`, optionally stopping
 /// early when `should_stop(&events)` returns true.
 async fn collect_events(
-    rx: &mut mpsc::Receiver<Value>,
+    rx: &mut fantastic_kernel::inbox::InboxReceiver,
     deadline: Duration,
     mut should_stop: impl FnMut(&[Value]) -> bool,
 ) -> Vec<Value> {
@@ -146,7 +150,7 @@ async fn collect_events(
             Ok(None) => return events, // channel closed
             Err(_) => {
                 // Drain any backlog non-blocking before re-looping.
-                while let Ok(v) = rx.try_recv() {
+                while let Some(v) = rx.try_recv() {
                     events.push(v);
                     if should_stop(&events) {
                         return events;
@@ -337,7 +341,7 @@ async fn flow_control_pauses_past_100k() {
     let mut paused = false;
     while std::time::Instant::now() < deadline {
         // Drain so the reader keeps making forward progress.
-        while rx.try_recv().is_ok() {}
+        while rx.try_recv().is_some() {}
         let refl = kernel
             .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
             .await
@@ -377,7 +381,7 @@ async fn ack_resumes_paused_reader() {
     // Wait until paused.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
-        while rx.try_recv().is_ok() {}
+        while rx.try_recv().is_some() {}
         let refl = kernel
             .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
             .await
@@ -407,7 +411,7 @@ async fn ack_resumes_paused_reader() {
     let deadline2 = std::time::Instant::now() + Duration::from_secs(2);
     let mut climbed = false;
     while std::time::Instant::now() < deadline2 {
-        while rx.try_recv().is_ok() {}
+        while rx.try_recv().is_some() {}
         let refl = kernel
             .send(vec![Item::new(term.clone(), json!({"type": "reflect"}))])
             .await
